@@ -15,10 +15,11 @@ import { relativeWindowsPath, strictJson } from "./windows-artifact.ts";
 import { windowsSandboxGuestBundleOptions } from "./windows-sandbox-guest.pack.ts";
 
 const decodeLock = Schema.decodeUnknownSync(BuildLock, { onExcessProperty: "error" });
-export const windowsNativeBuildBundleOptions = (root: string, outDir: string) => ({
-  ...windowsSandboxGuestBundleOptions(root, outDir),
-  entry: { "native-runner": NodePath.join(root, "scripts/lan/windows-native-build.ts") },
-});
+export const windowsNativeBuildBundleOptions = (root: string, outDir: string) =>
+  windowsSandboxGuestBundleOptions(root, outDir, {
+    name: "native-runner",
+    file: "scripts/lan/windows-native-build.ts",
+  });
 
 export async function buildWindowsNativeRunner(
   buildLockPath: string,

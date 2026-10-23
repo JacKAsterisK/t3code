@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off - Bundles the reviewed guest bootstrap into a new directory; does not start Sandbox, install dependencies or build a release.
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import { transformWithOxc } from "vite-plus";
 import { build } from "vite-plus/pack";
 import * as Schema from "effect/Schema";
 import { BuildLock, sha256 } from "./hub-distribution.ts";
@@ -15,9 +16,34 @@ import { nativeBuildRoot } from "./windows-build-preparation.ts";
 
 const decodeLock = Schema.decodeUnknownSync(BuildLock, { onExcessProperty: "error" });
 
-export const windowsSandboxGuestBundleOptions = (root: string, outDir: string) => ({
+export const windowsSandboxGuestBundleOptions = (
+  root: string,
+  outDir: string,
+  runner = { name: "guest-runner", file: "scripts/lan/windows-sandbox-guest.ts" },
+) => ({
   config: false as const,
-  entry: { "guest-runner": NodePath.join(root, "scripts/lan/windows-sandbox-guest.ts") },
+  entry: { [runner.name]: NodePath.join(root, runner.file) },
+  plugins: [
+    {
+      name: "lan-runner-module-main",
+      async transform(code: string, id: string) {
+        if (
+          NodePath.resolve(id) === NodePath.resolve(root, runner.file) ||
+          !code.includes("import.meta")
+        )
+          return;
+        // Bundling otherwise gives every imported CLI the entry module's main status.
+        // Keep the entry's real guard so importing the finished bundle stays inert.
+        const transformed = await transformWithOxc(code, id, {
+          define: { "import.meta.main": "false" },
+        });
+        return {
+          code: transformed.code,
+          map: transformed.map ? JSON.stringify(transformed.map) : null,
+        };
+      },
+    },
+  ],
   outDir,
   format: "esm" as const,
   platform: "node" as const,

@@ -225,8 +225,29 @@ it("bundles the normal native runner and crosses into working-source Effect serv
       windowsNativeBuildBundleOptions(NodePath.resolve(import.meta.dirname, "../.."), out),
     );
     expect(await NodeFSP.readdir(out)).toEqual(["native-runner.mjs"]);
+    const bundledPath = NodePath.join(out, "native-runner.mjs");
+    const cli = await new Promise<{ code: number | null; stdout: string; stderr: string }>(
+      (resolve, reject) => {
+        const child = NodeChildProcess.spawn(process.execPath, [bundledPath, "--invalid"], {
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stdout = "",
+          stderr = "";
+        child.stdout.on("data", (bytes: Buffer) => (stdout += bytes.toString()));
+        child.stderr.on("data", (bytes: Buffer) => (stderr += bytes.toString()));
+        child.once("error", reject);
+        child.once("close", (code) => resolve({ code, stdout, stderr }));
+      },
+    );
+    expect(cli.code).toBe(1);
+    expect(cli.stdout).toBe("");
+    expect(cli.stderr).toContain(
+      "Supply --request ABSOLUTE_JSON --approved-request-sha256 REVIEWED_SHA256 to execute the approved native-directory build.",
+    );
+    expect(cli.stderr).not.toContain("approved-policy-sha256");
     const bundle = (await import(
-      /* @vite-ignore */ NodeURL.pathToFileURL(NodePath.join(out, "native-runner.mjs")).href
+      /* @vite-ignore */ NodeURL.pathToFileURL(bundledPath).href
     )) as typeof import("./windows-native-build.ts");
     expect(typeof bundle.runWindowsNativeBuild).toBe("function");
     const source = NodePath.join(fixture.root, "working"),

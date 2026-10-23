@@ -71,6 +71,40 @@ export function requireNativeBuildInput(bytes: Uint8Array, digest: string, label
   return bytes;
 }
 
+export async function verifyNativeSnapshotFiles(
+  sourceRoot: string,
+  pins: ReadonlyArray<Pick<SourceSnapshot["files"][number], "path" | "length" | "sha256">>,
+  readFile = readValidationFile,
+) {
+  for (const pin of pins) {
+    relativeWindowsPath(pin.path);
+    if (!Number.isSafeInteger(pin.length) || pin.length < 0 || pin.length > 256 * 1024 ** 2)
+      throw new Error("Native source snapshot has an invalid or oversized file pin.");
+  }
+  const batch: Array<(typeof pins)[number]> = [];
+  let batchBytes = 0;
+  const flush = async () => {
+    // Finish all reads before reporting a failure, preserving the failed build for inspection.
+    const settled = await Promise.allSettled(
+      batch.splice(0).map(async (pin) => {
+        const bytes = await readFile(NodePath.join(sourceRoot, pin.path), pin.length);
+        if (bytes.length !== pin.length || sha256(bytes) !== pin.sha256)
+          throw new Error("Native working source changed before a build subprocess.");
+      }),
+    );
+    batchBytes = 0;
+    const failures = settled.filter((result) => result.status === "rejected");
+    if (failures.length) throw failures[0]!.reason;
+  };
+  for (const pin of pins) {
+    if (batch.length && (batch.length === 32 || batchBytes + pin.length > 32 * 1024 ** 2))
+      await flush();
+    batch.push(pin);
+    batchBytes += pin.length;
+  }
+  await flush();
+}
+
 export async function copyNativePinnedCache(
   sourceRoot: string,
   outputRoot: string,
@@ -389,13 +423,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
         [...toolchainFiles].some(([name, pin]) => actualTools.get(name)?.sha256 !== pin.sha256)
       )
         throw new Error("Native toolchain changed at a build boundary.");
-      for (const pin of snapshot.files)
-        if (
-          sha256(
-            await readValidationFile(NodePath.join(context.sourceRoot, pin.path), 256 * 1024 ** 2),
-          ) !== pin.sha256
-        )
-          throw new Error("Native working source changed before a build subprocess.");
+      await verifyNativeSnapshotFiles(context.sourceRoot, snapshot.files);
     };
     const header = async (name: string) => {
       const relative = `${relativeWindowsPath(execution.directories.nodeHeaders)}/include/node/${name}`;

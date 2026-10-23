@@ -54,6 +54,7 @@ function fixture(outputRoot = "C:\\T3LAN\\Output", visualStudioVersion = "17.14.
     msbuild: "vs/MSBuild/Current/Bin/MSBuild.exe",
     python: "python/python.exe",
     cmd: "windows/cmd.exe",
+    powershell: "powershell/7/powershell.exe",
     viteCli: "javascript/vite/bin/vp",
     builderCli: "javascript/builder/cli.js",
     nodeGyp: "javascript/node-gyp/bin/node-gyp.js",
@@ -358,6 +359,53 @@ it("uses the same pinned commands for a separately verified native backend witho
   );
 });
 
+it("requires a reviewed PowerShell executable and exposes its selected directory for packaging", () => {
+  const test = fixture(),
+    execution = test.create();
+  for (const command of [
+    execution.workspaceInstall(),
+    execution.stageInstall("C:\\T3LAN\\Output\\stage"),
+    execution.builder("C:\\T3LAN\\Output\\stage"),
+  ]) {
+    assert.equal(command.env.POWERSHELL_TELEMETRY_OPTOUT, "1");
+    assert.equal(command.env.DOTNET_CLI_TELEMETRY_OPTOUT, "1");
+    assert.equal(command.env.PSModulePath, "C:\\T3LAN\\Tools\\powershell\\7\\Modules");
+    assert.equal(
+      command.env.PSModuleAnalysisCachePath,
+      "C:\\T3LAN\\Output\\home\\local\\PowerShell-ModuleAnalysisCache",
+    );
+    assert.equal(command.env.DOTNET_SKIP_FIRST_TIME_EXPERIENCE, "1");
+    assert.equal(command.env.DOTNET_MULTILEVEL_LOOKUP, "0");
+  }
+  assert.include(
+    execution.builder("C:\\T3LAN\\Output\\stage").env.PATH?.split(";") ?? [],
+    "C:\\T3LAN\\Tools\\powershell\\7",
+  );
+  assert.notInclude(
+    execution.env.PATH?.split(";") ?? [],
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0",
+  );
+  assert.throws(() =>
+    test.create((request) => {
+      Reflect.deleteProperty(request.tools, "powershell");
+    }),
+  );
+  assert.throws(
+    () =>
+      test.create((request) => {
+        request.tools.powershell = "powershell/unreviewed/powershell.exe";
+      }),
+    /absent from the reviewed closure/u,
+  );
+  assert.throws(
+    () =>
+      test.create((request) => {
+        request.tools.powershell = request.tools.cmd;
+      }),
+    /explicit executable names/u,
+  );
+});
+
 it.effect(
   "rechecks the selected native executable bytes immediately before preparing a subprocess",
   () =>
@@ -380,6 +428,19 @@ it.effect(
       assert.equal(execution.prepare(command).command, executable);
       yield* fs.writeFileString(executable, "synthetic:pnpm/pnpm.exf");
       assert.throws(() => execution.prepare(command), /tool changed before execution/u);
+      const powershell = NodePath.join(root, "powershell", "7", "powershell.exe");
+      yield* fs.makeDirectory(NodePath.dirname(powershell), { recursive: true });
+      yield* fs.writeFileString(powershell, "synthetic:powershell/7/powershell.exe");
+      const powershellCommand = ChildProcess.make(
+        powershell,
+        ["-NoProfile", "-Command", "fixture"],
+        {
+          cwd: native.sourceRoot,
+        },
+      );
+      assert.equal(execution.prepare(powershellCommand).command, powershell);
+      yield* fs.writeFileString(powershell, "synthetic:powershell/7/powershell.exf");
+      assert.throws(() => execution.prepare(powershellCommand), /tool changed before execution/u);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 

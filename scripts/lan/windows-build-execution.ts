@@ -46,6 +46,7 @@ export const WindowsBuildExecutionRequest = Schema.Struct({
     msbuild: Schema.String,
     python: Schema.String,
     cmd: Schema.String,
+    powershell: Schema.String,
     viteCli: Schema.String,
     builderCli: Schema.String,
     nodeGyp: Schema.String,
@@ -93,6 +94,7 @@ const nativeTools = [
   "msbuild",
   "python",
   "cmd",
+  "powershell",
 ] as const;
 const scriptTools = ["viteCli", "builderCli", "nodeGyp"] as const;
 const normalize = (value: string) => path.normalize(value).replace(/\\$/u, "").toLowerCase();
@@ -408,6 +410,12 @@ export function createWindowsBuildExecution(input: {
     SOURCE_DATE_EPOCH: String(request.sourceDateEpoch),
     COREPACK_ENABLE_NETWORK: "0",
     COREPACK_ENABLE_PROJECT_SPEC: "0",
+    POWERSHELL_TELEMETRY_OPTOUT: "1",
+    DOTNET_CLI_TELEMETRY_OPTOUT: "1",
+    PSModulePath: path.join(path.dirname(tools.powershell), "Modules"),
+    PSModuleAnalysisCachePath: path.join(output, "home", "local", "PowerShell-ModuleAnalysisCache"),
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1",
+    DOTNET_MULTILEVEL_LOOKUP: "0",
     npm_config_userconfig: path.join(output, "empty.npmrc"),
     npm_config_globalconfig: path.join(output, "empty-global.npmrc"),
     npm_config_manage_package_manager_versions: "false",

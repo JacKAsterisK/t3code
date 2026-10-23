@@ -13,6 +13,7 @@ import {
   captureNativeBuildSource,
   copyNativePinnedCache,
   requireNativeBuildInput,
+  verifyNativeSnapshotFiles,
 } from "./windows-native-build.ts";
 import {
   assertWindowsNativeContext,
@@ -144,6 +145,168 @@ it("copies only pinned cache bytes into new files and preserves existing output 
   } finally {
     await fixture.cleanup();
   }
+});
+
+it("verifies actual snapshot bytes and refuses changed contents, lengths, and hardlink aliases", async () => {
+  const fixture = await fixtureRoot("t3-lan-native-snapshot-");
+  try {
+    const bytes = Buffer.from("approved source"),
+      file = NodePath.join(fixture.root, "entry");
+    const pin = { path: "entry", length: bytes.length, sha256: sha256(bytes) };
+    await NodeFSP.writeFile(file, bytes);
+    await verifyNativeSnapshotFiles(fixture.root, [pin]);
+    await NodeFSP.writeFile(file, "modified source");
+    await expect(verifyNativeSnapshotFiles(fixture.root, [pin])).rejects.toThrow(
+      /working source changed/u,
+    );
+    await NodeFSP.writeFile(file, Buffer.concat([bytes, Buffer.from([0])]));
+    await expect(verifyNativeSnapshotFiles(fixture.root, [pin])).rejects.toThrow(/oversized/u);
+    await NodeFSP.writeFile(file, bytes);
+    await expect(
+      verifyNativeSnapshotFiles(fixture.root, [{ ...pin, length: bytes.length + 1 }]),
+    ).rejects.toThrow(/working source changed/u);
+    await NodeFSP.link(file, NodePath.join(fixture.root, "alias"));
+    await expect(verifyNativeSnapshotFiles(fixture.root, [pin])).rejects.toThrow(/linked/u);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+it("checks every actual source file across successful snapshot batches", async () => {
+  const fixture = await fixtureRoot("t3-lan-native-snapshot-batches-");
+  try {
+    const pins = await Promise.all(
+      Array.from({ length: 70 }, async (_, index) => {
+        const bytes = Buffer.from([index, 0, 255]),
+          path = `entry-${index}`;
+        await NodeFSP.writeFile(NodePath.join(fixture.root, path), bytes);
+        return { path, length: bytes.length, sha256: sha256(bytes) };
+      }),
+    );
+    await verifyNativeSnapshotFiles(fixture.root, pins);
+    await NodeFSP.writeFile(NodePath.join(fixture.root, pins[69]!.path), Buffer.from([0, 0, 255]));
+    await expect(verifyNativeSnapshotFiles(fixture.root, pins)).rejects.toThrow(
+      /working source changed/u,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+it.each([
+  { path: "../outside", length: 0 },
+  { path: "entry", length: -1 },
+  { path: "entry", length: 0.5 },
+  { path: "entry", length: Number.NaN },
+  { path: "entry", length: 256 * 1024 ** 2 + 1 },
+])("refuses invalid snapshot pins before reading: %j", async (pin) => {
+  const readFile = vi.fn(async () => Buffer.alloc(0));
+  await expect(
+    verifyNativeSnapshotFiles(
+      NodePath.resolve("fixture"),
+      [{ ...pin, sha256: sha256("") }],
+      readFile,
+    ),
+  ).rejects.toThrow();
+  expect(readFile).not.toHaveBeenCalled();
+});
+
+it("drains pending snapshot reads before reporting a sibling read failure", async () => {
+  const fixture = await fixtureRoot("t3-lan-native-snapshot-drain-");
+  try {
+    const bytes = Buffer.from("approved source"),
+      pendingRead = Promise.withResolvers<typeof bytes>(),
+      pendingStarted = Promise.withResolvers<void>(),
+      failure = new Error("refused source read");
+    await NodeFSP.writeFile(NodePath.join(fixture.root, "entry"), bytes);
+    let siblingSettled = false;
+    const verification = verifyNativeSnapshotFiles(
+      fixture.root,
+      ["refused", "pending"].map((name) => ({
+        path: name,
+        length: bytes.length,
+        sha256: sha256(bytes),
+      })),
+      async (file) => {
+        if (NodePath.basename(file) === "refused") throw failure;
+        pendingStarted.resolve();
+        try {
+          return await pendingRead.promise;
+        } finally {
+          siblingSettled = true;
+        }
+      },
+    );
+    const outcome = verification.then(
+      () => ({ error: undefined, siblingSettled }),
+      (error: unknown) => ({ error, siblingSettled }),
+    );
+    await pendingStarted.promise;
+    const releaseRead = NodeFSP.readFile(NodePath.join(fixture.root, "entry")).then(
+      (contents) => pendingRead.resolve(contents),
+      (error: unknown) => pendingRead.reject(error),
+    );
+    try {
+      expect(await outcome).toEqual({ error: failure, siblingSettled: true });
+    } finally {
+      await releaseRead;
+      await Promise.allSettled([verification]);
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+it.each([
+  { label: "32 file limit", lengths: Array.from({ length: 33 }, () => 0), batchSize: 32 },
+  { label: "32 MiB limit", lengths: [20 * 1024 ** 2, 12 * 1024 ** 2, 1], batchSize: 2 },
+  { label: "oversized file alone", lengths: [32 * 1024 ** 2 + 1, 1], batchSize: 1 },
+  { label: "256 MiB maximum file", lengths: [256 * 1024 ** 2, 1], batchSize: 1 },
+])("bounds pending snapshot reads at $label", async ({ lengths, batchSize }) => {
+  const root = NodePath.resolve("fixture"),
+    batchStarted = Promise.withResolvers<void>(),
+    releaseBatch = Promise.withResolvers<void>(),
+    failure = new Error("refused source read");
+  const observed: Array<{ files: number; bytes: number; length: number }> = [];
+  let activeFiles = 0,
+    activeBytes = 0;
+  const pins = lengths.map((length, index) => ({
+    path: `entry-${index}`,
+    length,
+    sha256: sha256(""),
+  }));
+  const verification = verifyNativeSnapshotFiles(root, pins, async (file, maximum) => {
+    const index = Number(NodePath.basename(file).slice("entry-".length)),
+      length = lengths[index]!;
+    expect(maximum).toBe(length);
+    activeFiles += 1;
+    activeBytes += length;
+    observed.push({ files: activeFiles, bytes: activeBytes, length });
+    if (activeFiles === batchSize) batchStarted.resolve();
+    try {
+      await releaseBatch.promise;
+      throw failure;
+    } finally {
+      activeFiles -= 1;
+      activeBytes -= length;
+    }
+  });
+  const outcome = verification.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  await batchStarted.promise;
+  expect(observed).toHaveLength(batchSize);
+  releaseBatch.resolve();
+  expect(await outcome).toBe(failure);
+  expect(observed).toHaveLength(batchSize);
+  expect(observed.every((item) => item.files <= 32)).toBe(true);
+  expect(observed.every((item) => item.bytes <= 32 * 1024 ** 2 || item.files === 1)).toBe(true);
+  expect(
+    observed.filter((item) => item.length > 32 * 1024 ** 2).every((item) => item.files === 1),
+  ).toBe(true);
+  expect(activeFiles).toBe(0);
+  expect(activeBytes).toBe(0);
 });
 
 it("captures actual committed binary bytes and establishes a native context only while its original source stays clean", async () => {

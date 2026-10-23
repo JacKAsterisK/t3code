@@ -412,6 +412,7 @@ export function createWindowsBuildExecution(input: {
     npm_config_update_notifier: "false",
     npm_config_python: tools.python,
     PYTHON: tools.python,
+    PYTHONDONTWRITEBYTECODE: "1",
     npm_config_node_gyp: tools.nodeGyp,
     NODE_GYP_FORCE_PYTHON: tools.python,
     npm_config_script_shell: tools.cmd,

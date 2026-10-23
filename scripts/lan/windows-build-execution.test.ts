@@ -366,6 +366,7 @@ it("binds Cargo, Rust, MSVC, SDK, Python and builder to reviewed paths without a
     "C:\\T3LAN\\Tools\\vs\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\link.exe",
   );
   assert.equal(cargo.env.NODE_GYP_FORCE_PYTHON, "C:\\T3LAN\\Tools\\python\\python.exe");
+  assert.equal(cargo.env.PYTHONDONTWRITEBYTECODE, "1");
   assert.equal(cargo.env.GYP_MSVS_OVERRIDE_PATH, "C:\\T3LAN\\Tools\\vs");
   assert.equal(cargo.env.T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR, "false");
   assert.equal(

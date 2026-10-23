@@ -1,5 +1,6 @@
 import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { distributionUpdateGuidance, nativeUpdatesEnabled } from "@t3tools/shared/distribution";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -134,6 +135,7 @@ const resolveStartup = Effect.fn("cloud.service_launcher_client.resolve_startup"
 
 export const resolveServiceLauncherMode = Effect.fn("cloud.service_launcher_client.resolve_mode")(
   function* () {
+    if (!nativeUpdatesEnabled) return { managed: false };
     const { managed } = yield* resolveStartup();
     return { managed };
   },
@@ -142,6 +144,18 @@ export const resolveServiceLauncherMode = Effect.fn("cloud.service_launcher_clie
 export const make = Effect.fn("cloud.service_launcher_client.make")(function* (options?: {
   readonly currentVersion?: string;
 }) {
+  if (!nativeUpdatesEnabled)
+    return ServiceLauncherClient.of({
+      managed: false,
+      requestUpdate: (input) =>
+        Effect.fail(
+          new ServiceLauncherRejectedError({
+            targetVersion: input.targetVersion,
+            reason: distributionUpdateGuidance,
+          }),
+        ),
+      prepareTrial: Effect.succeed(undefined),
+    });
   const { host, context, managed } = yield* resolveStartup(options);
 
   const exchange = (

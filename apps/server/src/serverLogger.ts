@@ -1,4 +1,5 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { telemetryEnabled } from "@t3tools/shared/distribution";
 import * as SharedObservability from "@t3tools/shared/observability";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -55,7 +56,7 @@ export const layer = Effect.gen(function* () {
 
   const logs = config.otlpLogsExport;
   const otlpLogger =
-    config.otlpLogsUrl === undefined
+    !telemetryEnabled || config.otlpLogsUrl === undefined
       ? undefined
       : OtlpLogger.make({
           url: config.otlpLogsUrl,

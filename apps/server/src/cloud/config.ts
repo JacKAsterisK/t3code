@@ -3,6 +3,7 @@ import {
   RelayManagedEndpointRuntimeConfig,
 } from "@t3tools/contracts/relay";
 import * as Effect from "effect/Effect";
+import { cloudEnabled } from "@t3tools/shared/distribution";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -52,6 +53,7 @@ export const readAgentActivityPublishingActive: (
   secrets: ServerSecretStore.ServerSecretStore["Service"],
 ) => Effect.Effect<boolean> = Effect.fn("config.readAgentActivityPublishingActive")(
   function* (secrets: ServerSecretStore.ServerSecretStore["Service"]) {
+    if (!cloudEnabled) return false;
     const readSecretString = (name: string) =>
       secrets
         .get(name)
@@ -94,8 +96,12 @@ export const readRelayConnection = Effect.all([
   Effect.map(([url, environmentCredential]) =>
     url && environmentCredential ? { url, environmentCredential } : null,
   ),
+  (effect) => (cloudEnabled ? effect : Effect.succeed(null)),
 );
 
 export const readHoldWebhooksWhileOffline = readSecretString(
   HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET,
-).pipe(Effect.map((value) => value === "true"));
+).pipe(
+  Effect.map((value) => cloudEnabled && value === "true"),
+  (effect) => (cloudEnabled ? effect : Effect.succeed(false)),
+);

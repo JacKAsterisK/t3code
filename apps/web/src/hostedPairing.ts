@@ -1,4 +1,5 @@
 import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
+import { isLanDistribution } from "@t3tools/shared/distribution";
 
 import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "./pairingUrl";
 
@@ -11,6 +12,8 @@ export interface HostedPairingRequest {
 export type HostedAppChannel = "latest" | "nightly";
 
 export function configuredHostedAppUrl(): string {
+  if (isLanDistribution)
+    throw new Error("Hosted T3 services are disabled in this LAN distribution.");
   return import.meta.env.VITE_HOSTED_APP_URL?.trim() || DEFAULT_HOSTED_APP_URL;
 }
 
@@ -19,6 +22,7 @@ function configuredBackendUrl(): string {
 }
 
 function configuredHostedAppChannel(): HostedAppChannel | null {
+  if (isLanDistribution) return null;
   const channel = import.meta.env.VITE_HOSTED_APP_CHANNEL?.trim().toLowerCase();
   return channel === "latest" || channel === "nightly" ? channel : null;
 }
@@ -32,6 +36,7 @@ function originFromUrl(value: string): string | null {
 }
 
 export function isHostedStaticApp(url?: URL): boolean {
+  if (isLanDistribution) return false;
   if (configuredBackendUrl()) {
     return false;
   }
@@ -73,6 +78,18 @@ export function buildHostedPairingUrl(input: {
   readonly token: string;
   readonly label?: string | null;
 }): string {
+  if (isLanDistribution) {
+    const direct = new URL(input.host);
+    if (
+      !["http:", "https:"].includes(direct.protocol) ||
+      direct.username ||
+      direct.password ||
+      /(?:^|\.)t3\.codes$/iu.test(direct.hostname.replace(/\.$/u, ""))
+    )
+      throw new Error("LAN pairing requires a direct native server HTTP origin.");
+    const url = new URL("/pair", direct);
+    return setPairingTokenOnUrl(url, input.token).toString();
+  }
   const url = new URL("/pair", configuredHostedAppUrl());
   url.searchParams.set("host", input.host);
 
@@ -87,6 +104,10 @@ export function buildHostedPairingUrl(input: {
 export function buildHostedChannelSelectionUrl(input: {
   readonly channel: HostedAppChannel;
 }): string {
+  if (isLanDistribution)
+    throw new Error(
+      "Hosted release channels are disabled in this LAN distribution. Use the Hub update workflow.",
+    );
   const url = new URL("/__t3code/channel", configuredHostedAppUrl());
   url.searchParams.set("channel", input.channel);
   return url.toString();

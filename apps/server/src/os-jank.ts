@@ -1,4 +1,5 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { assertDistributionHome, resolveDistributionHome } from "@t3tools/shared/distribution";
 import {
   listLoginShellCandidates,
   mergePathEntries,
@@ -123,8 +124,16 @@ export const expandHomePath = Effect.fn(function* (input: string) {
 
 export const resolveBaseDir = Effect.fn(function* (raw: string | undefined) {
   const { join, resolve } = yield* Path.Path;
+  const platform = yield* HostProcess.Platform;
+  const environment = yield* HostProcess.Environment;
+  const expectedHome = resolveDistributionHome({
+    homeDirectory: yield* HostProcess.HomeDirectory,
+    platform,
+    localAppData: environment.LOCALAPPDATA,
+    joinPath: join,
+  });
   if (!raw || raw.trim().length === 0) {
-    return join(yield* HostProcess.HomeDirectory, ".t3");
+    return expectedHome;
   }
-  return resolve(yield* expandHomePath(raw.trim()));
+  return assertDistributionHome(resolve(yield* expandHomePath(raw.trim())), expectedHome);
 });

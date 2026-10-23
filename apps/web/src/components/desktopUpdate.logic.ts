@@ -1,23 +1,14 @@
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
+import {
+  nativeUpdatesEnabled,
+  resolveDistributionUpdateRepository,
+  distributionUpdateGuidance,
+} from "@t3tools/shared/distribution";
 
 export type DesktopUpdateButtonAction = "download" | "install" | "none";
 
-const DEFAULT_DESKTOP_RELEASE_REPOSITORY = "pingdotgg/t3code";
-const GITHUB_REPOSITORY_SEGMENT = /^[A-Za-z0-9._-]+$/u;
-
-function isValidRepositorySegment(value: string | undefined): value is string {
-  return (
-    value !== undefined && value !== "." && value !== ".." && GITHUB_REPOSITORY_SEGMENT.test(value)
-  );
-}
-
 function desktopReleaseRepositoryUrl(repository: string | undefined): string {
-  const configuredRepository = repository?.trim() ?? "";
-  const [owner, name, ...extra] = configuredRepository.split("/");
-  const releaseRepository =
-    isValidRepositorySegment(owner) && isValidRepositorySegment(name) && extra.length === 0
-      ? configuredRepository
-      : DEFAULT_DESKTOP_RELEASE_REPOSITORY;
+  const releaseRepository = resolveDistributionUpdateRepository(repository);
   return `https://github.com/${releaseRepository}/releases`;
 }
 
@@ -34,6 +25,8 @@ export function getDesktopUpdateReleaseUrl(
   version: string | null,
   repository: string | undefined = import.meta.env.T3CODE_DESKTOP_UPDATE_REPOSITORY,
 ): string | null {
+  // Application versions do not identify the fork's independently versioned release tags.
+  if (!nativeUpdatesEnabled) return null;
   const normalizedVersion = version?.trim();
   if (!normalizedVersion) return null;
   return `${desktopReleaseRepositoryUrl(repository)}/tag/v${encodeURIComponent(normalizedVersion)}`;
@@ -48,6 +41,7 @@ export function getDesktopUpdateReleaseHistoryUrl(
 export function resolveDesktopUpdateButtonAction(
   state: DesktopUpdateState,
 ): DesktopUpdateButtonAction {
+  if (!nativeUpdatesEnabled) return "none";
   if (
     state.downloadedVersion &&
     (state.status === "downloaded" ||
@@ -91,6 +85,7 @@ export function getArm64IntelBuildWarningDescription(state: DesktopUpdateState):
 }
 
 export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string {
+  if (!nativeUpdatesEnabled) return state.message ?? distributionUpdateGuidance;
   if (
     state.notAppliedVersion !== undefined &&
     (state.status === "available" || state.status === "downloaded") &&
@@ -162,5 +157,7 @@ export function getDesktopUpdateIdleTooltip(
   const disabledReason = getDesktopUpdateDisabledReason(state);
   return disabledReason
     ? { title: "Updates unavailable", detail: disabledReason }
-    : { title: "Check for updates", detail: null };
+    : !nativeUpdatesEnabled
+      ? { title: "Check fork updates", detail: state?.message ?? distributionUpdateGuidance }
+      : { title: "Check for updates", detail: null };
 }

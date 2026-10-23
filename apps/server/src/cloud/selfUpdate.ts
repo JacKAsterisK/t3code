@@ -8,6 +8,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { distributionUpdateGuidance, nativeUpdatesEnabled } from "@t3tools/shared/distribution";
 import * as Cause from "effect/Cause";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
@@ -47,6 +48,7 @@ export function resolveServerSelfUpdateCapability(input: {
   readonly desktopManaged: boolean;
   readonly launcherManaged: boolean;
 }): ServerSelfUpdateCapability | null {
+  if (!nativeUpdatesEnabled) return null;
   if (input.desktopManaged) return "desktop-managed" as const;
   return input.launcherManaged ? ("boot-service" as const) : null;
 }
@@ -78,6 +80,7 @@ export const withRunningThreadContinuation = Effect.fn(
     threadIds: ReadonlyArray<ThreadId>,
   ) => Effect.Effect<void, ServerSelfUpdateError>;
 }) {
+  if (!nativeUpdatesEnabled) return input.selfUpdate;
   const desktopContinuationTokens = yield* Ref.make(HashSet.empty<string>());
   const clearOnError = <A>(
     effect: Effect.Effect<A, ServerSelfUpdateError>,
@@ -203,6 +206,14 @@ export const pruneRuntimesOnStart = Effect.fn("cloud.server_self_update.prune_on
 );
 
 export const make = Effect.fn("cloud.server_self_update.make")(function* () {
+  if (!nativeUpdatesEnabled) {
+    const refusal = Effect.fail(
+      new ServerSelfUpdateError({
+        reason: distributionUpdateGuidance,
+      }),
+    );
+    return ServerSelfUpdate.of({ update: () => refusal, commitDesktopUpdate: () => refusal });
+  }
   const serverConfig = yield* ServerConfig.ServerConfig;
   const desktopAppUpdate = yield* DesktopAppUpdate.DesktopAppUpdate;
   const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;

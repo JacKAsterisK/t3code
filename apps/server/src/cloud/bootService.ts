@@ -1,4 +1,5 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { distributionUpdateGuidance, nativeUpdatesEnabled } from "@t3tools/shared/distribution";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -548,6 +549,26 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
   readonly cliVersion: string;
   readonly host?: BootServiceHost;
 }) {
+  if (!nativeUpdatesEnabled) {
+    const refusal = Effect.fail(
+      new BootServiceCommandError({
+        step: distributionUpdateGuidance,
+      }),
+    );
+    return BootService.of({
+      install: () => refusal,
+      restart: refusal,
+      withStopped: () => refusal,
+      uninstall: refusal,
+      status: Effect.succeed({
+        supported: false,
+        installed: false,
+        current: false,
+        unitPath: "",
+        logPath: "",
+      }),
+    });
+  }
   const hostExecPath = yield* HostProcess.ExecutablePath;
   const platform = yield* HostProcess.Platform;
   const arch = yield* HostProcess.Architecture;

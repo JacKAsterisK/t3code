@@ -11,13 +11,16 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import * as Electron from "electron";
+import {
+  cloudEnabled,
+  desktopProtocolSchemes,
+  getDistributionProtocolScheme,
+} from "@t3tools/shared/distribution";
 
 export const DESKTOP_HOST = "app";
-const DESKTOP_PRODUCTION_SCHEME = "t3code";
-const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
 
 export function getDesktopScheme(isDevelopment: boolean): string {
-  return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
+  return getDistributionProtocolScheme(isDevelopment);
 }
 
 function getDesktopOrigin(isDevelopment: boolean): string {
@@ -67,15 +70,16 @@ export class ElectronProtocol extends Context.Service<
 >()("@t3tools/desktop/electron/ElectronProtocol") {}
 
 function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrationInput): string {
-  const clerkOrigin = input.clerkFrontendApiHostname
-    ? `https://${input.clerkFrontendApiHostname}`
-    : undefined;
+  const clerkOrigin =
+    cloudEnabled && input.clerkFrontendApiHostname
+      ? `https://${input.clerkFrontendApiHostname}`
+      : undefined;
   const scriptSources = [
     "'self'",
     "'unsafe-inline'",
     "'wasm-unsafe-eval'",
     ...(clerkOrigin ? [clerkOrigin] : []),
-    "https://challenges.cloudflare.com",
+    ...(cloudEnabled ? ["https://challenges.cloudflare.com"] : []),
   ];
 
   // The renderer connects directly to user-configured environments in addition to
@@ -114,9 +118,9 @@ function withContentSecurityPolicy(response: Response, policy: string): Response
  * Must run synchronously during process bootstrap, before Electron emits `ready`.
  */
 function registerDesktopSchemePrivilegesSync(): void {
-  Electron.protocol.registerSchemesAsPrivileged([
-    {
-      scheme: DESKTOP_PRODUCTION_SCHEME,
+  Electron.protocol.registerSchemesAsPrivileged(
+    desktopProtocolSchemes.map((scheme, index) => ({
+      scheme,
       privileges: {
         standard: true,
         secure: true,
@@ -125,20 +129,10 @@ function registerDesktopSchemePrivilegesSync(): void {
         stream: true,
         // Custom schemes skip Chromium's V8 code cache unless they opt in.
         // Dev stays off: Vite serves changing code at stable URLs.
-        codeCache: true,
+        codeCache: index === 0,
       },
-    },
-    {
-      scheme: DESKTOP_DEVELOPMENT_SCHEME,
-      privileges: {
-        standard: true,
-        secure: true,
-        supportFetchAPI: true,
-        corsEnabled: true,
-        stream: true,
-      },
-    },
-  ]);
+    })),
+  );
 }
 
 const registerDesktopSchemePrivileges = Effect.sync(registerDesktopSchemePrivilegesSync).pipe(

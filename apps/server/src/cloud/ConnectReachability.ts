@@ -1,4 +1,5 @@
 import * as NodeNet from "node:net";
+import { cloudEnabled } from "@t3tools/shared/distribution";
 
 import {
   connectReachabilityHelpUrl,
@@ -198,6 +199,20 @@ export class ConnectReachability extends Context.Service<
 >()("t3/cloud/ConnectReachability") {}
 
 const make = Effect.gen(function* () {
+  if (!cloudEnabled)
+    return ConnectReachability.of({
+      check: DateTime.now.pipe(
+        Effect.map((now) => ({
+          status: "unreachable" as const,
+          cause: "not_linked" as const,
+          checkedAt: DateTime.formatIso(now),
+          reason: "T3 Connect is disabled in this LAN distribution.",
+          hint: null,
+          fix: "Use an approved direct environment connection.",
+        })),
+      ),
+      latest: Effect.succeedNone,
+    });
   const runtime = yield* ManagedEndpointRuntime.CloudManagedEndpointRuntime;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const httpClient = yield* HttpClient.HttpClient;

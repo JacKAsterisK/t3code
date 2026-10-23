@@ -171,11 +171,20 @@ export function ConnectAgentSurface() {
         title={`Connect ${details.clientName}`}
         description={
           <>
-            This agent wants to use the threads in every project on{" "}
+            {details.taskOnly
+              ? "This agent wants task access allowed by this environment's machine and project policy on "
+              : "This agent wants to use the threads in every project on "}
             <span className="font-medium text-foreground">{details.environmentHost}</span>.
           </>
         }
       />
+      {details.renewable ? (
+        <p className="mt-2 text-sm text-muted-foreground">
+          Approval lets this agent renew task access for up to 90 days. You can revoke it in
+          Connections. Other environment tools are blocked, and a new approval is required after 90
+          days.
+        </p>
+      ) : null}
       <p className="mt-2 text-xs text-muted-foreground">
         {redirectsToThisComputer(details.redirectHost) ? (
           <>
@@ -207,9 +216,11 @@ export function ConnectAgentSurface() {
             value={access}
             onValueChange={(value) => setAccess(value as AuthMcpClientAccess)}
           >
-            {AuthMcpClientAccess.literals.map((option) => (
-              <AccessOption key={option} access={option} selected={option === access} />
-            ))}
+            {AuthMcpClientAccess.literals
+              .filter((option) => !details.taskOnly || option !== "full-access")
+              .map((option) => (
+                <AccessOption key={option} access={option} selected={option === access} />
+              ))}
           </RadioGroup>
           <p className="text-xs text-muted-foreground">
             Beyond read only, it can start, message and stop threads, and none of them can run with

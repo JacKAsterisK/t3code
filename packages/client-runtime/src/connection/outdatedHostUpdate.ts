@@ -7,6 +7,7 @@ import {
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
+import { distributionUpdateGuidance, nativeUpdatesEnabled } from "@t3tools/shared/distribution";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -78,6 +79,11 @@ export const updateOutdatedHost = Effect.fn("clientRuntime.connection.updateOutd
     input: ServerSelfUpdateInput,
     onStage: (stage: OutdatedHostUpdateStage) => Effect.Effect<void>,
   ) {
+    if (!nativeUpdatesEnabled)
+      return yield* new OutdatedHostUpdateError({
+        environmentId,
+        message: distributionUpdateGuidance,
+      });
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
     const webSocketConstructor = yield* Socket.WebSocketConstructor;
     const httpClient = yield* HttpClient.HttpClient;

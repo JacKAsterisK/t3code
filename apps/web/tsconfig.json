@@ -33,6 +33,8 @@
     "test",
     "scripts/warm-dep-cache.ts",
     "../../scripts/lib/public-config.ts",
+    "../../scripts/lib/lan-build-policy.ts",
+    "../../scripts/lib/strict-json.ts",
     "../../scripts/lib/third-party-licenses.ts"
   ]
 }

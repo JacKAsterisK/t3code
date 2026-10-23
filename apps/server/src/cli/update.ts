@@ -1,5 +1,10 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
+  distributionUpdateGuidance,
+  isLanDistribution,
+  nativeUpdatesEnabled,
+} from "@t3tools/shared/distribution";
+import {
   CLI_RELEASE_BASE_URL_ENV,
   CLI_RELEASE_CHANNELS,
   cliReleaseIndexPageUrl,
@@ -35,6 +40,7 @@ import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntim
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import { createUpdateProgress } from "./updateProgress.ts";
 import * as CliService from "./service.ts";
+import * as ForkUpdateDiscovery from "../lan/ForkUpdateDiscovery.ts";
 
 export class CliUpdateError extends Schema.TaggedError<CliUpdateError>()("CliUpdateError", {
   reason: Schema.String,
@@ -58,6 +64,10 @@ const RELEASE_INDEX_MAX_PAGES = 10;
 export const resolveNewestVersion = Effect.fn("cli.update.resolve_newest")(function* (
   channel: CliReleaseChannel,
 ) {
+  if (!nativeUpdatesEnabled)
+    return yield* new CliUpdateError({
+      reason: distributionUpdateGuidance,
+    });
   const httpClient = yield* HttpClient.HttpClient;
   const environment = yield* HostProcess.Environment;
   const githubToken = environment.GH_TOKEN?.trim() || environment.GITHUB_TOKEN?.trim() || undefined;
@@ -99,6 +109,10 @@ export const repointLauncher = Effect.fn("cli.update.repoint_launcher")(function
   readonly versionsDir: string;
   readonly targetEntryPath: string;
 }) {
+  if (!nativeUpdatesEnabled)
+    return yield* new CliUpdateError({
+      reason: distributionUpdateGuidance,
+    });
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const platform = yield* HostProcess.Platform;
@@ -195,6 +209,12 @@ export const findWindowsShim = Effect.fn("cli.update.find_windows_shim")(functio
 
 const updateFlags = {
   ...projectLocationFlags,
+  check: Flag.Boolean("check").pipe(
+    Flag.withDescription(
+      "Inspect release metadata without downloading or activating an update. LAN releases require Reprint Hub activation.",
+    ),
+    Flag.withDefault(false),
+  ),
   channel: Flag.Literals("channel", CLI_RELEASE_CHANNELS).pipe(
     Flag.withDescription(
       "Release channel to follow. Defaults to the channel this t3 was published on.",
@@ -226,10 +246,56 @@ export const updateCommand = Command.make("update", {
   version: versionArgument,
 }).pipe(
   Command.withDescription(
-    "Download a newer t3 and switch this machine to it, including the background service when one is installed.",
+    isLanDistribution
+      ? "Inspect fork updates with --check. Reprint Hub verifies and activates LAN updates while T3 Code is stopped."
+      : "Download a newer t3 and switch this machine to it, including the background service when one is installed.",
   ),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
+      if (flags.check) {
+        if (Option.isSome(flags.version))
+          return yield* new CliUpdateError({
+            reason: "Use --check without an exact version to inspect the current update catalog.",
+          });
+        if (isLanDistribution) {
+          if (Option.isSome(flags.channel) && flags.channel.value !== "stable")
+            return yield* new CliUpdateError({
+              reason: `The LAN catalog supports the stable fork channel. ${distributionUpdateGuidance}`,
+            });
+          const result = yield* ForkUpdateDiscovery.ForkUpdateDiscovery.pipe(
+            Effect.flatMap((discovery) => discovery.check),
+            Effect.provide(ForkUpdateDiscovery.layer.pipe(Layer.provide(FetchHttpClient.layer))),
+            Effect.mapError(
+              () =>
+                new CliUpdateError({
+                  reason: `Could not inspect the LAN fork catalog. ${distributionUpdateGuidance}`,
+                }),
+            ),
+          );
+          yield* Console.log(
+            [
+              result.message,
+              ...(result.channel === null
+                ? []
+                : [
+                    `Distribution: ${result.channel.distributionVersion}; application: ${result.channel.applicationVersion}; source: ${result.channel.identity.sourceCommit}`,
+                  ]),
+              ...(result.releaseUrl === null ? [] : [result.releaseUrl]),
+              distributionUpdateGuidance,
+            ].join("\n"),
+          );
+          return;
+        }
+        const version = yield* resolveNewestVersion(
+          Option.getOrElse(flags.channel, () => cliReleaseChannelOf(packageJson.version)),
+        ).pipe(Effect.provide(FetchHttpClient.layer));
+        yield* Console.log(`Newest release: ${version}`);
+        return;
+      }
+      if (!nativeUpdatesEnabled)
+        return yield* new CliUpdateError({
+          reason: distributionUpdateGuidance,
+        });
       const logLevel = yield* GlobalFlag.LogLevel;
       const config = yield* resolveCliAuthConfig(flags, logLevel);
       return yield* runUpdate({

@@ -4,6 +4,7 @@ import {
 } from "@t3tools/shared/relayAuth";
 import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
 import * as Schema from "effect/Schema";
+import { cloudEnabled, telemetryEnabled } from "@t3tools/shared/distribution";
 
 export class CloudPublicConfigMissingError extends Schema.TaggedError<CloudPublicConfigMissingError>()(
   "CloudPublicConfigMissingError",
@@ -41,6 +42,13 @@ function normalizeSecureUrl(value: string): string | null {
 }
 
 export function resolveCloudPublicConfig(): CloudPublicConfig {
+  if (!cloudEnabled)
+    return {
+      clerkPublishableKey: null,
+      clerkJwtTemplate: null,
+      relayUrl: null,
+      relayTracing: { tracesUrl: null, tracesDataset: null, tracesToken: null },
+    };
   return {
     clerkPublishableKey: trimNonEmpty(
       import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined,
@@ -62,6 +70,7 @@ export function resolveCloudPublicConfig(): CloudPublicConfig {
 }
 
 export function resolveRelayTracingConfig() {
+  if (!telemetryEnabled || !cloudEnabled) return null;
   // The relay exporter is created during module initialization, so this must be synchronous.
   if (
     typeof window !== "undefined" &&

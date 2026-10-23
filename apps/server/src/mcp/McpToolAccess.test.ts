@@ -228,12 +228,20 @@ const mismatchedProvider = {
 const supervisedClient = clientCaller("approval-required");
 const fullAccessClient = clientCaller("full-access");
 const readOnlyClient = clientCaller("read-only");
+const taskOnlyClient = {
+  ...clientCaller("auto"),
+  client: { ...clientCaller("auto").client!, grantId: "task-grant", taskOnly: true },
+};
 const previewOnly = { ...fullAccess, capabilities: new Set(["preview"] as const) };
 
 it.effect.each([
   ["reads", ended, {}, "ran"],
   ["reads", supervisedClient, {}, "ran"],
   ["reads", readOnlyClient, {}, "ran"],
+  ["reads", taskOnlyClient, {}, "capability_denied"],
+  ["writes", taskOnlyClient, {}, "capability_denied"],
+  ["starts_threads", taskOnlyClient, {}, "capability_denied"],
+  ["writes_environment", taskOnlyClient, {}, "capability_denied"],
 
   ["writes", readOnlyClient, {}, "capability_denied"],
   ["writes_threads", readOnlyClient, { threadId: supervisedThreadId }, "capability_denied"],

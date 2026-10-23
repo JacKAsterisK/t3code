@@ -5,6 +5,7 @@
  * without a valid proof is handled as a direct request.
  */
 import { RelayHookDeliveryProofPayload } from "@t3tools/contracts/relay";
+import { cloudEnabled } from "@t3tools/shared/distribution";
 import {
   normalizeRelayIssuer,
   RELAY_HOOK_DELIVERY_HEADER,
@@ -42,6 +43,7 @@ export class RelayDeliveryProof extends Context.Service<
 >()("t3/scheduledTasks/RelayDeliveryProof") {}
 
 const make = Effect.gen(function* () {
+  if (!cloudEnabled) return RelayDeliveryProof.of({ verify: () => Effect.succeed(Option.none()) });
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const verify: RelayDeliveryProof["Service"]["verify"] = Effect.fn("webhook.verifyRelayDelivery")(

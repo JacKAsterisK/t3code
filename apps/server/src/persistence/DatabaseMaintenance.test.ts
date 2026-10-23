@@ -42,6 +42,7 @@ it.layer(DatabaseMaintenance.layer.pipe(Layer.provideMerge(NodeServices.layer)))
         yield* Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
           yield* sql`CREATE TABLE retained_data (value TEXT)`;
+          yield* sql`INSERT INTO retained_data (value) VALUES ('retained current generation')`;
         }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
         assert.isNull((yield* maintenance.inspect(dbPath)).legacyDatabaseBytes);
 
@@ -67,6 +68,12 @@ it.layer(DatabaseMaintenance.layer.pipe(Layer.provideMerge(NodeServices.layer)))
         assert.isFalse(yield* fs.exists(`${legacy}-wal`));
         assert.isTrue(yield* fs.exists(dbPath));
         assert.isNull((yield* maintenance.inspect(dbPath)).legacyDatabaseBytes);
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          assert.deepEqual(yield* sql`SELECT value FROM retained_data`, [
+            { value: "retained current generation" },
+          ]);
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath, readonly: true })));
       }).pipe(Effect.scoped),
     );
 

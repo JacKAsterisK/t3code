@@ -26,6 +26,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
+import { cloudEnabled } from "@t3tools/shared/distribution";
 import { withUntracedRequests } from "./http.ts";
 import * as ServerHttp from "./http.ts";
 import {
@@ -287,6 +288,27 @@ const layerResourceDiagnostics = Layer.mergeAll(
 
 const layerRelayClient = Layer.unwrap(
   Effect.gen(function* () {
+    if (!cloudEnabled)
+      return Layer.succeed(
+        RelayClient.RelayClient,
+        RelayClient.RelayClient.of({
+          resolve: Effect.succeed({ status: "missing", version: RelayClient.CLOUDFLARED_VERSION }),
+          install: Effect.fail(
+            new RelayClient.RelayClientInstallError({
+              reason: "unsupported_platform",
+              message: "T3 Connect is disabled in this LAN distribution.",
+            }),
+          ),
+          installWithProgress: () =>
+            Effect.fail(
+              new RelayClient.RelayClientInstallError({
+                reason: "unsupported_platform",
+                message: "T3 Connect is disabled in this LAN distribution.",
+              }),
+            ),
+          pruneManagedVersions: Effect.void,
+        }),
+      );
     const config = yield* ServerConfig.ServerConfig;
     return RelayClient.layerCloudflared({ baseDir: config.baseDir });
   }),
@@ -475,6 +497,7 @@ const layerCloudManagedEndpointRuntime = Layer.mergeAll(
 const layerScheduledTaskWebhookOrigin = Layer.effect(
   ScheduledTaskWebhookOrigin,
   Effect.gen(function* () {
+    if (!cloudEnabled) return Effect.succeed({ relayHookBaseUrl: null });
     const secrets = yield* ServerSecretStore.ServerSecretStore;
     return Effect.gen(function* () {
       const [relayUrl, tunnelConfig] = yield* Effect.all([
@@ -832,6 +855,10 @@ const layerMakeServer = Layer.unwrap(
       : Layer.empty;
     const layerCloudDesiredLinkReconcile = Layer.effectDiscard(
       Effect.gen(function* () {
+        if (!cloudEnabled) {
+          yield* Deferred.succeed(cloudLinkParked, undefined).pipe(Effect.orDie);
+          return;
+        }
         const cloudLink = yield* CloudLink.CloudLink;
         const releaseManagedTunnel = cloudLink.releaseManagedTunnelOnShutdown().pipe(
           Effect.timeout("10 seconds"),

@@ -1,4 +1,5 @@
 import * as Context from "effect/Context";
+import { acquireNativeAdmissionScoped } from "@t3tools/shared/nativeAdmission";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -156,6 +157,7 @@ export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig.ServerConfig;
+  yield* acquireNativeAdmissionScoped(serverConfig.baseDir).pipe(Effect.orDie);
 
   yield* fileSystem.makeDirectory(serverConfig.secretsDir, { recursive: true });
   yield* fileSystem.chmod(serverConfig.secretsDir, 0o700).pipe(

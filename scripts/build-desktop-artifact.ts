@@ -41,8 +41,37 @@ import {
   selectCliRuntimeExternalDependencies,
 } from "./lib/cli-external-packages.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
-import { selectDesktopRuntimeExternalDependencies } from "./lib/desktop-external-packages.ts";
+import {
+  createStageWorkspaceConfig,
+  createStagePatchedDependencies,
+  resolveDesktopRuntimeDependencies,
+  resolveFffNativeDependencies,
+} from "./lib/production-stage.ts";
+export {
+  createStageWorkspaceConfig,
+  createStagePatchedDependencies,
+  resolveDesktopRuntimeDependencies,
+  resolveFffNativeDependencies,
+} from "./lib/production-stage.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import {
+  readLanBuildPolicyFile,
+  lanBuildEnvironment,
+  type LanBuildIdentity,
+} from "./lib/lan-build-policy.ts";
+import {
+  readLanPackagingInputs,
+  assertLanPackagingTarget,
+  type LanPackagingInputs,
+} from "./lan/lan-packaging.ts";
+import { buildNativeMaintenance } from "./lan/native-maintenance.pack.ts";
+import {
+  WindowsBuildExecution,
+  WindowsBuildExecutionError,
+  asChildProcess,
+  assertWindowsBuildExecution,
+  type PinnedWindowsBuildExecution,
+} from "./lan/windows-build-execution.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -101,14 +130,6 @@ const StageWorkspaceConfig = Schema.Struct({
   ),
   nodeLinker: Schema.optional(Schema.Literals(["hoisted"])),
 });
-type StageWorkspaceConfig = typeof StageWorkspaceConfig.Type;
-
-// electron-webauthn declares TypeScript as a peer only for its typings. pnpm
-// auto-installs missing peers, which would ship a compiler inside the app.
-const STAGE_PACKAGE_EXTENSIONS = {
-  "electron-webauthn": { peerDependenciesMeta: { typescript: { optional: true } } },
-  "@electron-webauthn/macos": { peerDependenciesMeta: { typescript: { optional: true } } },
-} as const;
 
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
@@ -179,6 +200,8 @@ const PLATFORM_CONFIG: Record<typeof BuildPlatform.Type, PlatformConfig> = {
 };
 
 interface BuildCliInput {
+  readonly lanPolicy?: Option.Option<string>;
+  readonly lanBuildLock?: Option.Option<string>;
   readonly platform: Option.Option<typeof BuildPlatform.Type>;
   readonly target: Option.Option<string>;
   readonly arch: Option.Option<typeof BuildArch.Type>;
@@ -601,10 +624,21 @@ const BUNDLE_SELF_CONTAINED_SENTINEL = "effect";
 const BUNDLE_SELF_CHECK_TIMEOUT = Duration.seconds(120);
 const WINDOWS_PRIMARY_NATIVE_PROBE_TIMEOUT = Duration.seconds(30);
 
-const WINDOWS_PRIMARY_FFF_PROBE_SOURCE = `
-const { join } = await import("node:path");
+export const WINDOWS_PRIMARY_NATIVE_PROBE_SOURCE = `
+const { join, dirname, resolve, sep } = await import("node:path");
 const { pathToFileURL } = await import("node:url");
+const { createRequire } = await import("node:module");
 const { FileFinder } = await import(pathToFileURL(process.argv[1]).href);
+const require = createRequire(pathToFileURL(process.argv[1]));
+const sidecarRoot = resolve(dirname(process.argv[1]), "../../../..");
+const ptyUtilsPath = require.resolve("node-pty/lib/utils.js");
+if (!ptyUtilsPath.toLowerCase().startsWith((join(sidecarRoot, "node_modules", "node-pty") + sep).toLowerCase()))
+  throw new Error("The PTY loader resolved outside the packaged sidecar.");
+const { loadNativeModule } = require(ptyUtilsPath);
+const conpty = loadNativeModule("conpty").module;
+const consoleList = loadNativeModule("conpty_console_list").module;
+if (typeof conpty.startProcess !== "function" || typeof consoleList.getConsoleProcessList !== "function")
+  throw new Error("The packaged PTY native modules have incompatible exports.");
 const probeRoot = process.argv[2];
 const result = FileFinder.create({
   basePath: probeRoot,
@@ -737,7 +771,7 @@ export class WindowsPrimaryNativeProbeError extends Schema.TaggedError<WindowsPr
   },
 ) {
   override get message(): string {
-    return `The packaged Windows primary could not load fff from server.asar (exit ${this.exitCode}). Output:\n${this.output}`;
+    return `The packaged Windows primary could not load required native modules from server.asar (exit ${this.exitCode}). Output:\n${this.output}`;
   }
 }
 
@@ -815,6 +849,22 @@ const collectStreamAsString = <E>(stream: Stream.Stream<Uint8Array, E>): Effect.
 
 const COMMAND_OUTPUT_TAIL_LENGTH = 20_000;
 
+const requireWindowsBuildExecution = Effect.fn("requireWindowsBuildExecution")(function* () {
+  const execution = yield* Effect.serviceOption(WindowsBuildExecution);
+  if (Option.isNone(execution))
+    return yield* new WindowsBuildExecutionError({
+      message: "LAN execution requires the approved offline Windows Sandbox runner.",
+    });
+  yield* Effect.try({
+    try: () => assertWindowsBuildExecution(execution.value),
+    catch: () =>
+      new WindowsBuildExecutionError({
+        message: "The isolated build execution capability is invalid.",
+      }),
+  });
+  return execution.value;
+});
+
 function appendOutputTail(acc: string, chunk: string): string {
   const next = acc + chunk;
   return next.length > COMMAND_OUTPUT_TAIL_LENGTH ? next.slice(-COMMAND_OUTPUT_TAIL_LENGTH) : next;
@@ -846,8 +896,19 @@ const collectCommandStream = <E>(
 const spawnAndCollectOutput = Effect.fn("spawnAndCollectOutput")(function* (
   command: ChildProcess.Command,
 ) {
+  const execution = yield* Effect.serviceOption(WindowsBuildExecution);
+  if (Option.isSome(execution)) yield* execution.value.verify;
+  const prepared = Option.isNone(execution)
+    ? command
+    : yield* Effect.try({
+        try: () => execution.value.prepare(command),
+        catch: () =>
+          new WindowsBuildExecutionError({
+            message: "An unapproved LAN build subprocess was refused.",
+          }),
+      });
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const child = yield* spawner.spawn(command);
+  const child = yield* spawner.spawn(prepared);
 
   const [stdout, stderr, exitCode] = yield* Effect.all(
     [
@@ -858,6 +919,7 @@ const spawnAndCollectOutput = Effect.fn("spawnAndCollectOutput")(function* (
     { concurrency: "unbounded" },
   );
 
+  if (Option.isSome(execution)) yield* execution.value.verify;
   return { stdout, stderr, exitCode } as const;
 });
 
@@ -882,6 +944,22 @@ const resolveGitCommitHash = Effect.fn("resolveGitCommitHash")(function* (repoRo
     return "unknown";
   }
   return hash.toLowerCase();
+});
+
+export const resolveLanSourceCommit = Effect.fn("resolveLanSourceCommit")(function* (
+  repoRoot: string,
+) {
+  const result = yield* spawnAndCollectOutput(
+    ChildProcess.make("git", ["--no-optional-locks", "rev-parse", "--verify", "HEAD^{commit}"], {
+      cwd: repoRoot,
+    }),
+  );
+  const commit = result.stdout.trim().toLowerCase();
+  if (result.exitCode !== 0 || !/^[a-f0-9]{40}$/u.test(commit))
+    return yield* new LanBuildConfigurationError({
+      reason: "LAN source admission requires the complete pinned HEAD commit.",
+    });
+  return commit;
 });
 
 const resolvePythonForNodeGyp = Effect.fn("resolvePythonForNodeGyp")(function* () {
@@ -945,6 +1023,7 @@ const resolvePythonForNodeGyp = Effect.fn("resolvePythonForNodeGyp")(function* (
 });
 
 interface ResolvedBuildOptions {
+  readonly lanBuild?: LanPackagingInputs;
   readonly platform: typeof BuildPlatform.Type;
   readonly target: string;
   readonly arch: typeof BuildArch.Type;
@@ -960,6 +1039,7 @@ interface ResolvedBuildOptions {
 }
 
 interface StagePackageJson {
+  readonly t3codeLanIdentity?: { readonly schemaVersion: 1 } & LanBuildIdentity;
   readonly name: string;
   readonly version: string;
   readonly buildVersion: string;
@@ -980,6 +1060,20 @@ interface StagePackageJson {
 }
 
 export const STAGE_INSTALL_ARGS = ["install", "--prod"] as const;
+export const LAN_STAGE_INSTALL_ARGS = [
+  "install",
+  "--prod",
+  "--offline",
+  "--frozen-lockfile",
+] as const;
+export class LanBuildConfigurationError extends Schema.TaggedError<LanBuildConfigurationError>()(
+  "LanBuildConfigurationError",
+  { reason: Schema.String },
+) {
+  override get message() {
+    return this.reason;
+  }
+}
 export const DESKTOP_ELECTRON_LANGUAGES = ["en-US"] as const;
 export const DESKTOP_FILE_EXCLUSIONS = [
   // Cursor finds platform assets by walking up from argv[1]. Keep them outside
@@ -1419,32 +1513,6 @@ ${associatedDomains}
 `;
 }
 
-export function resolveFffNativeDependencies(
-  platform: typeof BuildPlatform.Type,
-  arch: typeof BuildArch.Type,
-  version: string,
-): Record<string, string> {
-  const architectures = arch === "universal" ? (["arm64", "x64"] as const) : [arch];
-
-  if (platform === "mac") {
-    return Object.fromEntries(
-      architectures.map((architecture) => [`@ff-labs/fff-bin-darwin-${architecture}`, version]),
-    );
-  }
-
-  if (platform === "win") {
-    return Object.fromEntries(
-      architectures.map((architecture) => [`@ff-labs/fff-bin-win32-${architecture}`, version]),
-    );
-  }
-
-  return Object.fromEntries(
-    architectures.flatMap((architecture) =>
-      ["gnu", "musl"].map((libc) => [`@ff-labs/fff-bin-linux-${architecture}-${libc}`, version]),
-    ),
-  );
-}
-
 // macOS and Linux run both processes from one app.asar, so the stage installs
 // the union of what each bundle leaves external and nothing else.
 export function resolveMergedStageDependencies(input: {
@@ -1602,58 +1670,6 @@ const stageClerkPasskeyNativeBinaries = Effect.fn("stageClerkPasskeyNativeBinari
   }
 });
 
-export function createStageWorkspaceConfig(input: {
-  readonly platform: typeof BuildPlatform.Type;
-  readonly arch: typeof BuildArch.Type;
-  readonly allowBuilds?: Record<string, boolean>;
-  readonly patchedDependencies?: Record<string, string>;
-  readonly overrides?: Record<string, string>;
-}): StageWorkspaceConfig {
-  const { platform, arch, allowBuilds, patchedDependencies, overrides } = input;
-  const hostOs = platform === "mac" ? "darwin" : platform === "win" ? "win32" : "linux";
-  const hostCpu = arch === "universal" ? ["arm64", "x64"] : [arch];
-  // Linux AppImages execute a Linux/glibc Node process that loads
-  // Linux-native optional deps at runtime. Keep libc explicit so pnpm
-  // includes those optional packages in the staged production install.
-  const supportedArchitectures =
-    platform === "linux"
-      ? {
-          os: [hostOs],
-          cpu: hostCpu,
-          libc: ["glibc"],
-        }
-      : {
-          os: [hostOs],
-          cpu: hostCpu,
-        };
-
-  return {
-    supportedArchitectures,
-    ...(allowBuilds && Object.keys(allowBuilds).length > 0 ? { allowBuilds } : {}),
-    ...(patchedDependencies && Object.keys(patchedDependencies).length > 0
-      ? { patchedDependencies }
-      : {}),
-    ...(overrides && Object.keys(overrides).length > 0 ? { overrides } : {}),
-    packageExtensions: STAGE_PACKAGE_EXTENSIONS,
-  };
-}
-
-export function createStagePatchedDependencies(
-  patchedDependencies: Record<string, string>,
-  dependencies: Record<string, unknown>,
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(patchedDependencies).filter(([patchKey]) =>
-      Object.hasOwn(dependencies, getPatchedDependencyPackageName(patchKey)),
-    ),
-  );
-}
-
-function getPatchedDependencyPackageName(patchKey: string): string {
-  const versionSeparator = patchKey.lastIndexOf("@");
-  return versionSeparator > 0 ? patchKey.slice(0, versionSeparator) : patchKey;
-}
-
 const AzureTrustedSigningOptionsConfig = Config.all({
   publisherName: Config.String("AZURE_TRUSTED_SIGNING_PUBLISHER_NAME"),
   endpoint: Config.String("AZURE_TRUSTED_SIGNING_ENDPOINT"),
@@ -1746,7 +1762,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
       supportedArchitectures: [...supportedArchitectures],
     });
   }
-  const version = mergeOptions(input.buildVersion, env.version, undefined);
+  let version = mergeOptions(input.buildVersion, env.version, undefined);
   const releaseDir = resolveBooleanFlag(input.mockUpdates, env.mockUpdates)
     ? "release-mock"
     : "release";
@@ -1775,7 +1791,35 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const wslRuntime =
     Option.getOrUndefined(input.wslRuntime) ?? Option.getOrUndefined(env.wslRuntime);
 
+  const lanPolicyPath = Option.getOrUndefined(input.lanPolicy ?? Option.none());
+  const lanLockPath = Option.getOrUndefined(input.lanBuildLock ?? Option.none());
+  if ((lanPolicyPath === undefined) !== (lanLockPath === undefined))
+    return yield* new LanBuildConfigurationError({
+      reason: "Supply both --lan-policy and --lan-build-lock; no LAN build inputs are inferred.",
+    });
+  const lanBuild =
+    lanPolicyPath === undefined
+      ? undefined
+      : yield* Effect.try({
+          try: () => {
+            const selection = readLanBuildPolicyFile(lanPolicyPath);
+            assertLanPackagingTarget(
+              { platform, arch, target, skipBuild, signed, mockUpdates, wslRuntime },
+              selection,
+            );
+            if (version !== undefined && version !== selection.identity.applicationVersion)
+              throw new Error("LAN application version differs from the immutable policy.");
+            return readLanPackagingInputs(selection, lanLockPath!, repoRoot);
+          },
+          catch: (cause) =>
+            new LanBuildConfigurationError({
+              reason: cause instanceof Error ? cause.message : "LAN build inputs refused.",
+            }),
+        });
+  if (lanBuild !== undefined) version = lanBuild.selection.identity.applicationVersion;
+
   return {
+    ...(lanBuild === undefined ? {} : { lanBuild }),
     platform,
     target,
     arch,
@@ -1798,8 +1842,19 @@ const runCommand = Effect.fn("runCommand")(function* (
     readonly verbose: boolean;
   },
 ) {
+  const execution = yield* Effect.serviceOption(WindowsBuildExecution);
+  if (Option.isSome(execution)) yield* execution.value.verify;
+  const prepared = Option.isNone(execution)
+    ? command
+    : yield* Effect.try({
+        try: () => execution.value.prepare(command),
+        catch: () =>
+          new WindowsBuildExecutionError({
+            message: "An unapproved LAN build subprocess was refused.",
+          }),
+      });
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const child = yield* commandSpawner.spawn(command);
+  const child = yield* commandSpawner.spawn(prepared);
   const [stdout, stderr, exitCode] = yield* Effect.all(
     [
       collectCommandStream(child.stdout, process.stdout, options.verbose),
@@ -1808,6 +1863,8 @@ const runCommand = Effect.fn("runCommand")(function* (
     ],
     { concurrency: "unbounded" },
   );
+
+  if (Option.isSome(execution)) yield* execution.value.verify;
 
   if (exitCode !== 0) {
     return yield* new BuildCommandFailedError({
@@ -1864,9 +1921,22 @@ const buildDesktopBundlesUnlocked = Effect.fn("buildDesktopBundlesUnlocked")(fun
   repoRoot: string,
   appVersion: string,
   verbose: boolean,
+  lanBuild?: LanPackagingInputs,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  if (lanBuild !== undefined) {
+    const execution = yield* requireWindowsBuildExecution();
+    for (const command of execution.compile(appVersion, lanBuildEnvironment(lanBuild.selection)))
+      yield* runCommand(asChildProcess(command), { label: "Pinned LAN compilation", verbose }).pipe(
+        Effect.scoped,
+      );
+    yield* fs.copy(
+      path.join(repoRoot, "apps/web/dist"),
+      path.join(repoRoot, "apps/server/dist/client"),
+    );
+    return;
+  }
   const spawnCommand = yield* resolveSpawnCommand("vp", ["run", "build:desktop"]);
   yield* Effect.acquireUseRelease(
     Effect.forEach(releasePackageFiles, (relativePath) =>
@@ -1889,7 +1959,7 @@ const buildDesktopBundlesUnlocked = Effect.fn("buildDesktopBundlesUnlocked")(fun
           ChildProcess.make(spawnCommand.command, spawnCommand.args, {
             cwd: repoRoot,
             shell: spawnCommand.shell,
-            env: { APP_VERSION: appVersion },
+            env: { APP_VERSION: appVersion, ...lanBuildEnvironment(undefined) },
             extendEnv: true,
           }),
           { label: "vp run build:desktop", verbose },
@@ -2251,9 +2321,11 @@ export const verifyPackagedBundleIsSelfContained = Effect.fn("verifyPackagedBund
   function* (input: { readonly asarPath: string; readonly verbose: boolean }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const execution = yield* Effect.serviceOption(WindowsBuildExecution);
 
     const probeRoot = yield* fs.makeTempDirectoryScoped({
       prefix: "t3code-bundle-selfcheck-",
+      ...(Option.isNone(execution) ? {} : { directory: execution.value.isolation.outputRoot }),
     });
     const extractedApp = path.join(probeRoot, "extracted");
     const probeApp = path.join(probeRoot, "app");
@@ -2403,32 +2475,50 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* 
   const manifestPath = path.join(input.repoRoot, "native/resource-monitor/Cargo.toml");
   const executableName = resourceMonitorExecutableName(input.platform);
   const rustTargets = resolveResourceMonitorRustTargets(input.platform, input.arch);
-  const reuseResourceMonitor = yield* Config.Boolean("T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR").pipe(
-    Config.withDefault(false),
-  );
+  const execution = yield* Effect.serviceOption(WindowsBuildExecution);
+  const reuseResourceMonitor = Option.isSome(execution)
+    ? false
+    : yield* Config.Boolean("T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR").pipe(
+        Config.withDefault(false),
+      );
   const builtBinaries: string[] = [];
 
   for (const rustTarget of rustTargets) {
     if (!reuseResourceMonitor) {
-      const spawnCommand = yield* resolveSpawnCommand("cargo", [
-        "build",
-        "--locked",
-        "--release",
-        "--manifest-path",
-        manifestPath,
-        "--target",
-        rustTarget,
-      ]);
-      yield* runCommand(
-        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-          cwd: input.repoRoot,
-          shell: spawnCommand.shell,
-        }),
-        {
-          label: `cargo build resource monitor (${rustTarget})`,
+      if (Option.isSome(execution)) {
+        if (
+          input.platform !== "win" ||
+          input.arch !== "x64" ||
+          input.repoRoot !== execution.value.isolation.sourceRoot
+        )
+          return yield* new WindowsBuildExecutionError({
+            message: "The native helper build target differs from its isolated Windows source.",
+          });
+        yield* runCommand(asChildProcess(execution.value.resourceMonitor()), {
+          label: "Pinned offline Cargo resource monitor",
           verbose: input.verbose,
-        },
-      );
+        });
+      } else {
+        const spawnCommand = yield* resolveSpawnCommand("cargo", [
+          "build",
+          "--locked",
+          "--release",
+          "--manifest-path",
+          manifestPath,
+          "--target",
+          rustTarget,
+        ]);
+        yield* runCommand(
+          ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+            cwd: input.repoRoot,
+            shell: spawnCommand.shell,
+          }),
+          {
+            label: `cargo build resource monitor (${rustTarget})`,
+            verbose: input.verbose,
+          },
+        );
+      }
     }
 
     const binaryPath = path.join(
@@ -2720,21 +2810,6 @@ const validateBundledClientAssets = Effect.fn("build-desktop-artifact.validateBu
   },
 );
 
-export function resolveDesktopRuntimeDependencies(
-  dependencies: Record<string, string> | undefined,
-  catalog: Record<string, string>,
-): Record<string, string> {
-  if (!dependencies || Object.keys(dependencies).length === 0) {
-    return {};
-  }
-
-  return resolveCatalogDependencies(
-    selectDesktopRuntimeExternalDependencies(dependencies),
-    catalog,
-    "apps/desktop",
-  );
-}
-
 export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
   updateChannel: "latest" | "nightly",
 ) {
@@ -2827,11 +2902,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     | undefined,
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  lanIdentity?: LanBuildIdentity,
 ) {
   const buildConfig: Record<string, unknown> = {
-    appId: DESKTOP_APP_ID,
-    productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-${version}-${arch}.${ext}",
+    appId: lanIdentity?.appId ?? DESKTOP_APP_ID,
+    productName: lanIdentity?.productName ?? resolveDesktopProductName(version),
+    artifactName:
+      lanIdentity === undefined
+        ? "T3-Code-${version}-${arch}.${ext}"
+        : "T3CodeLAN-${version}-${arch}.${ext}",
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
       ...DESKTOP_FILE_EXCLUSIONS,
@@ -2856,8 +2935,46 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       ...(platform === "linux" ? LINUX_BROWSER_SECRET_EXTRA_RESOURCES : []),
       ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
       ...(platform === "win" && wslRuntimeBundled ? WSL_RUNTIME_EXTRA_RESOURCES : []),
+      ...(lanIdentity === undefined
+        ? []
+        : [
+            {
+              from: "apps/desktop/prod-resources/lan-native-maintenance",
+              to: ".",
+              filter: ["*.mjs"],
+            },
+            {
+              from: "apps/desktop/prod-resources/lan-native-maintenance/manifest.json",
+              to: "native-maintenance-build.json",
+            },
+          ]),
     ],
   };
+  if (lanIdentity !== undefined) {
+    if (
+      platform !== "win" ||
+      arch !== "x64" ||
+      signed ||
+      mockUpdates ||
+      wslRuntimeBundled ||
+      target !== "zip"
+    )
+      return yield* new LanBuildConfigurationError({
+        reason: "LAN packaging requires unsigned Windows x64 ZIP with no native feed or WSL.",
+      });
+    buildConfig.publish = null;
+    buildConfig.protocols = [
+      { name: lanIdentity.productName, schemes: [lanIdentity.protocolScheme] },
+    ];
+    buildConfig.npmRebuild = false;
+    buildConfig.win = {
+      target: [target],
+      icon: "icon.ico",
+      signExts: [".node", ".dll"],
+      signAndEditExecutable: true,
+    };
+    return buildConfig;
+  }
   const updateChannel = resolveDesktopUpdateChannel(version);
   // A missing `publish` makes electron-builder infer a GitHub feed from
   // GH_TOKEN/GITHUB_TOKEN. The staged app has no repository to resolve it
@@ -3148,6 +3265,7 @@ export const packWindowsServerAsar = Effect.fn("packWindowsServerAsar")(function
 });
 
 export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(function* (input: {
+  readonly lanBuild?: LanPackagingInputs;
   readonly stageRoot: string;
   readonly repoRoot: string;
   readonly serverDistDir: string;
@@ -3177,7 +3295,7 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
     sidecarDependencies,
   );
   const sidecarPackageJson = {
-    name: "t3code-server",
+    name: input.lanBuild === undefined ? "t3code-server" : "t3code-lan-server",
     version: input.appVersion,
     private: true,
     packageManager: rootPackageJson.packageManager,
@@ -3210,12 +3328,24 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   }
 
   yield* Effect.log("[desktop-artifact] Installing server sidecar runtime externals...");
-  const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+  if (input.lanBuild !== undefined)
+    yield* fs.writeFile(
+      path.join(serverStageDir, "pnpm-lock.yaml"),
+      input.lanBuild.stageLocks.server,
+    );
+  const installCommand =
+    input.lanBuild === undefined
+      ? yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS])
+      : undefined;
+  const execution =
+    input.lanBuild === undefined ? undefined : yield* requireWindowsBuildExecution();
   yield* runCommand(
-    ChildProcess.make(installCommand.command, installCommand.args, {
-      cwd: serverStageDir,
-      shell: installCommand.shell,
-    }),
+    execution !== undefined
+      ? asChildProcess(execution.stageInstall(serverStageDir))
+      : ChildProcess.make(installCommand!.command, installCommand!.args, {
+          cwd: serverStageDir,
+          shell: installCommand!.shell,
+        }),
     { label: "vp install --prod (server sidecar)", verbose: input.verbose },
   );
 
@@ -3296,41 +3426,49 @@ export const verifyWindowsPrimaryFffNativeLoad = Effect.fn(
   }
   if (hostPlatform !== "win32" || hostArchitecture !== input.targetArch) return;
 
+  const execution = yield* Effect.serviceOption(WindowsBuildExecution);
   const probeRoot = yield* fs.makeTempDirectoryScoped({
     prefix: "t3code-windows-primary-native-probe-",
+    ...(Option.isNone(execution) ? {} : { directory: execution.value.isolation.outputRoot }),
   });
   const fffEntryPath = path.join(input.asarPath, "node_modules/@ff-labs/fff-node/dist/index.js");
   const probeEnv = { ...process.env };
   delete probeEnv.ELECTRON_NO_ASAR;
   delete probeEnv.NODE_OPTIONS;
 
-  yield* runCommand(
-    ChildProcess.make(
-      executablePath,
-      [
-        "--no-global-search-paths",
-        "--input-type=module",
-        "--eval",
-        WINDOWS_PRIMARY_FFF_PROBE_SOURCE,
-        fffEntryPath,
-        probeRoot,
-      ],
-      {
-        cwd: input.packagedAppDir,
-        stdout: "pipe",
-        stderr: "pipe",
-        env: {
-          ...probeEnv,
-          ELECTRON_RUN_AS_NODE: "1",
-          NODE_PATH: "",
-        },
-      },
-    ),
+  const probeCommand = ChildProcess.make(
+    executablePath,
+    [
+      "--no-global-search-paths",
+      "--input-type=module",
+      "--eval",
+      WINDOWS_PRIMARY_NATIVE_PROBE_SOURCE,
+      fffEntryPath,
+      probeRoot,
+    ],
     {
-      label: "Windows primary fff native-load probe",
-      verbose: input.verbose,
+      cwd: input.packagedAppDir,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...probeEnv,
+        ELECTRON_RUN_AS_NODE: "1",
+        NODE_PATH: "",
+      },
     },
-  ).pipe(
+  );
+  if (Option.isSome(execution))
+    yield* Effect.try({
+      try: () => execution.value.registerPackagedElectronProbe(probeCommand),
+      catch: () =>
+        new WindowsBuildExecutionError({
+          message: "The packaged native-load probe could not be bound to candidate bytes.",
+        }),
+    });
+  yield* runCommand(probeCommand, {
+    label: "Windows primary fff native-load probe",
+    verbose: input.verbose,
+  }).pipe(
     Effect.timeout(WINDOWS_PRIMARY_NATIVE_PROBE_TIMEOUT),
     Effect.catchTags({
       TimeoutError: () =>
@@ -3612,13 +3750,42 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   const hostPlatform = yield* HostProcess.Platform;
+  const executionOption = yield* Effect.serviceOption(WindowsBuildExecution);
+  const execution = Option.getOrUndefined(executionOption);
+  if (options.lanBuild !== undefined) {
+    if (execution === undefined)
+      return yield* new LanBuildConfigurationError({
+        reason:
+          "LAN builds require the approved offline Windows Sandbox runner and exact toolchain execution capability.",
+      });
+    yield* execution.verify;
+    const nodeBytes = yield* fs.readFile(process.execPath);
+    if (
+      process.versions.node !== options.lanBuild.lock.tools.node.version ||
+      NodeCrypto.createHash("sha256").update(nodeBytes).digest("hex") !==
+        options.lanBuild.lock.tools.node.sha256
+    )
+      return yield* new LanBuildConfigurationError({
+        reason: "LAN packaging requires the exact approved Node binary/version.",
+      });
+    if (
+      hostPlatform !== "win32" ||
+      execution.isolation.sourceRoot.toLowerCase() !== repoRoot.toLowerCase() ||
+      execution.isolation.sourceCommit !== options.lanBuild.selection.identity.sourceCommit ||
+      execution.lock.forkCommit !== options.lanBuild.lock.forkCommit
+    )
+      return yield* new LanBuildConfigurationError({
+        reason:
+          "LAN packaging needs the verified isolated native Windows source snapshot; no build was started.",
+      });
+  }
   if (hostPlatform === "linux" && options.platform === "linux") {
     yield* preflightLinuxDesktopBuild(options.arch);
   }
   if (hostPlatform === "darwin" && options.platform === "mac") {
     yield* preflightMacDesktopBuild(options.arch);
   }
-  if (hostPlatform === "win32" && options.platform === "win") {
+  if (hostPlatform === "win32" && options.platform === "win" && options.lanBuild === undefined) {
     yield* preflightWindowsDesktopBuild({
       arch: options.arch,
       bundlesWslRuntime: bundlesWslRuntime({
@@ -3683,10 +3850,14 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
 
   const appVersion = options.version ?? serverPackageJson.version;
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
-  const commitHash = yield* resolveGitCommitHash(repoRoot);
+  const commitHash =
+    options.lanBuild === undefined
+      ? yield* resolveGitCommitHash(repoRoot)
+      : options.lanBuild.selection.identity.sourceCommit;
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
   const stageRoot = yield* mkdir({
     prefix: `t3code-desktop-${options.platform}-stage-`,
+    ...(execution === undefined ? {} : { directory: execution.isolation.outputRoot }),
   });
 
   const stageAppDir = path.join(stageRoot, "app");
@@ -3700,7 +3871,10 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
 
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    yield* buildDesktopBundlesUnlocked(repoRoot, appVersion, options.verbose);
+    yield* buildDesktopBundlesUnlocked(repoRoot, appVersion, options.verbose, options.lanBuild);
+  }
+  if (options.lanBuild !== undefined) {
+    yield* execution!.verify;
   }
 
   const requiredBuildInputs = [
@@ -3844,6 +4018,19 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   // electron-builder is filtering out stageResourcesDir directory in the AppImage for production
   const stageProdResourcesDir = path.join(stageAppDir, "apps/desktop/prod-resources");
   yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
+  if (options.lanBuild !== undefined)
+    yield* Effect.tryPromise({
+      try: () =>
+        buildNativeMaintenance(
+          options.lanBuild!.selection.identity,
+          options.lanBuild!.lockBytes,
+          path.join(stageProdResourcesDir, "lan-native-maintenance"),
+        ),
+      catch: (cause) =>
+        new LanBuildConfigurationError({
+          reason: cause instanceof Error ? cause.message : "LAN native helper build failed.",
+        }),
+    });
 
   const configuredMacPasskeySigning =
     options.platform === "mac" && options.signed
@@ -3903,10 +4090,15 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
       : undefined;
   const stagePackageJson: StagePackageJson = {
-    name: "t3code",
+    name: options.lanBuild === undefined ? "t3code" : "t3code-lan",
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
+    ...(options.lanBuild === undefined
+      ? {}
+      : {
+          t3codeLanIdentity: { schemaVersion: 1 as const, ...options.lanBuild.selection.identity },
+        }),
     // Read by apps/desktop/src/preview/Passkeys.ts; must match the signed entitlements.
     ...(macWebAuthn ? { t3codeWebAuthn: macWebAuthn } : {}),
     private: true,
@@ -3914,8 +4106,14 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     description:
       "T3 Code is an open-source desktop app for coding agents. Work with your existing agent subscriptions, review code changes, and run commands in your projects. Connect from desktop, web, or mobile to continue working remotely.",
     license: "MIT",
-    homepage: "https://t3.codes",
-    author: "T3 Tools",
+    homepage:
+      options.lanBuild === undefined
+        ? "https://t3.codes"
+        : "https://github.com/JacKAsterisK/t3code",
+    author:
+      options.lanBuild === undefined
+        ? "T3 Tools"
+        : `${options.lanBuild.selection.identity.productName} contributors`,
     main: "apps/desktop/dist-electron/boot.cjs",
     build: yield* createBuildConfig(
       options.platform,
@@ -3932,6 +4130,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
         : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
+      options.lanBuild?.selection.identity,
     ),
     dependencies: stageDependencies,
     devDependencies: {
@@ -3959,12 +4158,22 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   }
 
   yield* Effect.log("[desktop-artifact] Installing staged production dependencies...");
-  const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
+  if (options.lanBuild !== undefined)
+    yield* fs.writeFile(
+      path.join(stageAppDir, "pnpm-lock.yaml"),
+      options.lanBuild.stageLocks.desktop,
+    );
+  const installCommand =
+    options.lanBuild === undefined
+      ? yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS])
+      : undefined;
   yield* runCommand(
-    ChildProcess.make(installCommand.command, installCommand.args, {
-      cwd: stageAppDir,
-      shell: installCommand.shell,
-    }),
+    execution !== undefined
+      ? asChildProcess(execution.stageInstall(stageAppDir))
+      : ChildProcess.make(installCommand!.command, installCommand!.args, {
+          cwd: stageAppDir,
+          shell: installCommand!.shell,
+        }),
     { label: "vp install --prod", verbose: options.verbose },
   );
   yield* stageClerkPasskeyNativeBinaries(stageAppDir, options.platform, options.arch);
@@ -3984,6 +4193,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       overrides: resolvedOverrides,
       asarPath: windowsServerAsarPath,
       verbose: options.verbose,
+      ...(options.lanBuild === undefined ? {} : { lanBuild: options.lanBuild }),
     });
   }
   yield* stageCursorSdkPlatformPackages(
@@ -4008,7 +4218,8 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   // as enabled, so copy the host env and scrub empty values instead of relying
   // on `extendEnv` merging.
   const buildEnv: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...(execution === undefined ? process.env : execution.env),
+    ...lanBuildEnvironment(options.lanBuild?.selection),
   };
   buildEnv.npm_config_user_agent = resolvePackageManagerUserAgent(rootPackageJson.packageManager);
   for (const [key, value] of Object.entries(buildEnv)) {
@@ -4022,6 +4233,16 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     buildEnv.XZ_DEFAULTS = "-T0";
   }
   if (options.platform === "win") {
+    if (options.lanBuild !== undefined) {
+      for (const key of Object.keys(buildEnv))
+        if (
+          /^(?:AZURE_|CSC_|APPLE_|GH_|GITHUB_|T3CODE_.*(?:CLERK|RELAY|OTLP|UPDATE)|VITE_)/iu.test(
+            key,
+          )
+        )
+          delete buildEnv[key];
+      Object.assign(buildEnv, lanBuildEnvironment(options.lanBuild.selection));
+    }
     // Windows signs only through Azure Trusted Signing. Off Windows,
     // electron-builder's signtool manager would read CSC_LINK (the macOS
     // certificate) as a Windows certificate.
@@ -4037,7 +4258,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     delete buildEnv.APPLE_API_ISSUER;
   }
 
-  if (hostPlatform === "win32") {
+  if (hostPlatform === "win32" && execution === undefined) {
     const python = yield* resolvePythonForNodeGyp();
     if (python) {
       buildEnv.PYTHON = python;
@@ -4071,13 +4292,18 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     "--publish",
     "never",
   ];
-  const builderCommand = yield* resolveSpawnCommand("vp", builderArgs, { env: buildEnv });
+  const builderCommand =
+    execution === undefined
+      ? yield* resolveSpawnCommand("vp", builderArgs, { env: buildEnv })
+      : undefined;
   yield* runCommand(
-    ChildProcess.make(builderCommand.command, builderCommand.args, {
-      cwd: repoRoot,
-      env: buildEnv,
-      shell: builderCommand.shell,
-    }),
+    execution !== undefined
+      ? asChildProcess(execution.builder(stageAppDir))
+      : ChildProcess.make(builderCommand!.command, builderCommand!.args, {
+          cwd: repoRoot,
+          env: buildEnv,
+          shell: builderCommand!.shell,
+        }),
     {
       label: `vp exec --filter @t3tools/desktop -- electron-builder --projectDir ${stageAppDir} ${platformConfig.cliFlag} --${options.arch} --publish never`,
       verbose: options.verbose,
@@ -4096,7 +4322,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   if (options.platform === "win") {
     yield* validateWindowsPackagedPayload({
       stageDistDir,
-      appExecutableName: `${resolveDesktopProductName(appVersion)}.exe`,
+      appExecutableName: `${options.lanBuild?.selection.identity.productName ?? resolveDesktopProductName(appVersion)}.exe`,
       targetArch: options.arch,
       appVersion,
       expectWslRuntime: bundlesWslRuntime({
@@ -4138,10 +4364,89 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   options: ResolvedBuildOptions,
 ) {
   const repoRoot = yield* RepoRoot;
+  if (options.lanBuild !== undefined) {
+    const execution = yield* Effect.serviceOption(WindowsBuildExecution);
+    if (Option.isNone(execution))
+      return yield* new LanBuildConfigurationError({
+        reason:
+          "LAN builds require a verified Windows native-directory or Sandbox runner; environment flags cannot enable execution.",
+      });
+    yield* Effect.try({
+      try: () => assertWindowsBuildExecution(execution.value),
+      catch: () =>
+        new LanBuildConfigurationError({
+          reason: "The isolated Windows build execution capability is invalid.",
+        }),
+    });
+    yield* execution.value.verify;
+  }
   return yield* withDesktopBuildLock(repoRoot, buildDesktopArtifactUnlocked(options));
 });
 
+export const runIsolatedWindowsDesktopBuild = Effect.fn("runIsolatedWindowsDesktopBuild")(
+  function* (
+    execution: PinnedWindowsBuildExecution,
+    input: { readonly policyPath: string; readonly buildLockPath: string },
+  ) {
+    yield* Effect.try({
+      try: () => assertWindowsBuildExecution(execution),
+      catch: () =>
+        new LanBuildConfigurationError({
+          reason: "The isolated Windows build execution capability is invalid.",
+        }),
+    });
+    const repoRoot = yield* RepoRoot;
+    const path = yield* Path.Path;
+    const lanBuild = yield* Effect.try({
+      try: () =>
+        readLanPackagingInputs(
+          readLanBuildPolicyFile(input.policyPath),
+          input.buildLockPath,
+          repoRoot,
+        ),
+      catch: () =>
+        new LanBuildConfigurationError({
+          reason: "The isolated build policy or lock differs from its reviewed inputs.",
+        }),
+    });
+    if (sha256ForBuild(lanBuild.lockBytes) !== sha256ForBuild(execution.lockBytes))
+      return yield* new LanBuildConfigurationError({
+        reason: "The packager and isolated runner selected different build locks.",
+      });
+    // This entry runs only in the disposable child. In-process bundler helpers
+    // must see the same scrubbed environment as every explicitly routed child.
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, execution.env, lanBuildEnvironment(lanBuild.selection));
+    return yield* buildDesktopArtifact({
+      lanBuild,
+      platform: "win",
+      target: "zip",
+      arch: "x64",
+      version: execution.lock.applicationVersion,
+      outputDir: path.join(execution.isolation.outputRoot, "artifacts"),
+      skipBuild: false,
+      keepStage: false,
+      signed: false,
+      verbose: false,
+      mockUpdates: false,
+      mockUpdateServerPort: undefined,
+      wslRuntime: undefined,
+    }).pipe(Effect.provideService(WindowsBuildExecution, execution));
+  },
+);
+
+const sha256ForBuild = (bytes: Uint8Array) =>
+  NodeCrypto.createHash("sha256").update(bytes).digest("hex");
+
 const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
+  lanPolicy: Flag.String("lan-policy").pipe(
+    Flag.withDescription("Explicit immutable independent LAN policy (Windows x64 ZIP only)."),
+    Flag.optional,
+  ),
+  lanBuildLock: Flag.String("lan-build-lock").pipe(
+    Flag.withDescription("Approved build lock including both frozen production stage locks."),
+    Flag.optional,
+  ),
   platform: Flag.Literals("platform", BuildPlatform.literals).pipe(
     Flag.withDescription("Build platform (env: T3CODE_DESKTOP_PLATFORM)."),
     Flag.optional,

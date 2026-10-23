@@ -6,6 +6,7 @@ import type {
 } from "@t3tools/contracts";
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
+import { nativeUpdatesEnabled } from "@t3tools/shared/distribution";
 import * as Schema from "effect/Schema";
 
 import { APP_VERSION } from "./branding";
@@ -86,18 +87,21 @@ export function resolveServerConfigVersionMismatch(
 export function resolveServerSelfUpdateCapability(
   serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
 ): ServerSelfUpdateCapability | null {
+  if (!nativeUpdatesEnabled) return null;
   return serverConfig?.environment.capabilities.serverSelfUpdate ?? null;
 }
 
 export function supportsDesktopAppUpdate(
   serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
 ): boolean {
+  if (!nativeUpdatesEnabled) return false;
   return serverConfig?.environment.capabilities.desktopAppUpdate === true;
 }
 
 export function supportsServerUpdateThreadContinuation(
   serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
 ): boolean {
+  if (!nativeUpdatesEnabled) return false;
   return serverConfig?.environment.capabilities.serverUpdateThreadContinuation === true;
 }
 
@@ -105,6 +109,7 @@ export function manualServerUpdateCommand(
   targetVersion: string,
   installation?: ServerInstallation,
 ): string {
+  if (!nativeUpdatesEnabled) return "Use the Hub update workflow for T3 Code LAN.";
   if (installation?.kind === "npm-global") {
     const prefix = `'${installation.prefix.replaceAll("'", "'\\''")}'`;
     return `npm install --global --prefix ${prefix} t3@${targetVersion}`;

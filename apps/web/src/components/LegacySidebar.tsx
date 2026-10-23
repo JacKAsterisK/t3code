@@ -1,4 +1,5 @@
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
+import { nativeUpdatesEnabled } from "@t3tools/shared/distribution";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
 import { Spinner } from "~/components/ui/spinner";
 import {
@@ -3533,6 +3534,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
     ? null
     : shortcutLabelForCommand(keybindings, "commandPalette.toggle", newThreadShortcutLabelOptions);
   const handleDesktopUpdateButtonClick = async () => {
+    if (!nativeUpdatesEnabled) return;
     const bridge = window.desktopBridge;
     if (!bridge || !desktopUpdateState) return;
     if (

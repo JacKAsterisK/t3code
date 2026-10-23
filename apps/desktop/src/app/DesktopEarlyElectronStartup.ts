@@ -58,6 +58,8 @@ function resolveEarlyDesktopSettingsPath(input: {
   const baseDir = resolveDesktopBaseDir({
     homeDirectory: input.homeDirectory,
     joinPath: input.joinPath,
+    platform: "linux",
+    localAppData: undefined,
     t3Home,
   });
   const stateDir = resolveDesktopStateDir({

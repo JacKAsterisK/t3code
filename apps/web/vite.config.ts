@@ -1,4 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - Vite bootstrap reads only public branding inputs before an Effect runtime exists.
 import * as NodeZlib from "node:zlib";
+import * as NodeFS from "node:fs";
 
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
@@ -16,11 +18,18 @@ import {
 } from "@t3tools/shared/devProxy";
 
 import { loadRepoEnv } from "../../scripts/lib/public-config";
+import {
+  loadLanBuildPolicy,
+  lanBuildDefines,
+  transformLanIndexHtml,
+  transformLanWebManifest,
+} from "../../scripts/lib/lan-build-policy.ts";
 import { thirdPartyLicensesPlugin } from "../../scripts/lib/third-party-licenses";
 import { tailwindPlugins } from "./vite/tailwind";
 import { warmBundledDevPlugin } from "./vite/warmBundledDev";
 
-const repoEnv = loadRepoEnv();
+const lanIdentity = loadLanBuildPolicy();
+const repoEnv = lanIdentity === undefined ? loadRepoEnv() : {};
 Object.assign(process.env, repoEnv);
 
 // Single-origin dev is signalled positively, because it cannot be inferred from
@@ -32,8 +41,10 @@ const isSingleOriginDev = process.env.T3CODE_SINGLE_ORIGIN_DEV === "1";
 const port = Number(process.env.PORT ?? 5733);
 const explicitHost = process.env.HOST?.trim();
 const host = explicitHost || "localhost";
-const configuredWsUrl = isSingleOriginDev ? undefined : process.env.VITE_WS_URL?.trim();
-const configuredHttpUrl = isSingleOriginDev ? undefined : process.env.VITE_HTTP_URL?.trim();
+const configuredWsUrl =
+  lanIdentity !== undefined || isSingleOriginDev ? undefined : process.env.VITE_WS_URL?.trim();
+const configuredHttpUrl =
+  lanIdentity !== undefined || isSingleOriginDev ? undefined : process.env.VITE_HTTP_URL?.trim();
 const configuredRelayUrl = repoEnv.VITE_T3CODE_RELAY_URL?.trim() || "";
 const configuredClerkPublishableKey = repoEnv.VITE_CLERK_PUBLISHABLE_KEY?.trim() || "";
 const configuredClerkJwtTemplate = repoEnv.VITE_CLERK_JWT_TEMPLATE?.trim() || "";
@@ -41,13 +52,18 @@ const configuredClerkCliOAuthClientId = repoEnv.VITE_CLERK_CLI_OAUTH_CLIENT_ID?.
 const configuredRelayTracingUrl = repoEnv.VITE_RELAY_OTLP_TRACES_URL?.trim() || "";
 const configuredRelayTracingDataset = repoEnv.VITE_RELAY_OTLP_TRACES_DATASET?.trim() || "";
 const configuredRelayTracingToken = repoEnv.VITE_RELAY_OTLP_TRACES_TOKEN?.trim() || "";
-const configuredHostedAppChannel = process.env.VITE_HOSTED_APP_CHANNEL?.trim() || "";
-const configuredAppVersion = process.env.APP_VERSION?.trim() || pkg.version;
+const configuredHostedAppChannel =
+  lanIdentity === undefined ? process.env.VITE_HOSTED_APP_CHANNEL?.trim() || "" : "";
+const configuredAppVersion =
+  lanIdentity?.applicationVersion ?? (process.env.APP_VERSION?.trim() || pkg.version);
 const configuredDesktopUpdateRepository =
-  process.env.T3CODE_DESKTOP_UPDATE_REPOSITORY?.trim() ||
-  process.env.GITHUB_REPOSITORY?.trim() ||
-  "";
+  lanIdentity !== undefined
+    ? ""
+    : process.env.T3CODE_DESKTOP_UPDATE_REPOSITORY?.trim() ||
+      process.env.GITHUB_REPOSITORY?.trim() ||
+      "";
 const configuredHostedAppUrl = (() => {
+  if (lanIdentity !== undefined) return undefined;
   const explicitHostedAppUrl = process.env.VITE_HOSTED_APP_URL?.trim();
   if (explicitHostedAppUrl) {
     return explicitHostedAppUrl;
@@ -186,8 +202,27 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
   .filter((entry) => entry.length > 0);
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
-export default defineConfig(() => {
+function lanBrandingPlugin(): Plugin {
   return {
+    name: "t3code:lan-branding",
+    transformIndexHtml: (html) => transformLanIndexHtml(html, lanIdentity),
+    generateBundle() {
+      if (lanIdentity !== undefined)
+        this.emitFile({
+          type: "asset",
+          fileName: "manifest.webmanifest",
+          source: transformLanWebManifest(
+            NodeFS.readFileSync(new URL("./public/manifest.webmanifest", import.meta.url)),
+            lanIdentity,
+          ),
+        });
+    },
+  };
+}
+
+export default defineConfig(({ mode }) => {
+  return {
+    ...(lanIdentity === undefined ? {} : { envDir: false, envPrefix: [] }),
     run: {
       tasks: {
         // tsc (tsc-rs) rewrites the tsbuildinfo it reads, which keeps a task out of the cache.
@@ -199,6 +234,7 @@ export default defineConfig(() => {
     },
     assetsInclude: ["**/*.wasm"],
     plugins: [
+      ...(lanIdentity === undefined ? [] : [lanBrandingPlugin()]),
       devCompressionPlugin(),
       builtDev
         ? undefined
@@ -230,6 +266,7 @@ export default defineConfig(() => {
       ],
     },
     define: {
+      ...lanBuildDefines(lanIdentity, mode === "test"),
       "import.meta.env.VITE_WS_URL": JSON.stringify(configuredWsUrl ?? ""),
       // Pinned explicitly rather than left to Vite's automatic VITE_ exposure:
       // under single-origin dev this must stay empty even when a `.env`

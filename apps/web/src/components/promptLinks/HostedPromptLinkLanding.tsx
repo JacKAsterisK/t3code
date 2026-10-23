@@ -154,9 +154,11 @@ function HostedPromptLinkLanding({
             Continue here
           </Button>
         ) : null}
-        <Button variant="ghost" render={<a href={DESKTOP_DOWNLOAD_URL} />}>
-          Get T3 Code
-        </Button>
+        {DESKTOP_DOWNLOAD_URL ? (
+          <Button variant="ghost" render={<a href={DESKTOP_DOWNLOAD_URL} />}>
+            Get T3 Code
+          </Button>
+        ) : null}
       </div>
       <label className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
         <Checkbox checked={remember} onCheckedChange={(checked) => setRemember(checked === true)} />

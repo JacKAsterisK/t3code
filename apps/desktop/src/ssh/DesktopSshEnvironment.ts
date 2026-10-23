@@ -27,6 +27,7 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as DesktopSshPasswordPrompts from "./DesktopSshPasswordPrompts.ts";
+import { isLanDistribution } from "@t3tools/shared/distribution";
 
 export type DesktopSshEnvironmentRuntimeServices =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -144,13 +145,21 @@ export const make = Effect.gen(function* () {
         Effect.withSpan("desktop.ssh.resolveHost"),
       ),
     ensureEnvironment: (target, ensureOptions) =>
-      manager
-        .ensureEnvironment(target, ensureOptions)
-        .pipe(
-          Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
-          Effect.provide(runtimeContext),
-          Effect.withSpan("desktop.ssh.ensureEnvironment"),
-        ),
+      isLanDistribution
+        ? Effect.fail(
+            new SshLaunchError({
+              message:
+                "Automatic SSH runtime installation and pairing are unavailable in this LAN distribution. Connect to an independently installed, approved native environment instead.",
+              stdout: "",
+            }),
+          )
+        : manager
+            .ensureEnvironment(target, ensureOptions)
+            .pipe(
+              Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
+              Effect.provide(runtimeContext),
+              Effect.withSpan("desktop.ssh.ensureEnvironment"),
+            ),
     disconnectEnvironment: (target) =>
       manager
         .disconnectEnvironment(target)

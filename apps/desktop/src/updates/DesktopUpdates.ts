@@ -10,6 +10,13 @@ import {
 import { errorTag } from "@t3tools/shared/observability";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
+import {
+  nativeUpdatesEnabled,
+  lanBuildIdentity,
+  distributionUpdateGuidance,
+} from "@t3tools/shared/distribution";
+import { discoverLanUpdateChannel } from "@t3tools/shared/lanUpdateChannel";
+import * as HttpClient from "effect/http/HttpClient";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -345,6 +352,7 @@ export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
+  const httpClient = yield* HttpClient.HttpClient;
 
   const appUpdateYmlConfigRef = yield* Ref.make<Option.Option<AppUpdateYmlConfig>>(Option.none());
   const activeUpdateActionRef = yield* Ref.make<Option.Option<UpdateAction>>(Option.none());
@@ -416,6 +424,7 @@ export const make = Effect.gen(function* () {
   );
 
   const resolveDisabledReason = Effect.gen(function* () {
+    if (!nativeUpdatesEnabled) return Option.none<string>();
     const hasFeedConfig = yield* hasUpdateFeedConfig;
     return Option.fromNullishOr(
       getAutoUpdateDisabledReason({
@@ -476,6 +485,80 @@ export const make = Effect.gen(function* () {
   ) {
     yield* Effect.annotateCurrentSpan({ reason });
     if (yield* Ref.get(desktopState.quitting)) return false;
+    if (!nativeUpdatesEnabled && lanBuildIdentity !== undefined) {
+      const forkIdentity = lanBuildIdentity;
+      if (!(yield* tryStartUpdateAction("check"))) return false;
+      const prior = yield* Ref.get(updateStateRef);
+      return yield* Effect.gen(function* () {
+        const checkedAt = yield* currentIsoTimestamp;
+        const { forkRelease: _priorFork, ...base } = prior;
+        yield* setState({
+          ...base,
+          enabled: true,
+          status: "checking",
+          checkedAt,
+          message: "Checking the LAN fork release channel.",
+          errorContext: null,
+          canRetry: false,
+        });
+        const result = yield* Effect.result(
+          discoverLanUpdateChannel(forkIdentity).pipe(
+            Effect.provideService(HttpClient.HttpClient, httpClient),
+          ),
+        );
+        if (result._tag === "Failure") {
+          yield* setState({
+            ...base,
+            enabled: true,
+            status: "error",
+            checkedAt,
+            availableVersion: null,
+            message: result.failure.message,
+            errorContext: "check",
+            canRetry: true,
+          });
+          return true;
+        }
+        const discovery = result.success;
+        yield* setState({
+          ...base,
+          enabled: true,
+          checkedAt,
+          downloadedVersion: null,
+          downloadPercent: null,
+          status: discovery.status === "available" ? "available" : "idle",
+          availableVersion:
+            discovery.status === "available" ? discovery.channel!.applicationVersion : null,
+          releaseNotes: discovery.channel
+            ? [
+                {
+                  version: discovery.channel.applicationVersion,
+                  items: [
+                    `LAN distribution ${discovery.channel.distributionVersion}. ${distributionUpdateGuidance}`,
+                  ],
+                  totalItems: 1,
+                },
+              ]
+            : [],
+          message: discovery.message,
+          errorContext: null,
+          canRetry: false,
+          ...(discovery.channel && discovery.releaseUrl
+            ? {
+                forkRelease: {
+                  releaseUrl: discovery.releaseUrl,
+                  distributionVersion: discovery.channel.distributionVersion,
+                  sourceCommit: discovery.channel.identity.sourceCommit,
+                },
+              }
+            : {}),
+        });
+        return true;
+      }).pipe(
+        Effect.onInterrupt(() => setState(prior)),
+        Effect.ensuring(finishUpdateAction("check")),
+      );
+    }
     if (!(yield* Ref.get(updaterConfiguredRef))) return false;
 
     const state = yield* Ref.get(updateStateRef);
@@ -524,6 +607,7 @@ export const make = Effect.gen(function* () {
   });
 
   const downloadAvailableUpdate = Effect.gen(function* () {
+    if (!nativeUpdatesEnabled) return { accepted: false, completed: false };
     const state = yield* Ref.get(updateStateRef);
     if (!(yield* Ref.get(updaterConfiguredRef)) || state.status !== "available") {
       return { accepted: false, completed: false };
@@ -1031,6 +1115,13 @@ export const make = Effect.gen(function* () {
     emitState,
     disabledReason: resolveDisabledReason,
     configure: Effect.gen(function* () {
+      if (!nativeUpdatesEnabled) {
+        yield* setState({
+          ...(yield* baseUpdateState("latest", Option.none())),
+          message: distributionUpdateGuidance,
+        });
+        return;
+      }
       const context = yield* Effect.context<never>();
       const runEffect = (effect: Effect.Effect<void>) => {
         void Effect.runPromiseWith(context)(effect);
@@ -1104,6 +1195,7 @@ export const make = Effect.gen(function* () {
     setChannel: Effect.fn("desktop.updates.setChannel")(function* (
       nextChannel: DesktopUpdateChannel,
     ) {
+      if (!nativeUpdatesEnabled) return yield* Ref.get(updateStateRef);
       yield* Effect.annotateCurrentSpan({ channel: nextChannel });
       const activeAction = yield* tryStartChannelChange;
       if (Option.isSome(activeAction)) {
@@ -1145,7 +1237,7 @@ export const make = Effect.gen(function* () {
     }),
     check: Effect.fn("desktop.updates.check")(function* (reason: string) {
       yield* Effect.annotateCurrentSpan({ reason });
-      if (!(yield* Ref.get(updaterConfiguredRef))) {
+      if (nativeUpdatesEnabled && !(yield* Ref.get(updaterConfiguredRef))) {
         return {
           checked: false,
           state: yield* Ref.get(updateStateRef),

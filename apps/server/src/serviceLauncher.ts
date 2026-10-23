@@ -7,6 +7,7 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import { distributionUpdateGuidance, nativeUpdatesEnabled } from "@t3tools/shared/distribution";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
@@ -493,6 +494,7 @@ export class Launcher {
   }
 
   async run(): Promise<void> {
+    if (!nativeUpdatesEnabled) throw new Error(distributionUpdateGuidance);
     const onSigterm = () => void this.stop("SIGTERM");
     const onSigint = () => void this.stop("SIGINT");
     process.once("SIGTERM", onSigterm);
@@ -862,6 +864,7 @@ export class Launcher {
 }
 
 export async function main(): Promise<void> {
+  if (!nativeUpdatesEnabled) throw new Error(distributionUpdateGuidance);
   const baseDir = process.env.T3CODE_HOME?.trim();
   if (baseDir === undefined || baseDir === "") {
     throw new Error("T3CODE_HOME is required by the T3 Code service launcher.");

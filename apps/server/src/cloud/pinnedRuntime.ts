@@ -2,6 +2,7 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import { distributionUpdateGuidance, nativeUpdatesEnabled } from "@t3tools/shared/distribution";
 import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -367,7 +368,13 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
 });
 
 export const ensurePinnedRuntimeInstalled = (input: PinnedRuntimeInstallInput) =>
-  pinnedRuntimeInstallLock.withPermit(installPinnedRuntime(input));
+  nativeUpdatesEnabled
+    ? pinnedRuntimeInstallLock.withPermit(installPinnedRuntime(input))
+    : Effect.fail(
+        new PinnedRuntimeInstallError({
+          step: distributionUpdateGuidance,
+        }),
+      );
 
 const PINNED_RUNTIME_PRUNED_PREFIX = ".pruned-";
 /**
@@ -610,6 +617,7 @@ export const prunePinnedRuntimes = Effect.fn("cloud.pinned_runtime.prune")(funct
   readonly keep: ReadonlyArray<string>;
   readonly references?: ReadonlyArray<string>;
 }) {
+  if (!nativeUpdatesEnabled) return [];
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   // Only selection and the renames race an install; deleting renamed trees can take a while.

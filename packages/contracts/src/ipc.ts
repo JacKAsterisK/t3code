@@ -265,6 +265,7 @@ export interface DesktopRuntimeInfo {
 }
 
 export interface DesktopUpdateState {
+  forkRelease?: { releaseUrl: string; distributionVersion: string; sourceCommit: string };
   enabled: boolean;
   status: DesktopUpdateStatus;
   channel: DesktopUpdateChannel;
@@ -297,6 +298,17 @@ export const DesktopUpdateReleaseNoteSchema = Schema.Struct({
 });
 
 export const DesktopUpdateStateSchema = Schema.Struct({
+  forkRelease: Schema.optionalKey(
+    Schema.Struct({
+      releaseUrl: Schema.String.check(
+        Schema.isPattern(
+          /^https:\/\/github\.com\/JacKAsterisK\/t3code\/releases\/tag\/lan-v\d+\.\d+\.\d+$/u,
+        ),
+      ),
+      distributionVersion: Schema.String.check(Schema.isPattern(/^\d+\.\d+\.\d+$/u)),
+      sourceCommit: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/u)),
+    }),
+  ),
   enabled: Schema.Boolean,
   status: DesktopUpdateStatusSchema,
   channel: DesktopUpdateChannelSchema,

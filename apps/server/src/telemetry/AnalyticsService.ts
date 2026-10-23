@@ -8,6 +8,7 @@ import type { ClientOs } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
+import { telemetryEnabled } from "@t3tools/shared/distribution";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -135,6 +136,12 @@ function serverOsFromNodePlatform(platform: string): ClientOs {
 /** @public */
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  if (!telemetryEnabled)
+    return AnalyticsService.of({
+      record: () => Effect.void,
+      flush: Effect.void,
+      recordOwners: () => Effect.void,
+    });
   const telemetryConfig = yield* TelemetryEnvConfig;
   const httpClient = yield* HttpClient.HttpClient;
   const serverConfig = yield* ServerConfig.ServerConfig;

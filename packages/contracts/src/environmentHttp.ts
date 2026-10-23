@@ -28,6 +28,7 @@ import {
   AuthMcpTokenError,
   AuthMcpTokenRequest,
   AuthMcpTokenResult,
+  AuthMcpRevokeRequest,
   AuthPairingCredentialResult,
   AuthPairingLink,
   AuthRevokeClientSessionInput,
@@ -650,6 +651,13 @@ class EnvironmentMcpOAuthHttpApi extends HttpApiGroup.make("mcpOAuth")
     HttpApiEndpoint.post("token", "/oauth/mcp/token", {
       payload: AuthMcpTokenRequest,
       success: AuthMcpTokenResult,
+      error: AuthMcpTokenError,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("revoke", "/oauth/mcp/revoke", {
+      payload: AuthMcpRevokeRequest,
+      success: Schema.Struct({}),
       error: AuthMcpTokenError,
     }),
   ) {}

@@ -1,4 +1,5 @@
 import * as NetService from "@t3tools/shared/Net";
+import { telemetryEnabled } from "@t3tools/shared/distribution";
 import {
   OtlpHeadersFromString,
   OtlpProtocol,
@@ -10,6 +11,7 @@ import { DesktopBackendBootstrap, PortSchema } from "@t3tools/contracts";
 import * as Config from "effect/Config";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import { acquireNativeAdmissionScoped } from "@t3tools/shared/nativeAdmission";
 import * as FileSystem from "effect/FileSystem";
 import * as LogLevel from "effect/LogLevel";
 import * as Option from "effect/Option";
@@ -100,28 +102,33 @@ const EnvServerConfig = Config.all({
   traceMaxBytes: Config.Int("T3CODE_TRACE_MAX_BYTES").pipe(Config.withDefault(10 * 1024 * 1024)),
   traceMaxFiles: traceMaxFilesConfig,
   traceBatchWindowMs: Config.Int("T3CODE_TRACE_BATCH_WINDOW_MS").pipe(Config.withDefault(1_000)),
-  otlpTracesUrl: Config.String("T3CODE_OTLP_TRACES_URL").pipe(
-    Config.option,
-    Config.map(Option.getOrUndefined),
-  ),
-  otlpMetricsUrl: Config.String("T3CODE_OTLP_METRICS_URL").pipe(
-    Config.option,
-    Config.map(Option.getOrUndefined),
-  ),
-  otlpLogsUrl: Config.String("T3CODE_OTLP_LOGS_URL").pipe(
-    Config.option,
-    Config.map(Option.getOrUndefined),
-  ),
-  otlpExportIntervalMs: Config.Int("T3CODE_OTLP_EXPORT_INTERVAL_MS").pipe(
-    Config.withDefault(10_000),
-  ),
-  otlpHeaders: Config.schema(OtlpHeadersFromString, "T3CODE_OTLP_HEADERS").pipe(
-    Config.option,
-    Config.map(Option.getOrUndefined),
-  ),
-  otlpProtocol: Config.schema(OtlpProtocol, "T3CODE_OTLP_PROTOCOL").pipe(
-    Config.withDefault("http/json"),
-  ),
+  otlpTracesUrl: !telemetryEnabled
+    ? Config.succeed(undefined)
+    : Config.String("T3CODE_OTLP_TRACES_URL").pipe(
+        Config.option,
+        Config.map(Option.getOrUndefined),
+      ),
+  otlpMetricsUrl: !telemetryEnabled
+    ? Config.succeed(undefined)
+    : Config.String("T3CODE_OTLP_METRICS_URL").pipe(
+        Config.option,
+        Config.map(Option.getOrUndefined),
+      ),
+  otlpLogsUrl: !telemetryEnabled
+    ? Config.succeed(undefined)
+    : Config.String("T3CODE_OTLP_LOGS_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  otlpExportIntervalMs: !telemetryEnabled
+    ? Config.succeed(10_000)
+    : Config.Int("T3CODE_OTLP_EXPORT_INTERVAL_MS").pipe(Config.withDefault(10_000)),
+  otlpHeaders: !telemetryEnabled
+    ? Config.succeed(undefined)
+    : Config.schema(OtlpHeadersFromString, "T3CODE_OTLP_HEADERS").pipe(
+        Config.option,
+        Config.map(Option.getOrUndefined),
+      ),
+  otlpProtocol: !telemetryEnabled
+    ? Config.succeed("http/json" as const)
+    : Config.schema(OtlpProtocol, "T3CODE_OTLP_PROTOCOL").pipe(Config.withDefault("http/json")),
   mode: Config.schema(ServerConfig.RuntimeMode, "T3CODE_MODE").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
@@ -239,6 +246,8 @@ const resolveOptionPrecedence = <Value>(
 ): Option.Option<Value> => Option.firstSomeOf(values);
 
 const loadPersistedObservabilitySettings = Effect.fn(function* (settingsPath: string) {
+  if (!telemetryEnabled)
+    return { otlpTracesUrl: undefined, otlpMetricsUrl: undefined, otlpLogsUrl: undefined };
   const fs = yield* FileSystem.FileSystem;
   const exists = yield* fs.exists(settingsPath).pipe(Effect.orElseSucceed(() => false));
   if (!exists) {
@@ -344,6 +353,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
       });
     }
   }
+  yield* acquireNativeAdmissionScoped(baseDir).pipe(Effect.orDie);
   yield* fs.makeDirectory(cwd, { recursive: true });
   yield* ServerConfig.ensureServerDirectories(derivedPaths);
   const persistedObservabilitySettings = yield* loadPersistedObservabilitySettings(

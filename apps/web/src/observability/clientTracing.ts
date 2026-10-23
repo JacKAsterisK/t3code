@@ -1,4 +1,5 @@
 import * as Exit from "effect/Exit";
+import { telemetryEnabled } from "@t3tools/shared/distribution";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Scope from "effect/Scope";
@@ -42,6 +43,7 @@ export interface ClientTracingConfig {
 }
 
 export function configureClientTracing(config: ClientTracingConfig = {}): Promise<void> {
+  if (!telemetryEnabled) return Promise.resolve();
   if (config.exportIntervalMs === undefined && activeConfigKey !== null) {
     return pendingConfiguration;
   }

@@ -7,6 +7,7 @@ import * as LogLevel from "effect/LogLevel";
 import * as Path from "effect/Path";
 import type * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import { acquireNativeAdmissionScoped } from "@t3tools/shared/nativeAdmission";
 
 import { sweepStalePendingAttachments } from "./attachmentStore.ts";
 import { DEFAULT_SIGNAL_EXPORT, type SignalExport } from "@t3tools/shared/observability";
@@ -151,6 +152,7 @@ export const deriveServerPaths = Effect.fn(function* (
 export const ensureServerDirectories = Effect.fn(function* (derivedPaths: ServerDerivedPaths) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  yield* acquireNativeAdmissionScoped(path.dirname(derivedPaths.stateDir)).pipe(Effect.orDie);
 
   yield* Effect.all(
     [

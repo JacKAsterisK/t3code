@@ -1,4 +1,10 @@
-const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
+import {
+  isLanDistribution,
+  distributionUpdateGuidance,
+  resolveDistributionUpdateRepository,
+} from "./distribution.ts";
+
+const CLI_RELEASE_REPOSITORY = resolveDistributionUpdateRepository();
 export const CLI_RELEASES_PAGE_URL = `https://github.com/${CLI_RELEASE_REPOSITORY}/releases`;
 export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
 export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";
@@ -52,6 +58,7 @@ export function cliReleaseDownloadBaseUrl(
   version: string,
   baseUrl: string | undefined = CLI_RELEASE_DEFAULT_BASE_URL,
 ): string {
+  if (isLanDistribution) throw new Error(distributionUpdateGuidance);
   return `${(baseUrl?.trim() || CLI_RELEASE_DEFAULT_BASE_URL).replace(/\/+$/, "")}/v${version}`;
 }
 
@@ -83,6 +90,8 @@ export function cliReleaseChannelOf(version: string): CliReleaseChannel {
  * preview or stable release past any single page.
  */
 export function cliReleaseIndexPageUrl(page: number): string {
+  if (!Number.isSafeInteger(page) || page < 1 || page > 100)
+    throw new Error("Invalid release index page.");
   return `https://api.github.com/repos/${CLI_RELEASE_REPOSITORY}/releases?per_page=100&page=${page}`;
 }
 

@@ -3,6 +3,22 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./lanUpdateChannel": {
+      "types": "./src/lanUpdateChannel.ts",
+      "import": "./src/lanUpdateChannel.ts"
+    },
+    "./strictJson": {
+      "types": "./src/strictJson.ts",
+      "import": "./src/strictJson.ts"
+    },
+    "./distribution": {
+      "types": "./src/distribution.ts",
+      "import": "./src/distribution.ts"
+    },
+    "./nativeAdmission": {
+      "types": "./src/nativeAdmission.ts",
+      "import": "./src/nativeAdmission.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"

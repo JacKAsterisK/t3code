@@ -49,6 +49,7 @@ import { getOrCreateEnvironmentKeyPairFromSecretStore } from "../cloud/environme
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import { cloudEnabled } from "@t3tools/shared/distribution";
 import { forkParked } from "../serverActivation.ts";
 
 export class AgentAwarenessRelay extends Context.Service<
@@ -361,6 +362,13 @@ export function resolveAgentAwarenessRelayActiveThreadIds(input: {
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  if (!cloudEnabled)
+    return AgentAwarenessRelay.of({
+      publishThread: () => Effect.void,
+      drain: Effect.void,
+      requestCatchUp: () => Effect.void,
+      start: () => Effect.void,
+    });
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
   const threads = yield* ThreadManagement.ThreadManagementService;

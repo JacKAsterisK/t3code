@@ -5,6 +5,7 @@ import {
   type ExecutionEnvironmentDescriptor,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { acquireNativeAdmissionScoped } from "@t3tools/shared/nativeAdmission";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -84,6 +85,7 @@ function platformArch(
 const makeIdentity = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const serverConfig = yield* ServerConfig.ServerConfig;
+  yield* acquireNativeAdmissionScoped(serverConfig.baseDir).pipe(Effect.orDie);
   const crypto = yield* Crypto.Crypto;
 
   const readPersistedEnvironmentId = Effect.gen(function* () {
@@ -266,6 +268,7 @@ export const make = Effect.gen(function* () {
         : {}),
       ...(desktopAppUpdate ? { desktopAppUpdate: true } : {}),
       serverBrowser: true,
+      lanTaskRouting: 1,
     },
   };
 

@@ -370,6 +370,8 @@ export class SessionStore extends Context.Service<
     readonly legacyCookieName: string | undefined;
     readonly issue: (input?: {
       readonly ttl?: Duration.Duration;
+      /** Keep renewable grants visible for revocation after their access token expires. */
+      readonly sessionTtl?: Duration.Duration;
       readonly subject?: string;
       readonly method?: ServerAuthSessionMethod;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
@@ -661,6 +663,12 @@ const make = Effect.gen(function* () {
       const expiresAt = DateTime.add(issuedAt, {
         milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
       });
+      const sessionExpiresAt =
+        input?.sessionTtl === undefined
+          ? expiresAt
+          : DateTime.add(issuedAt, {
+              milliseconds: Duration.toMillis(input.sessionTtl),
+            });
       const claims: SessionClaims = {
         v: 1,
         kind: "session",
@@ -704,7 +712,7 @@ const make = Effect.gen(function* () {
           browser: client.browser ?? null,
         },
         issuedAt,
-        expiresAt,
+        expiresAt: sessionExpiresAt,
       } satisfies AuthSessions.CreateAuthSessionInput;
       const replacedSessionIds = yield* (
         input?.replaceSessionId !== undefined || input?.replaceActiveForSubjectAndMethod
@@ -738,7 +746,7 @@ const make = Effect.gen(function* () {
           method: claims.method,
           client,
           issuedAt,
-          expiresAt,
+          expiresAt: sessionExpiresAt,
           lastConnectedAt: null,
           connected: false,
         }),

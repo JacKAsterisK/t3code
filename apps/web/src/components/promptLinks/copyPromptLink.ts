@@ -1,4 +1,5 @@
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
+import { isLanDistribution } from "@t3tools/shared/distribution";
 import {
   type ModelSelection,
   repositoryGroupingKeyOf,
@@ -28,7 +29,11 @@ export function promptLinkFor(
 ): string | null {
   const trimmed = prompt.trim();
   if (trimmed.length === 0 || trimmed.length > PROMPT_LINK_MAX_PROMPT_LENGTH) return null;
-  return buildNewThreadLink({ prompt: trimmed, ...context, origin: configuredHostedAppUrl() });
+  return buildNewThreadLink({
+    prompt: trimmed,
+    ...context,
+    ...(isLanDistribution ? {} : { origin: configuredHostedAppUrl() }),
+  });
 }
 
 export function promptLinkRepositoryOf(

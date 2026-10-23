@@ -1,4 +1,5 @@
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
+import { cloudEnabled } from "@t3tools/shared/distribution";
 import { RelayWebClientId } from "@t3tools/contracts/relay";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -77,6 +78,57 @@ const layerRelayDpopSigner = Layer.effect(
 );
 
 export const layer = (relayUrl: string) =>
-  ManagedRelay.layer({ relayUrl, clientId: RelayWebClientId }).pipe(
-    Layer.provideMerge(layerRelayDpopSigner),
-  );
+  cloudEnabled
+    ? ManagedRelay.layer({ relayUrl, clientId: RelayWebClientId }).pipe(
+        Layer.provideMerge(layerRelayDpopSigner),
+      )
+    : Layer.mergeAll(
+        Layer.succeed(
+          ManagedRelay.ManagedRelayClient,
+          ManagedRelay.ManagedRelayClient.of({
+            relayUrl: "",
+            listEnvironments: () =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            listDevices: () =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            createEnvironmentLinkChallenge: () =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            linkEnvironment: () =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            unlinkEnvironment: () =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            getEnvironmentStatus: () =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            connectEnvironment: () =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            registerDevice: () =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            unregisterDevice: () =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            registerLiveActivity: () =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            getAgentActivitySnapshot: () =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            resetTokenCache: Effect.void,
+          }),
+        ),
+        Layer.succeed(
+          ManagedRelay.ManagedRelayDpopSigner,
+          ManagedRelay.ManagedRelayDpopSigner.of({
+            thumbprint: Effect.fail(
+              new ManagedRelay.ManagedRelayDpopKeyLoadError({
+                keyStore: "indexed-db",
+                cause: new Error("T3 Connect is disabled in this LAN distribution."),
+              }),
+            ),
+            createProof: (input) =>
+              Effect.fail(
+                new ManagedRelay.ManagedRelayDpopProofCreationError({
+                  method: input.method,
+                  url: input.url,
+                  cause: new Error("T3 Connect is disabled in this LAN distribution."),
+                }),
+              ),
+          }),
+        ),
+      );

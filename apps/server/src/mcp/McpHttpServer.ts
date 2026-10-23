@@ -36,6 +36,14 @@ import {
   toolOutcome,
 } from "../telemetry/ProviderDimensions.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as EnvironmentRouting from "../lan/EnvironmentRouting.ts";
+import * as EnvironmentRegistry from "../lan/EnvironmentRegistry.ts";
+import * as NativeTaskService from "../lan/NativeTaskService.ts";
+import * as EventStore from "../orchestration-v2/EventStore.ts";
+import * as RemoteTaskTransport from "../lan/RemoteTaskTransport.ts";
+import * as RoutingStore from "../lan/RoutingStore.ts";
+import { LanToolkit } from "./toolkits/lan/tools.ts";
+import * as LanHandlers from "./toolkits/lan/handlers.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
@@ -1066,6 +1074,18 @@ export const layerMcpTransport = McpServer.layerHttp({
 }).pipe(Layer.provide(layerMcpAuthMiddleware));
 
 export const layer = Layer.mergeAll(
+  toolkitRegistration(LanToolkit, LanHandlers.layer).pipe(
+    Layer.provide(EnvironmentRouting.layer),
+    Layer.provide(EnvironmentRegistry.layer),
+    Layer.provide(RoutingStore.layer),
+    Layer.provide(RemoteTaskTransport.layer),
+    Layer.provide(
+      NativeTaskService.layer.pipe(
+        Layer.provide(OrchestratorMcpService.layer),
+        Layer.provide(EventStore.layer),
+      ),
+    ),
+  ),
   layerPreviewToolkit,
   layerOrchestratorToolkit,
   layerThreadToolkit,

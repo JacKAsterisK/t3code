@@ -7,6 +7,7 @@ import { clerkFrontendApiUrlFromPublishableKey } from "@t3tools/shared/relayAuth
 import { isRelayTracingEnabled } from "@t3tools/shared/otelEnvironment";
 import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
 import * as Config from "effect/Config";
+import { cloudEnabled, telemetryEnabled } from "@t3tools/shared/distribution";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -86,6 +87,7 @@ export function resolveRelayClientTracingConfig(
   env: Readonly<Record<string, string | undefined>> = process.env,
   fallback = buildTimeRelayClientTracing,
 ) {
+  if (!cloudEnabled || !telemetryEnabled) return null;
   if (!isRelayTracingEnabled(env)) {
     return null;
   }
@@ -101,6 +103,12 @@ export function resolveRelayClientTracingConfig(
 }
 
 export function makeRelayUrlConfig(fallback = buildTimeRelayUrl) {
+  if (!cloudEnabled)
+    return Config.fail(
+      new ConfigProvider.SourceError({
+        message: "T3 Connect is disabled in this LAN distribution.",
+      }),
+    );
   const runtimeConfig = Config.NonEmptyString("T3CODE_RELAY_URL");
   return (fallback ? runtimeConfig.pipe(Config.withDefault(fallback)) : runtimeConfig).pipe(
     Config.mapEffect(validateRelayUrl),
@@ -109,10 +117,15 @@ export function makeRelayUrlConfig(fallback = buildTimeRelayUrl) {
 
 export const relayUrlConfig = makeRelayUrlConfig();
 
-export const hostedAppUrlConfig = makePublicValueConfig(
-  "T3CODE_HOSTED_APP_URL",
-  DEFAULT_HOSTED_APP_URL,
-).pipe(Config.mapEffect(validateHostedAppUrl));
+export const hostedAppUrlConfig = cloudEnabled
+  ? makePublicValueConfig("T3CODE_HOSTED_APP_URL", DEFAULT_HOSTED_APP_URL).pipe(
+      Config.mapEffect(validateHostedAppUrl),
+    )
+  : Config.fail(
+      new ConfigProvider.SourceError({
+        message: "Hosted T3 services are disabled in this LAN distribution.",
+      }),
+    );
 
 function validateHostedAppUrl(value: string) {
   try {
@@ -165,6 +178,12 @@ export function makeCloudCliOAuthConfig({
   readonly clerkPublishableKeyFallback?: string;
   readonly clerkCliOAuthClientIdFallback?: string;
 } = {}) {
+  if (!cloudEnabled)
+    return Config.fail(
+      new ConfigProvider.SourceError({
+        message: "T3 Connect is disabled in this LAN distribution.",
+      }),
+    );
   return Config.all({
     clerkPublishableKey: makePublicValueConfig(
       "T3CODE_CLERK_PUBLISHABLE_KEY",
@@ -204,8 +223,10 @@ export function makeCloudCliOAuthConfig({
 
 export const cloudCliOAuthConfig = makeCloudCliOAuthConfig();
 
-export const hasCloudPublicConfig = Boolean(
-  (normalizeSecureRelayUrl(process.env.T3CODE_RELAY_URL ?? "") ?? buildTimeRelayUrl) &&
-  (process.env.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() || buildTimeClerkPublishableKey) &&
-  (process.env.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID?.trim() || buildTimeClerkCliOAuthClientId),
-);
+export const hasCloudPublicConfig =
+  cloudEnabled &&
+  Boolean(
+    (normalizeSecureRelayUrl(process.env.T3CODE_RELAY_URL ?? "") ?? buildTimeRelayUrl) &&
+    (process.env.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() || buildTimeClerkPublishableKey) &&
+    (process.env.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID?.trim() || buildTimeClerkCliOAuthClientId),
+  );

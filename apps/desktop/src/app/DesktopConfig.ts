@@ -2,6 +2,11 @@ import { OtlpHeadersFromString, OtlpProtocol } from "@t3tools/shared/observabili
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Option from "effect/Option";
+import {
+  isLanDistribution,
+  nativeUpdatesEnabled,
+  telemetryEnabled,
+} from "@t3tools/shared/distribution";
 
 const trimNonEmptyOption = (value: string): Option.Option<string> => {
   const trimmed = value.trim();
@@ -35,32 +40,49 @@ const compactEnv = (env: Readonly<Record<string, string | undefined>>): Record<s
 
 export const DesktopConfig = Config.all({
   appDataDirectory: trimmedString("APPDATA"),
+  localAppDataDirectory: trimmedString("LOCALAPPDATA"),
   xdgConfigHome: trimmedString("XDG_CONFIG_HOME"),
   xdgDataHome: trimmedString("XDG_DATA_HOME"),
   t3Home: trimmedString("T3CODE_HOME"),
-  devServerUrl: Config.URL("VITE_DEV_SERVER_URL").pipe(Config.option),
+  devServerUrl: isLanDistribution
+    ? Config.succeed(Option.none<URL>())
+    : Config.URL("VITE_DEV_SERVER_URL").pipe(Config.option),
   appUserModelIdOverride: trimmedString("T3CODE_DESKTOP_APP_USER_MODEL_ID"),
-  devRemoteT3ServerEntryPath: trimmedString("T3CODE_DEV_REMOTE_T3_SERVER_ENTRY_PATH"),
+  devRemoteT3ServerEntryPath: isLanDistribution
+    ? Config.succeed(Option.none<string>())
+    : trimmedString("T3CODE_DEV_REMOTE_T3_SERVER_ENTRY_PATH"),
   configuredBackendPort: Config.Port("T3CODE_PORT").pipe(Config.option),
   commitHashOverride: trimmedString("T3CODE_COMMIT_HASH"),
   desktopLanHostOverride: trimmedString("T3CODE_DESKTOP_LAN_HOST"),
   desktopHttpsEndpointUrls: commaSeparatedStrings("T3CODE_DESKTOP_HTTPS_ENDPOINTS"),
-  otlpTracesUrl: trimmedString("T3CODE_OTLP_TRACES_URL"),
-  otlpMetricsUrl: trimmedString("T3CODE_OTLP_METRICS_URL"),
-  otlpLogsUrl: trimmedString("T3CODE_OTLP_LOGS_URL"),
-  otlpExportIntervalMs: Config.Int("T3CODE_OTLP_EXPORT_INTERVAL_MS").pipe(
-    Config.withDefault(10_000),
-  ),
-  otlpHeaders: Config.schema(OtlpHeadersFromString, "T3CODE_OTLP_HEADERS").pipe(Config.option),
-  otlpProtocol: Config.schema(OtlpProtocol, "T3CODE_OTLP_PROTOCOL").pipe(
-    Config.withDefault("http/json"),
-  ),
+  otlpTracesUrl: telemetryEnabled
+    ? trimmedString("T3CODE_OTLP_TRACES_URL")
+    : Config.succeed(Option.none<string>()),
+  otlpMetricsUrl: telemetryEnabled
+    ? trimmedString("T3CODE_OTLP_METRICS_URL")
+    : Config.succeed(Option.none<string>()),
+  otlpLogsUrl: telemetryEnabled
+    ? trimmedString("T3CODE_OTLP_LOGS_URL")
+    : Config.succeed(Option.none<string>()),
+  otlpExportIntervalMs: telemetryEnabled
+    ? Config.Int("T3CODE_OTLP_EXPORT_INTERVAL_MS").pipe(Config.withDefault(10_000))
+    : Config.succeed(10_000),
+  otlpHeaders: telemetryEnabled
+    ? Config.schema(OtlpHeadersFromString, "T3CODE_OTLP_HEADERS").pipe(Config.option)
+    : Config.succeed(Option.none<Record<string, string>>()),
+  otlpProtocol: telemetryEnabled
+    ? Config.schema(OtlpProtocol, "T3CODE_OTLP_PROTOCOL").pipe(Config.withDefault("http/json"))
+    : Config.succeed("http/json" as const),
   appImagePath: trimmedString("APPIMAGE"),
-  disableAutoUpdate: optionalBoolean("T3CODE_DISABLE_AUTO_UPDATE"),
-  mockUpdates: optionalBoolean("T3CODE_DESKTOP_MOCK_UPDATES"),
-  mockUpdateServerPort: Config.Port("T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(
-    Config.withDefault(3000),
-  ),
+  disableAutoUpdate: nativeUpdatesEnabled
+    ? optionalBoolean("T3CODE_DISABLE_AUTO_UPDATE")
+    : Config.succeed(true),
+  mockUpdates: nativeUpdatesEnabled
+    ? optionalBoolean("T3CODE_DESKTOP_MOCK_UPDATES")
+    : Config.succeed(false),
+  mockUpdateServerPort: nativeUpdatesEnabled
+    ? Config.Port("T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(Config.withDefault(3000))
+    : Config.succeed(3000),
 });
 
 export const layerTest = (env: Readonly<Record<string, string | undefined>>) =>

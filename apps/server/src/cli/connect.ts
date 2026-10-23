@@ -19,6 +19,7 @@ import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import { cloudEnabled } from "@t3tools/shared/distribution";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -26,6 +27,7 @@ import * as Option from "effect/Option";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import { Command, Flag, GlobalFlag, Prompt } from "effect/cli";
+import * as CliError from "effect/cli/CliError";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
@@ -529,6 +531,11 @@ const runCloudCommand = Effect.fn("cloud.cli.run_cloud_command")(function* <A, E
   },
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
+  if (!cloudEnabled)
+    return yield* new CliError.UserError({
+      cause:
+        "T3 Connect is disabled in this LAN distribution. Use an approved direct environment connection.",
+    });
   const config = yield* resolveCliAuthConfig(flags, logLevel);
   const minimumLogLevel = options?.quietLogs ? "Error" : config.logLevel;
   const layerRuntime = Layer.mergeAll(

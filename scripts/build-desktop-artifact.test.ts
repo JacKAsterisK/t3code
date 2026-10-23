@@ -41,6 +41,7 @@ import {
   resolveMacPasskeySigningConfiguration,
   resolveMergedStageDependencies,
   resolveBuildOptions,
+  resolveLanSourceCommit,
   stageWslRuntimeArchive,
   ancestorNodeModulesPaths,
   copyDirectoryPreservingSymlinks,
@@ -55,6 +56,7 @@ import {
   WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT,
   WINDOWS_SERVER_ASAR_IGNORE_GLOBS,
   WINDOWS_SERVER_ASAR_RESOURCE,
+  WINDOWS_PRIMARY_NATIVE_PROBE_SOURCE,
   WSL_RUNTIME_ARCHIVE_EXTRA_RESOURCE,
   WSL_RUNTIME_ARCHIVE_HASH_EXTRA_RESOURCE,
   WSL_RUNTIME_ARCHIVE_HASH_NAME,
@@ -67,6 +69,7 @@ import {
 } from "./update-release-package-versions.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import { parseLanBuildIdentity } from "@t3tools/shared/distribution";
 
 const encodeModuleUrl = Schema.encodeEffect(Schema.fromJsonString(Schema.String));
 const decodePackageVersion = Schema.decodeUnknownEffect(
@@ -212,6 +215,75 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
 });
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it.effect(
+    "reads full HEAD for pinned LAN source admission while short metadata remains separate",
+    () =>
+      Effect.gen(function* () {
+        const commit = yield* resolveLanSourceCommit("C:\\synthetic-fixture").pipe(
+          Effect.provideService(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make((command) => {
+              assert.equal(command._tag, "StandardCommand");
+              if (command._tag !== "StandardCommand") throw new Error("Expected one Git command.");
+              assert.equal(command.command, "git");
+              return Effect.succeed(
+                mockProcess(0, `${"a".repeat(command.args.includes("--short=12") ? 12 : 40)}\n`),
+              );
+            }),
+          ),
+        );
+        assert.equal(commit, "a".repeat(40));
+      }),
+  );
+  it.effect(
+    "keeps explicit LAN Windows packaging independent and skips ambient signing/feed configuration",
+    () =>
+      Effect.gen(function* () {
+        const identity = parseLanBuildIdentity({
+          appId: "com.example.lanfixture",
+          productName: "LAN Fixture",
+          protocolScheme: "lan-fixture",
+          homeDirectoryName: "T3CodeLAN",
+          telemetry: "disabled",
+          cloudConfiguration: "disabled",
+          nativeUpdater: "disabled",
+          protocolVersion: 2,
+          applicationVersion: "0.1.2",
+          sourceCommit: "a".repeat(40),
+        });
+        const config = yield* createBuildConfig(
+          "win",
+          "zip",
+          "0.1.2",
+          false,
+          false,
+          undefined,
+          undefined,
+          false,
+          "x64",
+          identity,
+        ).pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  GITHUB_REPOSITORY: "upstream/official",
+                  AZURE_TRUSTED_SIGNING_PUBLISHER_NAME: "Official publisher",
+                },
+              }),
+            ),
+          ),
+        );
+        assert.equal(config.appId, identity.appId);
+        assert.equal(config.productName, identity.productName);
+        assert.equal(config.publish, null);
+        assert.deepStrictEqual(config.protocols, [
+          { name: identity.productName, schemes: [identity.protocolScheme] },
+        ]);
+        assert.notProperty(config.win, "azureSignOptions");
+        assert.include(JSON.stringify(config.extraResources), "lan-native-maintenance");
+      }),
+  );
   it.effect("rejects overlapping builds from another process until restoration finishes", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -1670,4 +1742,67 @@ it.effect.skipIf(!symlinksSupported)("rebases packaged links into the isolated t
       resolvedCopiedPackage,
     );
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "the packaged native probe loads both PTY bindings without starting a terminal or querying processes",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const node = yield* HostProcess.ExecutablePath;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-probe-contract-" });
+      const sidecar = path.join(root, "server.asar");
+      const fff = path.join(sidecar, "node_modules/@ff-labs/fff-node");
+      const pty = path.join(sidecar, "node_modules/node-pty");
+      const probeRoot = path.join(root, "scratch");
+      yield* fs.makeDirectory(path.join(fff, "dist"), { recursive: true });
+      yield* fs.makeDirectory(path.join(pty, "lib"), { recursive: true });
+      yield* fs.makeDirectory(probeRoot);
+      yield* fs.writeFileString(path.join(fff, "package.json"), '{"type":"module"}');
+      yield* fs.writeFileString(
+        path.join(fff, "dist/index.js"),
+        `
+      import { writeFileSync } from 'node:fs';
+      import { join } from 'node:path';
+      export const FileFinder = { create(options) {
+        if (!options.disableWatch || !options.disableMmapCache || !options.disableContentIndexing) throw new Error('Unexpected work');
+        return { ok: true, value: { destroy() { writeFileSync(join(options.basePath, 'finder-closed'), 'yes'); } } };
+      } };
+    `,
+      );
+      yield* fs.writeFileString(path.join(pty, "package.json"), '{"name":"node-pty"}');
+      const loader = `
+      const { writeFileSync } = require('node:fs');
+      const { join } = require('node:path');
+      exports.loadNativeModule = name => {
+        writeFileSync(join(__dirname, name + '.loaded'), 'yes');
+        const forbidden = () => { throw new Error('The probe must not invoke PTY operations'); };
+        return { module: name === 'conpty' ? { startProcess: forbidden } : { getConsoleProcessList: forbidden } };
+      };
+    `;
+      yield* fs.writeFileString(path.join(pty, "lib/utils.js"), loader);
+      const probe = ChildProcess.make(
+        node,
+        [
+          "--no-global-search-paths",
+          "--input-type=module",
+          "--eval",
+          WINDOWS_PRIMARY_NATIVE_PROBE_SOURCE,
+          path.join(fff, "dist/index.js"),
+          probeRoot,
+        ],
+        { cwd: root, env: {}, extendEnv: false, stdout: "ignore", stderr: "ignore", shell: false },
+      );
+      assert.equal(Number(yield* spawner.exitCode(probe)), 0);
+      assert.isTrue(yield* fs.exists(path.join(pty, "lib/conpty.loaded")));
+      assert.isTrue(yield* fs.exists(path.join(pty, "lib/conpty_console_list.loaded")));
+      assert.isTrue(yield* fs.exists(path.join(probeRoot, "finder-closed")));
+      yield* fs.writeFileString(
+        path.join(pty, "lib/utils.js"),
+        "exports.loadNativeModule = () => ({ module: {} });",
+      );
+      assert.notEqual(Number(yield* spawner.exitCode(probe)), 0);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

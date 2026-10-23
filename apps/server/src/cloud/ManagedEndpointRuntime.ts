@@ -1,5 +1,6 @@
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as RelayClient from "@t3tools/shared/relayClient";
+import { cloudEnabled } from "@t3tools/shared/distribution";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
@@ -191,6 +192,16 @@ const stopConnector = (connector: ActiveConnector | null) =>
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  if (!cloudEnabled)
+    return CloudManagedEndpointRuntime.of({
+      applyConfig: () => Effect.succeed({ status: "disabled" }),
+      inspectConnector: Effect.succeed(null),
+      readinessChanged: Stream.never,
+      recoveryRequests: Stream.never,
+      requestRecovery: () => Effect.void,
+      tunnelConnected: Stream.never,
+      withLinkStateLock: (effect) => effect,
+    });
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const relayClient = yield* RelayClient.RelayClient;
   const httpClient = HttpClient.withScope(yield* HttpClient.HttpClient);

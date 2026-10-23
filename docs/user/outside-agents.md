@@ -119,3 +119,8 @@ result that always includes the thread id.
 Approved agents appear under **Settings → Connections** like other clients.
 Revoke one there to cut off its access immediately. A sign-in lasts 30 days;
 after that the agent asks you to approve it again.
+
+A gateway may instead request renewable task access. The sign-in page identifies
+that request and limits it to Auto or a lower mode, within the machine and project
+policy configured for that gateway. It can renew for up to 90 days before you
+approve it again. Revoking its connection stops both access and renewal.

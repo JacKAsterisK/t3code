@@ -2,6 +2,7 @@ import * as NodeOS from "node:os";
 
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
 import { currentDesktopBootstrapToken } from "@t3tools/shared/desktopBootstrapToken";
+import { telemetryEnabled } from "@t3tools/shared/distribution";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -231,6 +232,7 @@ const readPersistedBackendObservabilitySettings = Effect.gen(function* () {
 });
 
 const readBackendObservabilitySettings = Effect.gen(function* () {
+  if (!telemetryEnabled) return emptyBackendObservabilitySettings;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const persisted = yield* readPersistedBackendObservabilitySettings;
   return {

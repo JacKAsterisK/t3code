@@ -1,4 +1,5 @@
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import { acquireNativeAdmissionScoped } from "@t3tools/shared/nativeAdmission";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -147,6 +148,12 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const legacyPath = (databasePath: string) =>
     path.join(path.dirname(databasePath), "state.sqlite");
+  const homeDirectory = (databasePath: string) => {
+    const directory = path.dirname(databasePath);
+    return ["userdata", "dev"].includes(path.basename(directory).toLowerCase())
+      ? path.dirname(directory)
+      : directory;
+  };
 
   const locate = Effect.fn("DatabaseMaintenance.locate")(function* (databasePath: string) {
     if (!(yield* fs.exists(databasePath))) {
@@ -156,6 +163,7 @@ const make = Effect.gen(function* () {
 
   const inspect = Effect.fn("DatabaseMaintenance.inspect")(
     function* (databasePath: string) {
+      yield* acquireNativeAdmissionScoped(homeDirectory(databasePath));
       yield* locate(databasePath);
       const storage = yield* readStorage.pipe(
         Effect.provide(NodeSqliteClient.layer({ filename: databasePath, readonly: true })),
@@ -168,6 +176,7 @@ const make = Effect.gen(function* () {
     },
     (effect, databasePath) =>
       effect.pipe(
+        Effect.scoped,
         Effect.mapError((cause) =>
           isDomainError(cause) ? cause : new DatabaseInspectError({ path: databasePath, cause }),
         ),
@@ -176,6 +185,7 @@ const make = Effect.gen(function* () {
 
   const compact = Effect.fn("DatabaseMaintenance.compact")(
     function* (databasePath: string) {
+      yield* acquireNativeAdmissionScoped(homeDirectory(databasePath));
       yield* locate(databasePath);
       const beforeBytes = Number((yield* fs.stat(databasePath)).size);
       const result = yield* Effect.gen(function* () {
@@ -214,6 +224,7 @@ const make = Effect.gen(function* () {
     },
     (effect, databasePath) =>
       effect.pipe(
+        Effect.scoped,
         Effect.mapError((cause) =>
           isDomainError(cause) ? cause : new DatabaseCompactError({ path: databasePath, cause }),
         ),
@@ -222,6 +233,7 @@ const make = Effect.gen(function* () {
 
   const removeLegacyDatabase = Effect.fn("DatabaseMaintenance.removeLegacyDatabase")(
     function* (databasePath: string) {
+      yield* acquireNativeAdmissionScoped(homeDirectory(databasePath));
       const legacy = legacyPath(databasePath);
       if (!(yield* fs.exists(legacy))) return;
       // A version before 0.1.0 may still be running against it. Keep the lock
@@ -236,6 +248,7 @@ const make = Effect.gen(function* () {
     },
     (effect, databasePath) =>
       effect.pipe(
+        Effect.scoped,
         Effect.mapError((cause) =>
           cause._tag === "DatabaseInUseError"
             ? cause

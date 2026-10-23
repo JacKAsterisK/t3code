@@ -243,8 +243,47 @@ export class HandlersLayer<Tools extends Record<string, Tool.Any>, EX = never, R
   }
 }
 
-const checkedHandlers = <Handlers>(declarations: Declarations<Handlers>): Handlers =>
-  Struct.map(declarations, checkedHandler);
+const taskOnlyTools = new Set([
+  "t3_lan_environments",
+  "t3_lan_task_launch",
+  "t3_lan_task_list",
+  "t3_lan_task_read",
+  "t3_lan_task_send",
+  "t3_lan_task_interrupt",
+  "t3_lan_task_requests",
+  "t3_lan_task_respond",
+  "t3_lan_task_observe",
+  "t3_lan_events_ack",
+]);
+
+const checkedHandlers = <Handlers>(declarations: Declarations<Handlers>): Handlers => {
+  const handles = Struct.map(declarations, checkedHandler);
+  // Every registration crosses this boundary, including native tools whose own
+  // declarations predate task grants. A newly added tool must be reviewed here.
+  return Object.fromEntries(
+    Object.entries(handles).map(([name, value]) => {
+      const handle = value as (params: unknown) => Effect.Effect<unknown, unknown, unknown>;
+      return [
+        name,
+        (params: unknown) =>
+          McpInvocationContext.McpInvocationContext.pipe(
+            Effect.flatMap((scope) =>
+              scope.client?.taskOnly === true && !taskOnlyTools.has(name)
+                ? Effect.fail(
+                    new OrchestratorMcpFailure({
+                      code: "capability_denied",
+                      message:
+                        "This task-only credential may only use the approved LAN task tools.",
+                    }),
+                  )
+                : // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- This heterogeneous mapping restores each tool's declared channels through Handlers below.
+                  handle(params),
+            ),
+          ),
+      ];
+    }),
+  ) as Handlers;
+};
 
 export const toLayer = <Tools extends Record<string, Tool.Any>, EX = never, RX = never>(
   toolkit: Toolkit.Toolkit<Tools>,

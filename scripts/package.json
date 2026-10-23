@@ -3,6 +3,17 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "lan:prepare-hub": "node lan/prepare-hub.ts",
+    "lan:prepare-windows": "node lan/windows-build-preparation.ts",
+    "lan:bundle-native-runner": "node lan/windows-native-build.pack.ts",
+    "lan:prepare-sandbox": "node lan/prepare-windows-sandbox.ts",
+    "lan:bundle-sandbox-guest": "node lan/windows-sandbox-guest.pack.ts",
+    "lan:prepare-stage-locks": "node lan/prepare-stage-locks.ts",
+    "lan:accept-stage-locks": "node lan/accept-stage-locks.ts",
+    "lan:prepare-update-channel": "node lan/prepare-update-channel.ts",
+    "lan:validate-windows": "node lan/validate-windows-artifact.ts",
+    "lan:bundle-gateway": "node lan/gateway.pack.ts",
+    "lan:bundle-native-maintenance": "node lan/native-maintenance.pack.ts",
     "typecheck": "tsc --noEmit",
     "test": "vp test run --config ../vite.config.ts --dir ."
   },

@@ -75,7 +75,7 @@ export const layer = HttpApiBuilder.group(
             client_id: client.clientId,
             client_name: client.name,
             redirect_uris: client.redirectUris,
-            grant_types: ["authorization_code" as const],
+            grant_types: ["authorization_code" as const, "refresh_token" as const],
             response_types: ["code" as const],
             token_endpoint_auth_method: "none" as const,
           })),
@@ -116,14 +116,17 @@ export const layer = HttpApiBuilder.group(
             clientName: resolved.client.name,
             redirectHost: new URL(resolved.redirectUri).host,
             environmentHost: new URL(urls.issuer).host,
+            ...(resolved.taskOnly ? { taskOnly: true, renewable: resolved.renewable } : {}),
             ...(session === undefined
               ? {}
               : {
                   csrfToken: session.csrfToken,
-                  oneClickAccess: AuthMcpClientAccess.literals.filter((access) =>
-                    EnvironmentAuth.mcpClientScopes(access).every((scope) =>
-                      session.scopes.includes(scope),
-                    ),
+                  oneClickAccess: AuthMcpClientAccess.literals.filter(
+                    (access) =>
+                      (!resolved.taskOnly || access !== "full-access") &&
+                      EnvironmentAuth.mcpClientScopes(access).every((scope) =>
+                        session.scopes.includes(scope),
+                      ),
                   ),
                 }),
           };
@@ -146,6 +149,13 @@ export const layer = HttpApiBuilder.group(
         Effect.gen(function* () {
           yield* noStore;
           return yield* oauth.exchangeCode({ request, urls: yield* requestUrls, token: payload });
+        }),
+      )
+      .handle("revoke", ({ payload }) =>
+        Effect.gen(function* () {
+          yield* noStore;
+          yield* oauth.revoke({ urls: yield* requestUrls, token: payload });
+          return {};
         }),
       );
   }),

@@ -3,16 +3,20 @@ import { defaultInclude, defineConfig } from "vite-plus";
 
 import { isDesktopRuntimeExternalDependency } from "../../scripts/lib/desktop-external-packages.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
+import { loadLanBuildPolicy, lanBuildDefines } from "../../scripts/lib/lan-build-policy.ts";
 
-const repoEnv = loadRepoEnv();
+const lanIdentity = loadLanBuildPolicy();
+const repoEnv = lanIdentity === undefined ? loadRepoEnv() : {};
 
 // The packaged app then installs just those externals, instead of a full
 // production install of apps/desktop's dependency tree next to a server bundle
 // that already carries its own copy of the same libraries.
 const isMainProcessExternal = (id: string) =>
   id === "electron" || id.startsWith("electron/") || isDesktopRuntimeExternalDependency(id);
-const shouldLaunchElectronAfterPack = process.env.T3CODE_DESKTOP_DEV === "1";
+const shouldLaunchElectronAfterPack =
+  lanIdentity === undefined && process.env.T3CODE_DESKTOP_DEV === "1";
 const publicConfigDefine = {
+  ...lanBuildDefines(lanIdentity),
   __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
     repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
   ),
@@ -96,6 +100,7 @@ export default defineConfig({
       sourcemap: true,
       outExtensions: () => ({ js: ".cjs" }),
       entry: ["src/boot.ts", "src/compileCache.ts"],
+      define: publicConfigDefine,
       clean: false,
       deps: {
         neverBundle: (id) => id === "./main.cjs" || id === "./compileCache.cjs",
@@ -123,6 +128,7 @@ export default defineConfig({
       sourcemap: true,
       outExtensions: () => ({ js: ".cjs" }),
       entry: ["src/preview-pick-preload.ts"],
+      define: publicConfigDefine,
       deps: {
         alwaysBundle: (id) => id === "react-grab" || id.startsWith("react-grab/"),
       },
@@ -134,6 +140,7 @@ export default defineConfig({
       sourcemap: true,
       outExtensions: () => ({ js: ".cjs" }),
       entry: ["src/preview-pip-preload.ts"],
+      define: publicConfigDefine,
     },
     {
       // Sandboxed preloads must be self-contained, without shared runtime chunks.
@@ -143,6 +150,7 @@ export default defineConfig({
       sourcemap: true,
       outExtensions: () => ({ js: ".cjs" }),
       entry: ["src/mac-permission-preload.ts"],
+      define: publicConfigDefine,
     },
   ],
   test: {

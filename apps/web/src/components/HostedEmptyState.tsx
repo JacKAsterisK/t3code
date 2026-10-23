@@ -5,6 +5,7 @@ import { CheckIcon } from "lucide-react";
 import { type ReactNode, useState } from "react";
 
 import { APP_DISPLAY_NAME, DESKTOP_DOWNLOAD_URL } from "~/branding";
+import { isLanDistribution } from "@t3tools/shared/distribution";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { isElectron } from "../env";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
@@ -119,7 +120,11 @@ function PairingSteps() {
   return (
     <>
       <SetupStep number={1}>
-        <RunOnComputer command="npx t3 pair" />
+        {isLanDistribution ? (
+          <p>Open T3 Code LAN on the approved computer and create a pairing link in Connections.</p>
+        ) : (
+          <RunOnComputer command="npx t3 pair" />
+        )}
       </SetupStep>
       <SetupStep number={2}>
         <Button render={<Link to="/settings/connections" />} size="sm">
@@ -150,14 +155,18 @@ function RunOnComputer({ command }: { readonly command: string }) {
     <>
       <p>Run on your computer:</p>
       <CommandBlock command={command} className="mt-2" />
-      <a
-        className="mt-2 inline-block text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
-        href={DESKTOP_DOWNLOAD_URL}
-        target="_blank"
-        rel="noreferrer noopener"
-      >
-        Or download the desktop app
-      </a>
+      {DESKTOP_DOWNLOAD_URL ? (
+        <a
+          className="mt-2 inline-block text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+          href={DESKTOP_DOWNLOAD_URL}
+          target="_blank"
+          rel="noreferrer noopener"
+        >
+          Or download the desktop app
+        </a>
+      ) : (
+        <p>Install T3 Code LAN through the Hub.</p>
+      )}
     </>
   );
 }

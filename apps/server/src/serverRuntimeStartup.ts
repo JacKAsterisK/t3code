@@ -17,6 +17,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import { telemetryEnabled } from "@t3tools/shared/distribution";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -147,6 +148,7 @@ export const makeCommandGate = Effect.gen(function* () {
 });
 
 const recordStartupHeartbeat = Effect.gen(function* () {
+  if (!telemetryEnabled) return;
   const analytics = yield* AnalyticsService.AnalyticsService;
   const projects = yield* ProjectService.ProjectService;
   const threads = yield* ThreadManagement.ThreadManagementService;

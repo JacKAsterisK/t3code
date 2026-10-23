@@ -28,6 +28,8 @@ export interface McpThreadCaller {
 
 export interface McpClientCaller {
   readonly sessionId: string;
+  readonly grantId?: string;
+  readonly taskOnly?: boolean;
   readonly label: string;
   readonly access: AuthMcpClientAccess;
 }

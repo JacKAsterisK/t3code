@@ -41,6 +41,7 @@ import * as EnvironmentAuthPolicy from "./EnvironmentAuthPolicy.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
+import * as McpOAuthGrants from "./McpOAuthGrants.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
@@ -93,6 +94,8 @@ export const mcpClientScopes = (
 
 export interface McpClientSession {
   readonly sessionId: AuthSessionId;
+  readonly grantId?: string;
+  readonly taskOnly?: boolean;
   readonly label: string;
   readonly access: AuthMcpClientAccess;
 }
@@ -726,6 +729,7 @@ export const make = Effect.gen(function* () {
   const policy = yield* EnvironmentAuthPolicy.EnvironmentAuthPolicy;
   const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
   const sessions = yield* SessionStore.SessionStore;
+  const mcpGrants = yield* McpOAuthGrants.McpOAuthGrants;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const crypto = yield* Crypto.Crypto;
   const descriptor = yield* policy.getDescriptor();
@@ -1132,6 +1136,11 @@ export const make = Effect.gen(function* () {
 
   const revokeSession: EnvironmentAuth["Service"]["revokeSession"] = (sessionId) =>
     sessions.revoke(sessionId).pipe(
+      Effect.flatMap((removed) =>
+        mcpGrants
+          .revokeSession(sessionId)
+          .pipe(Effect.map((revokedGrant) => removed || revokedGrant)),
+      ),
       Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })),
       Effect.withSpan("EnvironmentAuth.revokeSession"),
     );
@@ -1268,13 +1277,25 @@ export const make = Effect.gen(function* () {
       mapSessionVerificationErrors,
       Effect.flatMap((session) =>
         session.subject === MCP_CLIENT_SUBJECT && session.method === "bearer-access-token"
-          ? Effect.succeed({
-              sessionId: session.sessionId,
-              label: session.client.label ?? "MCP client",
-              access: session.scopes.includes(AuthOrchestrationOperateScope)
-                ? (session.runtimeModeCeiling ?? "approval-required")
-                : "read-only",
-            } satisfies McpClientSession)
+          ? mcpGrants.binding(session.sessionId).pipe(
+              Effect.map(
+                (binding) =>
+                  ({
+                    sessionId: session.sessionId,
+                    ...Option.getOrElse(binding, () => ({})),
+                    label: session.client.label ?? "MCP client",
+                    access: session.scopes.includes(AuthOrchestrationOperateScope)
+                      ? (session.runtimeModeCeiling ?? "approval-required")
+                      : "read-only",
+                  }) satisfies McpClientSession,
+              ),
+              Effect.mapError(
+                () =>
+                  new ServerAuthInvalidCredentialError({
+                    diagnostic: "The MCP task grant is invalid or revoked.",
+                  }),
+              ),
+            )
           : Effect.fail(
               new ServerAuthInvalidCredentialError({
                 diagnostic: "Only MCP client sessions are accepted here.",
@@ -1372,6 +1393,7 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(EnvironmentAuth, make).pipe(
+  Layer.provideMerge(McpOAuthGrants.layer),
   Layer.provideMerge(PairingGrantStore.layer),
   Layer.provideMerge(SessionStore.layer),
   Layer.provideMerge(EnvironmentAuthPolicy.layer),

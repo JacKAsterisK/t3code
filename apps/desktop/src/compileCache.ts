@@ -2,6 +2,7 @@
 import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { lanBuildIdentity } from "@t3tools/shared/distribution";
 
 // Linux uses the user's cache dir because /tmp is shared between users; the macOS and Windows
 // temp dirs are already per user. Skipped under AppImage: it mounts the app at a new
@@ -14,6 +15,8 @@ try {
       process.platform === "linux"
         ? process.env.XDG_CACHE_HOME || NodePath.join(NodeOS.homedir(), ".cache")
         : NodeOS.tmpdir();
-    NodeModule.enableCompileCache(NodePath.join(cacheRoot, "t3code", "compile-cache"));
+    NodeModule.enableCompileCache(
+      NodePath.join(cacheRoot, lanBuildIdentity?.homeDirectoryName ?? "t3code", "compile-cache"),
+    );
   }
 } catch {}

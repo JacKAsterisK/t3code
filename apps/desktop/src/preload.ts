@@ -12,6 +12,7 @@ import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 
 import * as IpcChannels from "./ipc/channels.ts";
 import { mergeLegacyLocalStorage } from "./legacyLocalStorageMerge.ts";
+import { cloudEnabled, isLanDistribution } from "@t3tools/shared/distribution";
 
 const SNAP_SHOT_EVENT_TYPES = new Set([
   "requested",
@@ -30,11 +31,13 @@ function isSnapShotEvent(value: unknown): value is DesktopSnapShotEvent {
   );
 }
 
-exposeClerkBridge({ passkeys: true });
+if (cloudEnabled) exposeClerkBridge({ passkeys: true });
 
 // Runs before any app script reads localStorage. See DesktopLegacyLocalStorage.
 try {
-  const legacyItems: unknown = ipcRenderer.sendSync(IpcChannels.TAKE_LEGACY_LOCAL_STORAGE_CHANNEL);
+  const legacyItems: unknown = isLanDistribution
+    ? undefined
+    : ipcRenderer.sendSync(IpcChannels.TAKE_LEGACY_LOCAL_STORAGE_CHANNEL);
   if (typeof legacyItems === "object" && legacyItems !== null) {
     if (mergeLegacyLocalStorage(window.localStorage, legacyItems as Record<string, string>)) {
       void ipcRenderer.invoke(IpcChannels.COMPLETE_LEGACY_LOCAL_STORAGE_CHANNEL);

@@ -11,6 +11,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - Version output must flush before Electron exits, without acquiring the runtime.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Pre-ready admission must resolve the native home without yielding to asynchronous platform services.
+import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -19,6 +21,7 @@ import * as Electron from "electron";
 
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { acquireNativeAdmissionScoped } from "@t3tools/shared/nativeAdmission";
 import type { RemoteT3RunnerOptions } from "@t3tools/ssh/tunnel";
 import serverPackageJson from "../../server/package.json" with { type: "json" };
 
@@ -62,6 +65,7 @@ import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
 import * as DesktopSshEnvironment from "./ssh/DesktopSshEnvironment.ts";
 import * as DesktopSshPasswordPrompts from "./ssh/DesktopSshPasswordPrompts.ts";
 import * as DesktopState from "./app/DesktopState.ts";
+import { resolveDesktopBaseDir } from "./app/DesktopStatePaths.ts";
 import * as DesktopLegacyLocalStorage from "./app/DesktopLegacyLocalStorage.ts";
 import * as DesktopTelemetryPublisher from "./telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopRendererHistory from "./telemetry/DesktopRendererHistory.ts";
@@ -235,11 +239,26 @@ const layerDesktopApplicationRuntime = layerDesktopApplication.pipe(
 
 // Acquire strict pre-ready setup before Clerk. Nothing before the Clerk bridge
 // may yield, or Electron can emit ready before Clerk registers its scheme.
-const layerDesktopRuntime = layerDesktopClerk.pipe(
-  Layer.flatMap((clerkContext) =>
-    layerDesktopApplicationRuntime.pipe(Layer.provideMerge(Layer.succeedContext(clerkContext))),
-  ),
-  Layer.provideMerge(DesktopPreReadyPlatform.layer),
+const layerDesktopRuntime = Layer.unwrap(
+  Effect.gen(function* () {
+    const homeDirectory = resolveDesktopBaseDir({
+      homeDirectory: NodeOS.homedir(),
+      joinPath: NodePath.join,
+      // oxlint-disable-next-line t3code/no-global-process-runtime -- Strict pre-ready admission resolves the platform synchronously before building platform services.
+      platform: process.platform,
+      localAppData: process.env.LOCALAPPDATA,
+      t3Home: Option.fromUndefinedOr(process.env.T3CODE_HOME),
+    });
+    // This acquisition is synchronous: pre-ready setup and Clerk must register
+    // their privileged schemes before Electron can emit ready.
+    yield* acquireNativeAdmissionScoped(homeDirectory).pipe(Effect.orDie);
+    return layerDesktopClerk.pipe(
+      Layer.flatMap((clerkContext) =>
+        layerDesktopApplicationRuntime.pipe(Layer.provideMerge(Layer.succeedContext(clerkContext))),
+      ),
+      Layer.provideMerge(DesktopPreReadyPlatform.layer),
+    );
+  }),
 );
 
 DesktopApp.program.pipe(Effect.provide(layerDesktopRuntime), NodeRuntime.runMain);

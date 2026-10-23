@@ -8,6 +8,11 @@ import {
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import {
+  cloudEnabled,
+  distributionUpdateGuidance,
+  nativeUpdatesEnabled,
+} from "@t3tools/shared/distribution";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -182,6 +187,25 @@ const authorizeRequest = Effect.fn("EnvironmentRpc.authorize")(function* (
   method: string,
   input: unknown,
 ) {
+  if (!cloudEnabled && method.startsWith("cloud.")) {
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+    return yield* new EnvironmentRpcUnavailableError({
+      environmentId: supervisor.target.environmentId,
+      message: "T3 Connect is disabled in this LAN distribution.",
+    });
+  }
+  if (
+    !nativeUpdatesEnabled &&
+    (method === WS_METHODS.serverUpdateServer ||
+      method === WS_METHODS.serverUpdateServerWithProgress ||
+      method === WS_METHODS.serverCommitDesktopUpdate)
+  ) {
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+    return yield* new EnvironmentRpcUnavailableError({
+      environmentId: supervisor.target.environmentId,
+      message: distributionUpdateGuidance,
+    });
+  }
   if (clientRpcRequiredScopes(method, input).length === 0) return;
   const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
   const guard = yield* RpcPermissionGuard;

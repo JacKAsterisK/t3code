@@ -2,6 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
+import { acquireNativeAdmissionScoped } from "@t3tools/shared/nativeAdmission";
 
 import { SERVER_EXIT_CODE_STATE_DIR_OWNED } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -188,6 +189,7 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
   statePath: string,
 ) {
   const stateDir = NodePath.dirname(statePath);
+  yield* acquireNativeAdmissionScoped(NodePath.dirname(stateDir)).pipe(Effect.orDie);
   const crypto = yield* Crypto.Crypto;
   const ownerId = yield* crypto
     .randomUUIDv4()

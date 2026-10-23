@@ -1,4 +1,10 @@
 import { DEFAULT_HOSTED_APP_URL } from "./connectAuth.ts";
+import {
+  cloudEnabled,
+  desktopProtocolSchemes,
+  getDistributionProtocolScheme,
+  isLanDistribution,
+} from "./distribution.ts";
 
 export const PROMPT_LINK_MAX_PROMPT_LENGTH = 8_000;
 
@@ -174,7 +180,9 @@ export function buildNewThreadLink(input: {
   readonly model?: string | null;
   readonly origin?: string;
 }): string {
-  const url = new URL("/new", input.origin ?? DEFAULT_HOSTED_APP_URL);
+  const url = isLanDistribution
+    ? new URL(`${getDistributionProtocolScheme(false)}://new`)
+    : new URL("/new", input.origin ?? DEFAULT_HOSTED_APP_URL);
   url.searchParams.set("prompt", input.prompt);
   if (input.repository) {
     url.searchParams.set("repo", `${input.repository.owner}/${input.repository.name}`);
@@ -193,7 +201,11 @@ export function promptLinkAppPath(
 ): string | null {
   if (!URL.canParse(value)) return null;
   const url = new URL(value);
-  if (APP_SCHEME.test(url.protocol)) {
+  if (
+    isLanDistribution
+      ? desktopProtocolSchemes.some((scheme) => url.protocol === `${scheme}:`)
+      : APP_SCHEME.test(url.protocol)
+  ) {
     if (url.host === "new" && (url.pathname === "" || url.pathname === "/")) {
       return `/new${url.search}`;
     }
@@ -201,12 +213,18 @@ export function promptLinkAppPath(
     return thread ? `/${thread[1]}/${thread[2]}${url.search}` : null;
   }
   if (!URL.canParse(hostedAppUrl) || url.origin !== new URL(hostedAppUrl).origin) return null;
+  if (!cloudEnabled && url.origin === new URL(DEFAULT_HOSTED_APP_URL).origin) return null;
   if (url.pathname === "/new") return `/new${url.search}`;
   const thread = url.searchParams.has("prompt") ? THREAD_PATH.exec(url.pathname) : null;
   return thread ? `/${thread[1]}/${thread[2]}${url.search}` : null;
 }
 
-export function promptLinkDeepLink(appPath: string, scheme = "t3code"): string {
+export function promptLinkDeepLink(
+  appPath: string,
+  scheme = getDistributionProtocolScheme(false),
+): string {
+  if (isLanDistribution && !desktopProtocolSchemes.includes(scheme))
+    throw new Error("This LAN distribution cannot open another application's protocol.");
   const url = new URL(appPath, "https://app.invalid");
   const host = url.pathname === "/new" ? "new" : `threads${url.pathname}`;
   return `${scheme}://${host}${url.search}`;

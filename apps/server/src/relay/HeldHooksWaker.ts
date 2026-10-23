@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import { cloudEnabled } from "@t3tools/shared/distribution";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
@@ -21,6 +22,7 @@ const wakeHeldHooks = Effect.fn("HeldHooksWaker.wake")(function* () {
 
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
+    if (!cloudEnabled) return;
     const runtime = yield* CloudManagedEndpointRuntime.CloudManagedEndpointRuntime;
     const wake = wakeHeldHooks().pipe(
       Effect.timeout("10 seconds"),

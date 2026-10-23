@@ -17,6 +17,7 @@ import { resolveLinuxDesktopEntryName } from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
 import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
 import type { OtlpProtocol } from "@t3tools/shared/observability";
+import { lanBuildIdentity } from "@t3tools/shared/distribution";
 
 export interface MakeDesktopEnvironmentInput {
   readonly dirname: string;
@@ -104,9 +105,9 @@ export function resolveDesktopAppBranding(input: {
 }): DesktopAppBranding {
   const stageLabel = resolveDesktopAppStageLabel(input);
   return {
-    baseName: APP_BASE_NAME,
+    baseName: lanBuildIdentity?.productName ?? APP_BASE_NAME,
     stageLabel,
-    displayName: `${APP_BASE_NAME} (${stageLabel})`,
+    displayName: lanBuildIdentity?.productName ?? `${APP_BASE_NAME} (${stageLabel})`,
   };
 }
 
@@ -158,6 +159,8 @@ const make = Effect.fn("desktop.environment.make")(function* (
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
   const baseDir = resolveDesktopBaseDir({
     homeDirectory,
+    platform: input.platform,
+    localAppData: Option.getOrUndefined(config.localAppDataDirectory),
     joinPath: path.join,
     t3Home: config.t3Home,
   });
@@ -227,11 +230,13 @@ const make = Effect.fn("desktop.environment.make")(function* (
     otlpProtocol: config.otlpProtocol,
     branding,
     displayName,
-    appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
-    ),
+    appUserModelId:
+      lanBuildIdentity?.appId ??
+      Option.getOrElse(config.appUserModelIdOverride, () =>
+        isDevelopment ? "com.t3tools.t3code.dev" : "com.t3tools.t3code",
+      ),
     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
+    linuxWmClass: lanBuildIdentity?.protocolScheme ?? (isDevelopment ? "t3code-dev" : "t3code"),
     linuxApplicationsDir,
     appImagePath: config.appImagePath,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),

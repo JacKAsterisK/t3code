@@ -25,6 +25,11 @@ import { createModelSelection } from "@t3tools/shared/model";
 import * as Equal from "effect/Equal";
 import * as Schema from "effect/Schema";
 import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
+import {
+  nativeUpdatesEnabled,
+  isLanDistribution,
+  distributionUpdateGuidance,
+} from "@t3tools/shared/distribution";
 import { CliCommandSettingsRow } from "./CliCommandSettingsRow";
 import { MobileAppSettingsRow } from "./MobileAppSettingsRow";
 import {
@@ -153,6 +158,7 @@ function AboutVersionSection() {
   const selectedHostedAppChannel = hasDesktopBridge ? null : HOSTED_APP_CHANNEL;
 
   const handleUpdateChannelChange = (channel: DesktopUpdateChannel) => {
+    if (!nativeUpdatesEnabled) return;
     const bridge = window.desktopBridge;
     if (
       !bridge ||
@@ -277,10 +283,16 @@ function AboutVersionSection() {
     downloading: "Downloading…",
     "up-to-date": "Up to Date",
   };
-  const buttonLabel =
-    actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates";
-  const description =
-    action === "download" || action === "install"
+  const buttonLabel = !nativeUpdatesEnabled
+    ? updateState?.status === "checking"
+      ? "Checking…"
+      : "Check Fork Updates"
+    : (actionLabel[action] ?? statusLabel[updateState?.status ?? ""] ?? "Check for Updates");
+  const description = !nativeUpdatesEnabled
+    ? updateState?.forkRelease
+      ? `Fork distribution ${updateState.forkRelease.distributionVersion} (app ${updateState.availableVersion ?? updateState.currentVersion}). ${distributionUpdateGuidance}`
+      : (updateState?.message ?? distributionUpdateGuidance)
+    : action === "download" || action === "install"
       ? "Update available."
       : (getDesktopUpdateDisabledReason(updateState) ?? "Current version of the application.");
 
@@ -308,7 +320,25 @@ function AboutVersionSection() {
           </Tooltip>
         }
       />
-      {hasDesktopBridge ? (
+      {isLanDistribution && updateState?.forkRelease ? (
+        <SettingsRow
+          title="Fork release"
+          description="Review the release, then use the Hub update workflow."
+          control={
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                const url = updateState.forkRelease?.releaseUrl;
+                if (url) void window.desktopBridge?.openExternal(url);
+              }}
+            >
+              Release Notes
+            </Button>
+          }
+        />
+      ) : null}
+      {hasDesktopBridge && nativeUpdatesEnabled ? (
         <SettingsRow
           {...searchableSetting("update-track")}
           description="Use stable releases or nightly builds. Switch back anytime."

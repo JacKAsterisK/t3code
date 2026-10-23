@@ -4,9 +4,10 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
-import { autoUpdater } from "electron-updater";
+import * as ElectronUpdaterRuntime from "electron-updater";
+import { nativeUpdatesEnabled } from "@t3tools/shared/distribution";
 
-type AutoUpdater = typeof autoUpdater;
+type AutoUpdater = typeof ElectronUpdaterRuntime.autoUpdater;
 
 export type ElectronUpdaterFeedUrl = Parameters<AutoUpdater["setFeedURL"]>[0];
 
@@ -84,64 +85,97 @@ export class ElectronUpdater extends Context.Service<
 export const make = ElectronUpdater.of({
   setFeedURL: (options) =>
     Effect.suspend(() => {
-      autoUpdater.setFeedURL(options);
+      if (!nativeUpdatesEnabled) return Effect.void;
+      ElectronUpdaterRuntime.autoUpdater.setFeedURL(options);
       return Effect.void;
     }),
   setAutoDownload: (value) =>
     Effect.suspend(() => {
-      autoUpdater.autoDownload = value;
+      if (!nativeUpdatesEnabled) return Effect.void;
+      ElectronUpdaterRuntime.autoUpdater.autoDownload = value;
       return Effect.void;
     }),
   setAutoInstallOnAppQuit: (value) =>
     Effect.suspend(() => {
-      autoUpdater.autoInstallOnAppQuit = value;
+      if (!nativeUpdatesEnabled) return Effect.void;
+      ElectronUpdaterRuntime.autoUpdater.autoInstallOnAppQuit = value;
       return Effect.void;
     }),
   setChannel: (channel) =>
     Effect.suspend(() => {
-      autoUpdater.channel = channel;
+      if (!nativeUpdatesEnabled) return Effect.void;
+      ElectronUpdaterRuntime.autoUpdater.channel = channel;
       return Effect.void;
     }),
   setAllowPrerelease: (value) =>
     Effect.suspend(() => {
-      autoUpdater.allowPrerelease = value;
+      if (!nativeUpdatesEnabled) return Effect.void;
+      ElectronUpdaterRuntime.autoUpdater.allowPrerelease = value;
       return Effect.void;
     }),
-  allowDowngrade: Effect.sync(() => autoUpdater.allowDowngrade),
+  allowDowngrade: Effect.sync(() =>
+    nativeUpdatesEnabled ? ElectronUpdaterRuntime.autoUpdater.allowDowngrade : false,
+  ),
   setAllowDowngrade: (value) =>
     Effect.suspend(() => {
-      autoUpdater.allowDowngrade = value;
+      if (!nativeUpdatesEnabled) return Effect.void;
+      ElectronUpdaterRuntime.autoUpdater.allowDowngrade = value;
       return Effect.void;
     }),
   setFullChangelog: (value) =>
     Effect.suspend(() => {
-      autoUpdater.fullChangelog = value;
+      if (!nativeUpdatesEnabled) return Effect.void;
+      ElectronUpdaterRuntime.autoUpdater.fullChangelog = value;
       return Effect.void;
     }),
   setDisableDifferentialDownload: (value) =>
     Effect.suspend(() => {
-      autoUpdater.disableDifferentialDownload = value;
+      if (!nativeUpdatesEnabled) return Effect.void;
+      ElectronUpdaterRuntime.autoUpdater.disableDifferentialDownload = value;
       return Effect.void;
     }),
   checkForUpdates: Effect.suspend(() => {
-    const channel = autoUpdater.channel;
+    if (!nativeUpdatesEnabled)
+      return Effect.fail(
+        new ElectronUpdaterCheckForUpdatesError({
+          channel: null,
+          cause: new Error("Native updates are disabled by the compiled distribution policy."),
+        }),
+      );
+    const channel = ElectronUpdaterRuntime.autoUpdater.channel;
     return Effect.tryPromise({
-      try: () => autoUpdater.checkForUpdates(),
+      try: () => ElectronUpdaterRuntime.autoUpdater.checkForUpdates(),
       catch: (cause) => new ElectronUpdaterCheckForUpdatesError({ channel, cause }),
     }).pipe(Effect.asVoid);
   }),
   downloadUpdate: Effect.suspend(() => {
-    const channel = autoUpdater.channel;
+    if (!nativeUpdatesEnabled)
+      return Effect.fail(
+        new ElectronUpdaterDownloadUpdateError({
+          channel: null,
+          cause: new Error("Native updates are disabled by the compiled distribution policy."),
+        }),
+      );
+    const channel = ElectronUpdaterRuntime.autoUpdater.channel;
     return Effect.tryPromise({
-      try: () => autoUpdater.downloadUpdate(),
+      try: () => ElectronUpdaterRuntime.autoUpdater.downloadUpdate(),
       catch: (cause) => new ElectronUpdaterDownloadUpdateError({ channel, cause }),
     }).pipe(Effect.asVoid);
   }),
   quitAndInstall: ({ isSilent, isForceRunAfter }) =>
     Effect.suspend(() => {
-      const channel = autoUpdater.channel;
+      if (!nativeUpdatesEnabled)
+        return Effect.fail(
+          new ElectronUpdaterQuitAndInstallError({
+            channel: null,
+            isSilent,
+            isForceRunAfter,
+            cause: new Error("Native updates are disabled by the compiled distribution policy."),
+          }),
+        );
+      const channel = ElectronUpdaterRuntime.autoUpdater.channel;
       return Effect.try({
-        try: () => autoUpdater.quitAndInstall(isSilent, isForceRunAfter),
+        try: () => ElectronUpdaterRuntime.autoUpdater.quitAndInstall(isSilent, isForceRunAfter),
         catch: (cause) =>
           new ElectronUpdaterQuitAndInstallError({
             channel,
@@ -152,7 +186,8 @@ export const make = ElectronUpdater.of({
       });
     }),
   on: (eventName, listener) => {
-    const eventTarget = autoUpdater as unknown as {
+    if (!nativeUpdatesEnabled) return Effect.void;
+    const eventTarget = ElectronUpdaterRuntime.autoUpdater as unknown as {
       on: (eventName: string, listener: (...args: Array<unknown>) => void) => void;
       removeListener: (eventName: string, listener: (...args: Array<unknown>) => void) => void;
     };

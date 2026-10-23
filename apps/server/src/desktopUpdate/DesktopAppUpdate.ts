@@ -6,6 +6,7 @@ import {
   type ServerSelfUpdateResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import { distributionUpdateGuidance, nativeUpdatesEnabled } from "@t3tools/shared/distribution";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -55,6 +56,14 @@ export class DesktopAppUpdate extends Context.Service<
 >()("t3/desktopUpdate/DesktopAppUpdate") {}
 
 export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* () {
+  if (!nativeUpdatesEnabled) {
+    const refusal = Effect.fail(
+      new ServerSelfUpdateError({
+        reason: distributionUpdateGuidance,
+      }),
+    );
+    return DesktopAppUpdate.of({ available: false, run: () => refusal, commit: () => refusal });
+  }
   const config = yield* ServerConfig.ServerConfig;
   const crypto = yield* Crypto.Crypto;
   const receiver = yield* DesktopTelemetryReceiver.DesktopTelemetryReceiver;

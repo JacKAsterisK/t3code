@@ -35,6 +35,7 @@ import {
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import { cloudEnabled, telemetryEnabled } from "@t3tools/shared/distribution";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -308,12 +309,13 @@ const ANALYTICS_DEVICE_ID_KEY = "t3code:analytics-device-id";
 // Lives as long as this browser profile's site data. Storage can be blocked, which only drops the id.
 const analyticsDevice = {
   id: Effect.try(() => {
+    if (!telemetryEnabled) return null;
     const existing = window.localStorage.getItem(ANALYTICS_DEVICE_ID_KEY);
     if (existing) return existing;
     const created = randomUUID();
     window.localStorage.setItem(ANALYTICS_DEVICE_ID_KEY, created);
     return created;
-  }).pipe(Effect.option),
+  }).pipe(Effect.option, Effect.map(Option.flatMap(Option.fromNullishOr))),
 };
 
 const layerCapabilities = Layer.effectContext(
@@ -323,9 +325,17 @@ const layerCapabilities = Layer.effectContext(
     });
     const cloudSession = ClientCapabilities.CloudSession.of({
       identity: Effect.sync(() =>
-        Option.fromNullishOr(appAtomRegistry.get(managedRelaySessionAtom)),
+        cloudEnabled
+          ? Option.fromNullishOr(appAtomRegistry.get(managedRelaySessionAtom))
+          : Option.none(),
       ),
       clerkToken: Effect.gen(function* () {
+        if (!cloudEnabled)
+          return yield* new ConnectionBlockedError({
+            reason: "unsupported",
+            detail:
+              "T3 Connect is disabled in this LAN distribution. Use an approved direct connection.",
+          });
         const session = appAtomRegistry.get(managedRelaySessionAtom);
         if (session === null) {
           return yield* new ConnectionBlockedError({

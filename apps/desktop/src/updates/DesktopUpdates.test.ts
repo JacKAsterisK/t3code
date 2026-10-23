@@ -1,4 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import { DESKTOP_UPDATE_RESTART_MARKER_FILE } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
@@ -19,6 +20,10 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
+
+// Electron's Node entry can install a missing binary; these service tests use ports only.
+vi.mock("electron", () => ({}));
+vi.mock("electron-updater", () => ({}));
 
 describe("DesktopUpdates", () => {
   it.effect("updates Linux .deb installs and leaves other non-AppImage installs off", () =>

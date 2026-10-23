@@ -53,6 +53,16 @@ above its ceiling. Inside MCP the credential sets the limits and tool
 parameters only pick targets; see
 [threadAccess](../../apps/server/src/mcp/threadAccess.ts).
 
+The LAN gateway can explicitly request task-only access with renewal. This is
+approved separately on the sign-in page and does not reuse an ordinary MCP
+grant. A stable server-issued grant ID binds machine and task policy while
+one-hour access sessions rotate. The global MCP registration boundary refuses
+every tool outside the reviewed LAN task allowlist, including native tools
+that accept the same orchestration scopes. Refresh secrets are stored as
+hashes; replay revokes the family. The family ends after 90 days, and revoking
+its visible Connections session also prevents renewal. A lost refresh response
+requires reapproval rather than an unsafe replay.
+
 Issuer and resource URLs come from the request's Host and
 `X-Forwarded-Proto`, so one server answers over loopback, Tailscale Serve and a
 T3 Connect tunnel. A proxy that rewrites Host or drops the protocol header

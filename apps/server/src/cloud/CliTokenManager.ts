@@ -6,6 +6,7 @@ import * as Clock from "effect/Clock";
 import * as Cause from "effect/Cause";
 import * as Console from "effect/Console";
 import * as Context from "effect/Context";
+import { cloudEnabled } from "@t3tools/shared/distribution";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -473,6 +474,20 @@ export const deviceAuthorizationLogin = Effect.fn("cloud.cli_token.device_author
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  if (!cloudEnabled) {
+    const refusal = Effect.fail(
+      new CloudCliAuthorizationError({
+        cause: new Error("T3 Connect is disabled in this LAN distribution."),
+      }),
+    );
+    return CloudCliTokenManager.of({
+      get: refusal,
+      getExisting: Effect.succeedNone,
+      hasCredential: Effect.succeed(false),
+      store: () => refusal,
+      clear: refusal,
+    });
+  }
   const crypto = yield* Crypto.Crypto;
   const httpClient = yield* HttpClient.HttpClient;
   const services = Context.make(Crypto.Crypto, crypto).pipe(

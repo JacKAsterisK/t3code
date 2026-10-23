@@ -3,6 +3,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import { isLanDistribution } from "@t3tools/shared/distribution";
+import { inspectOrdinaryDirectoryAncestors } from "./DesktopPreReadyFileSystem.ts";
 
 export class DesktopUserDataInitializationError extends Schema.TaggedError<DesktopUserDataInitializationError>()(
   "DesktopUserDataInitializationError",
@@ -36,9 +38,23 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
     readonly appDataDirectory: string;
     readonly isDevelopment: boolean;
     readonly platform: NodeJS.Platform;
+    readonly baseDir?: string;
   }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    if (isLanDistribution) {
+      if (input.baseDir === undefined)
+        return yield* Effect.die(
+          new Error("LAN desktop profile requires the resolved independent native home."),
+        );
+      const profile = path.join(input.baseDir, "..", "electron-profile");
+      yield* inspectOrdinaryDirectoryAncestors(profile).pipe(
+        Effect.mapError((cause) =>
+          DesktopUserDataInitializationError.fromFileSystem(cause, "inspect", profile),
+        ),
+      );
+      return profile;
+    }
     const names = input.isDevelopment
       ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }
       : { current: "t3code-v2", legacy: "T3 Code (Alpha)" };

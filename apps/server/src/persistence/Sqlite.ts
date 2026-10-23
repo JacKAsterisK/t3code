@@ -4,6 +4,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import { acquireNativeAdmissionScoped } from "@t3tools/shared/nativeAdmission";
 
 import { runMigrations } from "./Migrations.ts";
 import { initializeV2Database } from "./initializeV2Database.ts";
@@ -79,7 +80,8 @@ export const layerMemory = Layer.provideMerge(
 
 export const layerConfig = Layer.unwrap(
   Effect.gen(function* () {
-    const { dbPath } = yield* ServerConfig.ServerConfig;
+    const { dbPath, baseDir } = yield* ServerConfig.ServerConfig;
+    yield* acquireNativeAdmissionScoped(baseDir).pipe(Effect.orDie);
     yield* initializeV2Database(dbPath);
     return layerFromPath(dbPath);
   }),

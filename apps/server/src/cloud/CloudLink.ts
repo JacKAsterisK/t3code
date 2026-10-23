@@ -1,5 +1,6 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createPublicKey.
 import * as NodeCrypto from "node:crypto";
+import { cloudEnabled } from "@t3tools/shared/distribution";
 import {
   AuthStandardClientScopes,
   EnvironmentAuthenticatedPrincipal,
@@ -236,6 +237,8 @@ export class CloudLinkEndpointUnavailableError extends Schema.TaggedError<CloudL
 }
 
 const INTERNAL_OPERATION_MESSAGES = {
+  "distribution-disabled":
+    "T3 Connect is disabled in this LAN distribution. Use an approved direct environment connection.",
   "relay-url-unconfigured":
     "T3CODE_RELAY_URL must be configured as a secure absolute HTTPS origin.",
   "generate-link-proof": "Could not generate environment link proof.",
@@ -527,6 +530,34 @@ export class CloudLink extends Context.Service<
 >()("t3/cloud/CloudLink") {}
 
 const make = Effect.gen(function* () {
+  if (!cloudEnabled) {
+    const refuse = () =>
+      Effect.fail(new CloudLinkInternalError({ operation: "distribution-disabled" }));
+    return CloudLink.of({
+      linkProof: refuse,
+      applyRelayConfig: refuse,
+      linkState: () =>
+        Effect.succeed({
+          linked: false,
+          cloudUserId: null,
+          relayUrl: null,
+          relayIssuer: null,
+          managedTunnelActive: false,
+          publishAgentActivity: false,
+          holdWebhooksWhileOffline: false,
+        }),
+      unlink: refuse,
+      updatePreferences: refuse,
+      answerHealthRequest: refuse,
+      mintCredential: refuse,
+      reconcileDesiredLink: refuse,
+      reconcileDesiredLinkIfStillDesired: refuse,
+      registerManagedTunnelRecovery: refuse,
+      recoverManagedTunnel: refuse,
+      startManagedTunnelIfOriginConfirmed: () => Effect.succeed(false),
+      releaseManagedTunnelOnShutdown: () => Effect.succeed(false),
+    });
+  }
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const endpointRuntime = yield* ManagedEndpointRuntime.CloudManagedEndpointRuntime;

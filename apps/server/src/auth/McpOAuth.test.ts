@@ -280,8 +280,12 @@ it.live("signs in with a pairing code and issues a token only /mcp accepts", () 
       const token = (yield* json<unknown>(tokenResponse)) as {
         access_token: string;
         scope: string;
+        expires_in: number;
+        refresh_token?: string;
       };
       expect(token.scope).toBe("orchestration:read orchestration:operate");
+      expect(token.expires_in).toBeGreaterThanOrEqual(30 * 24 * 3600 - 1);
+      expect(token.refresh_token).toBeUndefined();
 
       expect((yield* exchange(verifier)).status).toBe(400);
 
@@ -551,6 +555,117 @@ it.live("one-click approves only access the browser session holds the scopes for
       expect(new URL(readOnly.redirectTo!).searchParams.get("code")).toEqual(expect.any(String));
     }),
   ),
+);
+
+it.live(
+  "issues renewable task-only grants, rotates identity safely and supports explicit revocation",
+  () =>
+    withRoutes((handler, auth) =>
+      Effect.gen(function* () {
+        const clientId = yield* registeredClientId(handler);
+        const params = { ...authorizeParams(clientId), task_only: "true", offline_access: "true" };
+        const details = yield* handler(postJson("/oauth/mcp/approval", params)).pipe(
+          Effect.flatMap(json<Record<string, unknown>>),
+        );
+        expect(details).toMatchObject({ taskOnly: true, renewable: true });
+        const excessive = yield* auth.issuePairingCredential();
+        expect(
+          (yield* decide(handler, params, {
+            _tag: "pairing-code",
+            access: "full-access",
+            code: excessive.credential,
+          })).status,
+        ).toBe(400);
+        const pairing = yield* auth.issuePairingCredential();
+        const approved = yield* decide(handler, params, {
+          _tag: "pairing-code",
+          access: "auto",
+          code: pairing.credential,
+        });
+        const issued = yield* handler(
+          at(
+            "/oauth/mcp/token",
+            form({
+              grant_type: "authorization_code",
+              client_id: clientId,
+              code: new URL(approved.redirectTo!).searchParams.get("code")!,
+              code_verifier: verifier,
+              redirect_uri: params.redirect_uri,
+              resource: `${ORIGIN}/mcp`,
+            }),
+          ),
+        ).pipe(
+          Effect.flatMap(
+            json<{
+              access_token: string;
+              refresh_token: string;
+              grant_id: string;
+              task_only: boolean;
+              expires_in: number;
+            }>,
+          ),
+        );
+        expect(issued).toMatchObject({ task_only: true, expires_in: 3600 });
+        const client = yield* auth.authenticateMcpClient(
+          HttpServerRequest.fromWeb(
+            at("/mcp", { headers: { authorization: `Bearer ${issued.access_token}` } }),
+          ),
+        );
+        expect(client).toMatchObject({ grantId: issued.grant_id, taskOnly: true, access: "auto" });
+        const refreshed = yield* handler(
+          at(
+            "/oauth/mcp/token",
+            form({
+              grant_type: "refresh_token",
+              client_id: clientId,
+              refresh_token: issued.refresh_token,
+              resource: `${ORIGIN}/mcp`,
+            }),
+          ),
+        ).pipe(
+          Effect.flatMap(
+            json<{
+              access_token: string;
+              refresh_token: string;
+              grant_id: string;
+            }>,
+          ),
+        );
+        expect(refreshed.grant_id).toBe(issued.grant_id);
+        const revoked = yield* handler(
+          at(
+            "/oauth/mcp/revoke",
+            form({
+              client_id: clientId,
+              token: refreshed.refresh_token,
+              resource: `${ORIGIN}/mcp`,
+            }),
+          ),
+        );
+        expect(revoked.status).toBe(200);
+        expect(
+          yield* auth
+            .authenticateMcpClient(
+              HttpServerRequest.fromWeb(
+                at("/mcp", { headers: { authorization: `Bearer ${refreshed.access_token}` } }),
+              ),
+            )
+            .pipe(Effect.isFailure),
+        ).toBe(true);
+        const retry = yield* handler(
+          at(
+            "/oauth/mcp/token",
+            form({
+              grant_type: "refresh_token",
+              client_id: clientId,
+              refresh_token: refreshed.refresh_token,
+              resource: `${ORIGIN}/mcp`,
+            }),
+          ),
+        );
+        expect(retry.status).toBe(400);
+      }),
+    ),
 );
 
 it("matches loopback redirects on everything but the port, and https redirects exactly", () => {

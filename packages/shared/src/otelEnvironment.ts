@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { OtlpHeadersFromString, OtlpProtocol, type SignalExport } from "./observability.ts";
+import { telemetryEnabled } from "./distribution.ts";
 
 type OtlpSignalName = "TRACES" | "METRICS" | "LOGS";
 
@@ -265,68 +266,80 @@ const sdkFlags = {
   ),
 };
 
-export const load: Effect.Effect<OtelEnvironment> = Config.all({
-  ...sdkFlags,
-  resource: resourceAttributes,
-  generic: settings("OTEL_EXPORTER_OTLP_"),
-  traces: settings("OTEL_EXPORTER_OTLP_TRACES_"),
-  metrics: settings("OTEL_EXPORTER_OTLP_METRICS_"),
-  logs: settings("OTEL_EXPORTER_OTLP_LOGS_"),
-  exporters: Config.all({
-    traces: exporter("OTEL_TRACES_EXPORTER"),
-    metrics: exporter("OTEL_METRICS_EXPORTER"),
-    logs: exporter("OTEL_LOGS_EXPORTER"),
-  }),
-}).pipe(
-  Effect.map(({ t3, spec, resource, generic, exporters, ...own }) => {
-    const disabled = t3.value ?? spec.value ?? false;
-    const signals = disabled
-      ? undefined
-      : {
-          traces: signal("TRACES", exporters.traces, own.traces, generic),
-          metrics: signal("METRICS", exporters.metrics, own.metrics, generic),
-          logs: signal("LOGS", exporters.logs, own.logs, generic),
+export const load: Effect.Effect<OtelEnvironment> = !telemetryEnabled
+  ? Effect.succeed({
+      disabled: true,
+      warnings: [],
+      resourceAttributes: {},
+      traces: OtelSignal.Off(),
+      metrics: OtelSignal.Off(),
+      logs: OtelSignal.Off(),
+    })
+  : Config.all({
+      ...sdkFlags,
+      resource: resourceAttributes,
+      generic: settings("OTEL_EXPORTER_OTLP_"),
+      traces: settings("OTEL_EXPORTER_OTLP_TRACES_"),
+      metrics: settings("OTEL_EXPORTER_OTLP_METRICS_"),
+      logs: settings("OTEL_EXPORTER_OTLP_LOGS_"),
+      exporters: Config.all({
+        traces: exporter("OTEL_TRACES_EXPORTER"),
+        metrics: exporter("OTEL_METRICS_EXPORTER"),
+        logs: exporter("OTEL_LOGS_EXPORTER"),
+      }),
+    }).pipe(
+      Effect.map(({ t3, spec, resource, generic, exporters, ...own }) => {
+        const disabled = t3.value ?? spec.value ?? false;
+        const signals = disabled
+          ? undefined
+          : {
+              traces: signal("TRACES", exporters.traces, own.traces, generic),
+              metrics: signal("METRICS", exporters.metrics, own.metrics, generic),
+              logs: signal("LOGS", exporters.logs, own.logs, generic),
+            };
+        const used = new Set(
+          signals === undefined ? [] : Object.values(signals).flatMap((resolved) => resolved.used),
+        );
+        const warnings = [
+          t3.warning,
+          spec.warning,
+          resource.warning,
+          ...Array.from(used, (setting) => setting.warning),
+        ].filter((warning) => warning !== undefined);
+        if (disabled) {
+          warnings.push(
+            t3.value
+              ? "T3CODE_OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it"
+              : "OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it; set T3CODE_OTEL_SDK_DISABLED=false to export anyway",
+          );
+        }
+        return {
+          disabled,
+          warnings,
+          resourceAttributes: resource.value,
+          traces: signals?.traces.signal ?? OtelSignal.Unset(),
+          metrics: signals?.metrics.signal ?? OtelSignal.Unset(),
+          logs: signals?.logs.signal ?? OtelSignal.Unset(),
         };
-    const used = new Set(
-      signals === undefined ? [] : Object.values(signals).flatMap((resolved) => resolved.used),
+      }),
+      Effect.orDie,
     );
-    const warnings = [
-      t3.warning,
-      spec.warning,
-      resource.warning,
-      ...Array.from(used, (setting) => setting.warning),
-    ].filter((warning) => warning !== undefined);
-    if (disabled) {
-      warnings.push(
-        t3.value
-          ? "T3CODE_OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it"
-          : "OTEL_SDK_DISABLED is set, so no telemetry is exported, whatever configured it; set T3CODE_OTEL_SDK_DISABLED=false to export anyway",
-      );
-    }
-    return {
-      disabled,
-      warnings,
-      resourceAttributes: resource.value,
-      traces: signals?.traces.signal ?? OtelSignal.Unset(),
-      metrics: signals?.metrics.signal ?? OtelSignal.Unset(),
-      logs: signals?.logs.signal ?? OtelSignal.Unset(),
-    };
-  }),
-  Effect.orDie,
-);
 
 export const isRelayTracingEnabled = (env: Readonly<Record<string, string | undefined>>) =>
-  Config.all({
-    ...sdkFlags,
-    telemetry: flag("T3CODE_TELEMETRY_ENABLED", T3CODE_TRUE, T3CODE_FALSE, String),
-  }).pipe(
-    Effect.map(
-      ({ telemetry, t3, spec }) => telemetry.value !== false && !(t3.value ?? spec.value ?? false),
-    ),
-    Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord(env))),
-    Effect.orDie,
-    Effect.runSync,
-  );
+  !telemetryEnabled
+    ? false
+    : Config.all({
+        ...sdkFlags,
+        telemetry: flag("T3CODE_TELEMETRY_ENABLED", T3CODE_TRUE, T3CODE_FALSE, String),
+      }).pipe(
+        Effect.map(
+          ({ telemetry, t3, spec }) =>
+            telemetry.value !== false && !(t3.value ?? spec.value ?? false),
+        ),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord(env))),
+        Effect.orDie,
+        Effect.runSync,
+      );
 
 export type SignalName = "traces" | "metrics" | "logs";
 
@@ -341,7 +354,7 @@ export const resolveSignalEndpoint = (
   t3: { readonly url: string | undefined; readonly export: SignalExport },
   ...fallbackUrls: ReadonlyArray<string | undefined>
 ): SignalEndpoint | undefined => {
-  if (otel.disabled) {
+  if (!telemetryEnabled || otel.disabled) {
     return undefined;
   }
   const t3Url = blankAsUnset(t3.url);

@@ -1,6 +1,11 @@
 import * as Option from "effect/Option";
+import {
+  assertDistributionHome,
+  isLanDistribution,
+  resolveDistributionHome,
+} from "@t3tools/shared/distribution";
 
-export type JoinPath = (first: string, ...segments: string[]) => string;
+export type JoinPath = (...segments: string[]) => string;
 
 function normalizeConfiguredBaseDir(t3Home: Option.Option<string>): Option.Option<string> {
   if (Option.isNone(t3Home)) {
@@ -12,9 +17,18 @@ function normalizeConfiguredBaseDir(t3Home: Option.Option<string>): Option.Optio
 
 export function resolveDesktopBaseDir(input: {
   readonly homeDirectory: string;
+  readonly platform: NodeJS.Platform;
+  readonly localAppData: string | undefined;
   readonly joinPath: JoinPath;
   readonly t3Home: Option.Option<string>;
 }): string {
+  if (isLanDistribution) {
+    const expected = resolveDistributionHome(input);
+    return assertDistributionHome(
+      Option.getOrElse(normalizeConfiguredBaseDir(input.t3Home), () => expected),
+      expected,
+    );
+  }
   return Option.getOrElse(normalizeConfiguredBaseDir(input.t3Home), () =>
     input.joinPath(input.homeDirectory, ".t3"),
   );
@@ -27,6 +41,8 @@ export function resolveDesktopStateDir(input: {
   readonly t3Home: Option.Option<string>;
 }): string {
   const useDevSubdir =
-    input.isDevelopment && Option.isNone(normalizeConfiguredBaseDir(input.t3Home));
+    !isLanDistribution &&
+    input.isDevelopment &&
+    Option.isNone(normalizeConfiguredBaseDir(input.t3Home));
   return input.joinPath(input.baseDir, useDevSubdir ? "dev" : "userdata");
 }

@@ -5,6 +5,19 @@ When a server is behind your web or desktop app, an update notice appears in the
 conversation and **Settings → Connections**. Update the machine named in that
 notice.
 
+## T3 Code LAN fork
+
+In the LAN desktop app, use **Settings → About → Check Fork Updates** or the
+sidebar update control to check the [fork's releases](https://github.com/JacKAsterisK/t3code/releases).
+The check reads public release metadata and shows the distribution and app versions
+when a compatible LAN release is available. **Release Notes** opens that release.
+On a LAN command-line server, `t3 update --check` checks the same fork channel.
+
+Use Reprint Hub to verify, stage and activate the package while T3 Code is stopped.
+The check does not download the package or install it. LAN builds do not fall back
+to official T3 releases or use the app's automatic installer. The automatic app
+and server update instructions below apply to upstream builds.
+
 ## Update everything at once
 
 The update button at the bottom of the sidebar updates every connected machine

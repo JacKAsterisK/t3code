@@ -9,6 +9,7 @@ import {
   AuthMcpTokenError,
   type AuthMcpTokenRequest,
   type AuthMcpTokenResult,
+  type AuthMcpRevokeRequest,
   type AuthMcpClientAccess,
   type AuthEnvironmentScope,
   AuthOrchestrationOperateScope,
@@ -29,6 +30,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
+import * as McpOAuthGrants from "./McpOAuthGrants.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import {
   base64UrlDecodeUtf8,
@@ -87,8 +89,9 @@ export const authorizationServerMetadata = (
   authorization_endpoint: `${urls.issuer}/oauth/mcp/authorize`,
   token_endpoint: `${urls.issuer}/oauth/mcp/token`,
   registration_endpoint: `${urls.issuer}/oauth/mcp/register`,
+  revocation_endpoint: `${urls.issuer}/oauth/mcp/revoke`,
   response_types_supported: ["code"],
-  grant_types_supported: ["authorization_code"],
+  grant_types_supported: ["authorization_code", "refresh_token"],
   code_challenge_methods_supported: ["S256"],
   token_endpoint_auth_methods_supported: ["none"],
   scopes_supported: MCP_OAUTH_SCOPES,
@@ -174,6 +177,8 @@ export interface AuthorizationRequest {
   readonly state: string | undefined;
   readonly resource: string;
   readonly issuer: string;
+  readonly taskOnly: boolean;
+  readonly renewable: boolean;
 }
 
 interface PendingCode {
@@ -184,6 +189,8 @@ interface PendingCode {
   readonly resource: string;
   readonly access: AuthMcpClientAccess;
   readonly expiresAtMs: number;
+  readonly taskOnly: boolean;
+  readonly renewable: boolean;
 }
 
 export type ApprovalDecision = Exclude<AuthMcpApprovalDecision, { readonly _tag: "deny" }>;
@@ -217,6 +224,10 @@ export class McpOAuth extends Context.Service<
       readonly urls: McpOAuthUrls;
       readonly token: AuthMcpTokenRequest;
     }) => Effect.Effect<AuthMcpTokenResult, AuthMcpTokenError>;
+    readonly revoke: (input: {
+      readonly urls: McpOAuthUrls;
+      readonly token: AuthMcpRevokeRequest;
+    }) => Effect.Effect<void, AuthMcpTokenError>;
   }
 >()("t3/auth/McpOAuth") {}
 
@@ -238,6 +249,7 @@ export const redirectForError = (error: McpOAuthRedirectError, issuer: string) =
 
 const make = Effect.gen(function* () {
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+  const grants = yield* McpOAuthGrants.McpOAuthGrants;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const crypto = yield* Crypto.Crypto;
   const signingKey = yield* secretStore
@@ -285,6 +297,8 @@ const make = Effect.gen(function* () {
         authorization.client.clientId,
         authorization.redirectUri,
         authorization.codeChallenge,
+        authorization.taskOnly,
+        authorization.renewable,
       ]),
     );
 
@@ -357,6 +371,20 @@ const make = Effect.gen(function* () {
     if (!sameResource(urls, request.resource)) {
       return yield* fail("invalid_target", `This server only issues tokens for ${urls.resource}.`);
     }
+    if (
+      (request.task_only !== undefined && request.task_only !== "true") ||
+      (request.offline_access !== undefined && request.offline_access !== "true") ||
+      (request.offline_access === "true" && request.task_only !== "true")
+    ) {
+      return yield* fail(
+        "invalid_request",
+        "Renewable access requires an explicit task-only request.",
+      );
+    }
+    const taskOnly = request.task_only === "true";
+    if (taskOnly && parseRedirect(urls.resource) === undefined) {
+      return yield* fail("invalid_request", "Task access requires HTTPS or loopback transport.");
+    }
     return {
       client,
       redirectUri,
@@ -364,6 +392,8 @@ const make = Effect.gen(function* () {
       state,
       resource: urls.resource,
       issuer: urls.issuer,
+      taskOnly,
+      renewable: request.offline_access === "true",
     } satisfies AuthorizationRequest;
   });
 
@@ -400,6 +430,8 @@ const make = Effect.gen(function* () {
         resource: authorization.resource,
         access,
         expiresAtMs: now + AUTHORIZATION_CODE_TTL_MS,
+        taskOnly: authorization.taskOnly,
+        renewable: authorization.renewable,
       });
       return next;
     });
@@ -408,6 +440,11 @@ const make = Effect.gen(function* () {
 
   const approve: McpOAuth["Service"]["approve"] = Effect.fn("McpOAuth.approve")(function* (input) {
     const { decision } = input;
+    if (input.authorization.taskOnly && decision.access === "full-access") {
+      return yield* new McpOAuthPageError({
+        description: "Task-only access is limited to Auto or a lower mode.",
+      });
+    }
     if (decision._tag === "pairing-code") {
       yield* environmentAuth.consumeMcpApprovalCode(decision.code, decision.access).pipe(
         Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
@@ -460,8 +497,59 @@ const make = Effect.gen(function* () {
     function* ({ request, urls, token }) {
       const fail = (error: AuthMcpTokenError["error"], description: string) =>
         new AuthMcpTokenError({ error, error_description: description });
+      const grantResult = (issued: {
+        readonly token: string;
+        readonly expiresIn: number;
+        readonly grantId: string;
+        readonly access: AuthMcpClientAccess;
+        readonly refreshToken?: string;
+        readonly refreshExpiresIn?: number;
+      }): AuthMcpTokenResult => ({
+        access_token: issued.token,
+        token_type: "Bearer",
+        expires_in: issued.expiresIn,
+        scope: encodeOAuthScope(EnvironmentAuth.mcpClientScopes(issued.access)),
+        grant_id: issued.grantId,
+        task_only: true,
+        ...(issued.refreshToken === undefined
+          ? {}
+          : { refresh_token: issued.refreshToken, refresh_expires_in: issued.refreshExpiresIn! }),
+      });
+      if (token.grant_type === "refresh_token") {
+        if (
+          !token.client_id ||
+          !token.refresh_token ||
+          !token.resource ||
+          !sameResource(urls, token.resource) ||
+          parseRedirect(urls.resource) === undefined
+        ) {
+          return yield* fail(
+            "invalid_request",
+            "client_id, refresh_token and the secure MCP resource are required.",
+          );
+        }
+        return yield* grants
+          .refresh({
+            clientId: token.client_id,
+            resource: urls.resource,
+            token: token.refresh_token,
+            client: deriveAuthClientMetadata({ request }),
+          })
+          .pipe(
+            Effect.map(grantResult),
+            Effect.mapError(() =>
+              fail(
+                "invalid_grant",
+                "The task grant is invalid, expired or revoked. Approve a new sign-in.",
+              ),
+            ),
+          );
+      }
       if (token.grant_type !== "authorization_code") {
-        return yield* fail("unsupported_grant_type", "Only authorization_code is supported.");
+        return yield* fail(
+          "unsupported_grant_type",
+          "Only authorization_code and refresh_token are supported.",
+        );
       }
       const { code, redirect_uri: redirectUri, client_id: clientId } = token;
       const verifier = token.code_verifier;
@@ -494,6 +582,20 @@ const make = Effect.gen(function* () {
       ) {
         return yield* fail("invalid_grant", "The authorization code is invalid or expired.");
       }
+      if (pending.taskOnly) {
+        return yield* grants
+          .issue({
+            clientId,
+            resource: urls.resource,
+            access: pending.access,
+            client: { ...deriveAuthClientMetadata({ request }), label: pending.clientName },
+            renewable: pending.renewable,
+          })
+          .pipe(
+            Effect.map(grantResult),
+            Effect.mapError(() => fail("invalid_grant", "The task grant could not be issued.")),
+          );
+      }
       const issued = yield* environmentAuth
         .issueMcpClientSession({
           label: pending.clientName,
@@ -518,6 +620,29 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const revoke: McpOAuth["Service"]["revoke"] = Effect.fn("McpOAuth.revoke")(function* ({
+    urls,
+    token,
+  }) {
+    if (!sameResource(urls, token.resource) || parseRedirect(urls.resource) === undefined) {
+      return yield* new AuthMcpTokenError({
+        error: "invalid_request",
+        error_description: "A secure matching MCP resource is required.",
+      });
+    }
+    yield* grants
+      .revoke({ clientId: token.client_id, resource: urls.resource, token: token.token })
+      .pipe(
+        Effect.mapError(
+          () =>
+            new AuthMcpTokenError({
+              error: "invalid_grant",
+              error_description: "The task grant could not be revoked.",
+            }),
+        ),
+      );
+  });
+
   return McpOAuth.of({
     register,
     validateAuthorization,
@@ -525,6 +650,7 @@ const make = Effect.gen(function* () {
     approve,
     deny,
     exchangeCode,
+    revoke,
   });
 });
 
@@ -543,12 +669,15 @@ export const layerMcpClientAuthenticator = Layer.effect(
             Clock.currentTimeMillis.pipe(
               Effect.map((issuedAt): McpInvocationContext.McpInvocationScope => ({
                 environmentId,
-                requestNamespace: `client:${client.sessionId}`,
+                requestNamespace: `client:${client.grantId ?? client.sessionId}`,
                 thread: undefined,
                 client: {
                   sessionId: client.sessionId,
                   label: client.label,
                   access: client.access,
+                  ...(client.grantId === undefined
+                    ? {}
+                    : { grantId: client.grantId, taskOnly: client.taskOnly }),
                 },
                 capabilities: new Set<McpInvocationContext.McpCapability>([
                   "orchestration",

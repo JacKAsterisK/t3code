@@ -30,6 +30,7 @@ import * as Tracer from "effect/Tracer";
 import { OtlpExporter, OtlpLogger, OtlpTracer } from "effect/observability";
 
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import { telemetryEnabled } from "@t3tools/shared/distribution";
 
 const DESKTOP_LOG_FILE_MAX_BYTES = 10 * 1024 * 1024;
 const DESKTOP_LOG_FILE_MAX_FILES = 10;
@@ -343,6 +344,14 @@ const readPersistedObservabilitySettings: Effect.Effect<
 });
 
 const resolveOtlpEndpoints = Effect.gen(function* () {
+  if (!telemetryEnabled)
+    return {
+      traces: undefined,
+      metrics: undefined,
+      logs: undefined,
+      warnings: [],
+      resourceAttributes: {},
+    };
   const otel = yield* OtelEnvironment.load;
   if (otel.disabled) {
     return {

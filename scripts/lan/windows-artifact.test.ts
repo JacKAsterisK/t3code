@@ -1,6 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off - Synthetic archives and signature port only; no native process or provider is run.
 import { it } from "@effect/vitest";
 import * as NodeAssert from "node:assert/strict";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeModule from "node:module";
+import { createPackageWithOptions } from "@electron/asar";
 import { readPortableZip, strictJson, validateWindowsArtifact } from "./windows-artifact.ts";
 import { fixture, zip, asar, pe, json, commit } from "./windows-artifact.fixtures.ts";
 import { sha256 } from "./hub-distribution.ts";
@@ -22,6 +27,214 @@ function patchHeader(
   encoded.copy(prefix, 16);
   return Buffer.concat([prefix, old.subarray(8 + oldSize)]);
 }
+
+async function writerArchive(
+  createPackage: typeof createPackageWithOptions,
+  additionalFiles: ReadonlyMap<string, Uint8Array>,
+) {
+  const parent = await NodeFSP.realpath(NodeOS.tmpdir());
+  const directory = await NodeFSP.mkdtemp(NodePath.join(parent, "t3-asar-shared-ranges-"));
+  try {
+    const source = NodePath.join(directory, "source"),
+      archivePath = NodePath.join(directory, "shared.asar");
+    const original = Buffer.from(fixture().files.get("resources/server.asar")!),
+      dataStart = 8 + original.readUInt32LE(4);
+    const originalHeader = JSON.parse(
+      original.subarray(16, 16 + original.readUInt32LE(12)).toString("utf8"),
+    );
+    const serverFiles = originalHeader.files.apps.files.server.files.dist.files;
+    for (const [name, entry] of [
+      ["apps/server/dist/bin.mjs", serverFiles["bin.mjs"]],
+      ["apps/server/dist/web/assets/main.js", serverFiles.web.files.assets.files["main.js"]],
+    ] as const) {
+      const file = NodePath.join(source, name),
+        offset = dataStart + Number(entry.offset);
+      await NodeFSP.mkdir(NodePath.dirname(file), { recursive: true });
+      await NodeFSP.writeFile(file, original.subarray(offset, offset + entry.size));
+    }
+    for (const [name, contents] of additionalFiles)
+      await NodeFSP.writeFile(NodePath.join(source, name), contents);
+    await createPackage(source, archivePath, {});
+    return await NodeFSP.readFile(archivePath);
+  } finally {
+    NodeAssert.equal(NodePath.dirname(await NodeFSP.realpath(directory)), parent);
+    await NodeFSP.rm(directory, { recursive: true });
+  }
+}
+
+it("accepts exact shared ranges emitted by the pinned ASAR writer", async () => {
+  const blockSize = 4 * 1024 ** 2;
+  const archive = await writerArchive(
+    createPackageWithOptions,
+    new Map([
+      ["one.txt", Buffer.from("public duplicate contents")],
+      ["two.txt", Buffer.from("public duplicate contents")],
+      ["empty.txt", Buffer.alloc(0)],
+      ["block.bin", Buffer.alloc(blockSize, 0x61)],
+    ]),
+  );
+  const header = JSON.parse(archive.subarray(16, 16 + archive.readUInt32LE(12)).toString("utf8"));
+  NodeAssert.equal(header.files["one.txt"].offset, header.files["two.txt"].offset);
+  NodeAssert.ok(header.files["one.txt"].size > 0);
+  NodeAssert.equal(header.files["one.txt"].size, header.files["two.txt"].size);
+  NodeAssert.equal(header.files["block.bin"].integrity.blockSize, blockSize);
+  NodeAssert.equal(header.files["block.bin"].integrity.blocks.length, 1);
+  const input = fixture((files) => files.set("resources/server.asar", archive));
+  NodeAssert.equal((await validateWindowsArtifact(input)).passed, true);
+});
+
+it("accepts the desktop ASAR writer's trailing empty block at an exact positive block multiple", async () => {
+  const desktopRequire = NodeModule.createRequire(
+    new URL("../../apps/desktop/package.json", import.meta.url),
+  );
+  const builderRequire = NodeModule.createRequire(desktopRequire.resolve("electron-builder"));
+  const appBuilderRequire = NodeModule.createRequire(builderRequire.resolve("app-builder-lib"));
+  NodeAssert.equal(appBuilderRequire("@electron/asar/package.json").version, "3.4.1");
+  const writer = appBuilderRequire("@electron/asar") as Pick<
+    typeof import("@electron/asar"),
+    "createPackageWithOptions"
+  >;
+  const blockSize = 4 * 1024 ** 2;
+  const archive = await writerArchive(
+    writer.createPackageWithOptions,
+    new Map([["block.bin", Buffer.alloc(blockSize, 0x61)]]),
+  );
+  const header = JSON.parse(archive.subarray(16, 16 + archive.readUInt32LE(12)).toString("utf8"));
+  NodeAssert.equal(header.files["block.bin"].integrity.blockSize, blockSize);
+  NodeAssert.equal(header.files["block.bin"].integrity.blocks.length, 2);
+  NodeAssert.equal(header.files["block.bin"].integrity.blocks[1], sha256(new Uint8Array()));
+  const input = fixture((files) => files.set("resources/server.asar", archive));
+  NodeAssert.equal((await validateWindowsArtifact(input)).passed, true);
+});
+
+it("accepts empty ASAR entries at occupied offsets in either header order", async () => {
+  const emptyDigest = sha256(new Uint8Array());
+  for (const offset of ["0", "1"])
+    for (const first of [false, true]) {
+      const input = fixture((files) =>
+        files.set(
+          "resources/server.asar",
+          patchHeader(files.get("resources/server.asar")!, (header) => {
+            const entry = {
+              size: 0,
+              offset,
+              integrity: {
+                algorithm: "SHA256",
+                hash: emptyDigest,
+                blockSize: 4 * 1024 ** 2,
+                blocks: [emptyDigest],
+              },
+            };
+            header.files = first
+              ? { "empty.txt": entry, ...header.files }
+              : { ...header.files, "empty.txt": entry };
+          }),
+        ),
+      );
+      NodeAssert.equal((await validateWindowsArtifact(input)).passed, true);
+    }
+});
+
+it("refuses partial and nested positive ASAR ranges with valid hashes in either header order", async () => {
+  for (const first of [false, true])
+    for (const [offset, length] of [
+      [1, 1],
+      [0, 1],
+      [1, undefined],
+    ] as const) {
+      const input = fixture((files) => {
+        const archive = Buffer.from(files.get("resources/server.asar")!),
+          data = archive.subarray(8 + archive.readUInt32LE(4)),
+          content = data.subarray(offset, length === undefined ? data.length : offset + length);
+        files.set(
+          "resources/server.asar",
+          patchHeader(archive, (header) => {
+            const entry = {
+              size: content.length,
+              offset: String(offset),
+              integrity: { algorithm: "SHA256", hash: sha256(content) },
+            };
+            header.files = first
+              ? { "overlap.txt": entry, ...header.files }
+              : { ...header.files, "overlap.txt": entry };
+          }),
+        );
+      });
+      await NodeAssert.rejects(() => validateWindowsArtifact(input), /ASAR file ranges overlap/u);
+    }
+});
+
+it("refuses corrupted shared-range integrity and out-of-bounds empty ASAR entries", async () => {
+  for (const invalid of ["hash", "block", "bounds"] as const) {
+    const input = fixture((files) => {
+      const archive = Buffer.from(files.get("resources/server.asar")!),
+        dataLength = archive.length - 8 - archive.readUInt32LE(4);
+      files.set(
+        "resources/server.asar",
+        patchHeader(archive, (header) => {
+          const original = JSON.parse(
+            archive.subarray(16, 16 + archive.readUInt32LE(12)).toString("utf8"),
+          ).files.apps.files.server.files.dist.files["bin.mjs"];
+          header.files["invalid.txt"] =
+            invalid === "bounds"
+              ? {
+                  size: 0,
+                  offset: String(dataLength + 1),
+                  integrity: { algorithm: "SHA256", hash: sha256(new Uint8Array()) },
+                }
+              : {
+                  ...original,
+                  integrity: {
+                    algorithm: "SHA256",
+                    hash: invalid === "hash" ? "0".repeat(64) : original.integrity.hash,
+                    blockSize: 4 * 1024 ** 2,
+                    blocks: ["0".repeat(64)],
+                  },
+                };
+        }),
+      );
+    });
+    await NodeAssert.rejects(
+      () => validateWindowsArtifact(input),
+      invalid === "hash"
+        ? /ASAR integrity differs/u
+        : invalid === "block"
+          ? /ASAR block integrity differs/u
+          : /ASAR file is outside/u,
+    );
+  }
+});
+
+it("refuses arbitrary extra ASAR blocks beyond the exact-size legacy empty suffix", async () => {
+  for (const invalid of ["count", "suffix", "partial", "block", "block-size"] as const) {
+    const input = fixture((files) => {
+      const archive = Buffer.from(files.get("resources/server.asar")!),
+        dataLength = archive.length - 8 - archive.readUInt32LE(4),
+        content = Buffer.alloc(
+          invalid === "partial" ? 7 : invalid === "block-size" ? 8 : 4 * 1024 ** 2,
+          0x61,
+        ),
+        empty = sha256(new Uint8Array()),
+        blockSize = invalid === "block-size" ? 4 : 4 * 1024 ** 2,
+        blocks =
+          blockSize === 4
+            ? [sha256(content.subarray(0, 4)), sha256(content.subarray(4)), empty]
+            : [sha256(content), empty];
+      if (invalid === "count") blocks.push(empty);
+      if (invalid === "suffix") blocks[blocks.length - 1] = "0".repeat(64);
+      if (invalid === "block") blocks[0] = "0".repeat(64);
+      const header = patchHeader(archive, (header) => {
+        header.files["blocks.bin"] = {
+          size: content.length,
+          offset: String(dataLength),
+          integrity: { algorithm: "SHA256", hash: sha256(content), blockSize, blocks },
+        };
+      });
+      files.set("resources/server.asar", Buffer.concat([header, content]));
+    });
+    await NodeAssert.rejects(() => validateWindowsArtifact(input), /ASAR block integrity differs/u);
+  }
+});
 
 it("accepts the ASAR writer's single integrity block for an empty file", async () => {
   const emptyDigest = sha256(new Uint8Array());

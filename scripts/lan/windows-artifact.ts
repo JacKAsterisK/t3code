@@ -353,7 +353,7 @@ function readAsar(bytes: Uint8Array, unpacked: ReadonlyMap<string, Uint8Array>, 
       if (!Number.isSafeInteger(from) || to > input.length)
         fail("ASAR file is outside the archive.");
       content = input.subarray(from, to);
-      ranges.push([from, to]);
+      if (length > 0) ranges.push([from, to]);
       if (nativeFile(prefix, content))
         fail("Native ASAR files must be unpacked for signature verification.");
     }
@@ -375,7 +375,14 @@ function readAsar(bytes: Uint8Array, unpacked: ReadonlyMap<string, Uint8Array>, 
         size <= 0 ||
         !Array.isArray(blocks) ||
         // Electron's ASAR writer emits the empty digest as one block for an empty file.
-        blocks.length !== Math.max(1, Math.ceil(content.length / size)) ||
+        (blocks.length !== Math.max(1, Math.ceil(content.length / size)) &&
+          // ASAR 3 also flushes an empty block after exact positive 4 MiB multiples.
+          !(
+            size === 4 * 1024 ** 2 &&
+            content.length > 0 &&
+            content.length % size === 0 &&
+            blocks.length === content.length / size + 1
+          )) ||
         blocks.some(
           (block: unknown, index: number) =>
             block !== sha256(content.subarray(index * size, (index + 1) * size)),
@@ -387,7 +394,13 @@ function readAsar(bytes: Uint8Array, unpacked: ReadonlyMap<string, Uint8Array>, 
   };
   walk(root, "", 0);
   ranges.sort(([a], [b]) => a - b);
-  if (ranges.some(([, to], index) => to > (ranges[index + 1]?.[0] ?? input.length)))
+  // ASAR 4 deduplicates identical contents into one exact extent, never partial overlaps.
+  if (
+    ranges.some(([from, to], index) => {
+      const next = ranges[index + 1];
+      return next !== undefined && to > next[0] && (from !== next[0] || to !== next[1]);
+    })
+  )
     fail("ASAR file ranges overlap.");
   return files;
 }

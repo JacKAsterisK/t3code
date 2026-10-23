@@ -103,6 +103,7 @@ export default defineConfig({
       define: publicConfigDefine,
       clean: false,
       deps: {
+        alwaysBundle: (id) => id === "@t3tools/shared/distribution",
         neverBundle: (id) => id === "./main.cjs" || id === "./compileCache.cjs",
       },
     },
@@ -116,9 +117,12 @@ export default defineConfig({
       entry: ["src/preload.ts"],
       deps: {
         // Sandboxed Electron preloads cannot reliably resolve package imports
-        // from inside the packaged ASAR. Bundle Clerk's preload bridge into the
-        // preload artifact instead of leaving a runtime require() behind.
-        alwaysBundle: (id) => id === "@clerk/electron" || id.startsWith("@clerk/electron/"),
+        // from inside the packaged ASAR. Keep the distribution policy and
+        // Clerk's preload bridge inside the preload artifact.
+        alwaysBundle: (id) =>
+          id === "@t3tools/shared/distribution" ||
+          id === "@clerk/electron" ||
+          id.startsWith("@clerk/electron/"),
       },
     },
     {

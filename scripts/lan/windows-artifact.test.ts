@@ -3,6 +3,7 @@ import { it } from "@effect/vitest";
 import * as NodeAssert from "node:assert/strict";
 import { readPortableZip, strictJson, validateWindowsArtifact } from "./windows-artifact.ts";
 import { fixture, zip, asar, pe, json, commit } from "./windows-artifact.fixtures.ts";
+import { sha256 } from "./hub-distribution.ts";
 function patchHeader(
   bytes: Uint8Array,
   edit: (header: { files: Record<string, Record<string, unknown>> }) => void,
@@ -21,6 +22,56 @@ function patchHeader(
   encoded.copy(prefix, 16);
   return Buffer.concat([prefix, old.subarray(8 + oldSize)]);
 }
+
+it("accepts the ASAR writer's single integrity block for an empty file", async () => {
+  const emptyDigest = sha256(new Uint8Array());
+  const input = fixture((files) => {
+    const archive = Buffer.from(files.get("resources/server.asar")!);
+    const dataLength = archive.length - 8 - archive.readUInt32LE(4);
+    files.set(
+      "resources/server.asar",
+      patchHeader(archive, (header) => {
+        header.files["empty.txt"] = {
+          size: 0,
+          offset: String(dataLength),
+          integrity: {
+            algorithm: "SHA256",
+            hash: emptyDigest,
+            blockSize: 4 * 1024 ** 2,
+            blocks: [emptyDigest],
+          },
+        };
+      }),
+    );
+  });
+  NodeAssert.equal((await validateWindowsArtifact(input)).passed, true);
+});
+
+it("refuses missing, extra or corrupted empty ASAR integrity blocks", async () => {
+  const emptyDigest = sha256(new Uint8Array());
+  for (const blocks of [[], ["0".repeat(64)], [emptyDigest, emptyDigest]]) {
+    const input = fixture((files) => {
+      const archive = Buffer.from(files.get("resources/server.asar")!);
+      const dataLength = archive.length - 8 - archive.readUInt32LE(4);
+      files.set(
+        "resources/server.asar",
+        patchHeader(archive, (header) => {
+          header.files["empty.txt"] = {
+            size: 0,
+            offset: String(dataLength),
+            integrity: {
+              algorithm: "SHA256",
+              hash: emptyDigest,
+              blockSize: 4 * 1024 ** 2,
+              blocks,
+            },
+          };
+        }),
+      );
+    });
+    await NodeAssert.rejects(() => validateWindowsArtifact(input), /ASAR block integrity/u);
+  }
+});
 
 it("rejects ASAR flag types that disagree with Electron's truthy unpacked interpretation", async () => {
   for (const field of ["unpacked", "executable", "integrity"]) {

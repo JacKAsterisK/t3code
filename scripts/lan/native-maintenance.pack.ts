@@ -17,6 +17,33 @@ import { assertOwnedNativeHelperFile, inspectNativeHelperOutput } from "./native
 const decodeLock = Schema.decodeUnknownSync(BuildLock, {
   onExcessProperty: "error",
 });
+export const nativeMaintenanceBundleOptions = (
+  root: string,
+  outDir: string,
+  identity: LanBuildIdentity,
+) => ({
+  config: false as const,
+  cwd: root,
+  entry: {
+    "native-maintenance": NodePath.join(root, "apps/server/src/lan/nativeMaintenanceEntry.ts"),
+  },
+  outDir,
+  format: "esm" as const,
+  platform: "node" as const,
+  target: "node24",
+  dts: false,
+  clean: false,
+  define: lanBuildDefines(identity),
+  deps: {
+    alwaysBundle: [
+      /^effect(?:\/|$)/,
+      /^@effect\/platform-node(?:-shared)?(?:\/|$)/,
+      /^@t3tools\/(?:contracts|shared)(?:\/|$)/,
+    ],
+    onlyBundle: ["effect", "@effect/platform-node", "@effect/platform-node-shared"],
+  },
+});
+
 export async function buildNativeMaintenance(
   rawIdentity: LanBuildIdentity,
   lockBytes: Uint8Array,
@@ -46,27 +73,7 @@ export async function buildNativeMaintenance(
       assertOwnedNativeHelperFile(file);
       NodeFS.unlinkSync(file.path);
     }
-    await build({
-      config: false,
-      entry: {
-        "native-maintenance": NodePath.join(root, "apps/server/src/lan/nativeMaintenanceEntry.ts"),
-      },
-      outDir,
-      format: "esm",
-      platform: "node",
-      target: "node24",
-      dts: false,
-      clean: false,
-      define: lanBuildDefines(identity),
-      deps: {
-        alwaysBundle: [
-          /^effect(?:\/|$)/,
-          /^@effect\/platform-node(?:-shared)?(?:\/|$)/,
-          /^@t3tools\/(?:contracts|shared)(?:\/|$)/,
-        ],
-        onlyBundle: ["effect", "@effect/platform-node", "@effect/platform-node-shared"],
-      },
-    });
+    await build(nativeMaintenanceBundleOptions(root, outDir, identity));
     const files = NodeFS.readdirSync(outDir)
       .filter((name) => name.endsWith(".mjs"))
       .sort()

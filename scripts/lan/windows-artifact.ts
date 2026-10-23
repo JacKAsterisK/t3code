@@ -374,7 +374,8 @@ function readAsar(bytes: Uint8Array, unpacked: ReadonlyMap<string, Uint8Array>, 
         !Number.isSafeInteger(size) ||
         size <= 0 ||
         !Array.isArray(blocks) ||
-        blocks.length !== Math.ceil(content.length / size) ||
+        // Electron's ASAR writer emits the empty digest as one block for an empty file.
+        blocks.length !== Math.max(1, Math.ceil(content.length / size)) ||
         blocks.some(
           (block: unknown, index: number) =>
             block !== sha256(content.subarray(index * size, (index + 1) * size)),

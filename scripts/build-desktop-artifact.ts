@@ -3220,13 +3220,130 @@ export const parseWslRuntimeArchiveMembers = (listing: string): ReadonlyArray<st
     .map((member) => member.replace(/^\.\//, "").replace(/\/$/, ""))
     .filter((member) => member.length > 0);
 
+export const pruneLanWindowsX64Stage = Effect.fn("pruneLanWindowsX64Stage")(function* (input: {
+  readonly stageRoot: string;
+  readonly repoRoot: string;
+  readonly kind: "app" | "server";
+}) {
+  yield* Effect.tryPromise({
+    try: async () => {
+      const inside = (root: string, file: string) => {
+        const relative = NodePath.relative(root, file);
+        return (
+          relative !== "" &&
+          !relative.startsWith(`..${NodePath.sep}`) &&
+          relative !== ".." &&
+          !NodePath.isAbsolute(relative)
+        );
+      };
+      for (const root of [input.stageRoot, input.repoRoot])
+        if (!NodePath.isAbsolute(root) || NodePath.resolve(root) !== root)
+          throw new Error("LAN native pruning requires canonical absolute stage/source paths.");
+      const stageRoot = await NodeFSP.realpath(input.stageRoot),
+        repoRoot = await NodeFSP.realpath(input.repoRoot);
+      if (
+        NodePath.relative(stageRoot, input.stageRoot) !== "" ||
+        stageRoot === repoRoot ||
+        inside(repoRoot, stageRoot) ||
+        inside(stageRoot, repoRoot)
+      )
+        throw new Error("LAN native pruning requires a separate ordinary disposable stage.");
+      const stageDir = NodePath.join(stageRoot, input.kind);
+      if (NodePath.relative(stageDir, await NodeFSP.realpath(stageDir)) !== "")
+        throw new Error("LAN native pruning cannot follow a linked stage root.");
+      const stagedPath = async (file: string) => {
+        try {
+          await NodeFSP.lstat(file);
+        } catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+          throw cause;
+        }
+        const actual = await NodeFSP.realpath(file);
+        if (!inside(stageDir, actual))
+          throw new Error("LAN native pruning refused a path outside its stage.");
+        return actual;
+      };
+      const modules = NodePath.join(stageDir, "node_modules");
+      const store = await stagedPath(NodePath.join(modules, ".pnpm"));
+      const storeEntries = store === undefined ? [] : await NodeFSP.readdir(store);
+      const packages = async (name: string) => {
+        const candidates = [
+          NodePath.join(modules, name),
+          ...storeEntries
+            .filter((entry) => entry.startsWith(`${name.replace("/", "+")}@`))
+            .map((entry) => NodePath.join(store!, entry, "node_modules", name)),
+        ];
+        const roots = new Set<string>();
+        for (const candidate of candidates) {
+          const actual = await stagedPath(candidate);
+          if (actual !== undefined) roots.add(actual);
+        }
+        return roots;
+      };
+      const candidates = [];
+      for (const root of await packages("node-pty"))
+        for (const target of [
+          "darwin-arm64",
+          "darwin-x64",
+          "linux-arm64",
+          "linux-x64",
+          "win32-arm64",
+          "win32-ia32",
+        ])
+          candidates.push(NodePath.join(root, "prebuilds", target));
+      // Keep optional package metadata and graph links available to pnpm's desktop collector.
+      for (const root of await packages("@yuuang/ffi-rs-win32-ia32-msvc"))
+        candidates.push(NodePath.join(root, "ffi-rs.win32-ia32-msvc.node"));
+      if (input.kind === "server")
+        for (const name of [".modules.yaml", ".pnpm-workspace-state-v1.json"])
+          candidates.push(NodePath.join(modules, name));
+      const removals = new Set<string>();
+      const inspect = async (file: string): Promise<void> => {
+        const stat = await NodeFSP.lstat(file);
+        if (stat.isSymbolicLink()) {
+          await stagedPath(file);
+          return;
+        }
+        if (stat.isDirectory())
+          for (const entry of await NodeFSP.readdir(file))
+            await inspect(NodePath.join(file, entry));
+        else if (!stat.isFile())
+          throw new Error("LAN native pruning requires ordinary staged files.");
+      };
+      for (const candidate of candidates) {
+        if ((await stagedPath(candidate)) === undefined) continue;
+        const parent = await NodeFSP.realpath(NodePath.dirname(candidate));
+        if (!inside(stageDir, parent))
+          throw new Error("LAN native pruning refused an outside parent.");
+        const file = NodePath.join(parent, NodePath.basename(candidate));
+        await inspect(file);
+        removals.add(file);
+      }
+      // Unlinking stage hardlinks preserves the private store/source bytes; no file is rewritten.
+      for (const file of removals) await NodeFSP.rm(file, { recursive: true });
+    },
+    catch: (cause) =>
+      new LanBuildConfigurationError({
+        reason: cause instanceof Error ? cause.message : "LAN Windows native stage pruning failed.",
+      }),
+  });
+});
+
 export const packWindowsServerAsar = Effect.fn("packWindowsServerAsar")(function* (input: {
   readonly sourceDir: string;
   readonly asarPath: string;
   readonly arch: typeof BuildArch.Type;
+  readonly lanStage?: { readonly stageRoot: string; readonly repoRoot: string };
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  if (input.lanStage !== undefined) {
+    if (input.arch !== "x64" || input.sourceDir !== path.join(input.lanStage.stageRoot, "server"))
+      return yield* new LanBuildConfigurationError({
+        reason: "LAN server pruning requires its Windows x64 stage.",
+      });
+    yield* pruneLanWindowsX64Stage({ ...input.lanStage, kind: "server" });
+  }
   // Native addons are unpacked only when they are Windows PE ("MZ") binaries.
   // Signed builds Authenticode-sign every unpacked .node file, which fails on
   // the darwin and linux prebuilds some packages (node-pty) ship alongside
@@ -3362,6 +3479,9 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
     sourceDir: serverStageDir,
     asarPath: input.asarPath,
     arch: input.arch,
+    ...(input.lanBuild === undefined
+      ? {}
+      : { lanStage: { stageRoot: input.stageRoot, repoRoot: input.repoRoot } }),
   });
   const packedStat = yield* fs.stat(input.asarPath);
   yield* Effect.log(
@@ -4185,6 +4305,8 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   );
   yield* stageClerkPasskeyNativeBinaries(stageAppDir, options.platform, options.arch);
   yield* stageKeyringNativeBinaries(stageAppDir, options.platform, options.arch);
+  if (options.lanBuild !== undefined)
+    yield* pruneLanWindowsX64Stage({ stageRoot, repoRoot, kind: "app" });
 
   if (options.platform === "win" && windowsServerAsarPath) {
     yield* stageWindowsServerSidecar({

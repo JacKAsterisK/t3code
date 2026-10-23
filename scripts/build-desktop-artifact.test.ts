@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
+import * as NodeFSP from "node:fs/promises";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { extractFile } from "@electron/asar";
@@ -35,6 +36,7 @@ import {
   MacPasskeySigningConfigurationResolutionError,
   MissingMacPasskeyProvisioningProfileError,
   packWindowsServerAsar,
+  pruneLanWindowsX64Stage,
   preflightWindowsDesktopBuild,
   renderMacPasskeyEntitlements,
   resolveMacWebAuthnEntitlements,
@@ -791,6 +793,149 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             path.join(unpackedRoot, "node_modules/node-pty/third_party/conpty/1.0.0/win10-arm64"),
           ),
         );
+      }),
+    ),
+  );
+
+  it.effect("prunes only LAN Windows x64 sidecar alternates and install metadata", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-lan-sidecar-prune-" });
+        const stageRoot = path.join(fixture, "stage"),
+          sourceDir = path.join(stageRoot, "server"),
+          repoRoot = path.join(fixture, "source");
+        const kept = [
+          "node_modules/node-pty/lib/utils.js",
+          "node_modules/node-pty/prebuilds/win32-x64/pty.node",
+          "node_modules/node-pty/prebuilds/win32-x64/conpty/OpenConsole.exe",
+          "node_modules/ffi-rs/index.js",
+          "node_modules/@yuuang/ffi-rs-win32-x64-msvc/ffi-rs.win32-x64-msvc.node",
+        ];
+        const removed = [
+          ...["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-arm64"].map(
+            (target) => `node_modules/node-pty/prebuilds/${target}/pty.node`,
+          ),
+          "node_modules/@yuuang/ffi-rs-win32-ia32-msvc/ffi-rs.win32-ia32-msvc.node",
+          "node_modules/.modules.yaml",
+          "node_modules/.pnpm-workspace-state-v1.json",
+        ];
+        for (const relative of [...kept, ...removed]) {
+          const contents =
+            relative.endsWith(".node") || relative.endsWith(".exe") ? "MZ" : relative;
+          for (const root of [sourceDir, repoRoot]) {
+            const file = path.join(root, relative);
+            yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+            yield* fs.writeFileString(file, contents);
+          }
+        }
+        const input = {
+          sourceDir,
+          asarPath: path.join(fixture, "server.asar"),
+          arch: "x64" as const,
+          lanStage: { stageRoot, repoRoot },
+        };
+        yield* packWindowsServerAsar(input);
+        for (const relative of removed) {
+          assert.isFalse(yield* fs.exists(path.join(sourceDir, relative)), relative);
+          assert.isTrue(yield* fs.exists(path.join(repoRoot, relative)), relative);
+          assert.throws(() => extractFile(input.asarPath, path.join(...relative.split("/"))));
+        }
+        for (const relative of kept) {
+          assert.equal(
+            yield* fs.readFileString(path.join(sourceDir, relative)),
+            yield* fs.readFileString(path.join(repoRoot, relative)),
+          );
+          assert.equal(
+            extractFile(input.asarPath, path.join(...relative.split("/"))).toString(),
+            yield* fs.readFileString(path.join(repoRoot, relative)),
+          );
+        }
+      }),
+    ),
+  );
+
+  it.effect("keeps desktop pnpm discovery and stage hardlink sources while pruning ia32", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-lan-desktop-prune-" });
+        const stageRoot = path.join(fixture, "stage"),
+          stage = path.join(stageRoot, "app"),
+          repoRoot = path.join(fixture, "source"),
+          modules = path.join(stage, "node_modules"),
+          ia32 = path.join(
+            modules,
+            ".pnpm/@yuuang+ffi-rs-win32-ia32-msvc@1.3.2/node_modules/@yuuang/ffi-rs-win32-ia32-msvc",
+          );
+        const kept = [
+          ".modules.yaml",
+          ".pnpm-workspace-state-v1.json",
+          "ffi-rs/index.js",
+          "@yuuang/ffi-rs-win32-x64-msvc/ffi-rs.win32-x64-msvc.node",
+          ".pnpm/@yuuang+ffi-rs-win32-ia32-msvc@1.3.2/node_modules/@yuuang/ffi-rs-win32-ia32-msvc/package.json",
+        ];
+        for (const relative of kept) {
+          const file = path.join(modules, relative);
+          yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+          yield* fs.writeFileString(file, relative);
+        }
+        yield* fs.makeDirectory(repoRoot);
+        const source = path.join(repoRoot, "private-store-fixture.node"),
+          binary = path.join(ia32, "ffi-rs.win32-ia32-msvc.node");
+        yield* fs.writeFileString(source, "public native fixture");
+        yield* Effect.promise(() => NodeFSP.link(source, binary));
+        const packageLink = path.join(modules, "@yuuang/ffi-rs-win32-ia32-msvc");
+        yield* Effect.promise(() => NodeFSP.symlink(ia32, packageLink, "junction"));
+        yield* pruneLanWindowsX64Stage({ stageRoot, repoRoot, kind: "app" });
+        assert.isFalse(yield* fs.exists(binary));
+        assert.equal(yield* fs.readFileString(source), "public native fixture");
+        assert.equal(yield* Effect.promise(() => NodeFSP.realpath(packageLink)), ia32);
+        for (const relative of kept)
+          assert.equal(yield* fs.readFileString(path.join(modules, relative)), relative);
+      }),
+    ),
+  );
+
+  it.effect("refuses overlapping source and outside package aliases before LAN stage cleanup", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-lan-prune-boundary-" });
+        const stageRoot = path.join(fixture, "stage"),
+          modules = path.join(stageRoot, "server/node_modules"),
+          repoRoot = path.join(fixture, "source"),
+          outside = path.join(repoRoot, "node-pty");
+        yield* fs.makeDirectory(modules, { recursive: true });
+        yield* fs.makeDirectory(path.join(outside, "prebuilds/darwin-arm64"), { recursive: true });
+        const source = path.join(outside, "prebuilds/darwin-arm64/pty.node"),
+          metadata = path.join(modules, ".modules.yaml");
+        yield* fs.writeFileString(source, "preserved source binary");
+        yield* fs.writeFileString(metadata, "preserved before refusal");
+        const overlap = yield* pruneLanWindowsX64Stage({
+          stageRoot: repoRoot,
+          repoRoot,
+          kind: "server",
+        }).pipe(Effect.flip);
+        assert.match(overlap.reason, /separate ordinary disposable stage/u);
+        const invalid = yield* pruneLanWindowsX64Stage({
+          stageRoot: `${stageRoot}${path.sep}..`,
+          repoRoot,
+          kind: "server",
+        }).pipe(Effect.flip);
+        assert.match(invalid.reason, /canonical absolute/u);
+        yield* Effect.promise(() =>
+          NodeFSP.symlink(outside, path.join(modules, "node-pty"), "junction"),
+        );
+        const alias = yield* pruneLanWindowsX64Stage({ stageRoot, repoRoot, kind: "server" }).pipe(
+          Effect.flip,
+        );
+        assert.match(alias.reason, /outside its stage/u);
+        assert.equal(yield* fs.readFileString(source), "preserved source binary");
+        assert.equal(yield* fs.readFileString(metadata), "preserved before refusal");
       }),
     ),
   );

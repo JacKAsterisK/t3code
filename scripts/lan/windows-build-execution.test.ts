@@ -367,6 +367,7 @@ it("requires a reviewed PowerShell executable and exposes its selected directory
     execution.stageInstall("C:\\T3LAN\\Output\\stage"),
     execution.builder("C:\\T3LAN\\Output\\stage"),
   ]) {
+    assert.equal(command.env.PATHEXT, ".COM;.EXE;.BAT;.CMD");
     assert.equal(command.env.POWERSHELL_TELEMETRY_OPTOUT, "1");
     assert.equal(command.env.DOTNET_CLI_TELEMETRY_OPTOUT, "1");
     assert.equal(command.env.PSModulePath, "C:\\T3LAN\\Tools\\powershell\\7\\Modules");

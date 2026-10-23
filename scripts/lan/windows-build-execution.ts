@@ -393,6 +393,7 @@ export function createWindowsBuildExecution(input: {
     SystemRoot: "C:\\Windows",
     WINDIR: "C:\\Windows",
     ComSpec: tools.cmd,
+    PATHEXT: ".COM;.EXE;.BAT;.CMD",
     PATH: [
       ...new Set([
         path.dirname(tools.node),

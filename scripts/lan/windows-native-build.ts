@@ -87,8 +87,15 @@ export async function copyNativePinnedCache(
     directories.set(root, { dev: stat.dev, ino: stat.ino });
   };
   await register(outputRoot);
+  const files: Array<{
+    relative: string;
+    parent: string;
+    pin: { readonly length: number; readonly sha256: string };
+  }> = [];
   for (const [relative, pin] of [...pins].sort(([left], [right]) => (left < right ? -1 : 1))) {
     relativeWindowsPath(relative);
+    if (!Number.isSafeInteger(pin.length) || pin.length < 0 || pin.length > 256 * 1024 ** 2)
+      throw new Error("Native offline cache has an invalid or oversized file pin.");
     let parent = outputRoot;
     for (const part of relative.split("/").slice(0, -1)) {
       parent = NodePath.join(parent, part);
@@ -97,31 +104,50 @@ export async function copyNativePinnedCache(
         await register(parent);
       }
     }
-    await assertValidationRoot(parent);
-    for (let at = parent; ; at = NodePath.dirname(at)) {
-      const expected = directories.get(at),
-        actual = await NodeFSP.lstat(at);
-      if (
-        !expected ||
-        !actual.isDirectory() ||
-        actual.isSymbolicLink() ||
-        actual.dev !== expected.dev ||
-        actual.ino !== expected.ino
-      )
-        throw new Error("Native cache output parent changed.");
-      if (at === outputRoot) break;
-    }
-    // Derived caches are verified after copy; never retain a multi-gigabyte store in RAM.
-    const bytes = await readValidationFile(NodePath.join(sourceRoot, relative), 256 * 1024 ** 2);
-    if (bytes.length !== pin.length || sha256(bytes) !== pin.sha256)
-      throw new Error("Native offline cache changed during copy.");
-    const output = await NodeFSP.open(NodePath.join(outputRoot, relative), "wx", 0o600);
-    try {
-      await output.writeFile(bytes);
-    } finally {
-      await output.close();
-    }
+    files.push({ relative, parent, pin });
   }
+  const batch: typeof files = [];
+  let batchBytes = 0;
+  const flush = async () => {
+    // Bound both handles and retained bytes, and finish every write before
+    // returning an error so callers can safely preserve a failed build directory.
+    const settled = await Promise.allSettled(
+      batch.splice(0).map(async ({ relative, parent, pin }) => {
+        await assertValidationRoot(parent);
+        for (let at = parent; ; at = NodePath.dirname(at)) {
+          const expected = directories.get(at),
+            actual = await NodeFSP.lstat(at);
+          if (
+            !expected ||
+            !actual.isDirectory() ||
+            actual.isSymbolicLink() ||
+            actual.dev !== expected.dev ||
+            actual.ino !== expected.ino
+          )
+            throw new Error("Native cache output parent changed.");
+          if (at === outputRoot) break;
+        }
+        const bytes = await readValidationFile(NodePath.join(sourceRoot, relative), pin.length);
+        if (bytes.length !== pin.length || sha256(bytes) !== pin.sha256)
+          throw new Error("Native offline cache changed during copy.");
+        const output = await NodeFSP.open(NodePath.join(outputRoot, relative), "wx", 0o600);
+        try {
+          await output.writeFile(bytes);
+        } finally {
+          await output.close();
+        }
+      }),
+    );
+    batchBytes = 0;
+    for (const item of settled) if (item.status === "rejected") throw item.reason;
+  };
+  for (const file of files) {
+    if (batch.length && (batch.length === 32 || batchBytes + file.pin.length > 32 * 1024 ** 2))
+      await flush();
+    batch.push(file);
+    batchBytes += file.pin.length;
+  }
+  await flush();
   const copied = await inspectValidationTree(outputRoot, true);
   if (
     copied.size !== pins.size ||

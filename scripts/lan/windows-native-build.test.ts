@@ -105,10 +105,23 @@ it("copies only pinned cache bytes into new files and preserves existing output 
     const bytes = new TextEncoder().encode("public offline cache");
     await NodeFSP.writeFile(NodePath.join(source, "nested", "entry"), bytes);
     const pins = new Map([["nested/entry", { length: bytes.length, sha256: sha256(bytes) }]]);
+    for (let index = 0; index < 70; index++) {
+      const tiny = index % 2 === 0 ? new Uint8Array() : new Uint8Array([index, 0, 255]);
+      const relative = `nested/tiny-${index.toString().padStart(2, "0")}`;
+      await NodeFSP.writeFile(NodePath.join(source, relative), tiny);
+      pins.set(relative, { length: tiny.length, sha256: sha256(tiny) });
+    }
+    const large = new Uint8Array(32 * 1024 ** 2 + 1).fill(42);
+    await NodeFSP.writeFile(NodePath.join(source, "nested", "zz-large"), large);
+    pins.set("nested/zz-large", { length: large.length, sha256: sha256(large) });
     await copyNativePinnedCache(source, output, pins);
     expect(await NodeFSP.readFile(NodePath.join(output, "nested", "entry"), "utf8")).toBe(
       "public offline cache",
     );
+    for (const [relative, pin] of pins) {
+      const copied = await NodeFSP.readFile(NodePath.join(output, relative));
+      expect({ length: copied.length, sha256: sha256(copied) }).toEqual(pin);
+    }
     await expect(copyNativePinnedCache(source, output, pins)).rejects.toThrow();
     await NodeFSP.writeFile(NodePath.join(source, "nested", "entry"), "changed");
     const refused = NodePath.join(fixture.root, "refused");
@@ -119,6 +132,15 @@ it("copies only pinned cache bytes into new files and preserves existing output 
     expect(await NodeFSP.readFile(NodePath.join(output, "nested", "entry"), "utf8")).toBe(
       "public offline cache",
     );
+    const oversized = NodePath.join(fixture.root, "oversized");
+    await expect(
+      copyNativePinnedCache(
+        source,
+        oversized,
+        new Map([["nested/entry", { length: 0, sha256: sha256(new Uint8Array()) }]]),
+      ),
+    ).rejects.toThrow(/oversized/u);
+    await expect(NodeFSP.lstat(NodePath.join(oversized, "nested", "entry"))).rejects.toThrow();
   } finally {
     await fixture.cleanup();
   }

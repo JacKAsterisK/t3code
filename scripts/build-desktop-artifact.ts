@@ -853,7 +853,7 @@ const requireWindowsBuildExecution = Effect.fn("requireWindowsBuildExecution")(f
   const execution = yield* Effect.serviceOption(WindowsBuildExecution);
   if (Option.isNone(execution))
     return yield* new WindowsBuildExecutionError({
-      message: "LAN execution requires the approved offline Windows Sandbox runner.",
+      message: "LAN execution requires an approved pinned Windows build runner.",
     });
   yield* Effect.try({
     try: () => assertWindowsBuildExecution(execution.value),
@@ -3756,7 +3756,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     if (execution === undefined)
       return yield* new LanBuildConfigurationError({
         reason:
-          "LAN builds require the approved offline Windows Sandbox runner and exact toolchain execution capability.",
+          "LAN builds require an approved pinned Windows build runner and exact toolchain execution capability.",
       });
     yield* execution.verify;
     const nodeBytes = yield* fs.readFile(process.execPath);

@@ -465,7 +465,13 @@ export function createWindowsBuildExecution(input: {
     CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: tools.link,
     CARGO_NET_OFFLINE: "true",
     CARGO_INCREMENTAL: "0",
-    RUSTFLAGS: "-C link-arg=/Brepro",
+    // Stripping symbols leaves registry panic locations in the EXE. Encode arguments
+    // so both copied cache/source roots remap consistently even when paths contain spaces.
+    CARGO_ENCODED_RUSTFLAGS: [
+      "-C",
+      "link-arg=/Brepro",
+      `--remap-path-prefix=${output}=C:\\T3LanBuild`,
+    ].join("\x1f"),
     CFLAGS: "/Brepro",
     CXXFLAGS: "/Brepro",
     ELECTRON_CACHE: cache("electronCache"),

@@ -82,67 +82,100 @@ const tree = async (root: string, hashesOnly = false) => {
   await safeRoot(root);
   const result = new Map<string, { bytes: Uint8Array; length: number; sha256: string }>();
   let total = 0;
+  const pendingTools: Array<{ name: string; file: string }> = [];
+  const flushTools = async () => {
+    const batch = pendingTools.splice(0);
+    // Drain every handle before propagating a failure; tool inventories contain
+    // hundreds of thousands of tiny files, so serial opens dominate hashing.
+    const settled = await Promise.allSettled(
+      batch.map(async ({ name, file }) => {
+        const stat = await NodeFSP.lstat(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1)
+          throw new Error("Toolchain file changed while opening.");
+        total += stat.size;
+        if (total > TOOLCHAIN_LIMITS.bytes)
+          throw new Error("Validation tree exceeds its bounded local inventory size.");
+        const handle = await NodeFSP.open(file, "r");
+        try {
+          const opened = await handle.stat();
+          if (
+            !opened.isFile() ||
+            opened.nlink !== 1 ||
+            opened.dev !== stat.dev ||
+            opened.ino !== stat.ino ||
+            opened.size !== stat.size
+          )
+            throw new Error("Toolchain file changed while opening.");
+          const digest = NodeCrypto.createHash("sha256");
+          let length = 0;
+          if (opened.size <= 256 * 1024) {
+            const bytes = await handle.readFile();
+            digest.update(bytes);
+            length = bytes.length;
+          } else {
+            for await (const chunk of handle.createReadStream({ autoClose: false })) {
+              digest.update(chunk);
+              length += chunk.length;
+            }
+          }
+          const after = await handle.stat();
+          if (
+            length !== stat.size ||
+            after.mtimeMs !== opened.mtimeMs ||
+            after.size !== opened.size
+          )
+            throw new Error("Toolchain file changed while hashing.");
+          return {
+            name,
+            pin: { bytes: new Uint8Array(), length, sha256: digest.digest("hex") },
+          };
+        } finally {
+          await handle.close();
+        }
+      }),
+    );
+    for (const item of settled) {
+      if (item.status === "rejected") throw item.reason;
+      result.set(item.value.name, item.value.pin);
+    }
+  };
+  const queueTool = async (name: string, file: string) => {
+    if (result.size + pendingTools.length >= TOOLCHAIN_LIMITS.files)
+      throw new Error("Validation tree has too many files.");
+    relativeWindowsPath(name);
+    pendingTools.push({ name, file });
+    if (pendingTools.length === 32) await flushTools();
+  };
   const visit = async (directory: string, prefix: string, depth: number): Promise<void> => {
     if (depth > 64) throw new Error("Validation tree is too deep.");
     for (const entry of await NodeFSP.readdir(directory, { withFileTypes: true })) {
       const name = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const file = NodePath.join(directory, entry.name),
-        stat = await NodeFSP.lstat(file);
+      const file = NodePath.join(directory, entry.name);
+      if (hashesOnly && !entry.isDirectory()) {
+        await queueTool(name, file);
+        continue;
+      }
+      const stat = await NodeFSP.lstat(file);
       if (stat.isSymbolicLink())
         throw new Error("Validation tree contains a link or reparse point.");
       if (stat.isDirectory()) await visit(file, name, depth + 1);
       else {
-        if (result.size >= (hashesOnly ? TOOLCHAIN_LIMITS.files : 100000))
-          throw new Error("Validation tree has too many files.");
+        if (hashesOnly) {
+          await queueTool(name, file);
+          continue;
+        }
+        if (result.size >= 100000) throw new Error("Validation tree has too many files.");
         relativeWindowsPath(name);
         total += stat.size;
-        if (total > (hashesOnly ? TOOLCHAIN_LIMITS.bytes : 8 * 1024 ** 3))
+        if (total > 8 * 1024 ** 3)
           throw new Error("Validation tree exceeds its bounded local inventory size.");
-        if (hashesOnly) {
-          const handle = await NodeFSP.open(file, "r");
-          try {
-            const opened = await handle.stat();
-            if (
-              !opened.isFile() ||
-              opened.nlink !== 1 ||
-              opened.dev !== stat.dev ||
-              opened.ino !== stat.ino ||
-              opened.size !== stat.size
-            )
-              throw new Error("Toolchain file changed while opening.");
-            const digest = NodeCrypto.createHash("sha256");
-            let length = 0;
-            // Package stores contain hundreds of thousands of tiny files. Avoid
-            // a stream per entry while keeping large compiler archives bounded.
-            if (opened.size <= 256 * 1024) {
-              const bytes = await handle.readFile();
-              digest.update(bytes);
-              length = bytes.length;
-            } else {
-              for await (const chunk of handle.createReadStream({ autoClose: false })) {
-                digest.update(chunk);
-                length += chunk.length;
-              }
-            }
-            const after = await handle.stat();
-            if (
-              length !== stat.size ||
-              after.mtimeMs !== opened.mtimeMs ||
-              after.size !== opened.size
-            )
-              throw new Error("Toolchain file changed while hashing.");
-            result.set(name, { bytes: new Uint8Array(), length, sha256: digest.digest("hex") });
-          } finally {
-            await handle.close();
-          }
-        } else {
-          const bytes = await safeFile(file, 256 * 1024 ** 2);
-          result.set(name, { bytes, length: bytes.length, sha256: sha256(bytes) });
-        }
+        const bytes = await safeFile(file, 256 * 1024 ** 2);
+        result.set(name, { bytes, length: bytes.length, sha256: sha256(bytes) });
       }
     }
   };
   await visit(root, "", 0);
+  if (hashesOnly) await flushTools();
   return result;
 };
 

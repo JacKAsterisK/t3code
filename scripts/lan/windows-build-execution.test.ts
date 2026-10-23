@@ -377,6 +377,36 @@ it("binds Cargo, Rust, MSVC, SDK, Python and builder to reviewed paths without a
   assert.deepEqual(builder.args.slice(-2), ["--publish", "never"]);
 });
 
+it("remaps private Rust source and copied registry roots through encoded arguments without inheriting ambient flags", () => {
+  vi.stubEnv("RUSTFLAGS", "--cfg foreign_rust_flag");
+  vi.stubEnv("CARGO_ENCODED_RUSTFLAGS", "--cfg\x1fforeign_encoded_flag");
+  try {
+    for (const outputRoot of ["C:\\First Build\\Output", "C:\\Second Build\\Output"]) {
+      const execution = fixture(outputRoot).create(),
+        command = execution.resourceMonitor();
+      assert.isUndefined(command.env.RUSTFLAGS);
+      assert.deepEqual(command.env.CARGO_ENCODED_RUSTFLAGS?.split("\x1f"), [
+        "-C",
+        "link-arg=/Brepro",
+        `--remap-path-prefix=${outputRoot}=C:\\T3LanBuild`,
+      ]);
+      assert.equal(asChildProcess(command).options.extendEnv, false);
+      for (const name of ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"]) {
+        assert.throws(() =>
+          execution.prepare(
+            ChildProcess.make(command.executable, command.args, {
+              cwd: command.cwd,
+              env: { [name]: "--cfg foreign_flag" },
+            }),
+          ),
+        );
+      }
+    }
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
+
 it("rejects forged capabilities, changed pins, incomplete closures, traversal and bootstrap shims", () => {
   const test = fixture();
   assert.throws(() => assertWindowsBuildExecution({}));

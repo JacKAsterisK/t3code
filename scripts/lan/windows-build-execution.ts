@@ -512,7 +512,23 @@ export function createWindowsBuildExecution(input: {
       tools.pnpm,
       [
         "install",
-        ...(production ? ["--prod"] : []),
+        ...(production
+          ? ["--prod"]
+          : [
+              // Include build tooling and workspace dependency closures without mobile's
+              // local modules or lifecycles, which have no Windows build role.
+              "--filter",
+              "@t3tools/monorepo...",
+              "--filter",
+              "@t3tools/scripts...",
+              "--filter",
+              "@t3tools/web...",
+              "--filter",
+              "t3...",
+              "--filter",
+              "@t3tools/desktop...",
+              "--fail-if-no-match",
+            ]),
         "--offline",
         "--frozen-lockfile",
         // This exact pnpm pin preserves the recorded checksum and peer graph

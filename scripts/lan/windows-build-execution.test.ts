@@ -304,6 +304,21 @@ it("selects exact native pnpm and reviewed caches for offline frozen workspace a
       assert.equal(command.env[name], "10.0.26100.0");
   }
   assert.notInclude(execution.workspaceInstall().args, "--prod");
+  assert.deepEqual(execution.workspaceInstall().args.slice(0, 12), [
+    "install",
+    "--filter",
+    "@t3tools/monorepo...",
+    "--filter",
+    "@t3tools/scripts...",
+    "--filter",
+    "@t3tools/web...",
+    "--filter",
+    "t3...",
+    "--filter",
+    "@t3tools/desktop...",
+    "--fail-if-no-match",
+  ]);
+  assert.notInclude(execution.stageInstall("C:\\T3LAN\\Output\\stage").args, "--filter");
   assert.include(execution.workspaceInstall().args, "--ignore-pnpmfile");
   assert.equal(execution.workspaceInstall().env.npm_config_ignore_pnpmfile, "true");
   assert.include(execution.stageInstall("C:\\T3LAN\\Output\\stage").args, "--prod");

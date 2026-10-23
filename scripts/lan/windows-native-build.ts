@@ -428,7 +428,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
         yield* bootstrap.verify;
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         const code = yield* spawner.exitCode(
-          bootstrap.prepare(asChildProcess(bootstrap.workspaceInstall())),
+          bootstrap.prepare(asChildProcess(bootstrap.workspaceInstall(), "inherit")),
         );
         if (code !== 0)
           return yield* Effect.fail(

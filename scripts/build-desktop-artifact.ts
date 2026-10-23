@@ -3,6 +3,7 @@
 
 import * as NodeFSP from "node:fs/promises";
 import * as NodeCrypto from "node:crypto";
+import * as NodePath from "node:path";
 import * as NodeModule from "node:module";
 // plist is CommonJS; Node cannot load its named exports from an ES module.
 import Plist from "plist";
@@ -134,6 +135,12 @@ const StageWorkspaceConfig = Schema.Struct({
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
 );
+// File URLs retain the final separator, while the verified native context omits it.
+export const sameWindowsBuildSource = (sourceRoot: string, repoRoot: string) =>
+  NodePath.win32.isAbsolute(sourceRoot) &&
+  NodePath.win32.isAbsolute(repoRoot) &&
+  NodePath.win32.resolve(sourceRoot).toLowerCase() ===
+    NodePath.win32.resolve(repoRoot).toLowerCase();
 const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeReleasePackageManifest = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
@@ -2489,7 +2496,7 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* 
         if (
           input.platform !== "win" ||
           input.arch !== "x64" ||
-          input.repoRoot !== execution.value.isolation.sourceRoot
+          !sameWindowsBuildSource(input.repoRoot, execution.value.isolation.sourceRoot)
         )
           return yield* new WindowsBuildExecutionError({
             message: "The native helper build target differs from its isolated Windows source.",
@@ -3770,7 +3777,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       });
     if (
       hostPlatform !== "win32" ||
-      execution.isolation.sourceRoot.toLowerCase() !== repoRoot.toLowerCase() ||
+      !sameWindowsBuildSource(execution.isolation.sourceRoot, repoRoot) ||
       execution.isolation.sourceCommit !== options.lanBuild.selection.identity.sourceCommit ||
       execution.lock.forkCommit !== options.lanBuild.lock.forkCommit
     )

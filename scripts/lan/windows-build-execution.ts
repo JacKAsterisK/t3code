@@ -149,12 +149,17 @@ export function assertWindowsBuildExecution(
   assertWindowsBuildContext((value as PinnedWindowsBuildExecution).isolation);
 }
 
-export function asChildProcess(command: PinnedWindowsBuildCommand): ChildProcess.StandardCommand {
+export function asChildProcess(
+  command: PinnedWindowsBuildCommand,
+  output: "pipe" | "inherit" = "pipe",
+): ChildProcess.StandardCommand {
   return ChildProcess.make(command.executable, command.args, {
     cwd: command.cwd,
     env: command.env,
     extendEnv: false,
     shell: false,
+    stdout: output,
+    stderr: output,
   });
 }
 
@@ -413,6 +418,8 @@ export function createWindowsBuildExecution(input: {
     npm_config_python: tools.python,
     PYTHON: tools.python,
     PYTHONDONTWRITEBYTECODE: "1",
+    // The release snapshot has no Git metadata; developer hook setup has no build role.
+    VP_GIT_HOOKS: "0",
     npm_config_node_gyp: tools.nodeGyp,
     NODE_GYP_FORCE_PYTHON: tools.python,
     npm_config_script_shell: tools.cmd,

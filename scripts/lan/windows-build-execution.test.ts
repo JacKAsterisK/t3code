@@ -4,6 +4,10 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as NodePath from "node:path";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodeURL from "node:url";
+import * as NodeChildProcess from "node:child_process";
 import { ChildProcess } from "effect/process";
 import { vi } from "vite-plus/test";
 import { sha256 } from "./hub-distribution.ts";
@@ -204,6 +208,55 @@ function fixture(outputRoot = "C:\\T3LAN\\Output", visualStudioVersion = "17.14.
     },
   };
 }
+
+it.live("runs release prepare without Git metadata or a Git executable", () =>
+  Effect.promise(async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-lan-prepare-"));
+    const cleanup = async () => {
+      if (!NodePath.resolve(directory).startsWith(NodePath.resolve(NodeOS.tmpdir()) + NodePath.sep))
+        throw new Error("Release prepare fixture escaped its captured temporary root.");
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    };
+    try {
+      await NodeFSP.writeFile(NodePath.join(directory, "package.json"), '{"private":true}');
+      const command = fixture().create().workspaceInstall();
+      const result = await new Promise<{ code: number | null; output: string }>(
+        (resolve, reject) => {
+          const child = NodeChildProcess.spawn(
+            process.execPath,
+            [NodeURL.fileURLToPath(import.meta.resolve("vite-plus/bin")), "config", "--no-agent"],
+            {
+              cwd: directory,
+              env: {
+                ...command.env,
+                PATH: "",
+                HOME: directory,
+                USERPROFILE: directory,
+                APPDATA: directory,
+                LOCALAPPDATA: directory,
+                TEMP: directory,
+                TMP: directory,
+                npm_lifecycle_event: "prepare",
+              },
+              windowsHide: true,
+              stdio: ["ignore", "pipe", "pipe"],
+            },
+          );
+          let output = "";
+          child.stdout.on("data", (bytes: Buffer) => (output += bytes.toString()));
+          child.stderr.on("data", (bytes: Buffer) => (output += bytes.toString()));
+          child.once("error", reject);
+          child.once("close", (code) => resolve({ code, output }));
+        },
+      );
+      assert.equal(result.code, 0, result.output);
+      assert.include(result.output, "git hooks disabled");
+      assert.deepEqual(await NodeFSP.readdir(directory), ["package.json"]);
+    } finally {
+      await cleanup();
+    }
+  }),
+);
 
 it("selects exact native pnpm and reviewed caches for offline frozen workspace and production installs", () => {
   const test = fixture(),

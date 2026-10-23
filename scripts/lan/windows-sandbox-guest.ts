@@ -283,7 +283,9 @@ export async function runWindowsSandboxGuest(approvedGuestRequestSha256: string)
       yield* bootstrapExecution.verify;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const exitCode = yield* spawner.exitCode(
-        bootstrapExecution.prepare(asChildProcess(bootstrapExecution.workspaceInstall())),
+        bootstrapExecution.prepare(
+          asChildProcess(bootstrapExecution.workspaceInstall(), "inherit"),
+        ),
       );
       if (exitCode !== 0)
         return yield* Effect.fail(

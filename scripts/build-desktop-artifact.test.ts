@@ -42,6 +42,7 @@ import {
   resolveMergedStageDependencies,
   resolveBuildOptions,
   resolveLanSourceCommit,
+  sameWindowsBuildSource,
   stageWslRuntimeArchive,
   ancestorNodeModulesPaths,
   copyDirectoryPreservingSymlinks,
@@ -72,6 +73,24 @@ import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { parseLanBuildIdentity } from "@t3tools/shared/distribution";
 
 const encodeModuleUrl = Schema.encodeEffect(Schema.fromJsonString(Schema.String));
+it("accepts the file-URL trailing separator for the same Windows build source", () => {
+  assert.isTrue(
+    sameWindowsBuildSource("C:\\LAN\\output\\work\\source", "c:\\lan\\output\\work\\source\\"),
+  );
+  assert.isTrue(
+    sameWindowsBuildSource("C:\\LAN\\output\\work\\source\\", "C:/LAN/output/work/source"),
+  );
+  assert.isFalse(
+    sameWindowsBuildSource(
+      "C:\\LAN\\output\\work\\source",
+      "C:\\LAN\\output\\work\\source-other\\",
+    ),
+  );
+  assert.isFalse(
+    sameWindowsBuildSource("C:\\LAN\\output\\work\\source", "D:\\LAN\\output\\work\\source\\"),
+  );
+  assert.isFalse(sameWindowsBuildSource("source", "source\\"));
+});
 const decodePackageVersion = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ version: Schema.String })),
 );

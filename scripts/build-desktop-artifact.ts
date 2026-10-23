@@ -3236,8 +3236,16 @@ export const pruneLanWindowsX64Stage = Effect.fn("pruneLanWindowsX64Stage")(func
           !NodePath.isAbsolute(relative)
         );
       };
+      const rootSpelling = (root: string) => {
+        const native = NodePath.sep === "\\" ? root.replaceAll("/", "\\").toLowerCase() : root;
+        return native.endsWith(NodePath.sep) ? native.slice(0, -1) : native;
+      };
+      // File-URL roots retain one separator; do not normalize away traversal or duplicate separators.
       for (const root of [input.stageRoot, input.repoRoot])
-        if (!NodePath.isAbsolute(root) || NodePath.resolve(root) !== root)
+        if (
+          !NodePath.isAbsolute(root) ||
+          rootSpelling(NodePath.resolve(root)) !== rootSpelling(root)
+        )
           throw new Error("LAN native pruning requires canonical absolute stage/source paths.");
       const stageRoot = await NodeFSP.realpath(input.stageRoot),
         repoRoot = await NodeFSP.realpath(input.repoRoot);

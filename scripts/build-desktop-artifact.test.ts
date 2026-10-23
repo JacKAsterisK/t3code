@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { extractFile } from "@electron/asar";
@@ -797,15 +798,20 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
-  it.effect("prunes only LAN Windows x64 sidecar alternates and install metadata", () =>
+  it.effect("prunes LAN sidecars with the producer's file-URL source root", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-lan-sidecar-prune-" });
         const stageRoot = path.join(fixture, "stage"),
-          sourceDir = path.join(stageRoot, "server"),
-          repoRoot = path.join(fixture, "source");
+          sourceDir = path.join(stageRoot, "server");
+        const repoRoot = yield* path.fromFileUrl(
+          new URL(
+            "..",
+            NodeURL.pathToFileURL(path.join(fixture, "source/scripts/build-desktop-artifact.ts")),
+          ),
+        );
         const kept = [
           "node_modules/node-pty/lib/utils.js",
           "node_modules/node-pty/prebuilds/win32-x64/pty.node",
@@ -889,7 +895,11 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         yield* Effect.promise(() => NodeFSP.link(source, binary));
         const packageLink = path.join(modules, "@yuuang/ffi-rs-win32-ia32-msvc");
         yield* Effect.promise(() => NodeFSP.symlink(ia32, packageLink, "junction"));
-        yield* pruneLanWindowsX64Stage({ stageRoot, repoRoot, kind: "app" });
+        yield* pruneLanWindowsX64Stage({
+          stageRoot: NodePath.sep === "\\" ? stageRoot.replaceAll("\\", "/") : stageRoot,
+          repoRoot: NodePath.sep === "\\" ? repoRoot.toUpperCase() : repoRoot,
+          kind: "app",
+        });
         assert.isFalse(yield* fs.exists(binary));
         assert.equal(yield* fs.readFileString(source), "public native fixture");
         assert.equal(yield* Effect.promise(() => NodeFSP.realpath(packageLink)), ia32);
@@ -921,12 +931,27 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           kind: "server",
         }).pipe(Effect.flip);
         assert.match(overlap.reason, /separate ordinary disposable stage/u);
-        const invalid = yield* pruneLanWindowsX64Stage({
-          stageRoot: `${stageRoot}${path.sep}..`,
+        for (const invalidRoot of [
+          `${stageRoot}${path.sep}..`,
+          `${stageRoot}${path.sep}.${path.sep}`,
+          `${stageRoot}${path.sep}${path.sep}`,
+          `${stageRoot}${path.sep}${path.sep}server`,
+        ]) {
+          const invalid = yield* pruneLanWindowsX64Stage({
+            stageRoot: invalidRoot,
+            repoRoot,
+            kind: "server",
+          }).pipe(Effect.flip);
+          assert.match(invalid.reason, /canonical absolute/u);
+        }
+        const stageAlias = path.join(fixture, "stage-alias");
+        yield* Effect.promise(() => NodeFSP.symlink(stageRoot, stageAlias, "junction"));
+        const linked = yield* pruneLanWindowsX64Stage({
+          stageRoot: stageAlias,
           repoRoot,
           kind: "server",
         }).pipe(Effect.flip);
-        assert.match(invalid.reason, /canonical absolute/u);
+        assert.match(linked.reason, /separate ordinary disposable stage/u);
         yield* Effect.promise(() =>
           NodeFSP.symlink(outside, path.join(modules, "node-pty"), "junction"),
         );

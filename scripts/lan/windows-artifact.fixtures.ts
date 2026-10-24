@@ -94,6 +94,7 @@ export function pe() {
 export function fixture(
   edit?: (files: Map<string, Uint8Array>) => void,
   protocolScheme = "t3code-lan",
+  homeRepair = false,
 ) {
   const source = new Map(BUILD_INPUT_FILES.map((name) => [name, Buffer.from(`source:${name}`)]));
   source.set(
@@ -144,7 +145,7 @@ export function fixture(
     serverCode = Buffer.from("audited fixture server policy enforcement"),
     webCode = Buffer.from("audited fixture web policy enforcement"),
     helperCode = Buffer.from("audited fixture native maintenance identity binding");
-  const reviewedComponents: WindowsArtifactPolicy["reviewedComponents"] = [
+  let reviewedComponents: WindowsArtifactPolicy["reviewedComponents"] = [
     {
       role: "desktop-policy",
       location: "resources/app.asar::apps/desktop/dist-electron/main.cjs",
@@ -166,6 +167,18 @@ export function fixture(
       sha256: sha256(helperCode),
     },
   ];
+  const repairCode = Buffer.from("audited fixture home selection and coherent retention");
+  const repairContract = json({ schemaVersion: 1, interfaceVersion: 1 });
+  const repairSchema = json({ type: "object" });
+  if (homeRepair)
+    reviewedComponents = [
+      ...reviewedComponents,
+      {
+        role: "native-home-repair",
+        location: "resources/native-home-repair.mjs",
+        sha256: sha256(repairCode),
+      },
+    ];
   const runtimeEvidence = json({
     schemaVersion: 1,
     sourceCommit: commit,
@@ -173,7 +186,7 @@ export function fixture(
     identity,
     components: reviewedComponents,
     checks: [
-      "default-home-isolation",
+      homeRepair ? "default-home-selection" : "default-home-isolation",
       "native-updater-disabled",
       "cloud-disabled",
       "telemetry-disabled",
@@ -194,6 +207,17 @@ export function fixture(
       nsis: "bin/nsis",
     },
     reviewedComponents,
+    ...(homeRepair
+      ? {
+          homeRepair: {
+            interfaceVersion: 1 as const,
+            admission: "hub-held-windows-handles-v1" as const,
+            defaultHomeMode: "drop-in" as const,
+            contractSha256: sha256(repairContract),
+            schemaSha256: sha256(repairSchema),
+          },
+        }
+      : {}),
     runtimePolicyEvidenceSha256: sha256(runtimeEvidence),
   };
   const packageJson = json({
@@ -237,6 +261,20 @@ export function fixture(
     ["t3code-lan-test-receipt.json", receipt],
     ["t3code-lan-runtime-policy-evidence.json", runtimeEvidence],
   ]);
+  if (homeRepair) {
+    files.set("resources/native-home-repair.mjs", repairCode);
+    files.set("resources/native-home-repair.contract.json", repairContract);
+    files.set("resources/native-home-repair.schema.json", repairSchema);
+    const receipt = JSON.parse(
+      Buffer.from(files.get("t3code-lan-test-receipt.json")!).toString("utf8"),
+    );
+    receipt.checks = receipt.checks.map((check: { name: string; passed: boolean }) =>
+      check.name === "identity-isolation"
+        ? { ...check, name: "home-selection-and-retention" }
+        : check,
+    );
+    files.set("t3code-lan-test-receipt.json", json(receipt));
+  }
   edit?.(files);
   files.set(
     "t3code-lan-package.json",

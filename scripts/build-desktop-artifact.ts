@@ -66,6 +66,7 @@ import {
   type LanPackagingInputs,
 } from "./lan/lan-packaging.ts";
 import { buildNativeMaintenance } from "./lan/native-maintenance.pack.ts";
+import { buildHomeRepair } from "./lan/home-repair.pack.ts";
 import {
   WindowsBuildExecution,
   WindowsBuildExecutionError,
@@ -2954,6 +2955,11 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
               from: "apps/desktop/prod-resources/lan-native-maintenance/manifest.json",
               to: "native-maintenance-build.json",
             },
+            {
+              from: "apps/desktop/prod-resources/lan-native-home-repair",
+              to: ".",
+              filter: ["native-home-repair*.mjs", "native-home-repair*.json"],
+            },
           ]),
     ],
   };
@@ -4164,6 +4170,15 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       catch: (cause) =>
         new LanBuildConfigurationError({
           reason: cause instanceof Error ? cause.message : "LAN native helper build failed.",
+        }),
+    });
+
+  if (options.lanBuild !== undefined)
+    yield* Effect.tryPromise({
+      try: () => buildHomeRepair(path.join(stageProdResourcesDir, "lan-native-home-repair")),
+      catch: (cause) =>
+        new LanBuildConfigurationError({
+          reason: cause instanceof Error ? cause.message : "LAN home repair helper build failed.",
         }),
     });
 

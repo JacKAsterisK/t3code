@@ -1,9 +1,6 @@
 import * as Option from "effect/Option";
-import {
-  assertDistributionHome,
-  isLanDistribution,
-  resolveDistributionHome,
-} from "@t3tools/shared/distribution";
+import { assertDistributionHome, isLanDistribution } from "@t3tools/shared/distribution";
+import { resolveNativeHomeSelection } from "@t3tools/shared/nativeHomeSelection";
 
 export type JoinPath = (...segments: string[]) => string;
 
@@ -23,7 +20,10 @@ export function resolveDesktopBaseDir(input: {
   readonly t3Home: Option.Option<string>;
 }): string {
   if (isLanDistribution) {
-    const expected = resolveDistributionHome(input);
+    const expected = resolveNativeHomeSelection({
+      userHomeDirectory: input.homeDirectory,
+      localAppData: input.localAppData ?? input.joinPath(input.homeDirectory, "AppData", "Local"),
+    }).homeDirectory;
     return assertDistributionHome(
       Option.getOrElse(normalizeConfiguredBaseDir(input.t3Home), () => expected),
       expected,

@@ -1,7 +1,8 @@
 {
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "composite": true,
+    // Offline bundles import the real shared/server implementations; this utility workspace is not a project-reference boundary.
+    "composite": false,
     "types": ["node"],
     "lib": ["ESNext", "esnext.disposable"]
   },

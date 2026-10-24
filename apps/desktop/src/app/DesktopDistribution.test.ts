@@ -58,6 +58,26 @@ const {
   };
 });
 
+// File-backed selection, receipts and race checks have real temporary-home fixtures in the repair suites.
+// Keep these broader distribution policy fixtures independent of the machine running Vitest.
+vi.mock("@t3tools/shared/nativeHomeSelection", async () => {
+  const path = await import("node:path");
+  return {
+    resolveNativeHomeSelection: (input: { userHomeDirectory: string }) => {
+      const paths = /^[a-z]:/i.test(input.userHomeDirectory) ? path.win32 : path.posix;
+      return {
+        homeDirectory: paths.join(input.userHomeDirectory, ".t3"),
+        mode: "drop-in",
+        electronProfileDirectory: paths.join(
+          input.userHomeDirectory,
+          "AppData",
+          "Roaming",
+          "t3code-v2",
+        ),
+      };
+    },
+  };
+});
 vi.mock("@clerk/electron", () => ({ createClerkBridge }));
 vi.mock("@clerk/electron/storage", () => ({ storage: clerkStorage }));
 vi.mock("@clerk/electron/preload", () => ({ exposeClerkBridge }));
@@ -133,7 +153,7 @@ it.effect(
     ),
 );
 
-const expectedHome = "C:\\LANFixture\\Local\\T3CodeLAN\\data";
+const expectedHome = "C:\\Users\\fixture\\.t3";
 const layerEnvironment = (env: Record<string, string> = {}) =>
   DesktopEnvironment.layer({
     dirname: "C:\\build\\apps\\desktop\\dist-electron",
@@ -155,7 +175,7 @@ const layerEnvironment = (env: Record<string, string> = {}) =>
   );
 
 it.effect(
-  "resolves the same independent LAN home and identity before and after desktop initialization",
+  "resolves the original home and fork identity before and after desktop initialization",
   () =>
     Effect.gen(function* () {
       const environment = yield* DesktopEnvironment.DesktopEnvironment;
@@ -195,14 +215,16 @@ it.effect(
     ),
 );
 
-it.effect("rejects an ambient official home before a desktop profile can be initialized", () =>
-  Effect.gen(function* () {
-    const result = yield* DesktopEnvironment.DesktopEnvironment.pipe(
-      Effect.provide(layerEnvironment({ T3CODE_HOME: "C:\\Users\\fixture\\.t3" })),
-      Effect.exit,
-    );
-    assert.equal(result._tag, "Failure");
-  }),
+it.effect(
+  "rejects a conflicting separate-home override before a desktop profile can be initialized",
+  () =>
+    Effect.gen(function* () {
+      const result = yield* DesktopEnvironment.DesktopEnvironment.pipe(
+        Effect.provide(layerEnvironment({ T3CODE_HOME: "C:\\unapproved-home" })),
+        Effect.exit,
+      );
+      assert.equal(result._tag, "Failure");
+    }),
 );
 
 it.effect(
@@ -230,30 +252,33 @@ it.effect(
     ),
 );
 
-it.effect("does not read or import official profile encryption keys or local storage", () =>
-  Effect.gen(function* () {
-    const environment = yield* DesktopEnvironment.DesktopEnvironment;
-    const profile = yield* DesktopUserData.resolveUserDataPath(environment);
-    assert.equal(profile, "C:\\LANFixture\\Local\\T3CodeLAN\\electron-profile");
-    const legacy = yield* DesktopLegacyLocalStorage.DesktopLegacyLocalStorage;
-    yield* legacy.load(profile);
-    assert.isTrue(Option.isNone(yield* legacy.take));
-    yield* legacy.complete;
-  }).pipe(
-    Effect.provide(
-      DesktopLegacyLocalStorage.layer.pipe(
-        Layer.provideMerge(layerEnvironment()),
-        Layer.provideMerge(NodePath.layerWin32),
-        Layer.provideMerge(
-          FileSystem.layerNoop({
-            exists: () => Effect.die("LAN startup attempted to inspect an official profile"),
-            readFileString: () => Effect.die("LAN startup attempted to read official credentials"),
-            writeFileString: () => Effect.die("LAN startup attempted to import official storage"),
-          }),
+it.effect(
+  "uses the selected original protection context without importing disabled legacy local storage",
+  () =>
+    Effect.gen(function* () {
+      const environment = yield* DesktopEnvironment.DesktopEnvironment;
+      const profile = yield* DesktopUserData.resolveUserDataPath(environment);
+      assert.equal(profile, "C:\\Users\\fixture\\AppData\\Roaming\\t3code-v2");
+      const legacy = yield* DesktopLegacyLocalStorage.DesktopLegacyLocalStorage;
+      yield* legacy.load(profile);
+      assert.isTrue(Option.isNone(yield* legacy.take));
+      yield* legacy.complete;
+    }).pipe(
+      Effect.provide(
+        DesktopLegacyLocalStorage.layer.pipe(
+          Layer.provideMerge(layerEnvironment()),
+          Layer.provideMerge(NodePath.layerWin32),
+          Layer.provideMerge(
+            FileSystem.layerNoop({
+              exists: () => Effect.die("LAN startup attempted to inspect an official profile"),
+              readFileString: () =>
+                Effect.die("LAN startup attempted to read official credentials"),
+              writeFileString: () => Effect.die("LAN startup attempted to import official storage"),
+            }),
+          ),
         ),
       ),
     ),
-  ),
 );
 
 it.effect("refuses a preexisting profile junction without writing through it", () =>
@@ -261,20 +286,22 @@ it.effect("refuses a preexisting profile junction without writing through it", (
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-lan-profile-junction-" });
-    const parent = path.join(root, "T3CodeLAN");
+    const parent = path.join(root, "AppData", "Roaming");
     const target = path.join(root, "existing-profile-fixture");
-    yield* fs.makeDirectory(parent);
+    yield* fs.makeDirectory(parent, { recursive: true });
     yield* fs.makeDirectory(target);
     yield* fs.writeFileString(path.join(target, "Local State"), "preserved profile fixture");
     yield* Effect.promise(() =>
-      NodeFSP.symlink(target, path.join(parent, "electron-profile"), "junction"),
+      NodeFSP.symlink(target, path.join(parent, "t3code-v2"), "junction"),
     );
     const result = yield* Effect.result(
       DesktopUserData.resolveUserDataPath({
         appDataDirectory: root,
         isDevelopment: false,
         platform: "win32",
-        baseDir: path.join(parent, "data"),
+        baseDir: path.join(root, ".t3"),
+        homeDirectory: root,
+        localAppDataDirectory: path.join(root, "AppData", "Local"),
       }),
     );
     assert.equal(result._tag, "Failure");
@@ -304,7 +331,7 @@ it.effect(
     return Effect.gen(function* () {
       yield* DesktopClerk.DesktopClerk;
       assert.deepEqual(events, [
-        "userData:C:\\LANFixture\\Local\\T3CodeLAN\\electron-profile",
+        "userData:C:\\Users\\fixture\\AppData\\Roaming\\t3code-v2",
         "single-instance",
       ]);
       assert.equal(createClerkBridge.mock.calls.length, 0);
@@ -346,7 +373,7 @@ it.effect(
       platform: "win32",
       env: {
         LOCALAPPDATA: "C:\\LANFixture\\Local",
-        T3CODE_HOME: expectedHome,
+        T3CODE_HOME: `/tmp/t3-desktop-updates-home-${process.pid}/.t3`,
         T3CODE_DISABLE_AUTO_UPDATE: "false",
         T3CODE_DESKTOP_MOCK_UPDATES: "true",
       },
@@ -439,7 +466,10 @@ it.effect("surfaces a compatible fork release without downloading or stopping na
     const harness = makeHarness({
       appVersion: "0.1.2",
       platform: "win32",
-      env: { LOCALAPPDATA: "C:\\LANFixture\\Local", T3CODE_HOME: expectedHome },
+      env: {
+        LOCALAPPDATA: "C:\\LANFixture\\Local",
+        T3CODE_HOME: `/tmp/t3-desktop-updates-home-${process.pid}/.t3`,
+      },
       stopBackend: Effect.die("Fork discovery attempted to stop native tasks"),
       httpClient: HttpClient.make((request) => {
         requests.push(request.url);

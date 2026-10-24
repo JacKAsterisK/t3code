@@ -1,0 +1,160 @@
+{
+  "schemaVersion": 1,
+  "operation": "preview",
+  "planId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "state": "split",
+  "recommendedAction": "adopt-original-retain-lan",
+  "canApply": false,
+  "applySupported": false,
+  "original": {
+    "homeDirectory": "C:\\Users\\fixture\\.t3",
+    "state": "initialized",
+    "environmentId": "11111111-1111-4111-8111-111111111111",
+    "migrationIds": [
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+      27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+      50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67
+    ],
+    "counts": {
+      "projects": 1,
+      "threads": 3,
+      "messages": 10,
+      "runs": 2,
+      "turnItems": 12,
+      "legacyEvents": 15,
+      "legacyThreads": 0,
+      "legacyMessages": 0
+    },
+    "activeWork": 0,
+    "providerInstances": [],
+    "files": {
+      "userdata/environment-id": {
+        "present": true,
+        "bytes": 37,
+        "modifiedMs": 1000
+      },
+      "userdata/statev2.sqlite": {
+        "present": true,
+        "bytes": 8192,
+        "modifiedMs": 1000
+      },
+      "userdata/statev2.sqlite-wal": {
+        "present": false
+      },
+      "userdata/statev2.sqlite-shm": {
+        "present": false
+      },
+      "userdata/connection-catalog.json": {
+        "present": true,
+        "bytes": 128,
+        "modifiedMs": 1000
+      }
+    },
+    "blockers": []
+  },
+  "lan": {
+    "homeDirectory": "C:\\Users\\fixture\\AppData\\Local\\T3CodeLAN\\data",
+    "state": "initialized",
+    "environmentId": "22222222-2222-4222-8222-222222222222",
+    "migrationIds": [
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+      27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+      50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71
+    ],
+    "counts": {
+      "projects": 1,
+      "threads": 1,
+      "messages": 2,
+      "runs": 2,
+      "turnItems": 4,
+      "legacyEvents": 7,
+      "legacyThreads": 0,
+      "legacyMessages": 0
+    },
+    "activeWork": 0,
+    "providerInstances": [
+      {
+        "instanceId": "claude_second",
+        "driver": "claudeAgent",
+        "configKeys": ["homePath"],
+        "environmentNames": ["ANTHROPIC_API_KEY"]
+      }
+    ],
+    "files": {
+      "userdata/environment-id": {
+        "present": true,
+        "bytes": 37,
+        "modifiedMs": 1000
+      },
+      "userdata/statev2.sqlite": {
+        "present": true,
+        "bytes": 8192,
+        "modifiedMs": 1000
+      },
+      "userdata/statev2.sqlite-wal": {
+        "present": false
+      },
+      "userdata/statev2.sqlite-shm": {
+        "present": false
+      },
+      "userdata/connection-catalog.json": {
+        "present": true,
+        "bytes": 128,
+        "modifiedMs": 1000
+      }
+    },
+    "blockers": []
+  },
+  "electronProfiles": [
+    {
+      "profileDirectory": "C:\\Users\\fixture\\AppData\\Roaming\\t3code-v2",
+      "localState": {
+        "present": true,
+        "bytes": 128,
+        "modifiedMs": 1000
+      }
+    },
+    {
+      "profileDirectory": "C:\\Users\\fixture\\AppData\\Roaming\\T3 Code (Alpha)",
+      "localState": {
+        "present": false
+      }
+    },
+    {
+      "profileDirectory": "C:\\Users\\fixture\\AppData\\Roaming\\t3code",
+      "localState": {
+        "present": false
+      }
+    },
+    {
+      "profileDirectory": "C:\\Users\\fixture\\AppData\\Local\\T3CodeLAN\\electron-profile",
+      "localState": {
+        "present": true,
+        "bytes": 128,
+        "modifiedMs": 1000
+      }
+    }
+  ],
+  "conflicts": [
+    "different-environment-identities",
+    "two-state-homes-require-retention-review",
+    "lan-only-history-or-settings"
+  ],
+  "blockers": [],
+  "preservePaths": [
+    "C:\\Users\\fixture\\.t3",
+    "C:\\Users\\fixture\\AppData\\Local\\T3CodeLAN\\data",
+    "C:\\Users\\fixture\\AppData\\Roaming\\t3code-v2",
+    "C:\\Users\\fixture\\AppData\\Local\\T3CodeLAN\\electron-profile"
+  ],
+  "requirements": [
+    "explicit-user-approval",
+    "stop-and-exclusively-lease-both-homes-and-electron-profiles",
+    "coherent-full-state-backup-including-wal-and-encrypted-protection-context",
+    "validate-existing-migrations-on-staged-backup-no-downgrade",
+    "retain-lan-history-attachments-worktrees-and-provider-configurations",
+    "record-authoritative-home-without-identity-or-credential-merge",
+    "validate-old-history-and-trusted-client-continuity-before-retiring-any-state",
+    "rollback-matching-binary-data-profile-and-selection-before-new-work"
+  ]
+}

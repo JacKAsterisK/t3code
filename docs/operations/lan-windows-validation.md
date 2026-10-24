@@ -65,7 +65,15 @@ The policy schema is exported as `WindowsArtifactPolicy` in
   `desktop-policy`, `server-policy`, `web-policy` and `native-maintenance`.
   A location is a payload path or `resources/app.asar::relative/entry` (similarly
   for `server.asar`). Native maintenance must be
-  `resources/native-maintenance.mjs`.
+  `resources/native-maintenance.mjs`. Packages containing home repair also require
+  the `native-home-repair` role at `resources/native-home-repair.mjs` and an explicit
+  `homeRepair` policy block: interface version 1, admission
+  `hub-held-windows-handles-v1`, default mode `drop-in`, and SHA-256 pins for
+  `native-home-repair.contract.json` and `native-home-repair.schema.json`. The helper's
+  generated policy fragment is not approval. Repair packages require the
+  `home-selection-and-retention` test receipt check and the
+  `default-home-selection` runtime policy check in place of the former home
+  isolation checks.
 - `runtimePolicyEvidenceSha256`, pinning the packaged
   `t3code-lan-runtime-policy-evidence.json`.
 

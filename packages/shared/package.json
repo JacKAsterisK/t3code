@@ -15,6 +15,10 @@
       "types": "./src/distribution.ts",
       "import": "./src/distribution.ts"
     },
+    "./nativeHomeSelection": {
+      "types": "./src/nativeHomeSelection.ts",
+      "import": "./src/nativeHomeSelection.ts"
+    },
     "./nativeAdmission": {
       "types": "./src/nativeAdmission.ts",
       "import": "./src/nativeAdmission.ts"

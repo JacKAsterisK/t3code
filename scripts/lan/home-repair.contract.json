@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "interfaceVersion": 1,
+  "executable": "node --no-warnings native-home-repair.mjs",
+  "operations": {
+    "preview": {
+      "arguments": ["preview", "--json"],
+      "stdin": null,
+      "stdoutSchema": "native-home-repair.schema.json",
+      "maximumOutputBytes": 131072
+    },
+    "apply": {
+      "arguments": ["apply", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "expectedPlanId": "<64 lowercase hex from the exact current preview>",
+        "choice": "adopt-original-retain-lan | side-by-side-retain-original",
+        "opaqueBackupApproved": true,
+        "repairId": "<32 new lowercase hex, never reused>"
+      },
+      "stdout": {
+        "schemaVersion": 1,
+        "status": "selected-pending-verification",
+        "receiptPath": "<absolute localAppData/T3CodeLAN/recovery/repairId/receipt.json>",
+        "homeDirectory": "<selected complete home>",
+        "retainedHomeDirectory": "<other unchanged complete home>",
+        "environmentId": "<selected home's existing identity>",
+        "electronProfileDirectory": "<selected matching existing profile>",
+        "restoredHistoryVerified": false
+      }
+    },
+    "rollback": {
+      "arguments": ["rollback", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "repairId": "<32 lowercase hex>"
+      },
+      "stdout": {
+        "schemaVersion": 1,
+        "status": "rolled-back"
+      }
+    },
+    "recover": {
+      "arguments": ["recover", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "repairId": "<32 lowercase hex>"
+      },
+      "stdout": {
+        "schemaVersion": 1,
+        "status": "rolled-back"
+      }
+    }
+  },
+  "input": {
+    "maximumBytes": 8192,
+    "encoding": "UTF-8",
+    "unknownFields": "refused",
+    "duplicateKeys": "refused"
+  },
+  "failure": {
+    "exitCode": 1,
+    "stderr": "native_home_repair_refused\n",
+    "stdout": ""
+  },
+  "discovery": {
+    "originalHome": "os.homedir()/.t3",
+    "lanHome": "LOCALAPPDATA/T3CodeLAN/data",
+    "originalElectronProfilesInPreferenceOrder": [
+      "APPDATA/t3code-v2",
+      "APPDATA/T3 Code (Alpha)",
+      "APPDATA/t3code"
+    ],
+    "lanElectronProfile": "LOCALAPPDATA/T3CodeLAN/electron-profile",
+    "customOriginalHome": "preview --original-home ABSOLUTE_PATH only; native Apply currently refuses a nondefault plan"
+  },
+  "hostAdmission": {
+    "kind": "hub-held-windows-handles-v1",
+    "required": "Hub establishes stopped process/profile quiescence and holds every handle continuously through helper exit, failure recovery and selection/pointer reconciliation. Conflicting helper opens are a protocol sanity check, not holder authentication.",
+    "eachInitializedHome": [
+      {
+        "relativePath": "native-admission.lock",
+        "fileAccess": "ReadWrite",
+        "fileShare": "None"
+      },
+      {
+        "relativePath": "userdata/server-owner.sqlite",
+        "fileAccess": "ReadWrite",
+        "fileShare": "None"
+      }
+    ],
+    "eachPresentElectronProfile": [
+      {
+        "relativePath": "Local State",
+        "fileAccess": "Read",
+        "fileShare": "Read"
+      }
+    ],
+    "processes": "No original or LAN backend, Electron process, profile writer or repair/activation may run concurrently. Never kill by name or override a failed admission.",
+    "work": "Helper uses existing NativeMaintenance inspector to refuse active, queued, pending, scheduled, background and restart-continuation work. No model is launched.",
+    "userContext": "Run helper and selected app as the original interactive Windows user. Do not run as a service or another user: DPAPI/private profile compatibility has not been verified across users."
+  },
+  "selection": {
+    "path": "LOCALAPPDATA/T3CodeLAN/home-selection.json",
+    "shape": {
+      "schemaVersion": 1,
+      "mode": "drop-in | side-by-side",
+      "originalHomeDirectory": "<absolute original home>",
+      "originalEnvironmentId": "<existing UUID>",
+      "lanHomeDirectory": "<absolute LAN home>",
+      "lanEnvironmentId": "<existing UUID or null>",
+      "electronProfileDirectory": "<matching profile>",
+      "repairId": "<32 lowercase hex>",
+      "receiptPath": "<absolute receipt>"
+    },
+    "journalPath": "LOCALAPPDATA/T3CodeLAN/home-repair.json",
+    "receipt": "Contains bounded public path/digest metadata and opaque snapshot locations; startup requires its selection hash and both recorded identities to match.",
+    "launch": "Hub active pointer homeDirectory and environmentId must equal the helper's selected result. Set T3CODE_HOME to that home. Keep installer/version root independent. Do not rewrite either environment-id. T3 derives Electron profile from the selection manifest.",
+    "activationJournal": "For original .t3 use <selected-home>/native-activation.json. Existing separate LAN home continues using LOCALAPPDATA/T3CodeLAN/activation.json.",
+    "startupBinding": "T3 rechecks selection while holding startup admission; stale pre-admission home choices are refused."
+  },
+  "retention": {
+    "behavior": "Original and LAN histories, attachments, settings, encrypted stores and matching profiles are retained as complete separate homes; no database, credentials or provider-environment merge occurs.",
+    "access": "Hub can explicitly select side-by-side-retain-original in a new stopped transaction to reopen retained LAN conversations and its existing Claude provider settings. Selecting adopt-original-retain-lan switches back. Every switch uses a fresh preview and repairId, backs up both current states and retains both histories.",
+    "limitation": "The original home's conversation list and provider settings do not automatically include LAN-only entries. Consolidated history/provider import is not implemented; do not describe retained bytes as merged or restored into one list.",
+    "rollback": "Rollback journals its selection restoration and can recover either side of an interrupted rollback while all source snapshots are unchanged. Any new work or durable schema/profile write refuses automatic data restoration; backups remain for reviewed recovery.",
+    "verification": "Apply returns selected-pending-verification. Hub must validate selected environment, readable old history and saved connection continuity using the normal app before reporting repair complete; restoredHistoryVerified remains false in this interface."
+  },
+  "release": {
+    "productionReady": false,
+    "reason": "Requires matching Hub admission/selection/pointer/recovery UI, production artifact policy/hash pins, scoped checks and release review. Do not publish preview-only or claim verified repair."
+  }
+}

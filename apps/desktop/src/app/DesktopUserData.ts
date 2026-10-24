@@ -4,6 +4,8 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import { isLanDistribution } from "@t3tools/shared/distribution";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { resolveNativeHomeSelection } from "@t3tools/shared/nativeHomeSelection";
 import { inspectOrdinaryDirectoryAncestors } from "./DesktopPreReadyFileSystem.ts";
 
 export class DesktopUserDataInitializationError extends Schema.TaggedError<DesktopUserDataInitializationError>()(
@@ -39,21 +41,34 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
     readonly isDevelopment: boolean;
     readonly platform: NodeJS.Platform;
     readonly baseDir?: string;
+    readonly homeDirectory?: string;
+    readonly localAppDataDirectory?: string;
   }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     if (isLanDistribution) {
       if (input.baseDir === undefined)
-        return yield* Effect.die(
-          new Error("LAN desktop profile requires the resolved independent native home."),
+        return yield* Effect.die(new Error("LAN desktop requires a resolved home selection."));
+      const environment = yield* HostProcess.Environment;
+      const userHomeDirectory = input.homeDirectory ?? (yield* HostProcess.HomeDirectory);
+      const selected = resolveNativeHomeSelection({
+        userHomeDirectory,
+        localAppData:
+          input.localAppDataDirectory ??
+          environment.LOCALAPPDATA ??
+          path.join(userHomeDirectory, "AppData", "Local"),
+      });
+      if (path.resolve(input.baseDir) !== path.resolve(selected.homeDirectory))
+        return yield* Effect.die(new Error("Desktop and backend home selections do not match."));
+      if (selected.electronProfileDirectory !== undefined) {
+        const profile = selected.electronProfileDirectory;
+        yield* inspectOrdinaryDirectoryAncestors(profile).pipe(
+          Effect.mapError((cause) =>
+            DesktopUserDataInitializationError.fromFileSystem(cause, "inspect", profile),
+          ),
         );
-      const profile = path.join(input.baseDir, "..", "electron-profile");
-      yield* inspectOrdinaryDirectoryAncestors(profile).pipe(
-        Effect.mapError((cause) =>
-          DesktopUserDataInitializationError.fromFileSystem(cause, "inspect", profile),
-        ),
-      );
-      return profile;
+        return profile;
+      }
     }
     const names = input.isDevelopment
       ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }

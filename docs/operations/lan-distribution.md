@@ -294,14 +294,24 @@ unsigned candidates requiring the separate signing, sealing and two-run
 
 ## Candidate and installation contract
 
-Ordinary upstream builds retain their existing defaults. Only the explicit LAN
-profile changes appId, product, protocol handlers and default home. It uses
-`%LOCALAPPDATA%\T3CodeLAN\data` and a separate sibling `electron-profile`, refuses
-conflicting home overrides and does not import the official Electron profile,
-encryption state or legacy local storage. Profile ancestors are checked for
-filesystem redirection before Electron adopts that path. An independent T3 home generates a new
-environment ID and requires explicit re-pairing; preserve an old-to-new inventory
-mapping rather than copying the official identity or credential stores.
+Ordinary upstream builds retain their existing defaults. The LAN profile keeps
+its separate appId, product and protocol while defaulting to the original
+`%USERPROFILE%\.t3` home and existing Electron protection context. It preserves
+the original environment identity, projects, messages and saved connections.
+Startup refuses ambiguous split homes until Hub previews them and the user
+explicitly chooses the original or separate LAN home. Both complete homes and
+matching profiles are preserved before selection; identities, credentials and
+databases are never merged.
+
+The native repair interface is defined in
+[`home-repair.contract.json`](../../scripts/lan/home-repair.contract.json).
+Hub holds stopped-home/profile admission throughout Apply and reconciles its
+active pointer and launch environment with the selected result. Retained LAN
+conversations and provider settings remain available by explicitly selecting the
+LAN home again; they do not appear in the original home's conversation list.
+Apply remains pending until the app verifies readable history and saved
+connections. Automatic rollback refuses source changes that could contain new
+work; preserved snapshots remain available for reviewed recovery.
 
 The preparation-only `CandidateManifest` binds the immutable artifact SHA-256 and length to fork and
 upstream commits, build-lock and test-receipt hashes, desktop/backend versions,

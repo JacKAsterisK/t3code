@@ -29,6 +29,10 @@
         "setup-worktree.ts",
         "sign-macos.ts",
         "verify-windows-desktop-artifact.ts",
+        // Bundled repair and synthetic verification CLIs are invoked by filename.
+        "lan/home-repair-native.ts",
+        "lan/home-repair.fixture-builder.ts",
+        "lan/home-repair.windows-smoke.ts",
       ],
       "ignoreDependencies": ["esbuild"],
       // The `t3` npm package's files: copied into the package, never imported.

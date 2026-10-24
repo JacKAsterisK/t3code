@@ -1,5 +1,10 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { assertDistributionHome, resolveDistributionHome } from "@t3tools/shared/distribution";
+import {
+  assertDistributionHome,
+  isLanDistribution,
+  resolveDistributionHome,
+} from "@t3tools/shared/distribution";
+import { resolveNativeHomeSelection } from "@t3tools/shared/nativeHomeSelection";
 import {
   listLoginShellCandidates,
   mergePathEntries,
@@ -126,12 +131,18 @@ export const resolveBaseDir = Effect.fn(function* (raw: string | undefined) {
   const { join, resolve } = yield* Path.Path;
   const platform = yield* HostProcess.Platform;
   const environment = yield* HostProcess.Environment;
-  const expectedHome = resolveDistributionHome({
-    homeDirectory: yield* HostProcess.HomeDirectory,
-    platform,
-    localAppData: environment.LOCALAPPDATA,
-    joinPath: join,
-  });
+  const userHomeDirectory = yield* HostProcess.HomeDirectory;
+  const expectedHome = isLanDistribution
+    ? resolveNativeHomeSelection({
+        userHomeDirectory,
+        localAppData: environment.LOCALAPPDATA ?? join(userHomeDirectory, "AppData", "Local"),
+      }).homeDirectory
+    : resolveDistributionHome({
+        homeDirectory: userHomeDirectory,
+        platform,
+        localAppData: environment.LOCALAPPDATA,
+        joinPath: join,
+      });
   if (!raw || raw.trim().length === 0) {
     return expectedHome;
   }

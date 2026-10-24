@@ -3,6 +3,9 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as HostProcess from "./HostProcess.ts";
+import { isLanDistribution } from "./distribution.ts";
+import { assertNativeHomeMatchesSelection } from "./nativeHomeSelection.ts";
 
 export class NativeAdmissionError extends Schema.TaggedError<NativeAdmissionError>()(
   "NativeAdmissionError",
@@ -77,7 +80,10 @@ export interface NativeAdmissionLease {
 }
 
 /** Hold this handle for the entire lifetime of any ordinary home/database writer. */
-export function acquireNativeAdmission(homeDirectory: string): NativeAdmissionLease {
+export function acquireNativeAdmission(
+  homeDirectory: string,
+  selectionContext?: { readonly userHomeDirectory: string; readonly localAppData: string },
+): NativeAdmissionLease {
   let descriptor: number | undefined;
   try {
     const paths = resolveNativeAdmissionPaths(homeDirectory);
@@ -101,6 +107,19 @@ export function acquireNativeAdmission(homeDirectory: string): NativeAdmissionLe
       throw new NativeAdmissionError({ reason: "unsafe_path" });
     }
     validateDirectories(paths.homeDirectory);
+    if (isLanDistribution) {
+      const userHomeDirectory =
+        selectionContext?.userHomeDirectory ?? Effect.runSync(HostProcess.HomeDirectory);
+      const environment = Effect.runSync(HostProcess.Environment);
+      assertNativeHomeMatchesSelection(
+        paths.homeDirectory,
+        selectionContext ?? {
+          userHomeDirectory,
+          localAppData:
+            environment.LOCALAPPDATA ?? NodePath.join(userHomeDirectory, "AppData", "Local"),
+        },
+      );
+    }
     if (paths.journalPaths.some((path) => lstatIfPresent(path) !== undefined)) {
       throw new NativeAdmissionError({ reason: "recovery_required" });
     }
@@ -128,9 +147,16 @@ export function acquireNativeAdmission(homeDirectory: string): NativeAdmissionLe
 export const acquireNativeAdmissionScoped = Effect.fn("nativeAdmission.acquireScoped")(function* (
   homeDirectory: string,
 ) {
+  const userHomeDirectory = yield* HostProcess.HomeDirectory;
+  const environment = yield* HostProcess.Environment;
   yield* Effect.acquireRelease(
     Effect.try({
-      try: () => acquireNativeAdmission(homeDirectory),
+      try: () =>
+        acquireNativeAdmission(homeDirectory, {
+          userHomeDirectory,
+          localAppData:
+            environment.LOCALAPPDATA ?? NodePath.join(userHomeDirectory, "AppData", "Local"),
+        }),
       catch: (cause) =>
         isNativeAdmissionError(cause) ? cause : new NativeAdmissionError({ reason: "io", cause }),
     }),

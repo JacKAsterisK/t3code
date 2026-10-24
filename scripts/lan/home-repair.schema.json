@@ -1,0 +1,424 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "T3 LAN home repair preview v1",
+  "description": "Read-only metadata, UTF-8 JSON bounded to 131072 bytes. planId is not an execution authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "operation": {
+      "const": "preview"
+    },
+    "planId": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "state": {
+      "enum": ["fresh", "original-only", "lan-only", "split", "blocked"]
+    },
+    "recommendedAction": {
+      "enum": [
+        "create-original",
+        "adopt-original",
+        "retain-lan",
+        "adopt-original-retain-lan",
+        "resolve-blockers"
+      ]
+    },
+    "canApply": {
+      "type": "boolean"
+    },
+    "applySupported": {
+      "type": "boolean"
+    },
+    "original": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "homeDirectory": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "state": {
+          "enum": ["missing", "empty", "initialized", "blocked"]
+        },
+        "environmentId": {
+          "type": ["string", "null"],
+          "maxLength": 256
+        },
+        "migrationIds": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "projects": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "threads": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "messages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "runs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnItems": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "legacyEvents": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "legacyThreads": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "legacyMessages": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "projects",
+            "threads",
+            "messages",
+            "runs",
+            "turnItems",
+            "legacyEvents",
+            "legacyThreads",
+            "legacyMessages"
+          ]
+        },
+        "activeWork": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "providerInstances": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "instanceId": {
+                "type": "string",
+                "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+              },
+              "driver": {
+                "type": "string",
+                "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+              },
+              "configKeys": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "maxLength": 32768
+                }
+              },
+              "environmentNames": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "maxLength": 32768
+                }
+              }
+            },
+            "required": ["instanceId", "driver", "configKeys", "environmentNames"]
+          }
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "present": {
+                "type": "boolean"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "modifiedMs": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": ["present"]
+          },
+          "maxProperties": 16
+        },
+        "blockers": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        }
+      },
+      "required": [
+        "homeDirectory",
+        "state",
+        "environmentId",
+        "migrationIds",
+        "counts",
+        "activeWork",
+        "providerInstances",
+        "files",
+        "blockers"
+      ]
+    },
+    "lan": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "homeDirectory": {
+          "type": "string",
+          "maxLength": 32768
+        },
+        "state": {
+          "enum": ["missing", "empty", "initialized", "blocked"]
+        },
+        "environmentId": {
+          "type": ["string", "null"],
+          "maxLength": 256
+        },
+        "migrationIds": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "projects": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "threads": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "messages": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "runs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "turnItems": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "legacyEvents": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "legacyThreads": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "legacyMessages": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "projects",
+            "threads",
+            "messages",
+            "runs",
+            "turnItems",
+            "legacyEvents",
+            "legacyThreads",
+            "legacyMessages"
+          ]
+        },
+        "activeWork": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "providerInstances": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "instanceId": {
+                "type": "string",
+                "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+              },
+              "driver": {
+                "type": "string",
+                "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+              },
+              "configKeys": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "maxLength": 32768
+                }
+              },
+              "environmentNames": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "maxLength": 32768
+                }
+              }
+            },
+            "required": ["instanceId", "driver", "configKeys", "environmentNames"]
+          }
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "present": {
+                "type": "boolean"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "modifiedMs": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": ["present"]
+          },
+          "maxProperties": 16
+        },
+        "blockers": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "maxLength": 32768
+          }
+        }
+      },
+      "required": [
+        "homeDirectory",
+        "state",
+        "environmentId",
+        "migrationIds",
+        "counts",
+        "activeWork",
+        "providerInstances",
+        "files",
+        "blockers"
+      ]
+    },
+    "electronProfiles": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "profileDirectory": {
+            "type": "string",
+            "maxLength": 32768
+          },
+          "localState": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "present": {
+                "type": "boolean"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "modifiedMs": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": ["present"]
+          }
+        },
+        "required": ["profileDirectory", "localState"]
+      }
+    },
+    "conflicts": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "maxLength": 32768
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "maxLength": 32768
+      }
+    },
+    "preservePaths": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "maxLength": 32768
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "maxLength": 32768
+      }
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "operation",
+    "planId",
+    "state",
+    "recommendedAction",
+    "canApply",
+    "applySupported",
+    "original",
+    "lan",
+    "electronProfiles",
+    "conflicts",
+    "blockers",
+    "preservePaths",
+    "requirements"
+  ]
+}

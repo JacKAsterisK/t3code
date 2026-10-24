@@ -44,9 +44,19 @@ export const WindowsArtifactPolicy = Schema.Struct({
         "server-policy",
         "web-policy",
         "native-maintenance",
+        "native-home-repair",
       ]),
       location: Schema.String,
       sha256: Hash,
+    }),
+  ),
+  homeRepair: Schema.optional(
+    Schema.Struct({
+      interfaceVersion: Schema.Literal(1),
+      admission: Schema.Literal("hub-held-windows-handles-v1"),
+      defaultHomeMode: Schema.Literal("drop-in"),
+      contractSha256: Hash,
+      schemaSha256: Hash,
     }),
   ),
   runtimePolicyEvidenceSha256: Hash,
@@ -627,7 +637,11 @@ export async function validateWindowsArtifact(input: {
       receipt.sourceCommit !== lock.forkCommit ||
       receipt.buildLockSha256 !== policy.buildLockSha256 ||
       receipt.passed !== true ||
-      !validChecks(receipt.checks, ["focused-tests", "windows-smoke", "identity-isolation"])
+      !validChecks(receipt.checks, [
+        "focused-tests",
+        "windows-smoke",
+        policy.homeRepair ? "home-selection-and-retention" : "identity-isolation",
+      ])
     )
       fail("Required build test evidence is missing.");
     const asars = new Map<string, ReadonlyMap<string, Uint8Array>>();
@@ -653,6 +667,20 @@ export async function validateWindowsArtifact(input: {
     get(server, "apps/server/dist/bin.mjs");
     get(files, "resources/resource-monitor/t3-resource-monitor.exe");
     get(files, "resources/native-maintenance.mjs");
+    const repairPresent = files.has("resources/native-home-repair.mjs");
+    if (repairPresent !== (policy.homeRepair !== undefined))
+      fail("Home repair resources require an explicit matching approved repair policy.");
+    if (policy.homeRepair) {
+      if (
+        sha256(get(files, "resources/native-home-repair.contract.json")) !==
+          policy.homeRepair.contractSha256 ||
+        sha256(get(files, "resources/native-home-repair.schema.json")) !==
+          policy.homeRepair.schemaSha256
+      )
+        fail("Home repair contract or schema differs from approved pins.");
+      if (!policy.reviewedComponents.some((component) => component.role === "native-home-repair"))
+        fail("Audited native home repair component is missing.");
+    }
     const roles = new Set(policy.reviewedComponents.map((component) => component.role));
     if (
       ["desktop-policy", "server-policy", "web-policy", "native-maintenance"].some(
@@ -666,7 +694,9 @@ export async function validateWindowsArtifact(input: {
         !archive ||
         extra !== undefined ||
         (component.role === "native-maintenance" &&
-          component.location !== "resources/native-maintenance.mjs")
+          component.location !== "resources/native-maintenance.mjs") ||
+        (component.role === "native-home-repair" &&
+          component.location !== "resources/native-home-repair.mjs")
       )
         fail("Invalid reviewed component location.");
       const bytes =
@@ -692,7 +722,7 @@ export async function validateWindowsArtifact(input: {
       !NodeUtil.isDeepStrictEqual(evidence.identity, policy.identity) ||
       !NodeUtil.isDeepStrictEqual(evidence.components, policy.reviewedComponents) ||
       !validChecks(evidence.checks, [
-        "default-home-isolation",
+        policy.homeRepair ? "default-home-selection" : "default-home-isolation",
         "native-updater-disabled",
         "cloud-disabled",
         "telemetry-disabled",

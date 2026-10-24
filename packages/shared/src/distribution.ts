@@ -141,10 +141,12 @@ export function resolveDistributionHome(input: {
   readonly platform: string;
   readonly localAppData: string | undefined;
   readonly joinPath: (...parts: string[]) => string;
+  readonly homeMode?: "drop-in" | "side-by-side";
 }): string {
   if (!isLanDistribution) return input.joinPath(input.homeDirectory, ".t3");
   if (input.platform !== "win32")
     throw new Error("This LAN distribution requires a native Windows home.");
+  if (input.homeMode !== "side-by-side") return input.joinPath(input.homeDirectory, ".t3");
   const local =
     input.localAppData?.trim() || input.joinPath(input.homeDirectory, "AppData", "Local");
   if (
@@ -175,7 +177,7 @@ export function assertDistributionHome(home: string, expectedHome: string): stri
     value.replaceAll("/", "\\").replace(/\\+$/u, "").toLowerCase();
   if (isLanDistribution && normalized(home) !== normalized(expectedHome))
     throw new Error(
-      "The LAN distribution cannot use a conflicting T3 home. Remove the override or use its independent native home.",
+      "The configured T3 home does not match the approved home selection. Use Hub repair preview to select the original or explicit side-by-side home.",
     );
   return home;
 }

@@ -72,6 +72,13 @@ const bootstrapJournal = Schema.decodeUnknownSync(
     bootstrapId: Schema.String,
   }),
 );
+const isAllowedMaintenanceLayout = (home: string, journal: string) =>
+  (NodePath.basename(home).toLowerCase() === ".t3" &&
+    NodePath.resolve(journal) === NodePath.join(home, "native-activation.json")) ||
+  (NodePath.basename(home).toLowerCase() === "data" &&
+    NodePath.basename(NodePath.dirname(home)).toLowerCase() === "t3codelan" &&
+    NodePath.resolve(journal) === NodePath.join(NodePath.dirname(home), "activation.json"));
+
 const bootstrapFiles = new Set([
   "native-admission.lock",
   "native-bootstrap-state.json",
@@ -174,10 +181,7 @@ function inspectBootstrapHome(request: NativeMaintenanceRequest) {
   const home = NodePath.resolve(request.homeDirectory);
   if (
     home !== request.homeDirectory ||
-    NodePath.basename(home) !== "data" ||
-    NodePath.basename(NodePath.dirname(home)) !== "T3CodeLAN" ||
-    NodePath.resolve(request.journalPath) !==
-      NodePath.join(NodePath.dirname(home), "activation.json") ||
+    !isAllowedMaintenanceLayout(home, request.journalPath) ||
     !request.bootstrapId ||
     !/^[a-f0-9]{64}$/u.test(request.bootstrapId) ||
     !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(
@@ -358,7 +362,7 @@ const statuses = [
 ] as const;
 
 // All identifiers below are fixed source constants, never request-derived SQL.
-const readDatabase = (databasePath: string) => {
+export const inspectStoppedRepairWork = (databasePath: string) => {
   const db = new NodeSqlite.DatabaseSync(databasePath, {
     readOnly: true,
     enableForeignKeyConstraints: true,
@@ -560,10 +564,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
             const home = NodePath.resolve(request.homeDirectory);
             if (
               home !== request.homeDirectory ||
-              NodePath.basename(home).toLowerCase() !== "data" ||
-              NodePath.basename(NodePath.dirname(home)) !== "T3CodeLAN" ||
-              NodePath.resolve(request.journalPath) !==
-                NodePath.join(NodePath.dirname(home), "activation.json")
+              !isAllowedMaintenanceLayout(home, request.journalPath)
             )
               throw new NativeMaintenanceError({ reason: "identity" });
             safeParents(home);
@@ -578,7 +579,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
             const dbPath = NodePath.join(state, "statev2.sqlite");
             safeFile(dbPath);
             const before = await filesGeneration(dbPath);
-            const work = readDatabase(dbPath);
+            const work = inspectStoppedRepairWork(dbPath);
             const after = await filesGeneration(dbPath);
             if (before !== after) throw new NativeMaintenanceError({ reason: "changed" });
             return {

@@ -628,3 +628,33 @@ it("rejects native updater feeds, unsafe ZIP names, case duplicates, CRC corrupt
     /Duplicate/u,
   );
 });
+
+it("binds the repair helper, interface and drop-in evidence to explicit approval", async () => {
+  await validateWindowsArtifact(fixture(undefined, "t3code-lan", true));
+  for (const path of [
+    "resources/native-home-repair.mjs",
+    "resources/native-home-repair.contract.json",
+    "resources/native-home-repair.schema.json",
+  ]) {
+    await NodeAssert.rejects(
+      () =>
+        validateWindowsArtifact(
+          fixture(
+            (files) => files.set(path, Buffer.from("changed repair bytes")),
+            "t3code-lan",
+            true,
+          ),
+        ),
+      /differs|component differs/,
+    );
+  }
+  await NodeAssert.rejects(
+    () =>
+      validateWindowsArtifact(
+        fixture((files) =>
+          files.set("resources/native-home-repair.mjs", Buffer.from("unapproved helper")),
+        ),
+      ),
+    /explicit matching approved repair policy/,
+  );
+});

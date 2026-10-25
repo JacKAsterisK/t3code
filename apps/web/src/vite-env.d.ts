@@ -15,6 +15,7 @@ interface ImportMetaEnv {
   readonly VITE_RELAY_OTLP_TRACES_TOKEN: string;
   readonly T3CODE_DESKTOP_UPDATE_REPOSITORY: string;
   readonly APP_VERSION: string;
+  readonly FORK_BUILD_VERSION: string;
 }
 
 interface ImportMeta {

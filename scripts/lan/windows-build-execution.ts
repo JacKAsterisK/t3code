@@ -602,7 +602,11 @@ export function createWindowsBuildExecution(input: {
         throw new Error(
           "Compilation requires the reviewed immutable LAN policy and application version.",
         );
-      const extra = { ...policyEnvironment, APP_VERSION: version };
+      const extra = {
+        ...policyEnvironment,
+        APP_VERSION: version,
+        T3CODE_FORK_BUILD_VERSION: lock.distributionVersion,
+      };
       return [
         command(tools.node, [tools.viteCli, "build"], path.join(source, "apps/web"), extra),
         command(tools.node, [tools.viteCli, "pack"], path.join(source, "apps/server"), extra),
@@ -714,6 +718,7 @@ export function createWindowsBuildExecution(input: {
         if (value === undefined || env[key] === value) continue;
         if (
           (key === "APP_VERSION" && value === lock.applicationVersion) ||
+          (key === "T3CODE_FORK_BUILD_VERSION" && value === lock.distributionVersion) ||
           (key === "T3CODE_LAN_BUILD_POLICY" && isInside(value, input.isolation.inputsRoot)) ||
           (key === "T3CODE_LAN_BUILD_POLICY_SHA256" && value === request.identitySha256) ||
           (key === "NODE_PATH" && value === "") ||

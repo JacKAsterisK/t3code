@@ -289,6 +289,10 @@ export default defineConfig(({ mode }) => {
         configuredDesktopUpdateRepository,
       ),
       "import.meta.env.APP_VERSION": JSON.stringify(configuredAppVersion),
+      // This identifies the renderer artifact, independently of any connected environment.
+      "import.meta.env.FORK_BUILD_VERSION": JSON.stringify(
+        process.env.T3CODE_FORK_BUILD_VERSION?.trim() || "",
+      ),
     },
     resolve: {
       tsconfigPaths: true,

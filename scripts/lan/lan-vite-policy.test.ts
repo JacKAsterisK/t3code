@@ -36,20 +36,35 @@ vi.mock("../lib/public-config.ts", () => ({
 it("disables Vite automatic environment exposure on the actual LAN config, outside plugin options", async () => {
   // Its own composite project typechecks this config; load the real module at
   // runtime without pulling web's bundler-resolution files into scripts' NodeNext project.
-  const configPath = "../../apps/web/vite.config.ts";
-  const { default: config } = (await import(configPath)) as { default: UserConfigExport };
-  if (typeof config !== "function")
-    throw new Error("Expected the actual web configuration function.");
-  const resolved = await config({
-    command: "build",
-    mode: "production",
-    isSsrBuild: false,
-    isPreview: false,
-  });
-  NodeAssert.equal(resolved.envDir, false);
-  NodeAssert.deepEqual(resolved.envPrefix, []);
-  NodeAssert.equal(resolved.define?.["import.meta.env.VITE_T3CODE_RELAY_URL"], '""');
-  NodeAssert.equal(resolved.define?.["import.meta.env.T3CODE_DESKTOP_UPDATE_REPOSITORY"], '""');
+  vi.stubEnv("T3CODE_FORK_BUILD_VERSION", "7.8.9");
+  try {
+    const configPath = "../../apps/web/vite.config.ts";
+    const { default: config } = (await import(configPath)) as { default: UserConfigExport };
+    if (typeof config !== "function")
+      throw new Error("Expected the actual web configuration function.");
+    const resolved = await config({
+      command: "build",
+      mode: "production",
+      isSsrBuild: false,
+      isPreview: false,
+    });
+    NodeAssert.equal(resolved.define?.["import.meta.env.FORK_BUILD_VERSION"], '"7.8.9"');
+    NodeAssert.equal(resolved.define?.["import.meta.env.APP_VERSION"], '"0.1.2"');
+    vi.stubEnv("T3CODE_FORK_BUILD_VERSION", "");
+    const withoutReleaseMetadata = await config({
+      command: "build",
+      mode: "production",
+      isSsrBuild: false,
+      isPreview: false,
+    });
+    NodeAssert.equal(withoutReleaseMetadata.define?.["import.meta.env.FORK_BUILD_VERSION"], '""');
+    NodeAssert.equal(resolved.envDir, false);
+    NodeAssert.deepEqual(resolved.envPrefix, []);
+    NodeAssert.equal(resolved.define?.["import.meta.env.VITE_T3CODE_RELAY_URL"], '""');
+    NodeAssert.equal(resolved.define?.["import.meta.env.T3CODE_DESKTOP_UPDATE_REPOSITORY"], '""');
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });
 
 it.each([

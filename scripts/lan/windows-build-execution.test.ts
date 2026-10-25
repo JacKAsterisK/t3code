@@ -475,8 +475,19 @@ it("compiles every surface with explicit reviewed Node and bundler entry points 
       "pack",
     ],
   );
-  for (const command of commands)
+  for (const command of commands) {
+    assert.equal(command.env.T3CODE_FORK_BUILD_VERSION, execution.lock.distributionVersion);
+    assert.notEqual(command.env.T3CODE_FORK_BUILD_VERSION, command.env.APP_VERSION);
     assert.equal(execution.prepare(asChildProcess(command)).options.extendEnv, false);
+  }
+  assert.throws(() =>
+    execution.prepare(
+      ChildProcess.make(commands[0]!.executable, commands[0]!.args, {
+        cwd: commands[0]!.cwd,
+        env: { T3CODE_FORK_BUILD_VERSION: "9.9.9" },
+      }),
+    ),
+  );
   assert.throws(() => execution.compile("9.9.9", policy));
   assert.throws(() =>
     execution.compile("0.1.2", { ...policy, T3CODE_LAN_BUILD_POLICY_SHA256: "e".repeat(64) }),

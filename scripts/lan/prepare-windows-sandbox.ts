@@ -42,7 +42,7 @@ export const SourceSnapshot = Schema.Struct({
   exclusions: Schema.Array(
     Schema.Struct({
       path: Schema.String,
-      mode: Schema.Literals(["120000", "160000"]),
+      mode: Schema.Literals(["100644", "100755", "120000", "160000"]),
       blob: Schema.String,
     }),
   ),

@@ -319,8 +319,13 @@ it("captures actual committed binary bytes and establishes a native context only
     for (const root of [source, tools, output]) await NodeFSP.mkdir(root);
     const bytes = new Uint8Array([0, 255, 10, 13, 13, 10]);
     await NodeFSP.writeFile(NodePath.join(source, "tracked.bin"), bytes);
+    await NodeFSP.mkdir(NodePath.join(source, ".repos", "reference"), { recursive: true });
+    await NodeFSP.writeFile(
+      NodePath.join(source, ".repos", "reference", "notes.txt"),
+      "reference only",
+    );
     await git(source, ["init"]);
-    await git(source, ["add", "tracked.bin"]);
+    await git(source, ["add", "-f", "tracked.bin", ".repos/reference/notes.txt"]);
     await git(source, ["commit", "-m", "fixture"]);
     const commit = await git(source, ["rev-parse", "HEAD"]),
       epoch = Number(await git(source, ["show", "-s", "--format=%ct", "HEAD"]));
@@ -341,6 +346,14 @@ it("captures actual committed binary bytes and establishes a native context only
     const captured = await captureNativeBuildSource(source, lock, epoch);
     expect(Array.from(captured.files.get("tracked.bin")!)).toEqual(Array.from(bytes));
     expect(captured.snapshot.sourceCommit).toBe(commit);
+    expect(captured.files.has(".repos/reference/notes.txt")).toBe(false);
+    expect(captured.snapshot.exclusions).toEqual([
+      {
+        path: ".repos/reference/notes.txt",
+        mode: "100644",
+        blob: await git(source, ["rev-parse", "HEAD:.repos/reference/notes.txt"]),
+      },
+    ]);
     const nativeBinding = {
       mappedSourceRoot: source,
       toolchainRoot: tools,

@@ -34,6 +34,29 @@ it("omits only the exact reviewed agent link and reference gitlinks while retain
   expect(() => assertSourceSnapshotExclusions(selected.exclusions)).not.toThrow();
 });
 
+it("excludes regular vendored reference files while retaining their exact object inventory", () => {
+  const references = [
+    { path: ".repos/effect/src/Effect.ts", mode: "100644", blob: "a".repeat(40) },
+    { path: ".repos/tool/bin/run", mode: "100755", blob: "b".repeat(40) },
+  ];
+  const build = { path: "scripts/build.ts", mode: "100644", blob: "c".repeat(40) };
+  const selection = partitionTrackedSourceEntries(
+    [...references, build]
+      .map((entry) => `${entry.mode} ${entry.blob} 0\t${entry.path}\0`)
+      .join(""),
+  );
+  expect(selection.files).toEqual([build]);
+  expect(selection.exclusions).toEqual(references);
+  expect(() => assertSourceSnapshotExclusions(selection.exclusions)).not.toThrow();
+  for (const path of [
+    ".repos/../scripts/build.ts",
+    ".repos//Effect.ts",
+    ".REPOS/Effect.ts",
+    ".repos/Effect\\main.ts",
+  ])
+    expect(() => partitionTrackedSourceEntries(`100644 ${"a".repeat(40)} 0\t${path}\0`)).toThrow();
+});
+
 it("refuses changed non-build references, unknown links, case aliases and unmerged index entries", () => {
   const known = APPROVED_NONBUILD_SOURCE_ENTRIES[0]!;
   for (const entry of [
@@ -66,7 +89,10 @@ it("classifies the actual tracked checkout without following or initializing non
   expect(selected.files.some((entry) => entry.path === "scripts/build-desktop-artifact.ts")).toBe(
     true,
   );
-  expect(selected.exclusions).toEqual(APPROVED_NONBUILD_SOURCE_ENTRIES);
+  expect(selected.files.some((entry) => entry.path.startsWith(".repos/"))).toBe(false);
+  expect(
+    selected.exclusions.filter((entry) => entry.mode !== "100644" && entry.mode !== "100755"),
+  ).toEqual(APPROVED_NONBUILD_SOURCE_ENTRIES);
 });
 
 it("removes repository/index/config overrides without exposing unrelated environment values", () => {

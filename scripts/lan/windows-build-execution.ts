@@ -364,7 +364,10 @@ export function createWindowsBuildExecution(input: {
   const vcTargets = directory(vcTargetsRelative);
   if (!isInside(source, output))
     throw new Error("The isolated working source must be below its fresh output root.");
-  const cache = (name: (typeof cacheNames)[number]) => path.join(output, "caches", name);
+  const cache = (name: (typeof cacheNames)[number]) =>
+    name === "pnpmStore" && input.isolation.kind === "windows-native-directory"
+      ? directory(request.directories.pnpmStore)
+      : path.join(output, "caches", name);
   const dirs = request.directories;
   const headerText = (name: "node_version.h" | "config.gypi", bytes: Uint8Array) => {
     const pin = toolchainFiles.get(`${dirs.nodeHeaders}/include/node/${name}`);
@@ -557,6 +560,13 @@ export function createWindowsBuildExecution(input: {
             ]),
         "--offline",
         "--frozen-lockfile",
+        ...(input.isolation.kind === "windows-native-directory"
+          ? [
+              "--frozen-store",
+              "--config.package-import-method=copy",
+              "--config.side-effects-cache=false",
+            ]
+          : []),
         // This exact pnpm pin preserves the recorded checksum and peer graph
         // when frozen hooks are skipped; the source hook adds WSL architectures.
         "--ignore-pnpmfile",
@@ -565,7 +575,10 @@ export function createWindowsBuildExecution(input: {
         "--config.verify-store-integrity=true",
         "--store-dir",
         cache("pnpmStore"),
-        "--config.cache-dir=" + path.join(cache("pnpmStore"), "metadata-cache"),
+        "--config.cache-dir=" +
+          (input.isolation.kind === "windows-native-directory"
+            ? path.join(output, "caches", "pnpmMetadata")
+            : path.join(cache("pnpmStore"), "metadata-cache")),
       ],
       workingDirectory,
     );

@@ -7,9 +7,8 @@ import * as NodeCrypto from "node:crypto";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 
-// These committed agent/reference entries are never build inputs. Object IDs
-// are explicit so an upstream change requires review instead of silently
-// widening the snapshot's omission policy or following a link.
+// Vendored .repos files are read-only references and cannot be imported by builds.
+// Links still require exact approval rather than following an arbitrary target.
 export const APPROVED_NONBUILD_SOURCE_ENTRIES = Object.freeze([
   Object.freeze({
     path: ".claude/skills",
@@ -32,6 +31,17 @@ export interface SourceSnapshotExclusion {
   readonly mode: string;
   readonly blob: string;
 }
+function isReferenceSourceEntry(entry: SourceSnapshotExclusion) {
+  return (
+    entry.path.startsWith(".repos/") &&
+    (entry.mode === "100644" || entry.mode === "100755") &&
+    /^[a-f0-9]{40}$/u.test(entry.blob) &&
+    entry.path
+      .split("/")
+      .every((part) => part.length > 0 && part !== "." && part !== ".." && !/[\\\0]/u.test(part))
+  );
+}
+
 export function assertSourceSnapshotExclusions(exclusions: readonly SourceSnapshotExclusion[]) {
   let previous = "";
   for (const entry of exclusions) {
@@ -39,10 +49,9 @@ export function assertSourceSnapshotExclusions(exclusions: readonly SourceSnapsh
       (candidate) => candidate.path === entry.path,
     );
     if (
-      !approved ||
       entry.path <= previous ||
-      entry.mode !== approved.mode ||
-      entry.blob !== approved.blob
+      (!isReferenceSourceEntry(entry) &&
+        (!approved || entry.mode !== approved.mode || entry.blob !== approved.blob))
     )
       throw new Error(
         "Source snapshot exclusion differs from the exact reviewed non-build inventory.",
@@ -70,7 +79,12 @@ export function partitionTrackedSourceEntries(index: string) {
     const approved = APPROVED_NONBUILD_SOURCE_ENTRIES.find(
       (candidate) => candidate.path.toLowerCase() === name,
     );
-    if (approved || entry.mode === "120000" || entry.mode === "160000") {
+    if (
+      approved ||
+      name.startsWith(".repos/") ||
+      entry.mode === "120000" ||
+      entry.mode === "160000"
+    ) {
       assertSourceSnapshotExclusions([entry]);
       exclusions.push(entry);
     } else {

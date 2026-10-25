@@ -343,7 +343,20 @@ it("uses the same pinned commands for a separately verified native backend witho
   assertWindowsBuildExecution(execution);
   assert.equal(execution.isolation.kind, "windows-native-directory");
   assert.equal(execution.workspaceInstall().executable, "C:\\T3LAN\\Tools\\pnpm\\pnpm.exe");
-  assert.include(execution.workspaceInstall().args, "--offline");
+  for (const command of [
+    execution.workspaceInstall(),
+    execution.stageInstall("C:\\T3LAN\\Output\\stage\\app"),
+  ]) {
+    assert.include(command.args, "--offline");
+    assert.include(command.args, "--frozen-store");
+    assert.include(command.args, "--config.package-import-method=copy");
+    assert.include(command.args, "--config.side-effects-cache=false");
+    assert.equal(
+      command.args[command.args.indexOf("--store-dir") + 1],
+      "C:\\T3LAN\\Tools\\pnpm-store",
+    );
+    assert.include(command.args, "--config.cache-dir=C:\\T3LAN\\Output\\caches\\pnpmMetadata");
+  }
   assert.equal(asChildProcess(execution.resourceMonitor()).options.extendEnv, false);
   assert.throws(
     () => execution.prepare(ChildProcess.make("C:\\Windows\\System32\\cmd.exe", [])),

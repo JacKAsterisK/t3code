@@ -418,13 +418,28 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
         mode: 0o600,
       });
     for (const name of ["pnpmStore", "cargoHome", "electronCache", "builderCache"] as const) {
-      console.log("[native-build] Copying exact pinned mutable cache: " + name);
       const prefix = relativeWindowsPath(execution.directories[name]) + "/";
       const pins = new Map(
         [...toolchainFiles]
           .filter(([relative]) => relative.startsWith(prefix))
           .map(([relative, pin]) => [relative.slice(prefix.length), pin]),
       );
+      if (name === "pnpmStore") {
+        if (!pins.size) throw new Error("The pinned pnpm store is empty.");
+        console.log(
+          "[native-build] Reusing pinned pnpm store with frozen-store and independent copy imports.",
+        );
+        await measureBuildStage(
+          "native.cache-reuse.pnpmStore",
+          () =>
+            assertValidationRoot(
+              NodePath.join(context.toolchainRoot, execution.directories.pnpmStore),
+            ),
+          () => buildInventoryCounts(pins.values()),
+        );
+        continue;
+      }
+      console.log("[native-build] Copying exact pinned mutable cache: " + name);
       await measureBuildStage(
         `native.cache-copy.${name}`,
         () =>

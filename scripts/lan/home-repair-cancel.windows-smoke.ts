@@ -14,8 +14,8 @@ const script = String.raw`
 param([string]$NodeExe,[string]$Helper,[string]$FixtureRoot)
 $ErrorActionPreference='Stop'
 $env:USERPROFILE=$FixtureRoot
-$env:LOCALAPPDATA=Join-NodePath $FixtureRoot 'AppData\Local'
-$env:APPDATA=Join-NodePath $FixtureRoot 'AppData\Roaming'
+$env:LOCALAPPDATA=Join-Path $FixtureRoot 'AppData\Local'
+$env:APPDATA=Join-Path $FixtureRoot 'AppData\Roaming'
 function Invoke-Repair([string]$Operation,[object]$Request){
   $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$NodeExe
   $start.Arguments='--no-warnings "'+$Helper+'" '+$Operation+' --json'
@@ -31,20 +31,20 @@ function Invoke-Repair([string]$Operation,[object]$Request){
 }
 function Expect-Ok([string]$Operation,[object]$Request){$run=Invoke-Repair $Operation $Request;if($run.exitCode-ne0){throw ('Synthetic '+$Operation+' refused: '+$run.error)};return ($run.output|ConvertFrom-Json)}
 $initial=Expect-Ok 'preview' $null
-if($initial.original.homeDirectory-ne(Join-NodePath $FixtureRoot '.t3')){throw 'Wrong synthetic original; no mutation permitted'}
+if($initial.original.homeDirectory-ne(Join-Path $FixtureRoot '.t3')){throw 'Wrong synthetic original; no mutation permitted'}
 if(-not$initial.canCancelOriginalWork-or$initial.canApply){throw 'Initial busy preview capability mismatch'}
 $cancelId='b'*32;$applyId='c'*32
 $request=@{schemaVersion=1;expectedPlanId=$initial.planId;repairId=$cancelId;cancelUnfinishedWorkApproved=$true;opaqueBackupApproved=$true;admissionOwnerPid=$PID}
 if((Invoke-Repair 'cancel-original-work' $request).exitCode-eq0){throw 'Cancellation accepted without held admission'}
 $handles=[Collections.Generic.List[IDisposable]]::new();$locked=[Collections.Generic.List[string]]::new()
 try{
-  $installation=Join-NodePath $env:LOCALAPPDATA 'T3CodeLAN\synthetic-installation.lock';[IO.File]::WriteAllText($installation,'synthetic installation owner')
+  $installation=Join-Path $env:LOCALAPPDATA 'T3CodeLAN\synthetic-installation.lock';[IO.File]::WriteAllText($installation,'synthetic installation owner')
   $handles.Add([IO.File]::Open($installation,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None));$locked.Add($installation)
   foreach($fixtureHome in @($initial.original,$initial.lan)){
     if($fixtureHome.state-ne'initialized'){continue}
-    foreach($relative in @('native-admission.lock','userdata\server-owner.sqlite')){$path=Join-NodePath $fixtureHome.homeDirectory $relative;$handles.Add([IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None));$locked.Add($path)}
+    foreach($relative in @('native-admission.lock','userdata\server-owner.sqlite')){$path=Join-Path $fixtureHome.homeDirectory $relative;$handles.Add([IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None));$locked.Add($path)}
   }
-  foreach($profile in $initial.electronProfiles){if($profile.localState.present){$path=Join-NodePath $profile.profileDirectory 'Local State';$handles.Add([IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read));$locked.Add($path)}}
+  foreach($profile in $initial.electronProfiles){if($profile.localState.present){$path=Join-Path $profile.profileDirectory 'Local State';$handles.Add([IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read));$locked.Add($path)}}
   function NodeAssert-Held{
     foreach($path in $locked){$opened=$null;try{$opened=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::ReadWrite)}catch [IO.IOException] {};if($null-ne$opened){$opened.Dispose();throw 'Owner released a required sharing handle'}}
   }

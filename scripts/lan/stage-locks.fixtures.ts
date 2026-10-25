@@ -6,7 +6,7 @@ import { projectProductionStageFiles } from "./prepare-stage-locks.ts";
 const json = (value: unknown) => Buffer.from(JSON.stringify(value));
 const yaml = Schema.encodeSync(fromYaml(Schema.Unknown));
 
-export function populateProductionStageFixture(files: Map<string, Buffer>) {
+export function populateProductionStageFixture(files: Map<string, Buffer>, directOverride = false) {
   const merge = (path: string, value: Record<string, unknown>) => {
     const existing = files.get(path);
     const original = existing === undefined ? {} : JSON.parse(existing.toString("utf8"));
@@ -24,11 +24,12 @@ export function populateProductionStageFixture(files: Map<string, Buffer>) {
   const patchPath = "patches/fixture-node-pty.patch",
     patch = Buffer.from("synthetic reviewed patch bytes");
   files.set(patchPath, patch);
+  const overrides = directOverride ? { "node-pty": "1.2.0-beta.15" } : {};
   const hash = sha256(patch),
     nodePty = `1.2.0-beta.15(patch_hash=${hash})`;
   files.set(
     "pnpm-workspace.yaml",
-    Buffer.from(yaml({ patchedDependencies: { "node-pty@1.2.0-beta.15": patchPath } })),
+    Buffer.from(yaml({ overrides, patchedDependencies: { "node-pty@1.2.0-beta.15": patchPath } })),
   );
   const pin = (specifier: string, version = specifier) => ({ specifier, version });
   const integrity = { integrity: `sha512-${Buffer.alloc(64, 1).toString("base64")}` };
@@ -64,6 +65,7 @@ export function populateProductionStageFixture(files: Map<string, Buffer>) {
       })}---\n${yaml({
         lockfileVersion: "9.0",
         settings: { autoInstallPeers: true, excludeLinksFromLockfile: false },
+        overrides,
         patchedDependencies: { "node-pty@1.2.0-beta.15": hash },
         importers: {
           "apps/desktop": {
@@ -75,7 +77,7 @@ export function populateProductionStageFixture(files: Map<string, Buffer>) {
           "apps/server": {
             dependencies: {
               "@ff-labs/fff-node": pin("0.11.0"),
-              "node-pty": pin("^1.2.0-beta.15", nodePty),
+              "node-pty": pin(directOverride ? "1.2.0-beta.15" : "^1.2.0-beta.15", nodePty),
             },
           },
         },

@@ -23,7 +23,7 @@ jobs:
       - uses: ./.github/actions/setup-ci-deps
       - name: Typecheck affected applications and contracts
         shell: bash
-        run: vp run --filter ./apps/server --filter @t3tools/web --filter @t3tools/desktop --filter @t3tools/contracts --filter @t3tools/client-runtime typecheck
+        run: vp run --filter ./apps/server --filter @t3tools/web --filter @t3tools/desktop --filter @t3tools/contracts --filter @t3tools/client-runtime --filter @t3tools/scripts typecheck
       - name: Install workspace-local Chromium test runtime
         shell: bash
         run: node apps/web/node_modules/playwright/cli.js install chromium --only-shell
@@ -37,6 +37,8 @@ jobs:
         shell: bash
         run: >-
           vp test run
+          scripts/lan/stage-locks.test.ts
+          scripts/lan/accept-stage-locks.test.ts
           scripts/lan/source-git.test.ts
           scripts/lan/windows-native-build.test.ts
           scripts/lan/windows-build-execution.test.ts

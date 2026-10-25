@@ -242,7 +242,12 @@ function roots(stage: WindowsProductionStage, rootLock: Record<string, unknown>)
           throw new Error(`No existing locked resolution for ${name}.`);
         version = text(specifier, "native dependency version");
       }
-      (result[section] ??= {})[name] = { specifier: text(specifier, "stage specifier"), version };
+      // pnpm applies direct overrides before comparing importer specifiers.
+      // Keep the existing root resolution and its patch/peer context unchanged.
+      (result[section] ??= {})[name] = {
+        specifier: stage.workspace.overrides?.[name] ?? text(specifier, "stage specifier"),
+        version,
+      };
     }
   }
   return result;

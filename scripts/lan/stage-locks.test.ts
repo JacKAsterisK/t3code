@@ -23,9 +23,9 @@ const object = (value: unknown): Record<string, unknown> => {
   decodeRecord(value);
   return value as Record<string, unknown>;
 };
-function fixture() {
+function fixture(directOverride = false) {
   const files = new Map<string, Buffer>();
-  populateProductionStageFixture(files);
+  populateProductionStageFixture(files, directOverride);
   const read = (name: string) => {
     const bytes = files.get(name);
     if (!bytes) throw new Error(`Missing fixture ${name}.`);
@@ -71,6 +71,15 @@ it("projects deterministic production inputs with exact peer/native optional clo
     report.pinnedPackageManagerAcceptance,
     "pending-pnpm@12.14.0-frozen-offline-verification",
   );
+});
+
+it("projects direct overrides as pnpm importer specifiers without changing locked patch resolutions", () => {
+  const input = fixture(true);
+  const lock = readWorkspaceLock(input.read("scripts/lan/locks/server.pnpm-lock.yaml"));
+  const nodePty = object(object(object(lock.importers)["."]).dependencies)["node-pty"];
+  NodeAssert.equal(object(nodePty).specifier, "1.2.0-beta.15");
+  NodeAssert.match(String(object(nodePty).version), /^1\.2\.0-beta\.15\(patch_hash=/u);
+  NodeAssert.equal(input.verify("server").packageManagerVerificationRequired, "pnpm@12.14.0");
 });
 
 it("rejects dropped native optional edges, fabricated peer contexts and changed complete package metadata", () => {

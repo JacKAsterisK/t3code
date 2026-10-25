@@ -17,7 +17,7 @@
       "packageManagerVerificationRequired": "pnpm@12.14.0"
     },
     "server": {
-      "sha256": "2a1b37b451a2cb02a576593294d42dc470cfd014bec3991ddfccc09e20b49d71",
+      "sha256": "15efa3e1ba4ef1f46434e9ab99d4ef985cef5a9fc22179741f500700bb3060ee",
       "snapshots": 51,
       "packageManagerVerificationRequired": "pnpm@12.14.0"
     }

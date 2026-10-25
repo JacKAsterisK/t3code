@@ -7,7 +7,7 @@ import { Command, GlobalFlag } from "effect/cli";
 import * as CliError from "effect/cli/CliError";
 
 import * as ServerConfig from "../config.ts";
-import { awaitLauncherLoss } from "../launcherWatch.ts";
+import { awaitDesktopShutdown, awaitLauncherLoss } from "../launcherWatch.ts";
 import { runServer } from "../server.ts";
 import { type CliServerFlags, resolveServerConfig, sharedServerCommandFlags } from "./config.ts";
 
@@ -38,7 +38,7 @@ const runServerCommand = Effect.fn("server.runServerCommand")(function* (
   });
   return yield* Effect.raceFirst(
     run,
-    awaitLauncherLoss().pipe(
+    (config.desktopShutdownOnStdin === true ? awaitDesktopShutdown() : awaitLauncherLoss()).pipe(
       // End like SIGTERM does (interrupt-only exit, so the runtime forces process exit).
       Effect.andThen(Effect.interrupt),
     ),

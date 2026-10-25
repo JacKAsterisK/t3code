@@ -120,6 +120,33 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     );
   });
 
+  it.effect.each([undefined, true] as const)(
+    "preserves native desktop shutdown opt-in from bootstrap: %s",
+    (enabled) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-graceful-bootstrap-" });
+        const fd = yield* openBootstrapFd(
+          makeDesktopBootstrap({
+            t3Home: baseDir,
+            ...(enabled === undefined ? {} : { desktopShutdownOnStdin: enabled }),
+          }),
+        );
+        const resolved = yield* resolveServerConfig(
+          { ...minimalDesktopFlags(baseDir), bootstrapFd: Option.some(fd) },
+          Option.none(),
+        ).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+              NetService.layer,
+            ),
+          ),
+        );
+        assert.equal(resolved.desktopShutdownOnStdin, enabled);
+      }),
+  );
+
   it.effect("keeps stale records and supervised startup out of the manual launch preflight", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

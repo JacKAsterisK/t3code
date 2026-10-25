@@ -242,6 +242,10 @@ describe("DesktopBackendConfiguration", () => {
         assert.isUndefined(first.env.T3CODE_DESKTOP_LAN_HOST);
 
         assert.equal(first.bootstrap.mode, "desktop");
+        assert.equal(
+          first.bootstrap.desktopShutdownOnStdin,
+          environment.platform === "win32" ? true : undefined,
+        );
         assert.equal(first.bootstrap.noBrowser, true);
         assert.equal(first.bootstrap.port, 4888);
         assert.equal(first.bootstrap.host, "0.0.0.0");
@@ -311,6 +315,7 @@ describe("DesktopBackendConfiguration", () => {
         path.join(resourcesPath, "server.asar/apps/server/dist/bin.mjs"),
       );
       assert.equal(config.env.ELECTRON_RUN_AS_NODE, "1");
+      assert.equal(config.bootstrap.desktopShutdownOnStdin, true);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -643,6 +648,7 @@ describe("DesktopBackendConfiguration", () => {
         );
 
         assert.equal(config.bootstrapDelivery, "stdin");
+        assert.isUndefined(config.bootstrap.desktopShutdownOnStdin);
         assert.deepEqual(config.args, [
           "-d",
           "Ubuntu",

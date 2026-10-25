@@ -54,33 +54,56 @@ const fixture = Effect.gen(function* () {
     environmentId: "environment:fixture",
     journalPath: path.join(root, "T3CodeLAN", "activation.json"),
   };
-  const insert = (table: string, status: string) =>
+  const insert = (
+    table: string,
+    status: string,
+    values: Readonly<Record<string, string | number | null>> = {},
+  ) =>
     Effect.sync(() => {
       const db = new NodeSqlite.DatabaseSync(dbPath);
       try {
         const columns = db
           .prepare(`PRAGMA table_info(${table})`)
           .all()
-          .filter((row) => row.pk || (row.notnull && row.dflt_value === null));
+          .filter(
+            (row) =>
+              row.pk ||
+              (row.notnull && row.dflt_value === null) ||
+              Object.hasOwn(values, String(row.name)),
+          );
         const names = columns.map((row) => String(row.name));
         db.prepare(
           `INSERT INTO ${table} (${names.join(",")}) VALUES (${names.map(() => "?").join(",")})`,
         ).run(
           ...columns.map((row) =>
-            row.name === "status"
-              ? status
-              : String(row.type).includes("INT")
-                ? 0
-                : String(row.name).endsWith("json")
-                  ? "{}"
-                  : "fixture",
+            Object.hasOwn(values, String(row.name))
+              ? values[String(row.name)]!
+              : row.name === "status"
+                ? status
+                : String(row.type).includes("INT")
+                  ? 0
+                  : String(row.name).endsWith("json")
+                    ? "{}"
+                    : "fixture",
           ),
         );
       } finally {
         db.close();
       }
     });
-  return { request, mutate, insert, dbPath };
+  const warm = () =>
+    Effect.gen(function* () {
+      yield* insert("orchestration_v2_projection_provider_sessions", "ready", {
+        provider_session_id: "session:warm",
+        thread_id: "thread:warm",
+      });
+      yield* insert("orchestration_v2_projection_provider_threads", "active", {
+        provider_thread_id: "provider-thread:warm",
+        provider_session_id: "session:warm",
+        thread_id: "thread:warm",
+      });
+    });
+  return { request, mutate, insert, warm, dbPath };
 });
 const testLayer = NativeMaintenance.layer(identity).pipe(
   Layer.provide(
@@ -115,14 +138,202 @@ it.layer(NodeServices.layer)("NativeMaintenance", (it) => {
       }).pipe(Effect.provide(testLayer)),
   );
 
+  it.effect.each(["completed", "interrupted", "failed", "cancelled", "rolled_back"])(
+    "admits crash-stale warm providers after a $status run without rewriting stopped state",
+    (status) =>
+      Effect.gen(function* () {
+        const { request, insert, warm } = yield* fixture;
+        yield* warm();
+        yield* insert("orchestration_v2_projection_runs", status, {
+          thread_id: "thread:warm",
+          provider_thread_id: "provider-thread:warm",
+        });
+        yield* insert("orchestration_v2_projection_provider_turns", "completed", {
+          thread_id: "thread:warm",
+          provider_thread_id: "provider-thread:warm",
+        });
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        const observed = yield* service.inspect(request);
+        assert.deepEqual(
+          [
+            observed.activeRuns,
+            observed.queuedRuns,
+            observed.pendingRequests,
+            observed.backgroundAgents,
+            observed.scheduledWork,
+            observed.restartContinuations,
+          ],
+          [0, 0, 0, 0, 0, 0],
+        );
+        const verified = yield* service.verify({ ...request, operation: "verify" });
+        assert.equal(verified.dataGeneration, observed.dataGeneration);
+        assert.equal(verified.workGeneration, observed.workGeneration);
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect.each(
+    [
+      ["orchestration_v2_projection_runs", "preparing"],
+      ["orchestration_v2_projection_runs", "starting"],
+      ["orchestration_v2_projection_runs", "running"],
+      ["orchestration_v2_projection_runs", "waiting"],
+      ["orchestration_v2_projection_provider_turns", "pending"],
+      ["orchestration_v2_projection_provider_turns", "running"],
+      ["orchestration_v2_projection_runtime_requests", "pending"],
+      ["orchestration_v2_projection_subagents", "waiting"],
+    ].map(([table, status]) => ({ table: table!, status: status! })),
+  )("retains warm-provider busy counts for unfinished $table ($status)", ({ table, status }) =>
+    Effect.gen(function* () {
+      const { request, insert, warm } = yield* fixture;
+      yield* warm();
+      yield* insert(table, status, {
+        thread_id: "thread:warm",
+        provider_thread_id: "provider-thread:warm",
+      });
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      assert.isAtLeast((yield* service.inspect(request)).backgroundAgents, 2);
+      assert.equal(
+        (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+        "busy",
+      );
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "relates warm state through shared-session bindings and provider-thread IDs, not unrelated work",
+    () =>
+      Effect.gen(function* () {
+        const { request, insert, mutate, warm } = yield* fixture;
+        yield* warm();
+        yield* insert("orchestration_v2_projection_runs", "running", {
+          thread_id: "thread:other",
+          provider_thread_id: "provider-thread:other",
+        });
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        const unrelated = yield* service.inspect(request);
+        assert.equal(unrelated.activeRuns, 1);
+        assert.equal(unrelated.backgroundAgents, 0);
+        yield* mutate(
+          "UPDATE orchestration_v2_projection_provider_sessions SET thread_id=NULL; INSERT INTO orchestration_v2_projection_provider_session_bindings (provider_session_id,thread_id) VALUES ('session:warm','thread:other')",
+        );
+        assert.equal((yield* service.inspect(request)).backgroundAgents, 1);
+        yield* mutate(
+          "UPDATE orchestration_v2_projection_provider_threads SET thread_id=NULL; UPDATE orchestration_v2_projection_runs SET provider_thread_id='provider-thread:warm'",
+        );
+        assert.equal((yield* service.inspect(request)).backgroundAgents, 2);
+        assert.equal(
+          (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+          "busy",
+        );
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect.each([
+    {
+      table: "orchestration_v2_projection_runs",
+      status: "completed",
+      payload: {
+        delegatedCompletion: {
+          disposition: "open",
+          nextGeneration: 2,
+          delivery: { generation: 1, messageId: "message:pending", taskIds: ["task:child"] },
+        },
+      },
+    },
+    {
+      table: "orchestration_v2_projection_subagents",
+      status: "idle",
+      payload: { completionDelivery: { state: "claimed", observedByRunId: null } },
+    },
+    {
+      table: "orchestration_v2_projection_subagents",
+      status: "idle",
+      payload: { origin: "app_owned", childThreadId: "thread:child", result: null },
+    },
+    {
+      table: "orchestration_v2_projection_provider_threads",
+      status: "active",
+      payload: { pendingBackgroundTasks: [{ taskId: "task:pending" }] },
+    },
+    { table: "orchestration_v2_effect_outbox", status: "pending", payload: {} },
+  ])("retains deferred-delivery blockers behind warm $table state", ({ table, status, payload }) =>
+    Effect.gen(function* () {
+      const { request, insert, mutate, warm } = yield* fixture;
+      yield* warm();
+      if (table === "orchestration_v2_projection_provider_threads")
+        yield* mutate(
+          `UPDATE orchestration_v2_projection_provider_threads SET payload_json='${JSON.stringify(payload)}'`,
+        );
+      else
+        yield* insert(table, status, {
+          thread_id: "thread:warm",
+          payload_json: JSON.stringify(payload),
+        });
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const observed = yield* service.inspect(request);
+      assert.isAtLeast(observed.backgroundAgents, 2);
+      assert.isAbove(observed.restartContinuations, 0);
+      assert.equal(
+        (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+        "busy",
+      );
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect.each(["active", "paused", "blocked", "usage_limited", "budget_limited", "complete"])(
+    "counts an explicit $status native goal only when it owns unfinished work",
+    (status) =>
+      Effect.gen(function* () {
+        const { request, mutate, warm } = yield* fixture;
+        yield* warm();
+        yield* mutate(
+          `UPDATE orchestration_v2_projection_provider_threads SET payload_json='${JSON.stringify({ goal: { objective: "Finish the requested task", status } })}'`,
+        );
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        assert.equal(
+          (yield* service.inspect(request)).backgroundAgents,
+          status === "active" ? 2 : 0,
+        );
+        if (status === "active")
+          assert.equal(
+            (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+            "busy",
+          );
+        else
+          assert.equal(
+            (yield* service.verify({ ...request, operation: "verify" })).backgroundAgents,
+            0,
+          );
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "refuses unknown native goals and warm status values rather than assuming they are idle",
+    () =>
+      Effect.gen(function* () {
+        const { request, mutate, warm } = yield* fixture;
+        yield* warm();
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        yield* mutate(
+          `UPDATE orchestration_v2_projection_provider_threads SET payload_json='{"goal":{"objective":"Unknown work","status":"future"}}'`,
+        );
+        assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "schema");
+        yield* mutate(
+          "UPDATE orchestration_v2_projection_provider_threads SET payload_json='{}'; UPDATE orchestration_v2_projection_provider_sessions SET status='future'",
+        );
+        assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "schema");
+      }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect.each(
     [
       ["orchestration_v2_projection_runs", "running"],
       ["orchestration_v2_projection_runs", "queued"],
       ["orchestration_v2_projection_nodes", "waiting"],
       ["orchestration_v2_projection_runtime_requests", "pending"],
-      ["orchestration_v2_projection_provider_sessions", "ready"],
-      ["orchestration_v2_projection_provider_threads", "active"],
+      ["orchestration_v2_projection_provider_sessions", "starting"],
+      ["orchestration_v2_projection_provider_sessions", "running"],
+      ["orchestration_v2_projection_provider_sessions", "waiting"],
       ["orchestration_v2_projection_provider_turns", "running"],
       ["orchestration_v2_projection_subagents", "pending"],
       ["orchestration_v2_projection_turn_items", "running"],

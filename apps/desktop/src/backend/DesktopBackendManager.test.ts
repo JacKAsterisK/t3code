@@ -73,6 +73,8 @@ function makeProcess(options?: {
   readonly stderr?: Stream.Stream<Uint8Array, PlatformError.PlatformError>;
   readonly exitCode?: Effect.Effect<ChildProcessSpawner.ExitCode, PlatformError.PlatformError>;
   readonly kill?: ChildProcessSpawner.ChildProcessHandle["kill"];
+  readonly stdin?: ChildProcessSpawner.ChildProcessHandle["stdin"];
+  readonly isRunning?: Effect.Effect<boolean>;
   readonly getOutputFd?: ChildProcessSpawner.ChildProcessHandle["getOutputFd"];
 }): ChildProcessSpawner.ChildProcessHandle {
   return ChildProcessSpawner.makeHandle({
@@ -81,9 +83,9 @@ function makeProcess(options?: {
     stderr: options?.stderr ?? Stream.empty,
     all: Stream.merge(options?.stdout ?? Stream.empty, options?.stderr ?? Stream.empty),
     exitCode: options?.exitCode ?? Effect.succeed(ChildProcessSpawner.ExitCode(0)),
-    isRunning: Effect.succeed(false),
+    isRunning: options?.isRunning ?? Effect.succeed(false),
     kill: options?.kill ?? (() => Effect.void),
-    stdin: Sink.drain,
+    stdin: options?.stdin ?? Sink.drain,
     getInputFd: () => Sink.drain,
     getOutputFd: options?.getOutputFd ?? (() => Stream.empty),
     unref: Effect.succeed(Effect.void),
@@ -576,3 +578,136 @@ describe("DesktopBackendManager", () => {
     ),
   );
 });
+
+it.effect(
+  "waits for the Windows desktop shutdown command to persist state and exit before process cleanup",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>();
+        const requested = yield* Deferred.make<void>();
+        const allowCommit = yield* Deferred.make<void>();
+        const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+        const stopCompleted = yield* Ref.make(false);
+        let spawnedCommand: ChildProcess.Command | undefined;
+        let forcedStops = 0;
+        const observed: string[] = [];
+        const layerSpawner = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make((command) =>
+            Effect.acquireRelease(
+              Effect.sync(() => {
+                spawnedCommand = command;
+                return makeProcess({
+                  isRunning: Deferred.isDone(exited).pipe(Effect.map((done) => !done)),
+                  exitCode: Deferred.await(exited),
+                  stdin: Sink.forEach((chunk: Uint8Array) =>
+                    Effect.gen(function* () {
+                      assert.equal(new TextDecoder().decode(chunk), "t3-desktop-shutdown-v1\n");
+                      yield* Deferred.succeed(requested, undefined);
+                      yield* Deferred.await(allowCommit);
+                      observed.push("persisted shutdown");
+                      yield* Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0));
+                    }),
+                  ),
+                });
+              }),
+              () =>
+                Effect.gen(function* () {
+                  if (!(yield* Deferred.isDone(exited))) {
+                    forcedStops += 1;
+                    yield* Deferred.succeed(exited, ChildProcessSpawner.ExitCode(1));
+                  }
+                  observed.push("process cleanup");
+                }),
+            ),
+          ),
+        );
+        const bootstrap = { ...baseConfig.bootstrap, desktopShutdownOnStdin: true as const };
+        const instance = yield* makeTestInstance({
+          config: { ...baseConfig, bootstrap },
+          spawnerLayer: layerSpawner,
+          onReady: Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
+        });
+        yield* instance.start;
+        yield* Deferred.await(ready);
+        assert.isDefined(spawnedCommand);
+        if (spawnedCommand._tag !== "StandardCommand")
+          throw new Error("Expected standard backend command");
+        assert.equal(spawnedCommand.options.stdin, "pipe");
+        const stopping = yield* instance
+          .stop()
+          .pipe(Effect.andThen(Ref.set(stopCompleted, true)), Effect.forkChild);
+        yield* Deferred.await(requested);
+        assert.isFalse(yield* Ref.get(stopCompleted));
+        assert.equal(forcedStops, 0);
+        assert.deepEqual(observed, []);
+        yield* Deferred.succeed(allowCommit, undefined);
+        yield* Fiber.join(stopping);
+        assert.equal(forcedStops, 0);
+        assert.deepEqual(observed, ["persisted shutdown", "process cleanup"]);
+      }),
+    ),
+);
+
+it.effect.each(["write failure", "exit timeout"] as const)(
+  "retains process cleanup when the desktop shutdown request cannot finish: %s",
+  (scenario) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>(),
+          sent = yield* Deferred.make<void>();
+        const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+        let forcedStops = 0;
+        const layerSpawner = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.acquireRelease(
+              Effect.succeed(
+                makeProcess({
+                  isRunning: Deferred.isDone(exited).pipe(Effect.map((done) => !done)),
+                  exitCode: Deferred.await(exited),
+                  stdin: Sink.forEach((_chunk: Uint8Array) =>
+                    Deferred.succeed(sent, undefined).pipe(
+                      Effect.andThen(
+                        scenario === "write failure"
+                          ? Effect.fail(
+                              PlatformError.systemError({
+                                _tag: "Unknown",
+                                module: "ChildProcess",
+                                method: "stdin",
+                                cause: new Error("synthetic write failure"),
+                              }),
+                            )
+                          : Effect.void,
+                      ),
+                    ),
+                  ),
+                }),
+              ),
+              () =>
+                Effect.gen(function* () {
+                  forcedStops += 1;
+                  yield* Deferred.succeed(exited, ChildProcessSpawner.ExitCode(1));
+                }),
+            ),
+          ),
+        );
+        const instance = yield* makeTestInstance({
+          config: {
+            ...baseConfig,
+            bootstrap: { ...baseConfig.bootstrap, desktopShutdownOnStdin: true },
+          },
+          spawnerLayer: layerSpawner,
+          onReady: Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
+        });
+        yield* instance.start;
+        yield* Deferred.await(ready);
+        const stopping = yield* instance.stop().pipe(Effect.forkChild);
+        yield* Deferred.await(sent);
+        if (scenario === "exit timeout") yield* TestClock.adjust(Duration.seconds(4));
+        yield* Fiber.join(stopping);
+        assert.equal(forcedStops, 1);
+      }),
+    ),
+);

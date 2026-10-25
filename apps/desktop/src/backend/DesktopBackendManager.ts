@@ -18,6 +18,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
   SERVER_EXIT_CODE_STATE_DIR_OWNED,
+  DESKTOP_BACKEND_SHUTDOWN_COMMAND,
   DesktopBackendBootstrap,
   type DesktopBackendBootstrap as DesktopBackendBootstrapValue,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
@@ -39,6 +40,8 @@ const DEFAULT_BACKEND_READINESS_INTERVAL = Duration.millis(100);
 const DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT = Duration.seconds(1);
 // Match the service launcher's grace period so backends can stop provider sessions.
 const DEFAULT_BACKEND_TERMINATE_GRACE = Duration.seconds(5);
+// Leave room inside DesktopApp's five-second stop budget for existing process cleanup.
+const DEFAULT_BACKEND_GRACEFUL_SHUTDOWN_GRACE = Duration.seconds(4);
 const DEFAULT_BACKEND_OUTPUT_DRAIN_TIMEOUT = Duration.seconds(5);
 const BACKEND_READINESS_PATH = "/.well-known/t3/environment";
 const { logWarning: logBackendProcessWarning } =
@@ -420,11 +423,18 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
       additionalFds[`fd${options.bootstrap.desktopBrowserControlFd}`] = { type: "output" };
     }
   }
+  const gracefulShutdown =
+    options.bootstrapDelivery === "fd3" && options.bootstrap.desktopShutdownOnStdin === true;
   const command = ChildProcess.make(options.executablePath, options.args, {
     cwd: options.cwd,
     env: options.env,
     extendEnv: options.extendEnv,
-    stdin: options.bootstrapDelivery === "stdin" ? bootstrapStream : "ignore",
+    stdin:
+      options.bootstrapDelivery === "stdin"
+        ? bootstrapStream
+        : gracefulShutdown
+          ? "pipe"
+          : "ignore",
     stdout: options.captureOutput ? "pipe" : "inherit",
     stderr: options.captureOutput ? "pipe" : "inherit",
     killSignal: "SIGTERM",
@@ -445,6 +455,40 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
         }),
     ),
   );
+  if (gracefulShutdown) {
+    // Registered after spawn: finish the server's domain finalizers before the
+    // spawner closes its scope. Windows SIGTERM uses taskkill /F, so it cannot
+    // deliver a JavaScript shutdown handler by itself.
+    yield* Effect.addFinalizer(() =>
+      handle.isRunning.pipe(
+        Effect.flatMap((running) =>
+          !running
+            ? Effect.void
+            : Stream.run(
+                Stream.make(new TextEncoder().encode(DESKTOP_BACKEND_SHUTDOWN_COMMAND)),
+                handle.stdin,
+              ).pipe(
+                Effect.andThen(handle.exitCode),
+                Effect.timeoutOption(DEFAULT_BACKEND_GRACEFUL_SHUTDOWN_GRACE),
+                Effect.flatMap((exit) =>
+                  Option.isSome(exit)
+                    ? Effect.void
+                    : logBackendProcessWarning(
+                        "backend did not exit after its desktop shutdown request; using process cleanup",
+                        { pid: Number(handle.pid) },
+                      ),
+                ),
+              ),
+        ),
+        Effect.catchCause((cause) =>
+          logBackendProcessWarning("desktop shutdown request failed; using process cleanup", {
+            pid: Number(handle.pid),
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      ),
+    );
+  }
   const outputFibers: Array<Fiber.Fiber<void, never>> = [];
 
   yield* options.onStarted?.(handle.pid) ?? Effect.void;

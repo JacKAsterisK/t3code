@@ -18,6 +18,7 @@ import {
   type NativeMaintenanceRequest,
   OrchestrationV2DelegatedCompletionCohort,
   OrchestrationV2DelegatedCompletionTaskDelivery,
+  OrchestrationV2ProviderGoal,
 } from "@t3tools/contracts";
 import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
 
@@ -323,6 +324,7 @@ const decodePayload = Schema.decodeUnknownSync(
 );
 const decodeCohort = Schema.decodeUnknownSync(OrchestrationV2DelegatedCompletionCohort);
 const decodeTaskDelivery = Schema.decodeUnknownSync(OrchestrationV2DelegatedCompletionTaskDelivery);
+const decodeGoal = Schema.decodeUnknownSync(OrchestrationV2ProviderGoal);
 const statuses = [
   [
     "orchestration_v2_projection_runs",
@@ -376,6 +378,10 @@ const statuses = [
   ],
 ] as const;
 
+const isWarmProviderState = (table: string, status: unknown) =>
+  (table === "orchestration_v2_projection_provider_sessions" && status === "ready") ||
+  (table === "orchestration_v2_projection_provider_threads" && status === "active");
+
 // All identifiers below are fixed source constants, never request-derived SQL.
 export const inspectStoppedRepairWork = (databasePath: string) => {
   const db = new NodeSqlite.DatabaseSync(databasePath, {
@@ -423,19 +429,75 @@ export const inspectStoppedRepairWork = (databasePath: string) => {
           typeof row.count !== "number"
         )
           throw new NativeMaintenanceError({ reason: "schema" });
-        if ((busy as ReadonlyArray<string>).includes(row.status)) count += row.count;
+        if (
+          (busy as ReadonlyArray<string>).includes(row.status) &&
+          !isWarmProviderState(table, row.status)
+        )
+          count += row.count;
       }
       counts.set(table, count);
     }
     let deferredDelivery = 0;
-    for (const [table] of statuses) {
-      for (const row of db.prepare(`SELECT payload_json FROM ${table}`).iterate()) {
+    const unfinishedThreads = new Set<string>();
+    const unfinishedProviderThreads = new Set<string>();
+    const readySessions = new Map<string, string | null>();
+    const providerThreads = new Map<
+      string,
+      { threadId: string | null; sessionId: string | null; active: boolean }
+    >();
+    const rememberWork = (row: Readonly<Record<string, unknown>>) => {
+      for (const key of [
+        "thread_id",
+        "source_thread_id",
+        "target_thread_id",
+        "parent_thread_id",
+        "child_thread_id",
+      ])
+        if (typeof row[key] === "string") unfinishedThreads.add(row[key]);
+      if (typeof row.provider_thread_id === "string")
+        unfinishedProviderThreads.add(row.provider_thread_id);
+    };
+    const optionalId = (value: unknown) => {
+      if (value === null || typeof value === "string") return value;
+      throw new NativeMaintenanceError({ reason: "schema" });
+    };
+    for (const [table, , busy] of statuses) {
+      for (const row of db.prepare(`SELECT * FROM ${table}`).iterate()) {
         let payload: Record<string, unknown>;
         try {
           payload = decodePayload(row.payload_json);
         } catch (cause) {
           throw new NativeMaintenanceError({ reason: "schema", cause });
         }
+        const beforeDelivery = deferredDelivery;
+        if (table === "orchestration_v2_projection_provider_sessions") {
+          if (row.status === "ready") {
+            if (typeof row.provider_session_id !== "string")
+              throw new NativeMaintenanceError({ reason: "schema" });
+            readySessions.set(row.provider_session_id, optionalId(row.thread_id));
+          }
+        } else if (table === "orchestration_v2_projection_provider_threads") {
+          if (typeof row.provider_thread_id !== "string")
+            throw new NativeMaintenanceError({ reason: "schema" });
+          providerThreads.set(row.provider_thread_id, {
+            threadId: optionalId(row.thread_id),
+            sessionId: optionalId(row.provider_session_id),
+            active: row.status === "active",
+          });
+          if (payload.goal != null) {
+            let goal;
+            try {
+              goal = decodeGoal(payload.goal);
+            } catch (cause) {
+              throw new NativeMaintenanceError({ reason: "schema", cause });
+            }
+            if (goal.status === "active") rememberWork(row);
+          }
+        } else if (
+          typeof row.status === "string" &&
+          (busy as ReadonlyArray<string>).includes(row.status)
+        )
+          rememberWork(row);
         if (table === "orchestration_v2_projection_runs" && payload.delegatedCompletion != null) {
           let cohort;
           try {
@@ -471,6 +533,7 @@ export const inspectStoppedRepairWork = (databasePath: string) => {
             throw new NativeMaintenanceError({ reason: "schema" });
           deferredDelivery += payload.pendingBackgroundTasks.length;
         }
+        if (deferredDelivery !== beforeDelivery) rememberWork(row);
       }
     }
     const count = (sql: string) => Number(db.prepare(sql).get()!.count);
@@ -479,6 +542,76 @@ export const inspectStoppedRepairWork = (databasePath: string) => {
       "SELECT COUNT(*) AS count FROM orchestration_v2_projection_runs WHERE status='queued'",
     );
     const pendingRequests = counts.get("orchestration_v2_projection_runtime_requests")!;
+    if (count("SELECT COUNT(*) AS count FROM scheduled_tasks WHERE enabled NOT IN (0,1)") !== 0)
+      throw new NativeMaintenanceError({ reason: "schema" });
+    const scheduledWork = count("SELECT COUNT(*) AS count FROM scheduled_tasks WHERE enabled=1");
+    let workflows = 0;
+    for (const row of db
+      .prepare(
+        "SELECT thread_id FROM orchestration_v2_thread_launch_workflows WHERE status NOT IN ('completed','failed')",
+      )
+      .iterate()) {
+      workflows++;
+      rememberWork(row);
+    }
+    if (
+      count(
+        "SELECT COUNT(*) AS count FROM orchestration_v2_projection_context_transfers WHERE status NOT IN ('pending','resolved_native','resolved_portable','failed','consumed','superseded')",
+      ) !== 0
+    )
+      throw new NativeMaintenanceError({ reason: "schema" });
+    let unconsumedContext = 0;
+    for (const row of db
+      .prepare(
+        "SELECT source_thread_id,target_thread_id FROM orchestration_v2_projection_context_transfers WHERE status IN ('pending','resolved_native','resolved_portable')",
+      )
+      .iterate()) {
+      unconsumedContext++;
+      rememberWork(row);
+    }
+    const childResultRows = db
+      .prepare(`SELECT thread.thread_id,json_extract(thread.payload_json,'$.lineage.parentThreadId') AS parent_thread_id FROM orchestration_v2_projection_threads AS thread
+      WHERE json_extract(thread.payload_json,'$.lineage.relationshipToParent')='subagent'
+      AND json_extract(thread.payload_json,'$.forkedFrom.type')='node'
+      AND EXISTS (SELECT 1 FROM orchestration_v2_projection_runs AS run WHERE run.thread_id=thread.thread_id AND run.status IN ('completed','interrupted','failed','cancelled','rolled_back'))
+      AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_context_transfers AS transfer WHERE json_extract(transfer.payload_json,'$.type')='subagent_result' AND json_extract(transfer.payload_json,'$.sourceThreadId')=thread.thread_id AND json_extract(transfer.payload_json,'$.targetThreadId')=json_extract(thread.payload_json,'$.lineage.parentThreadId'))`)
+      .all();
+    const childResults = childResultRows.length;
+    for (const row of childResultRows) rememberWork(row);
+    // With admission held, warm provider labels alone cannot represent a live process.
+    const busySessions = new Set<string>();
+    let activeProviderThreads = 0;
+    for (const [id, thread] of providerThreads) {
+      if (
+        !unfinishedProviderThreads.has(id) &&
+        !(thread.threadId !== null && unfinishedThreads.has(thread.threadId))
+      )
+        continue;
+      if (thread.active) activeProviderThreads++;
+      if (thread.sessionId !== null) busySessions.add(thread.sessionId);
+    }
+    if (readySessions.size) {
+      for (const row of db
+        .prepare(
+          "SELECT provider_session_id,thread_id FROM orchestration_v2_projection_provider_session_bindings",
+        )
+        .iterate())
+        if (
+          typeof row.provider_session_id === "string" &&
+          typeof row.thread_id === "string" &&
+          unfinishedThreads.has(row.thread_id)
+        )
+          busySessions.add(row.provider_session_id);
+    }
+    counts.set(
+      "orchestration_v2_projection_provider_sessions",
+      counts.get("orchestration_v2_projection_provider_sessions")! +
+        [...readySessions].filter(
+          ([id, threadId]) =>
+            busySessions.has(id) || (threadId !== null && unfinishedThreads.has(threadId)),
+        ).length,
+    );
+    counts.set("orchestration_v2_projection_provider_threads", activeProviderThreads);
     const backgroundAgents = [...counts]
       .filter(
         ([table]) =>
@@ -489,27 +622,6 @@ export const inspectStoppedRepairWork = (databasePath: string) => {
           ].includes(table),
       )
       .reduce((total, [, value]) => total + value, 0);
-    if (count("SELECT COUNT(*) AS count FROM scheduled_tasks WHERE enabled NOT IN (0,1)") !== 0)
-      throw new NativeMaintenanceError({ reason: "schema" });
-    const scheduledWork = count("SELECT COUNT(*) AS count FROM scheduled_tasks WHERE enabled=1");
-    const workflows = count(
-      "SELECT COUNT(*) AS count FROM orchestration_v2_thread_launch_workflows WHERE status NOT IN ('completed','failed')",
-    );
-    if (
-      count(
-        "SELECT COUNT(*) AS count FROM orchestration_v2_projection_context_transfers WHERE status NOT IN ('pending','resolved_native','resolved_portable','failed','consumed','superseded')",
-      ) !== 0
-    )
-      throw new NativeMaintenanceError({ reason: "schema" });
-    const unconsumedContext = count(
-      "SELECT COUNT(*) AS count FROM orchestration_v2_projection_context_transfers WHERE status IN ('pending','resolved_native','resolved_portable')",
-    );
-    const childResults =
-      count(`SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads AS thread
-      WHERE json_extract(thread.payload_json,'$.lineage.relationshipToParent')='subagent'
-      AND json_extract(thread.payload_json,'$.forkedFrom.type')='node'
-      AND EXISTS (SELECT 1 FROM orchestration_v2_projection_runs AS run WHERE run.thread_id=thread.thread_id AND run.status IN ('completed','interrupted','failed','cancelled','rolled_back'))
-      AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_context_transfers AS transfer WHERE json_extract(transfer.payload_json,'$.type')='subagent_result' AND json_extract(transfer.payload_json,'$.sourceThreadId')=thread.thread_id AND json_extract(transfer.payload_json,'$.targetThreadId')=json_extract(thread.payload_json,'$.lineage.parentThreadId'))`);
     const restartContinuations =
       counts.get("orchestration_v2_effect_outbox")! +
       workflows +

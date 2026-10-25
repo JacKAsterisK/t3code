@@ -1,4 +1,47 @@
-import { assert, it } from "@effect/vitest";
+// @effect-diagnostics nodeBuiltinImport:off - Tests observe actual native file/SQLite ownership handles and deliver private Node stdin bytes.
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
+import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import * as NetAddress from "effect/net/NetAddress";
+import * as NodeFS from "node:fs";
+import * as NodeSqlite from "node:sqlite";
+import * as NodeModule from "node:module";
+import * as NodeStream from "node:stream";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Cause from "effect/Cause";
+import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import { HttpServer } from "effect/http";
+import { DESKTOP_BACKEND_SHUTDOWN_COMMAND } from "@t3tools/contracts";
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
+import * as ServerConfig from "../config.ts";
+import * as ServerOwnership from "../serverOwnership.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import { awaitDesktopShutdown } from "../launcherWatch.ts";
+import * as Keybindings from "../keybindings.ts";
+import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
+import * as Orchestrator from "./Orchestrator.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as EffectWorker from "./EffectWorker.ts";
+import * as AgentAwarenessRelay from "../relay/AgentAwarenessRelay.ts";
+import * as ServerLifecycleEvents from "../serverLifecycleEvents.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ServiceLauncherClient from "../cloud/serviceLauncherClient.ts";
+import * as ExternalLauncher from "../process/externalLauncher.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as ProjectStore from "./ProjectStore.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as ThreadManagement from "./ThreadManagementService.ts";
+import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import { ServerActivation } from "../serverActivation.ts";
+import { assert, it, vi } from "@effect/vitest";
 import {
   CommandId,
   ContextTransferId,
@@ -7,6 +50,7 @@ import {
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2Run,
+  type OrchestrationV2DomainEvent,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -18,6 +62,7 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Stream from "effect/Stream";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -965,4 +1010,407 @@ it.effect("marks fork descendants unreadable when their source is missing or cor
       new Set([fork, descendant]),
     );
   }).pipe(Effect.provide(layerTest)),
+);
+
+const seedCompletedWarmTurn = Effect.fn("test.seedCompletedWarmTurn")(function* (trigger: string) {
+  const sink = yield* EventSink.EventSinkV2;
+  const store = yield* EventStore.EventStoreV2;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+  const sql = yield* SqlClient.SqlClient;
+  const now = yield* DateTime.now;
+  const threadId = ThreadId.make("thread:warm-session:" + trigger);
+  const providerSessionId = ProviderSessionId.make("session:warm:" + trigger);
+  const providerThreadId = ProviderThreadId.make("provider-thread:warm:" + trigger);
+  const runId = RunId.make("run:warm:" + trigger);
+  const run: OrchestrationV2Run = {
+    id: runId,
+    threadId,
+    ordinal: 1,
+    providerInstanceId,
+    modelSelection,
+    providerThreadId,
+    userMessageId: MessageId.make("message:warm:" + trigger),
+    rootNodeId: null,
+    activeAttemptId: null,
+    status: "running",
+    requestedAt: now,
+    startedAt: now,
+    completedAt: null,
+    checkpointId: null,
+    contextHandoffId: null,
+  };
+  const events: OrchestrationV2DomainEvent[] = [
+    {
+      id: EventId.make("event:warm:thread:" + trigger),
+      type: "thread.created",
+      threadId,
+      providerInstanceId,
+      occurredAt: now,
+      payload: {
+        createdBy: "user",
+        creationSource: "web",
+        id: threadId,
+        projectId: ProjectId.make("project:warm"),
+        title: "Completed warm turn",
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      },
+    },
+    {
+      id: EventId.make("event:warm:session:" + trigger),
+      type: "provider-session.attached",
+      threadId,
+      driver,
+      providerInstanceId,
+      occurredAt: now,
+      payload: {
+        id: providerSessionId,
+        driver,
+        providerInstanceId,
+        status: "ready",
+        cwd: "/workspace",
+        model: modelSelection.model,
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      },
+    },
+    {
+      id: EventId.make("event:warm:provider-thread:" + trigger),
+      type: "provider-thread.updated",
+      threadId,
+      driver,
+      providerInstanceId,
+      occurredAt: now,
+      payload: {
+        id: providerThreadId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        driver,
+        providerInstanceId,
+        providerSessionId,
+        nativeThreadRef: { driver, nativeId: "native-warm", strength: "strong" },
+        nativeConversationHeadRef: null,
+        status: "active",
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        pendingBackgroundTasks: [],
+      },
+    },
+    {
+      id: EventId.make("event:warm:run:" + trigger),
+      type: "run.created",
+      threadId,
+      runId,
+      providerInstanceId,
+      occurredAt: now,
+      payload: run,
+    },
+    {
+      id: EventId.make("event:warm:completed:" + trigger),
+      type: "run.updated",
+      threadId,
+      runId,
+      providerInstanceId,
+      occurredAt: now,
+      payload: { ...run, status: "completed", completedAt: now },
+    },
+  ];
+  yield* sink.write({ events });
+  return { sink, store, projections, recovery, sql, threadId, run, now };
+});
+
+it.effect.each(["startup", "shutdown"] as const)(
+  "%s persists idle warm-session cleanup through the event store with the projection at the event head",
+  (trigger) =>
+    Effect.gen(function* () {
+      const { store, projections, recovery, sql, threadId } = yield* seedCompletedWarmTurn(trigger);
+      const beforeHead = yield* store.latestSequence();
+      const before = yield* projections.getThreadProjection(threadId);
+      assert.equal(before.runs[0]?.status, "completed");
+      assert.equal(before.providerSessions[0]?.status, "ready");
+      assert.equal(before.providerThreads[0]?.status, "active");
+      assert.deepEqual(yield* projections.getRecoveryThreadIds("runtime"), [threadId]);
+      const summary = yield* recovery.reconcile(trigger);
+      assert.equal(summary.terminalizedRuns, 0);
+      assert.equal(summary.stoppedSessions, 1);
+      const stored = yield* store.read({ afterSequence: beforeHead }).pipe(Stream.runCollect);
+      assert.deepEqual(
+        stored.map(({ event }) => [
+          event.type,
+          "status" in event.payload ? event.payload.status : null,
+        ]),
+        [
+          ["provider-thread.updated", "idle"],
+          ["provider-session.updated", "stopped"],
+        ],
+      );
+      const after = yield* projections.getThreadProjection(threadId);
+      assert.equal(after.runs[0]?.status, "completed");
+      assert.equal(after.providerSessions[0]?.status, "stopped");
+      assert.equal(after.providerThreads[0]?.status, "idle");
+      const head = yield* store.latestSequence();
+      const metadata = yield* sql<{
+        readonly last_sequence: number;
+      }>`SELECT last_sequence FROM orchestration_v2_projection_metadata WHERE projection_name = 'thread-projections'`;
+      assert.equal(head, beforeHead + 2);
+      assert.deepEqual(metadata, [{ last_sequence: head }]);
+      assert.deepEqual(yield* projections.getRecoveryThreadIds("runtime"), []);
+    }).pipe(Effect.provide(layerRecoveryTest)),
+);
+
+it.effect.each(["normal", "prepare-failure"] as const)(
+  "desktop stdin close performs shutdown before both ownership releases: %s",
+  (scenario) =>
+    Effect.gen(function* () {
+      const { sink, store, projections, recovery, sql, threadId, run, now } =
+        yield* seedCompletedWarmTurn("desktop:" + scenario);
+      const fs = yield* FileSystem.FileSystem,
+        path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-graceful-owner-" });
+      const statePath = path.join(root, "home", "userdata", "server-runtime.json");
+      const ownerPath = path.join(path.dirname(statePath), "server-owner.sqlite");
+      const admissionPath = path.join(root, "home", "native-admission.lock");
+      const started = yield* Deferred.make<void>();
+      const input = new NodeStream.PassThrough();
+      let admissionFd: number | undefined,
+        admissionReleased = false,
+        ownerReleased = false;
+      let providersClosed = false,
+        reconciled = false;
+      const releases: Array<{ resource: string; reconciled: boolean; providersClosed: boolean }> =
+        [];
+      if (scenario === "prepare-failure") {
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:shutdown:queued"),
+              type: "run.created",
+              threadId,
+              runId: RunId.make("run:shutdown:queued"),
+              providerInstanceId,
+              occurredAt: now,
+              payload: {
+                ...run,
+                id: RunId.make("run:shutdown:queued"),
+                ordinal: 2,
+                userMessageId: MessageId.make("message:shutdown:queued"),
+                status: "queued",
+                requestedAt: now,
+                startedAt: null,
+                completedAt: null,
+                queuePosition: 1,
+                queueHeld: false,
+              },
+            },
+          ],
+        });
+        yield* (yield* EffectOutbox.EffectOutboxV2).enqueue([
+          {
+            id: "effect:shutdown:continuation",
+            commandId: CommandId.make("command:shutdown:continuation"),
+            threadId,
+            request: { type: "provider-runtime.continue", sourceRunId: run.id },
+          },
+        ]);
+      }
+      const beforeHead = yield* store.latestSequence();
+      const mutableNodeFS: typeof NodeFS = NodeModule.createRequire(import.meta.url)("node:fs");
+      const originalOpen = NodeFS.openSync,
+        originalClose = NodeFS.closeSync;
+      const originalDbClose = NodeSqlite.DatabaseSync.prototype.close;
+      const openSpy = vi
+        .spyOn(mutableNodeFS, "openSync")
+        .mockImplementation((...args: Parameters<typeof NodeFS.openSync>) => {
+          const fd = originalOpen(...args);
+          if (String(args[0]) === admissionPath && admissionFd === undefined) admissionFd = fd;
+          return fd;
+        });
+      const closeSpy = vi.spyOn(mutableNodeFS, "closeSync").mockImplementation((fd) => {
+        if (fd === admissionFd && !admissionReleased) {
+          admissionReleased = true;
+          releases.push({ resource: "native admission", reconciled, providersClosed });
+        }
+        originalClose(fd);
+      });
+      const dbCloseSpy = vi
+        .spyOn(NodeSqlite.DatabaseSync.prototype, "close")
+        .mockImplementation(function (this: NodeSqlite.DatabaseSync) {
+          const file = String(this.prepare("PRAGMA database_list").get()?.file ?? "");
+          if (
+            file.replaceAll("\\", "/").toLowerCase() ===
+              ownerPath.replaceAll("\\", "/").toLowerCase() &&
+            !ownerReleased
+          ) {
+            ownerReleased = true;
+            releases.push({ resource: "server owner", reconciled, providersClosed });
+          }
+          originalDbClose.call(this);
+        });
+      NodeModule.syncBuiltinESMExports();
+      const dependencies = Layer.mergeAll(
+        Layer.succeed(
+          ServerConfig.ServerConfig,
+          ServerConfig.make({
+            ...(yield* ServerConfig.deriveServerPaths(path.join(root, "home"), undefined)),
+            baseDir: path.join(root, "home"),
+            cwd: root,
+            logLevel: "Error",
+            traceMinLevel: "Info",
+            traceTimingEnabled: false,
+            traceBatchWindowMs: 200,
+            traceMaxBytes: 1024,
+            traceMaxFiles: 1,
+            otlpTracesUrl: undefined,
+            otlpMetricsUrl: undefined,
+            otlpLogsUrl: undefined,
+            otlpTracesExport: DEFAULT_SIGNAL_EXPORT,
+            otlpMetricsExport: DEFAULT_SIGNAL_EXPORT,
+            otlpLogsExport: DEFAULT_SIGNAL_EXPORT,
+            otelEnvironment: OtelEnvironment.none,
+            staticDir: undefined,
+            devUrl: undefined,
+            devAllowedOrigins: [],
+            desktopBootstrapToken: "synthetic-desktop-token",
+            desktopShutdownOnStdin: true,
+            mode: "desktop",
+            host: "127.0.0.1",
+            port: 3773,
+            noBrowser: true,
+            startupPresentation: "browser",
+            autoBootstrapProjectFromCwd: false,
+            logWebSocketEvents: false,
+            tailscaleServeEnabled: false,
+            tailscaleServePort: 443,
+          }),
+        ),
+        Layer.mock(Keybindings.Keybindings)({
+          start: Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+        }),
+        Layer.mock(LegacyV1ThreadImporter.LegacyV1ThreadImporter)({}),
+        Layer.mock(Orchestrator.OrchestratorV2)({}),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          shutdown: Effect.sync(() => {
+            providersClosed = true;
+          }),
+        }),
+        Layer.succeed(ProviderRuntimeRecovery.ProviderRuntimeRecoveryService, {
+          ...recovery,
+          prepareForShutdown:
+            scenario === "prepare-failure"
+              ? Effect.fail(
+                  new ProviderRuntimeRecovery.ProviderRuntimeRecoveryError({
+                    operation: "reconcile",
+                    cause: "continuation preparation failed",
+                  }),
+                )
+              : recovery.prepareForShutdown,
+          reconcile: (trigger) =>
+            recovery.reconcile(trigger).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  reconciled = true;
+                }),
+              ),
+            ),
+        }),
+        Layer.mock(AgentAwarenessRelay.AgentAwarenessRelay)({}),
+        Layer.mock(ServerLifecycleEvents.ServerLifecycleEvents)({}),
+        Layer.mock(ServerSettings.ServerSettingsService)({}),
+        Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+        Layer.mock(ServiceLauncherClient.ServiceLauncherClient)({ managed: false }),
+        Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+        Layer.mock(ServerSecretStore.ServerSecretStore)({}),
+        Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+        Layer.mock(AnalyticsService.AnalyticsService)({}),
+        Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+        Layer.mock(ProjectStore.ProjectStoreV2)({}),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(ThreadManagement.ThreadManagementService)({}),
+        Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+        Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({}),
+        Layer.mock(HttpServer.HttpServer)({
+          address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 3773),
+        }),
+        Layer.succeed(ServerActivation, Effect.never),
+      );
+      // Same ownership-outside-runtime Layer.unwrap structure as server.ts.
+      const runtime = Layer.unwrap(
+        Effect.gen(function* () {
+          yield* ServerOwnership.acquireServerOwnership(statePath);
+          return ServerRuntimeStartup.layerWithOptions().pipe(Layer.provide(dependencies));
+        }),
+      );
+      try {
+        const server = yield* Effect.raceFirst(
+          Layer.launch(runtime),
+          awaitDesktopShutdown(input).pipe(Effect.andThen(Effect.interrupt)),
+        ).pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+        input.end(DESKTOP_BACKEND_SHUTDOWN_COMMAND);
+        const exited = yield* Fiber.await(server);
+        assert.isTrue(Exit.isFailure(exited) && Cause.hasInterruptsOnly(exited.cause));
+        assert.deepEqual(releases, [
+          { resource: "server owner", reconciled: scenario === "normal", providersClosed: true },
+          {
+            resource: "native admission",
+            reconciled: scenario === "normal",
+            providersClosed: true,
+          },
+        ]);
+        const after = yield* projections.getThreadProjection(threadId);
+        const head = yield* store.latestSequence();
+        assert.equal(
+          after.providerSessions[0]?.status,
+          scenario === "normal" ? "stopped" : "ready",
+        );
+        assert.equal(after.providerThreads[0]?.status, scenario === "normal" ? "idle" : "active");
+        assert.equal(head, beforeHead + (scenario === "normal" ? 2 : 0));
+        const metadata = yield* sql<{
+          readonly last_sequence: number;
+        }>`SELECT last_sequence FROM orchestration_v2_projection_metadata WHERE projection_name = 'thread-projections'`;
+        assert.deepEqual(metadata, [{ last_sequence: head }]);
+        if (scenario === "prepare-failure") {
+          assert.equal(after.runs[1]?.status, "queued");
+          const pending = yield* sql<{
+            readonly status: string;
+          }>`SELECT status FROM orchestration_v2_effect_outbox WHERE effect_id = 'effect:shutdown:continuation'`;
+          assert.deepEqual(pending, [{ status: "pending" }]);
+        }
+      } finally {
+        input.destroy();
+        openSpy.mockRestore();
+        closeSpy.mockRestore();
+        dbCloseSpy.mockRestore();
+        NodeModule.syncBuiltinESMExports();
+      }
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(layerRecoveryTest, ProcessRunner.layer).pipe(
+          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(NodeCrypto.layer),
+          Layer.provide(Layer.succeed(HostProcess.Platform, "win32")),
+        ),
+      ),
+    ),
 );

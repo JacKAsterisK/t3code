@@ -1528,6 +1528,91 @@ export const stageCursorSdkPlatformPackages = Effect.fn("stageCursorSdkPlatformP
   },
 );
 
+// Cursor platform helpers are the last raw-sidecar consumer. Keep any copied
+// links and --keep-stage input intact; ordinary payload copies no longer need it.
+export const releasePackedWindowsServerStage = Effect.fn("releasePackedWindowsServerStage")(
+  function* (input: {
+    readonly stageRoot: string;
+    readonly asarPath: string;
+    readonly cursorSdkDirectory: string;
+    readonly keepStage: boolean;
+  }) {
+    if (input.keepStage) return false;
+    return yield* Effect.tryPromise({
+      try: async () => {
+        const sourceDir = NodePath.join(input.stageRoot, "server");
+        const inside = (root: string, file: string) => {
+          const relative = NodePath.relative(root, file);
+          return (
+            relative !== "" &&
+            relative !== ".." &&
+            !relative.startsWith(".." + NodePath.sep) &&
+            !NodePath.isAbsolute(relative)
+          );
+        };
+        if (
+          !inside(input.stageRoot, input.asarPath) ||
+          !inside(input.stageRoot, input.cursorSdkDirectory) ||
+          NodePath.relative(sourceDir, input.asarPath) === "" ||
+          NodePath.relative(sourceDir, input.cursorSdkDirectory) === "" ||
+          inside(sourceDir, input.asarPath) ||
+          inside(sourceDir, input.cursorSdkDirectory)
+        )
+          throw new Error("Packed payload paths must remain outside the raw server stage.");
+        const directories: Array<{ directory: string; dev: number; ino: number }> = [];
+        const inspectDirectory = async (directory: string) => {
+          const stat = await NodeFSP.lstat(directory);
+          if (
+            !NodePath.isAbsolute(directory) ||
+            NodePath.resolve(directory) !== directory ||
+            !stat.isDirectory() ||
+            stat.isSymbolicLink() ||
+            NodePath.relative(directory, await NodeFSP.realpath(directory)) !== ""
+          )
+            throw new Error("Raw server cleanup requires ordinary canonical stage directories.");
+          directories.push({ directory, dev: stat.dev, ino: stat.ino });
+        };
+        for (const directory of [input.stageRoot, sourceDir, input.asarPath + ".unpacked"])
+          await inspectDirectory(directory);
+        const archive = await NodeFSP.lstat(input.asarPath);
+        if (
+          !archive.isFile() ||
+          archive.isSymbolicLink() ||
+          NodePath.relative(input.asarPath, await NodeFSP.realpath(input.asarPath)) !== ""
+        )
+          throw new Error("Raw server cleanup requires a completed ordinary archive.");
+        // An absent optional SDK mapping retains the raw input; do not turn
+        // scratch-space cleanup into a packaging prerequisite.
+        try {
+          await inspectDirectory(input.cursorSdkDirectory);
+        } catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
+          throw cause;
+        }
+        const pending = [input.cursorSdkDirectory];
+        while (pending.length) {
+          const directory = pending.pop()!;
+          for (const entry of await NodeFSP.readdir(directory, { withFileTypes: true })) {
+            if (entry.isSymbolicLink()) return false;
+            if (entry.isDirectory()) pending.push(NodePath.join(directory, entry.name));
+          }
+        }
+        for (const { directory, dev, ino } of directories) {
+          const stat = await NodeFSP.lstat(directory);
+          if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== dev || stat.ino !== ino)
+            throw new Error("Raw server stage ownership changed before cleanup.");
+        }
+        await NodeFSP.rm(sourceDir, { recursive: true });
+        return true;
+      },
+      catch: (cause) =>
+        new LanBuildConfigurationError({
+          reason: cause instanceof Error ? cause.message : "Raw Windows server cleanup failed.",
+        }),
+    });
+  },
+);
+
 export interface ClerkPasskeyNativeArtifact {
   readonly packageName: string;
   readonly binaryFileName: string;
@@ -4268,13 +4353,24 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       ...(options.lanBuild === undefined ? {} : { lanBuild: options.lanBuild }),
     });
   }
+  const cursorSdkDirectory = path.join(stageProdResourcesDir, "cursor-sdk");
   yield* stageCursorSdkPlatformPackages(
     path.join(
       options.platform === "win" ? path.join(stageRoot, "server") : stageAppDir,
       "node_modules",
     ),
-    path.join(stageProdResourcesDir, "cursor-sdk"),
+    cursorSdkDirectory,
   );
+  if (windowsServerAsarPath && execution?.isolation.kind === "windows-native-directory") {
+    const released = yield* releasePackedWindowsServerStage({
+      stageRoot,
+      asarPath: windowsServerAsarPath,
+      cursorSdkDirectory,
+      keepStage: options.keepStage,
+    });
+    if (released)
+      yield* Effect.log("[desktop-artifact] Released raw server staging before Windows packaging.");
+  }
   if (
     options.wslRuntime !== undefined &&
     bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime })

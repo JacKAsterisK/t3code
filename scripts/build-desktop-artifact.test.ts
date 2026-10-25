@@ -37,6 +37,7 @@ import {
   MacPasskeySigningConfigurationResolutionError,
   MissingMacPasskeyProvisioningProfileError,
   packWindowsServerAsar,
+  releasePackedWindowsServerStage,
   pruneLanWindowsX64Stage,
   preflightWindowsDesktopBuild,
   renderMacPasskeyEntitlements,
@@ -72,6 +73,7 @@ import {
   releasePackageFiles,
 } from "./update-release-package-versions.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { parseLanBuildIdentity } from "@t3tools/shared/distribution";
 
@@ -97,6 +99,32 @@ it("accepts the file-URL trailing separator for the same Windows build source", 
 const decodePackageVersion = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ version: Schema.String })),
 );
+
+const buildFixtureDesktopBundles = Effect.fn("test.buildFixtureDesktopBundles")(function* (
+  root: string,
+  version: string,
+) {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  return yield* buildDesktopBundles(root, version, false).pipe(
+    Effect.provideService(SpawnExecutableResolution, () => undefined),
+    Effect.provideService(
+      ChildProcessSpawner.ChildProcessSpawner,
+      ChildProcessSpawner.make((command) => {
+        if (command._tag !== "StandardCommand")
+          throw new Error("Expected one fixture build command.");
+        assert.equal(command.command, "vp");
+        assert.deepEqual(command.args, ["run", "build:desktop"]);
+        assert.equal(command.options.cwd, root);
+        return spawner.spawn(
+          ChildProcess.make(process.execPath, [NodePath.join(root, "build.cjs")], {
+            ...command.options,
+            shell: false,
+          }),
+        );
+      }),
+    ),
+  );
+});
 
 // Keeps pnpm from auto-installing TypeScript, a types-only peer, into the app.
 
@@ -339,7 +367,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
            process.stdout.write(result);`,
       );
       const first = yield* Effect.forkChild(
-        Effect.exit(buildDesktopBundles(root, "0.0.43", false)).pipe(
+        Effect.exit(buildFixtureDesktopBundles(root, "0.0.43")).pipe(
           Effect.provideService(FileSystem.FileSystem, {
             ...fs,
             writeFileString: (filePath, contents, options) =>
@@ -375,7 +403,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       for (const relativePath of releasePackageFiles) {
         assert.equal(yield* fs.readFileString(path.join(root, relativePath)), original);
       }
-      yield* buildDesktopBundles(root, "0.0.44", false);
+      yield* buildFixtureDesktopBundles(root, "0.0.44");
       assert.equal(yield* fs.readFileString(path.join(root, "version.txt")), "0.0.44");
       for (const relativePath of releasePackageFiles) {
         assert.equal(yield* fs.readFileString(path.join(root, relativePath)), original);
@@ -489,7 +517,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           manifest.description = "edited during compilation";
           require("node:fs").writeFileSync("${matchingPath}", JSON.stringify(manifest) + "\\n");`,
         );
-        yield* buildDesktopBundles(root, version, false);
+        yield* buildFixtureDesktopBundles(root, version);
         assert.equal(
           yield* fs.readFileString(path.join(root, "version.txt")),
           [version, version, version, version].join("\n"),
@@ -498,9 +526,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           assert.equal(yield* fs.readFileString(path.join(root, relativePath)), contents);
         }
         assert.equal(yield* fs.readFileString(path.join(root, "package.json")), packageJson);
-        yield* fs.writeFileString(path.join(root, "build.cjs"), "process.exit(1);");
-        const failure = yield* Effect.flip(buildDesktopBundles(root, "0.0.44", false));
+        yield* fs.writeFileString(
+          path.join(root, "build.cjs"),
+          'process.stderr.write("fixture build failed"); process.exit(7);',
+        );
+        const failure = yield* Effect.flip(buildFixtureDesktopBundles(root, "0.0.44"));
         assert.instanceOf(failure, BuildCommandFailedError);
+        assert.equal(failure.exitCode, 7);
+        assert.equal(failure.stderrTail, "fixture build failed");
         for (const { relativePath, contents } of afterBuild) {
           assert.equal(yield* fs.readFileString(path.join(root, relativePath)), contents);
         }
@@ -511,7 +544,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           path.join(root, "build.cjs"),
           'require("node:fs").writeFileSync("unexpected-build.txt", "started");',
         );
-        const alignmentFailure = yield* Effect.flip(buildDesktopBundles(root, "0.0.44", false));
+        const alignmentFailure = yield* Effect.flip(buildFixtureDesktopBundles(root, "0.0.44"));
         assert.instanceOf(alignmentFailure, ReleasePackageManifestError);
         for (const { relativePath, contents } of afterBuild) {
           assert.equal(
@@ -550,7 +583,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         method: "writeFileString",
         pathOrDescriptor: failedPath,
       });
-      const failure = yield* Effect.flip(buildDesktopBundles(root, "0.0.43", false)).pipe(
+      const failure = yield* Effect.flip(buildFixtureDesktopBundles(root, "0.0.43")).pipe(
         Effect.provideService(FileSystem.FileSystem, {
           ...fs,
           writeFileString: (filePath, contents, options) =>
@@ -733,6 +766,108 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         }
       }),
     ),
+  );
+
+  it.effect(
+    "releases native raw staging after independent ASAR and Cursor copies while preserving debug or linked inputs",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-stage-release-" });
+          const stageRoot = path.join(fixture, "stage"),
+            sourceDir = path.join(stageRoot, "server");
+          const entry = "apps/server/dist/bin.mjs",
+            native = "node_modules/native-fixture/addon.node";
+          const files = new Map([
+            [entry, "export {};"],
+            [native, "MZ native fixture"],
+            ["node_modules/@cursor/sdk/package.json", "{}"],
+            ["node_modules/@cursor/sdk-win32-x64/bin/helper.exe", "Cursor fixture"],
+          ]);
+          for (const [relative, bytes] of files) {
+            const target = path.join(sourceDir, relative);
+            yield* fs.makeDirectory(path.dirname(target), { recursive: true });
+            yield* fs.writeFileString(target, bytes);
+          }
+          const asarPath = path.join(stageRoot, "app/resources/server.asar");
+          yield* fs.makeDirectory(path.dirname(asarPath), { recursive: true });
+          yield* packWindowsServerAsar({ sourceDir, asarPath, arch: "x64" });
+          const cursorSdkDirectory = path.join(stageRoot, "app/resources/cursor-sdk");
+          yield* stageCursorSdkPlatformPackages(
+            path.join(sourceDir, "node_modules"),
+            cursorSdkDirectory,
+          );
+          const before = yield* fs.readFile(asarPath);
+          const input = { stageRoot, asarPath, cursorSdkDirectory, keepStage: false };
+          assert.isFalse(yield* releasePackedWindowsServerStage({ ...input, keepStage: true }));
+          assert.isTrue(yield* fs.exists(sourceDir));
+          const invalid = yield* releasePackedWindowsServerStage({
+            ...input,
+            asarPath: path.join(sourceDir, "server.asar"),
+          }).pipe(Effect.flip);
+          assert.match(invalid.reason, /outside the raw server stage/u);
+          const invalidCursor = yield* releasePackedWindowsServerStage({
+            ...input,
+            cursorSdkDirectory: sourceDir,
+          }).pipe(Effect.flip);
+          assert.match(invalidCursor.reason, /outside the raw server stage/u);
+          const link = path.join(cursorSdkDirectory, "retained-source");
+          yield* Effect.tryPromise(() => NodeFSP.symlink(sourceDir, link, "junction"));
+          assert.isFalse(yield* releasePackedWindowsServerStage(input));
+          assert.isTrue(yield* fs.exists(sourceDir));
+          yield* Effect.tryPromise(() => NodeFSP.unlink(link));
+          assert.isTrue(yield* releasePackedWindowsServerStage(input));
+          assert.isFalse(yield* fs.exists(sourceDir));
+          assert.deepEqual(yield* fs.readFile(asarPath), before);
+          assert.equal(
+            extractFile(asarPath, path.join(...entry.split("/"))).toString(),
+            files.get(entry),
+          );
+          assert.equal(
+            extractFile(asarPath, path.join(...native.split("/"))).toString(),
+            files.get(native),
+          );
+          assert.equal(
+            yield* fs.readFileString(path.join(cursorSdkDirectory, "sdk-win32-x64/bin/helper.exe")),
+            "Cursor fixture",
+          );
+        }),
+      ),
+  );
+
+  it.effect(
+    "retains raw staging for a missing Cursor mapping and supports an absent optional SDK",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-no-cursor-" });
+          const stageRoot = path.join(fixture, "stage"),
+            sourceDir = path.join(stageRoot, "server");
+          const native = path.join("node_modules", "native-fixture", "addon.node");
+          yield* fs.makeDirectory(path.dirname(path.join(sourceDir, native)), { recursive: true });
+          yield* fs.writeFileString(path.join(sourceDir, native), "MZ native fixture");
+          const asarPath = path.join(stageRoot, "app/resources/server.asar");
+          yield* fs.makeDirectory(path.dirname(asarPath), { recursive: true });
+          yield* packWindowsServerAsar({ sourceDir, asarPath, arch: "x64" });
+          const cursorSdkDirectory = path.join(stageRoot, "app/resources/cursor-sdk");
+          const input = { stageRoot, asarPath, cursorSdkDirectory, keepStage: false };
+          assert.isFalse(yield* releasePackedWindowsServerStage(input));
+          assert.isTrue(yield* fs.exists(sourceDir));
+          assert.isFalse(yield* fs.exists(cursorSdkDirectory));
+          yield* stageCursorSdkPlatformPackages(
+            path.join(sourceDir, "node_modules"),
+            cursorSdkDirectory,
+          );
+          assert.deepEqual(yield* fs.readDirectory(cursorSdkDirectory), []);
+          assert.isTrue(yield* releasePackedWindowsServerStage(input));
+          assert.isFalse(yield* fs.exists(sourceDir));
+          assert.equal(extractFile(asarPath, native).toString(), "MZ native fixture");
+        }),
+      ),
   );
 
   it.effect("unpacks target Windows natives while excluding the other architecture", () =>

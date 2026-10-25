@@ -33,6 +33,11 @@ jobs:
           vp test run
           apps/web/src/components/sidebar/SidebarBrandMark.browser.test.tsx
           apps/web/src/components/settings/LanFleetSetup.browser.test.tsx
+      - name: Verify native Windows packaging and manifest restoration
+        shell: bash
+        run: >-
+          vp test run scripts/build-desktop-artifact.test.ts
+          -t 'native raw staging|Cursor SDK|target Windows natives|overlapping builds|resolved version|restore failure'
       - name: Verify build reuse, native bootstrap and both MCP access paths
         shell: bash
         run: >-
@@ -48,7 +53,6 @@ jobs:
           scripts/lan/runtime-policy.test.ts
           scripts/lan/native-helper-output.test.ts
           scripts/lan/home-repair.test.ts
-          scripts/build-desktop-artifact.test.ts
           apps/desktop/src/backend/DesktopBackendManager.test.ts
           apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
           apps/server/src/launcherWatch.test.ts

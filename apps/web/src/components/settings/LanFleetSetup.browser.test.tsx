@@ -46,8 +46,8 @@ function setup(overrides: Partial<LanFleetSetupState> = {}) {
   return { state, configure };
 }
 
-it("offers discovered LAN encryption with read-only access and no activation before confirmation", async () => {
-  const { configure } = setup();
+it("offers automatic LAN startup and task control with no activation before confirmation", async () => {
+  const { configure } = setup({ access: "standard" });
   await using screen = await render(<LanFleetSetup />);
   await screen.getByRole("button", { name: "Create fleet", exact: true }).click();
   await expect
@@ -55,8 +55,10 @@ it("offers discovered LAN encryption with read-only access and no activation bef
     .toHaveValue("https://192.168.40.10:4443");
   await expect
     .element(page.getByRole("combobox", { name: "Fleet access scope" }))
-    .toHaveTextContent("Read only");
+    .toHaveTextContent("Full T3 access");
   await expect.element(page.getByText(/opens the shown additional port/)).toBeVisible();
+  await expect.element(page.getByText(/automatically whenever T3 starts/)).toBeVisible();
+  await expect.element(page.getByText(/Full access includes running agents/)).toBeVisible();
   expect(configure).not.toHaveBeenCalled();
   await page
     .getByRole("button", { name: "Enable encryption and create fleet", exact: true })
@@ -67,7 +69,37 @@ it("offers discovered LAN encryption with read-only access and no activation bef
     origin: "https://192.168.40.10:4443",
     managedTls: true,
     autoPickup: true,
-    access: "read-only",
+    access: "standard",
+  });
+});
+
+it("preserves a saved read-only choice when resuming enrollment", async () => {
+  const { configure } = setup({ deviceCode: "abcdef123456", access: "read-only" });
+  await using screen = await render(<LanFleetSetup />);
+  await screen.getByRole("button", { name: "Create fleet", exact: true }).click();
+  await expect
+    .element(page.getByRole("combobox", { name: "Fleet access scope" }))
+    .toHaveTextContent("Read only");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(configure).not.toHaveBeenCalled();
+});
+
+it("can persistently stop an enabled endpoint even when automatic startup failed", async () => {
+  const { configure } = setup({ stage: "active", tlsEnabled: true, tlsReady: false });
+  await using screen = await render(<LanFleetSetup />);
+  await expect
+    .element(screen.getByText(/Automatic encrypted LAN startup could not complete/))
+    .toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Retry encrypted endpoint", exact: true }))
+    .toBeVisible();
+  await screen.getByRole("button", { name: "Stop encrypted endpoint", exact: true }).click();
+  await expect.element(page.getByText(/keeps it off after T3 restarts/)).toBeVisible();
+  await page.getByRole("button", { name: "Stop encrypted endpoint", exact: true }).last().click();
+  expect(configure).toHaveBeenCalledExactlyOnceWith({
+    operation: "transport",
+    confirmed: true,
+    enabled: false,
   });
 });
 

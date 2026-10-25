@@ -31,8 +31,8 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
   const [origin, setOrigin] = useState(setup?.origin ?? "");
   const [managedTls, setManagedTls] = useState(setup?.managedTls === true);
   const [code, setCode] = useState("");
-  const [access, setAccess] = useState<"read-only" | "standard">("read-only");
-  const [automatic, setAutomatic] = useState(true);
+  const [access, setAccess] = useState<"read-only" | "standard">(setup?.access ?? "standard");
+  const [automatic, setAutomatic] = useState(setup?.deviceCode == null ? true : setup.autoPickup);
   const joining = setup?.stage === "join";
   return (
     <Dialog
@@ -117,7 +117,8 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
             {managedTls ? (
               <p className="text-xs text-muted-foreground">
                 Confirming creates a local encryption key in the OS credential store and opens the
-                shown additional port while this app runs. The port must be available and reachable
+                shown additional port automatically whenever T3 starts, until you stop encrypted
+                access. Your access choice is saved once. The port must be available and reachable
                 on your LAN. No firewall rules or system certificate trust will be changed. Existing
                 HTTP connections are preserved.
               </p>
@@ -332,7 +333,7 @@ export function LanFleetSetup() {
   const [review, setReview] = useState<Peer | null>(null);
   const [revoke, setRevoke] = useState<Peer | null>(null);
   const [scopeChange, setScopeChange] = useState<"read-only" | "standard" | null>(null);
-  const [transportChange, setTransportChange] = useState(false);
+  const [transportChange, setTransportChange] = useState<boolean | null>(null);
   if (setup === null)
     return (
       <Button
@@ -355,8 +356,9 @@ export function LanFleetSetup() {
     <div className="space-y-3">
       {setup.managedTls && setup.tlsEnabled && setup.tlsReady === false ? (
         <p role="status" className="text-xs text-muted-foreground">
-          The encrypted endpoint is not running. Start it here to accept LAN connections. Saved keys
-          and connections are preserved.
+          Automatic encrypted LAN startup could not complete. Check the selected local address, port
+          availability and OS-stored key, then retry. Saved keys, connections and access choices are
+          preserved.
         </p>
       ) : null}
       {setup.stage === "unconfigured" || setup.stage === "join" ? (
@@ -436,9 +438,19 @@ export function LanFleetSetup() {
                 size="sm"
                 variant="outline"
                 disabled={fleet.busy || !fleet.allowed}
+                onClick={() => setTransportChange(!setup.tlsEnabled)}
+              >
+                {setup.tlsEnabled ? "Stop encrypted endpoint" : "Enable automatic encrypted access"}
+              </Button>
+            ) : null}
+            {setup.managedTls && setup.tlsEnabled && !setup.tlsReady ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={fleet.busy || !fleet.allowed}
                 onClick={() => setTransportChange(true)}
               >
-                {setup.tlsReady ? "Stop encrypted endpoint" : "Start encrypted endpoint"}
+                Retry encrypted endpoint
               </Button>
             ) : null}
             {setup.stage === "active" ? (
@@ -546,22 +558,24 @@ export function LanFleetSetup() {
           </DialogPopup>
         </Dialog>
       ) : null}
-      {transportChange ? (
+      {transportChange !== null ? (
         <Dialog
           open
           onOpenChange={(open) => {
-            if (!open && !fleet.busy) setTransportChange(false);
+            if (!open && !fleet.busy) setTransportChange(null);
           }}
         >
           <DialogPopup>
             <DialogHeader>
               <DialogTitle>
-                {setup.tlsReady ? "Stop encrypted LAN access?" : "Start encrypted LAN access?"}
+                {transportChange
+                  ? "Enable automatic encrypted LAN access?"
+                  : "Stop encrypted LAN access?"}
               </DialogTitle>
               <DialogDescription>
-                {setup.tlsReady
-                  ? "This closes the encrypted port and disconnects clients using it. Saved connections, keys and access grants stay available for a later restart. Existing HTTP connections are unchanged."
-                  : `This opens ${setup.origin} using its existing OS-stored key. It does not change firewall rules, rotate keys or create access grants.`}
+                {transportChange
+                  ? `This opens ${setup.origin} now and automatically whenever T3 starts, using its existing OS-stored key. You can stop it here at any time. It does not change firewall rules, rotate keys or create access grants.`
+                  : "This closes the encrypted port and keeps it off after T3 restarts until you enable it again. Saved connections, keys and access grants are preserved. Existing HTTP connections are unchanged."}
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
@@ -575,14 +589,14 @@ export function LanFleetSetup() {
                     .configure({
                       operation: "transport",
                       confirmed: true,
-                      enabled: !setup.tlsReady,
+                      enabled: transportChange,
                     })
                     .then((ok) => {
-                      if (ok) setTransportChange(false);
+                      if (ok) setTransportChange(null);
                     });
                 }}
               >
-                {setup.tlsReady ? "Stop encrypted endpoint" : "Start encrypted endpoint"}
+                {transportChange ? "Enable and start automatically" : "Stop encrypted endpoint"}
               </Button>
             </DialogFooter>
           </DialogPopup>

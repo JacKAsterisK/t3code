@@ -2,27 +2,55 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, LanFleetError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Context from "effect/Context";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { FLEET_ROSTER_ENV } from "./FleetBootstrap.ts";
 import * as Config from "../config.ts";
 import * as FleetTransport from "./FleetTransport.ts";
 import * as FleetNetwork from "./FleetNetwork.ts";
 import * as FleetVault from "./FleetVault.ts";
 import { generateFleetIdentity, type FleetVaultRecord } from "./FleetAuthority.ts";
 
-const fixture = Effect.fn("FleetTransportTest.fixture")(function* (initial?: FleetVaultRecord) {
+const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
+  initial?: FleetVaultRecord,
+  options: {
+    environment?: Readonly<Record<string, string | undefined>>;
+    conflict?: boolean;
+    vaultUnavailable?: boolean;
+    addresses?: readonly string[];
+    beforeListen?: Effect.Effect<void>;
+    events?: string[];
+  } = {},
+) {
   const config = yield* Config.ServerConfig;
   let record: FleetVaultRecord | undefined = initial;
   let starts = 0;
   let closes = 0;
   let saves = 0;
-  let conflict = false;
-  let vaultUnavailable = false;
+  let conflict = options.conflict ?? false;
+  let vaultUnavailable = options.vaultUnavailable ?? false;
+  let reads = 0;
   const services = yield* Layer.build(
     FleetTransport.layerServices.pipe(
       Layer.provide(
+        Layer.succeed(
+          HostProcess.Environment,
+          options.environment ?? {
+            [FLEET_ROSTER_ENV]: process.cwd() + "/synthetic-roster.json",
+          },
+        ),
+      ),
+      Layer.provide(
         Layer.succeed(FleetVault.FleetVault, {
-          read: Effect.sync(() => record),
+          read: Effect.suspend(() => {
+            reads++;
+            return vaultUnavailable
+              ? Effect.fail(new LanFleetError({ reason: "unavailable" }))
+              : Effect.succeed(record);
+          }),
           save: (next) =>
             vaultUnavailable
               ? Effect.fail(new LanFleetError({ reason: "unavailable" }))
@@ -34,21 +62,23 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (initial?: Fle
       ),
       Layer.provide(
         Layer.succeed(FleetNetwork.FleetNetwork, {
-          addresses: Effect.succeed(["192.168.40.10", "192.168.50.10"]),
+          addresses: Effect.succeed(options.addresses ?? ["192.168.40.10", "192.168.50.10"]),
           listen: (input) =>
-            conflict
-              ? Effect.fail(new LanFleetError({ reason: "transport" }))
-              : Effect.sync(() => {
-                  starts++;
-                  return {
-                    httpBaseUrl: `https://${input.listen.address}:${input.listen.port}/`,
-                    wsBaseUrl: "wss://synthetic-only/",
-                    close: () => {
-                      closes++;
-                      return Promise.resolve();
-                    },
-                  };
-                }),
+            Effect.gen(function* () {
+              yield* options.beforeListen ?? Effect.void;
+              if (conflict) return yield* new LanFleetError({ reason: "transport" });
+              starts++;
+              options.events?.push("start");
+              return {
+                httpBaseUrl: `https://${input.listen.address}:${input.listen.port}/`,
+                wsBaseUrl: "wss://synthetic-only/",
+                close: () => {
+                  closes++;
+                  options.events?.push("close");
+                  return Promise.resolve();
+                },
+              };
+            }),
         }),
       ),
     ),
@@ -66,7 +96,7 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (initial?: Fle
     transport,
     identity,
     origin: `https://192.168.40.10:${port}`,
-    stats: () => ({ record, starts, closes, saves }),
+    stats: () => ({ record, starts, closes, saves, reads }),
     conflict: (value: boolean) => {
       conflict = value;
     },
@@ -80,18 +110,103 @@ const configLayer = Config.ServerConfig.layerTest(process.cwd(), {
 });
 
 it.layer(NodeServices.layer)("confirmed fleet transport", (it) => {
-  it.effect("does not resume a persisted listener during construction or passive inspection", () =>
+  it.effect("restores an enabled saved listener at startup without rewriting keys or access", () =>
     Effect.gen(function* () {
       const first = yield* fixture();
       const tls = yield* first.transport.prepare(first.origin);
       const record = { ...first.identity, tls, tlsEnabled: true };
       const restarted = yield* fixture(record);
-      expect(yield* restarted.transport.ready(record)).toBe(false);
-      yield* restarted.transport.suggestions;
-      expect(restarted.stats()).toMatchObject({ starts: 0, saves: 0 });
-      yield* restarted.transport.persist(record);
       expect(yield* restarted.transport.ready(record)).toBe(true);
-      expect(restarted.stats()).toMatchObject({ starts: 1, saves: 1 });
+      yield* restarted.transport.suggestions;
+      expect(restarted.stats()).toMatchObject({ starts: 1, saves: 0, record });
+      yield* Effect.all(
+        [restarted.transport.persist(record), restarted.transport.persist(record)],
+        {
+          concurrency: "unbounded",
+        },
+      );
+      expect(yield* restarted.transport.ready(record)).toBe(true);
+      expect(restarted.stats()).toMatchObject({ starts: 1, saves: 2, record });
+    }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect("keeps a stopped or unconfigured endpoint stopped across restarts", () =>
+    Effect.gen(function* () {
+      const first = yield* fixture();
+      const tls = yield* first.transport.prepare(first.origin);
+      for (const record of [first.identity, { ...first.identity, tls, tlsEnabled: false }]) {
+        const restarted = yield* fixture(record);
+        expect(yield* restarted.transport.ready(record)).toBe(false);
+        expect(restarted.stats()).toMatchObject({ starts: 0, saves: 0, record });
+      }
+    }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect(
+    "does not restore or read saved secrets when launch configuration is absent, empty or invalid",
+    () =>
+      Effect.gen(function* () {
+        const first = yield* fixture();
+        const tls = yield* first.transport.prepare(first.origin);
+        const record = { ...first.identity, tls, tlsEnabled: true };
+        for (const environment of [
+          {},
+          ...["", " ", "relative.json"].map((value) => ({ [FLEET_ROSTER_ENV]: value })),
+        ]) {
+          const restarted = yield* fixture(record, { environment });
+          expect(yield* restarted.transport.ready(record)).toBe(false);
+          expect(restarted.stats()).toMatchObject({ starts: 0, saves: 0, reads: 0, record });
+        }
+      }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect("keeps local startup available on restore failure without changing saved trust", () =>
+    Effect.gen(function* () {
+      const first = yield* fixture();
+      const tls = yield* first.transport.prepare(first.origin);
+      const record = { ...first.identity, tls, tlsEnabled: true };
+      for (const options of [{ conflict: true }, { vaultUnavailable: true }, { addresses: [] }]) {
+        const restarted = yield* fixture(record, options);
+        expect(yield* restarted.transport.ready(record)).toBe(false);
+        expect(restarted.stats()).toMatchObject({ starts: 0, saves: 0, record });
+      }
+      const substituted = { ...record, tls: { ...tls, publicKeySha256: "0".repeat(64) } };
+      const rejected = yield* fixture(substituted);
+      expect(yield* rejected.transport.ready(substituted)).toBe(false);
+      expect(rejected.stats()).toMatchObject({ starts: 0, saves: 0, record: substituted });
+      const recovered = yield* fixture(record);
+      expect(yield* recovered.transport.ready(record)).toBe(true);
+    }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect("cleans up a listener acquired while startup is interrupted", () =>
+    Effect.gen(function* () {
+      const first = yield* fixture();
+      const tls = yield* first.transport.prepare(first.origin);
+      const record = { ...first.identity, tls, tlsEnabled: true };
+      const entered = yield* Deferred.make<void>();
+      const proceed = yield* Deferred.make<void>();
+      const events: string[] = [];
+      const startup = yield* Effect.scoped(
+        fixture(record, {
+          events,
+          beforeListen: Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(proceed)),
+          ),
+        }),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      const interrupted = yield* Fiber.interrupt(startup).pipe(
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      yield* Deferred.succeed(proceed, undefined);
+      yield* Fiber.join(interrupted);
+      expect(events).toEqual(["start", "close"]);
+    }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect("closes a restored listener with its server scope", () =>
+    Effect.gen(function* () {
+      const first = yield* fixture();
+      const tls = yield* first.transport.prepare(first.origin);
+      const record = { ...first.identity, tls, tlsEnabled: true };
+      const restarted = yield* Effect.scoped(fixture(record));
+      expect(restarted.stats()).toMatchObject({ starts: 1, closes: 1, saves: 0 });
     }).pipe(Effect.provide(configLayer)),
   );
   it.effect(

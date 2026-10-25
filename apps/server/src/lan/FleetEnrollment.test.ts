@@ -13,6 +13,8 @@ import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Context from "effect/Context";
+import * as Scope from "effect/Scope";
+import * as Exit from "effect/Exit";
 import * as FleetTransport from "./FleetTransport.ts";
 import * as FleetNetwork from "./FleetNetwork.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -89,49 +91,74 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (managedTls =
           ),
         )
       : Layer.empty;
-    const enrollmentServices = yield* Layer.build(
-      FleetEnrollment.layerServices.pipe(
-        Layer.provide(transportLayer),
-        Layer.provide(Config.layer(config)),
-        Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
-        Layer.provide(Layer.succeed(FleetVault.FleetVault, vault)),
-        Layer.provide(
-          Layer.mock(DirectEndpoints.DirectEndpoints)({ resolve: () => Effect.succeed([]) }),
-        ),
-        Layer.provide(Layer.succeed(HostProcess.Environment, { [FLEET_ROSTER_ENV]: rosterPath })),
-      ),
-    );
-    const enrollment = Context.get(enrollmentServices, FleetEnrollment.FleetEnrollment);
-    const links = yield* LanFleet.LanFleet.pipe(
-      Effect.provide(
-        LanFleet.layerServices.pipe(
-          Layer.provide(Config.layer(config)),
-          Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
-          Layer.provide(Layer.succeed(FleetEnrollment.FleetEnrollment, enrollment)),
-          Layer.provide(Layer.succeed(HostProcess.Environment, { [FLEET_ROSTER_ENV]: rosterPath })),
-          Layer.provide(
-            Layer.mock(EnvironmentAuth.EnvironmentAuth)({
-              createPairingLink: (input) =>
-                Effect.sync(() => {
-                  issued.push({ issuer: name, scopes: input?.scopes ?? AuthStandardClientScopes });
-                  return {
-                    id: `synthetic-${issued.length}`,
-                    credential: `synthetic-${name}-credential`,
-                    subject: "synthetic",
-                    scopes: input?.scopes ?? AuthStandardClientScopes,
-                    createdAt: DateTime.makeUnsafe(0),
-                    expiresAt: DateTime.makeUnsafe(86_400_000),
-                  };
-                }),
-            }),
+    let serverScope = yield* Scope.make();
+    yield* Effect.addFinalizer((exit) => Scope.close(serverScope, exit));
+    const build = Effect.fn("FleetEnrollmentTest.build")(
+      function* () {
+        const enrollmentServices = yield* Layer.build(
+          FleetEnrollment.layerServices.pipe(
+            Layer.provide(transportLayer),
+            Layer.provide(Config.layer(config)),
+            Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
+            Layer.provide(Layer.succeed(FleetVault.FleetVault, vault)),
+            Layer.provide(
+              Layer.mock(DirectEndpoints.DirectEndpoints)({ resolve: () => Effect.succeed([]) }),
+            ),
+            Layer.provide(
+              Layer.succeed(HostProcess.Environment, { [FLEET_ROSTER_ENV]: rosterPath }),
+            ),
           ),
-        ),
-      ),
+        );
+        const enrollment = Context.get(enrollmentServices, FleetEnrollment.FleetEnrollment);
+        const links = yield* LanFleet.LanFleet.pipe(
+          Effect.provide(
+            LanFleet.layerServices.pipe(
+              Layer.provide(Config.layer(config)),
+              Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
+              Layer.provide(Layer.succeed(FleetEnrollment.FleetEnrollment, enrollment)),
+              Layer.provide(
+                Layer.succeed(HostProcess.Environment, { [FLEET_ROSTER_ENV]: rosterPath }),
+              ),
+              Layer.provide(
+                Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+                  createPairingLink: (input) =>
+                    Effect.sync(() => {
+                      issued.push({
+                        issuer: name,
+                        scopes: input?.scopes ?? AuthStandardClientScopes,
+                      });
+                      return {
+                        id: `synthetic-${issued.length}`,
+                        credential: `synthetic-${name}-credential`,
+                        subject: "synthetic",
+                        scopes: input?.scopes ?? AuthStandardClientScopes,
+                        createdAt: DateTime.makeUnsafe(0),
+                        expiresAt: DateTime.makeUnsafe(86_400_000),
+                      };
+                    }),
+                }),
+              ),
+            ),
+          ),
+        );
+        return { enrollment, links };
+      },
+      (effect) => Effect.provideService(effect, Scope.Scope, serverScope),
     );
+    let services = yield* build();
     return {
       environmentId,
-      enrollment,
-      links,
+      get enrollment() {
+        return services.enrollment;
+      },
+      get links() {
+        return services.links;
+      },
+      restart: Effect.gen(function* () {
+        yield* Scope.close(serverScope, Exit.succeed(undefined));
+        serverScope = yield* Scope.make();
+        services = yield* build();
+      }),
       record: () => record,
       saves: () => saves,
       network: () => ({ starts, closes }),
@@ -240,6 +267,119 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         yield* f.a.enrollment.configure({ operation: "transport", confirmed: true, enabled: true });
         assert.deepEqual(f.a.record()!.tls, before);
         assert.equal(f.a.network().starts, 2);
+      }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect(
+    "automatically restores both peers, preserves read-only access and keeps stop and revocation across restarts",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(true);
+        const owner = yield* f.a.enrollment.configure({
+          operation: "start",
+          confirmed: true,
+          origin: "https://192.168.40.10:4001",
+          managedTls: true,
+          autoPickup: true,
+          access: "read-only",
+        });
+        const pending = yield* f.b.enrollment.configure({
+          operation: "join",
+          confirmed: true,
+          origin: "https://192.168.40.11:4001",
+          ownerCode: owner.ownerCode!,
+          managedTls: true,
+          autoPickup: true,
+          access: "standard",
+        });
+        const beforeA = f.a.record()!;
+        const beforeB = f.b.record()!;
+        yield* f.a.restart;
+        yield* f.b.restart;
+        assert.equal((yield* f.a.enrollment.status).tlsReady, true);
+        assert.equal((yield* f.b.enrollment.status).tlsReady, true);
+        assert.equal((yield* f.b.enrollment.status).stage, "pending");
+        assert.equal(yield* f.b.enrollment.resolve, null);
+        assert.deepEqual(f.issued, []);
+        assert.deepEqual(f.a.network(), { starts: 2, closes: 1 });
+        assert.deepEqual(f.b.network(), { starts: 2, closes: 1 });
+        assert.deepEqual(f.a.record()!.tls, beforeA.tls);
+        assert.deepEqual(f.b.record()!.tls, beforeB.tls);
+        assert.equal(f.a.record()!.access, "read-only");
+        assert.equal(f.b.record()!.access, "standard");
+        yield* f.approve(beforeB.machineId, pending.deviceCode!);
+        yield* f.a.enrollment.configure({
+          operation: "link",
+          confirmed: true,
+          machineIds: [beforeB.machineId],
+        });
+        yield* f.sync(f.a, [f.a.environmentId]);
+        yield* f.sync(f.b, [f.b.environmentId]);
+        assert.equal((yield* f.sync(f.a, [f.a.environmentId])).incoming.length, 1);
+        assert.equal((yield* f.sync(f.b, [f.b.environmentId])).incoming.length, 1);
+        assert.equal(f.issued.length, 2);
+        assert.equal(
+          f.issued
+            .find((grant) => grant.issuer === "alpha")!
+            .scopes.includes(AuthFilesystemWriteScope),
+          false,
+        );
+        assert.deepEqual(
+          f.issued.find((grant) => grant.issuer === "beta")!.scopes,
+          AuthStandardClientScopes,
+        );
+        yield* f.a.restart;
+        yield* f.b.restart;
+        yield* f.sync(f.a, [f.a.environmentId, f.b.environmentId]);
+        yield* f.sync(f.b, [f.a.environmentId, f.b.environmentId]);
+        assert.equal(f.issued.length, 2);
+        yield* f.a.enrollment.configure({
+          operation: "transport",
+          confirmed: true,
+          enabled: false,
+        });
+        const stopped = f.a.network();
+        yield* f.a.restart;
+        assert.equal((yield* f.a.enrollment.status).tlsReady, false);
+        assert.deepEqual(f.a.network(), stopped);
+        assert.equal(yield* f.a.enrollment.resolve, null);
+        yield* f.a.enrollment.configure({ operation: "transport", confirmed: true, enabled: true });
+        yield* f.a.enrollment.configure({
+          operation: "revoke",
+          confirmed: true,
+          machineId: beforeB.machineId,
+        });
+        yield* f.b.restart;
+        assert.equal(yield* f.b.enrollment.resolve, null);
+        assert.deepEqual(f.a.record()!.tls, beforeA.tls);
+        assert.equal(f.issued.length, 2);
+      }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect(
+    "preserves saved access and pickup choices after interrupted enrollment publication",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(true);
+        const input = {
+          operation: "start" as const,
+          confirmed: true,
+          origin: "https://192.168.40.10:4001",
+          managedTls: true,
+          autoPickup: false,
+          access: "read-only" as const,
+        };
+        yield* f.a.enrollment.configure(input);
+        const before = f.a.record()!;
+        yield* f.fs.remove(f.authorityFile);
+        yield* f.a.restart;
+        const status = yield* f.a.enrollment.status;
+        assert.equal(status.stage, "unconfigured");
+        assert.equal(status.access, "read-only");
+        assert.equal(status.autoPickup, false);
+        yield* f.a.enrollment.configure({ ...input, access: "standard", autoPickup: true });
+        assert.equal(f.a.record()!.access, "read-only");
+        assert.equal(f.a.record()!.autoPickup, false);
+        assert.deepEqual(f.a.record()!.tls, before.tls);
+        assert.deepEqual(f.issued, []);
       }).pipe(Effect.provide(configLayer)),
   );
   it.effect(

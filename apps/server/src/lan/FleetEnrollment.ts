@@ -117,8 +117,8 @@ const make = Effect.gen(function* () {
       suggestedTlsOrigins,
       tlsEnabled: current?.record?.tls !== undefined && current.record.tlsEnabled !== false,
       tlsReady,
-      autoPickup: false,
-      access: "standard",
+      autoPickup: current?.record?.autoPickup ?? false,
+      access: current?.record?.access ?? "standard",
       peers: [],
     };
     if (current === undefined) return base;

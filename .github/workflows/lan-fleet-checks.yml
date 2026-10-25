@@ -2,7 +2,7 @@ name: LAN fleet checks
 
 on:
   push:
-    branches: [lan/fleet-links, lan/fleet-transport-compat]
+    branches: [lan/fleet-links, lan/fleet-transport-compat, lan/fleet-persistent-startup]
   workflow_dispatch:
 
 permissions:

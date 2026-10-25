@@ -9,8 +9,10 @@ kept, and uncertain pickups pause for review instead of replacing credentials.
 
 Create the fleet on the machine that will approve its members. **Automatic LAN
 encryption** offers this machine's local addresses and a separate port; confirm
-the address, access scope and pickup schedule to enable it. Private keys stay in
-the OS credential store. This does not install system certificates, change
+the address, access scope and pickup schedule once to enable it. New setup offers
+**Full T3 access** for remote task control; choose **Read only** to limit new links.
+Saved access choices, including existing read-only choices, stay unchanged.
+Private keys stay in the OS credential store. This does not install system certificates, change
 firewall rules or require a VPN. The port must be reachable from your other
 machines. An existing HTTPS endpoint is also supported.
 
@@ -19,11 +21,14 @@ compares that machine's code from its own app before approving it. Select approv
 members and use **Link both ways**. The shared roster contains discovery metadata;
 changing a name or adding a row does not grant access or approve a public key.
 
-After reopening the app, use **Start encrypted endpoint** on machines that should
-accept fleet connections. Inspection and background sync do not open the port.
+After reopening T3, an enabled encrypted endpoint starts automatically with its
+existing key, and saved encrypted connections reconnect using their verified peer
+identities. No endpoint button or access selection is needed on each restart.
 **Pause fleet** pauses linking while preserving established access. **Stop
-encrypted endpoint** closes that port without deleting saved keys, connections or
-grants. Existing HTTP connections are preserved; protected fleet links never fall
+encrypted endpoint** closes that port and keeps it off across restarts until you
+enable it again, without deleting saved keys, connections or grants. If startup
+fails, Connections reports it and offers a retry; it never replaces a key or peer
+identity automatically. Existing HTTP connections are preserved; protected fleet links never fall
 back to plaintext. Install the updated desktop app on each fleet member before
 enabling encrypted fleet setup.
 

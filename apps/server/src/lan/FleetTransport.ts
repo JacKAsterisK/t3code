@@ -4,6 +4,7 @@ import {
   verifyFleetTlsCertificate,
 } from "@t3tools/shared/fleetTlsCertificate";
 import type { FleetProxy } from "@t3tools/shared/fleetTlsProxy";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
@@ -13,6 +14,7 @@ import * as Config from "../config.ts";
 import * as Vault from "./FleetVault.ts";
 import * as Network from "./FleetNetwork.ts";
 import type { FleetVaultRecord } from "./FleetAuthority.ts";
+import { resolveFleetBootstrap } from "./FleetBootstrap.ts";
 
 type StoredTls = NonNullable<FleetVaultRecord["tls"]>;
 export class FleetTransport extends Context.Service<
@@ -30,6 +32,7 @@ export class FleetTransport extends Context.Service<
 
 const make = Effect.gen(function* () {
   const config = yield* Config.ServerConfig;
+  const processEnvironment = yield* HostProcess.Environment;
   const vault = yield* Vault.FleetVault;
   const network = yield* Network.FleetNetwork;
   const mutex = yield* Semaphore.make(1);
@@ -124,6 +127,28 @@ const make = Effect.gen(function* () {
   );
   yield* Effect.addFinalizer(() =>
     running === undefined ? Effect.void : Effect.promise(() => running!.proxy.close()),
+  );
+  // The saved setting is the one-time startup consent. Restore the listener
+  // once per server lifetime, without rewriting keys, grants or vault settings.
+  // An explicitly disabled/missing launch configuration still takes precedence.
+  yield* Effect.gen(function* () {
+    const bootstrap = yield* Effect.try({
+      try: () => resolveFleetBootstrap(processEnvironment),
+      catch: () => new LanFleetError({ reason: "configuration" }),
+    });
+    if (bootstrap === undefined) return;
+    const record = yield* vault.read;
+    if (record?.tls === undefined || record.tlsEnabled === false) return;
+    yield* ensure(record);
+  }).pipe(
+    Effect.uninterruptible,
+    mutex.withPermit,
+    Effect.catchTags({
+      LanFleetError: () =>
+        Effect.logWarning(
+          "Saved encrypted LAN access could not start. Check the selected local address, port and OS-stored key in Connections; saved keys and access were preserved.",
+        ),
+    }),
   );
   return FleetTransport.of({
     suggestions,

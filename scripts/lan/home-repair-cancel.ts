@@ -226,16 +226,14 @@ export async function cancelOriginalWork(
       summary,
     };
     writeReceipt(paths.receiptPath, receipt);
-    atomicWrite(
-      paths.journalPath,
+    const journalText =
       JSON.stringify({
         schemaVersion: 1,
         operation: "cancel-original-work",
         repairId: request.repairId,
         receiptPath: paths.receiptPath,
-      }) + "\n",
-      request.repairId,
-    );
+      }) + "\n";
+    atomicWrite(paths.journalPath, journalText, request.repairId);
     const retired = NodePath.join(paths.directory, "retired-database");
     NodeFS.mkdirSync(retired);
     try {
@@ -260,8 +258,11 @@ export async function cancelOriginalWork(
         afterSha256: treeDigest(original).sha256,
       };
       writeReceipt(paths.receiptPath, completed);
-      const expectedPlanId = previewHomeRepair(options).planId;
       NodeFS.unlinkSync(paths.journalPath);
+      const fresh = previewHomeRepair(options);
+      if (fresh.state === "blocked" || fresh.original.activeWork !== 0)
+        throw new Error("Post-cancellation preview is not usable.");
+      const expectedPlanId = fresh.planId;
       return {
         schemaVersion: 1 as const,
         status: "unfinished-work-cancelled" as const,
@@ -271,6 +272,26 @@ export async function cancelOriginalWork(
         expectedPlanId,
       };
     } catch (error) {
+      // A post-cleanup preview can fail after unlink. Re-establish the startup barrier before restoring any database image.
+      if (!NodeFS.existsSync(paths.journalPath))
+        atomicWrite(paths.journalPath, journalText, request.repairId);
+      else {
+        assertOrdinaryNativePath(paths.journalPath, false);
+        if (
+          NodeFS.statSync(paths.journalPath).size > 8192 ||
+          NodeFS.readFileSync(paths.journalPath, "utf8") !== journalText
+        )
+          throw new Error("A different recovery journal prevents cancellation rollback.", {
+            cause: error,
+          });
+      }
+      await ports.verifyStoppedForCancellation(resources, original);
+      const databaseFiles = databaseNames.map((name) => `userdata/${name}`);
+      if (
+        treeDigest(original, databaseFiles).sha256 !==
+        treeDigest(snapshot.backup, databaseFiles).sha256
+      )
+        throw new Error("New non-database work prevents cancellation rollback.", { cause: error });
       restoreImages(receipt, paths.directory);
       writeReceipt(paths.receiptPath, { ...receipt, status: "rolled-back" });
       NodeFS.unlinkSync(paths.journalPath);

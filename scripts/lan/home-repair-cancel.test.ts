@@ -431,3 +431,58 @@ test("payload and indexed lifecycle disagreement fails without appending cancell
       after.close();
     }
   }));
+
+test("returned cancellation plan matches a fresh preview before releasing the same admission", async () =>
+  transactionFixture(async ({ options, ports, request }) => {
+    let checked = false;
+    const held: WorkCancellationPorts = {
+      ...ports,
+      withExclusiveAdmission: async (resources, operation) =>
+        ports.withExclusiveAdmission(resources, async () => {
+          const result = await operation();
+          if (result !== null && typeof result === "object" && "expectedPlanId" in result) {
+            NodeAssert.equal(result.expectedPlanId, previewHomeRepair(options).planId);
+            checked = true;
+          }
+          return result;
+        }),
+    };
+    await cancelOriginalWork(options, request, held);
+    NodeAssert.equal(checked, true);
+  }));
+
+test("failure after journal cleanup restores the barrier before rollback and retains exact original history", async () =>
+  transactionFixture(async ({ options, original, ports, request }) => {
+    const before = treeDigest(original);
+    const journal = NodePath.join(options.localAppData, "T3CodeLAN", "home-repair.json");
+    const fsModule: typeof NodeFS = NodeModule.createRequire(import.meta.url)("node:fs");
+    const realUnlink = fsModule.unlinkSync;
+    let failed = false,
+      barrierRechecked = false;
+    using _restoreNamedExports = { [Symbol.dispose]: () => NodeModule.syncBuiltinESMExports() };
+    using _unlink = vi.spyOn(fsModule, "unlinkSync").mockImplementation((file) => {
+      realUnlink(file);
+      if (String(file) === journal && !failed) {
+        failed = true;
+        throw new Error("synthetic failure after journal cleanup");
+      }
+    });
+    NodeModule.syncBuiltinESMExports();
+    await NodeAssert.rejects(
+      cancelOriginalWork(options, request, {
+        ...ports,
+        verifyStoppedForCancellation: async (resources, home) => {
+          await ports.verifyStoppedForCancellation(resources, home);
+          if (failed) {
+            NodeAssert.equal(NodeFS.existsSync(journal), true);
+            barrierRechecked = true;
+          }
+        },
+      }),
+      /synthetic failure after journal cleanup/,
+    );
+    NodeAssert.equal(barrierRechecked, true);
+    NodeAssert.equal(NodeFS.existsSync(journal), false);
+    NodeAssert.equal(treeDigest(original).sha256, before.sha256);
+    NodeAssert.equal(previewHomeRepair(options).original.activeWork, 17);
+  }));

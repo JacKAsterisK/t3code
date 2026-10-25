@@ -55,6 +55,7 @@ try{
   if($cancelled.status-ne'unfinished-work-cancelled'-or$cancelled.summary.providerLaunches-ne0){throw 'Cancellation result mismatch'}
   NodeAssert-Held
   $fresh=Expect-Ok 'preview' $null
+  if($cancelled.expectedPlanId-ne$fresh.planId){throw 'Native post-cancellation plan differs from fresh preview'}
   if(-not$fresh.canApply-or$fresh.original.activeWork-ne0-or$fresh.original.counts.messages-ne16-or$fresh.lan.counts.messages-ne2){throw 'Fresh preview lost history or did not become idle'}
   $apply=@{schemaVersion=1;expectedPlanId=$fresh.planId;repairId=$applyId;choice='adopt-original-retain-lan';opaqueBackupApproved=$true}
   $applied=Expect-Ok 'apply' $apply
@@ -66,7 +67,7 @@ try{
   NodeAssert-Held
   $restored=Expect-Ok 'preview' $null
   if($restored.original.activeWork-ne17){throw 'Cancellation rollback did not restore original unfinished intent'}
-  @{schemaVersion=1;status='real-windows-cancellation-apply-and-rollbacks-passed';ownerPid=$PID;exclusiveHandles=5;profileHandles=2;distinctRepairIds=$true;missingAdmissionRefused=$true;wrongParentRefused=$true;heldThroughAllChildren=$true;summary=$cancelled.summary}|ConvertTo-Json -Depth 12 -Compress
+  @{schemaVersion=1;status='real-windows-cancellation-apply-and-rollbacks-passed';ownerPid=$PID;exclusiveHandles=5;profileHandles=2;distinctRepairIds=$true;nativePreviewTokenMatched=$true;missingAdmissionRefused=$true;wrongParentRefused=$true;heldThroughAllChildren=$true;summary=$cancelled.summary}|ConvertTo-Json -Depth 12 -Compress
 }finally{foreach($handle in $handles){$handle.Dispose()}}
 `;
 const helper = process.argv[2],

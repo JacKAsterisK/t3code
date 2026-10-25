@@ -6,7 +6,7 @@
 //
 //   vp run check:changed          compare against the merge base with origin/main
 //   vp run check:changed <ref>    compare against the merge base with <ref>
-//   vp run check:changed <ref> --defer-test path.test.ts  defer one optional slow file
+//   vp run check:changed <ref> --defer-test path.test.ts  defer one allowlisted optional file
 //
 // Uncommitted and untracked files count. Affected packages come from
 // .github/scripts/ci-changes.cjs, the same mapping CI uses to gate its jobs.

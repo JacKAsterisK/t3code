@@ -73,6 +73,7 @@ export const DesktopConfig = Config.all({
   otlpProtocol: telemetryEnabled
     ? Config.schema(OtlpProtocol, "T3CODE_OTLP_PROTOCOL").pipe(Config.withDefault("http/json"))
     : Config.succeed("http/json" as const),
+  desktopLauncherPath: trimmedString("T3CODE_DESKTOP_LAUNCHER_PATH"),
   appImagePath: trimmedString("APPIMAGE"),
   disableAutoUpdate: nativeUpdatesEnabled
     ? optionalBoolean("T3CODE_DISABLE_AUTO_UPDATE")

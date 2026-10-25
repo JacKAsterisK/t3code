@@ -8,9 +8,7 @@ import { loadLanBuildPolicy, lanBuildDefines } from "../../scripts/lib/lan-build
 const lanIdentity = loadLanBuildPolicy();
 const repoEnv = lanIdentity === undefined ? loadRepoEnv() : {};
 
-// The packaged app then installs just those externals, instead of a full
-// production install of apps/desktop's dependency tree next to a server bundle
-// that already carries its own copy of the same libraries.
+// Install only bundle externals; the server bundle already carries its dependency tree.
 const isMainProcessExternal = (id: string) =>
   id === "electron" || id.startsWith("electron/") || isDesktopRuntimeExternalDependency(id);
 const shouldLaunchElectronAfterPack =

@@ -40,12 +40,16 @@ $previewRun = Invoke-Repair 'preview' ''
 if ($previewRun.exitCode -ne 0) { throw 'Fixture preview failed' }
 $preview = $previewRun.output | ConvertFrom-Json
 if ($preview.original.homeDirectory -ne (Join-Path $FixtureRoot '.t3')) { throw 'Fixture home override was not honored; refusing any Apply' }
-$request = @{ schemaVersion=1; expectedPlanId=$preview.planId; choice='adopt-original-retain-lan'; opaqueBackupApproved=$true; repairId=('b' * 32) } | ConvertTo-Json -Compress
+$choice = if ($preview.state -eq 'lan-only') { 'side-by-side-retain-original' } else { 'adopt-original-retain-lan' }
+$expectedHome = if ($preview.state -eq 'lan-only') { $preview.lan.homeDirectory } else { $preview.original.homeDirectory }
+$request = @{ schemaVersion=1; expectedPlanId=$preview.planId; choice=$choice; opaqueBackupApproved=$true; repairId=('b' * 32) } | ConvertTo-Json -Compress
 $denied = Invoke-Repair 'apply' $request
 if ($denied.exitCode -eq 0) { throw 'Apply incorrectly accepted missing admission' }
 $held = [Collections.Generic.List[IDisposable]]::new()
 try {
-  foreach ($fixtureHome in @($preview.original.homeDirectory,$preview.lan.homeDirectory)) {
+  foreach ($fixtureHome in @($preview.original,$preview.lan)) {
+    if ($fixtureHome.state -ne 'initialized') { continue }
+    $fixtureHome = $fixtureHome.homeDirectory
     foreach ($relative in @('native-admission.lock','userdata\server-owner.sqlite')) {
       $held.Add([IO.File]::Open((Join-Path $fixtureHome $relative),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None))
     }
@@ -58,7 +62,7 @@ try {
   $applied = Invoke-Repair 'apply' $request
   if ($applied.exitCode -ne 0) { throw ('Held fixture Apply failed: ' + $applied.error) }
   $result = $applied.output | ConvertFrom-Json
-  if ($result.status -ne 'selected-pending-verification' -or $result.homeDirectory -ne $preview.original.homeDirectory -or $result.restoredHistoryVerified) { throw 'Apply receipt contract mismatch' }
+  if ($result.status -ne 'selected-pending-verification' -or $result.homeDirectory -ne $expectedHome -or $result.restoredHistoryVerified) { throw 'Apply receipt contract mismatch' }
   $rollback = Invoke-Repair 'rollback' (@{schemaVersion=1;repairId=('b' * 32)} | ConvertTo-Json -Compress)
   if ($rollback.exitCode -ne 0 -or ($rollback.output | ConvertFrom-Json).status -ne 'rolled-back') { throw ('Fixture rollback failed: ' + $rollback.error) }
   @{schemaVersion=1;status='fixture-apply-and-rollback-passed';missingAdmissionRefused=$true;environmentId=$result.environmentId;restoredHistoryVerified=$false} | ConvertTo-Json -Compress
@@ -68,6 +72,8 @@ try {
 `;
 
 const helper = process.argv[2];
+const fixtureMode = process.argv[3] ?? "split";
+if (!["split", "lan-only"].includes(fixtureMode)) throw new Error("Unknown synthetic smoke mode.");
 if (!helper || !NodePath.isAbsolute(helper))
   throw new Error("Supply the absolute staged native-home-repair.mjs path.");
 const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-repair-windows-smoke-"));
@@ -141,6 +147,11 @@ try {
       "opaque fixture protection context",
     );
   }
+  if (fixtureMode === "lan-only")
+    NodeFS.renameSync(
+      NodePath.join(root, ".t3"),
+      NodePath.join(root, "fixture-unselected-original"),
+    );
   const file = NodePath.join(root, "host.ps1");
   NodeFS.writeFileSync(file, script);
   const child = NodeChildProcess.spawnSync(
@@ -162,7 +173,11 @@ try {
   NodeAssert.equal(child.status, 0, child.stderr || String(child.error));
   NodeAssert.match(child.stdout, /fixture-apply-and-rollback-passed/);
   for (const [home, messages, migration] of [
-    [NodePath.join(root, ".t3"), 1, 67],
+    [
+      NodePath.join(root, fixtureMode === "lan-only" ? "fixture-unselected-original" : ".t3"),
+      1,
+      67,
+    ],
     [NodePath.join(root, "AppData", "Local", "T3CodeLAN", "data"), 2, 71],
   ] as const) {
     const db = new NodeSqlite.DatabaseSync(NodePath.join(home, "userdata", "statev2.sqlite"), {

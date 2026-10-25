@@ -298,6 +298,8 @@ Ordinary upstream builds retain their existing defaults. The LAN profile keeps
 its separate appId, product and protocol while defaulting to the original
 `%USERPROFILE%\.t3` home and existing Electron protection context. It preserves
 the original environment identity, projects, messages and saved connections.
+Existing LAN-only installations continue on their initialized LAN home and profile;
+this preservation path never creates a separate home or an empty original history.
 Startup refuses ambiguous split homes until Hub previews them and the user
 explicitly chooses the original or separate LAN home. Both complete homes and
 matching profiles are preserved before selection; identities, credentials and

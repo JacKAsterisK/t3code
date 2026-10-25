@@ -82,6 +82,7 @@ const isAllowedMaintenanceLayout = (home: string, journal: string) =>
 const bootstrapFiles = new Set([
   "native-admission.lock",
   "native-bootstrap-state.json",
+  "native-activation.json",
   "userdata/server-owner.sqlite",
   "userdata/environment-id",
   "userdata/statev2.sqlite",

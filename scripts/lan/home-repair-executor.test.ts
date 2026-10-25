@@ -377,3 +377,101 @@ NodeTest.test("recovery finishes interrupted rollback after restoring the previo
     );
   }),
 );
+
+NodeTest.test(
+  "LAN-only upgrades keep the existing identity/profile and support explicit retention plus rollback",
+  () =>
+    fixture(async ({ options, original, lan, ports }) => {
+      const hidden = NodePath.join(options.userHomeDirectory, "fixture-unselected-original");
+      NodeAssert.equal(NodePath.dirname(original), options.userHomeDirectory);
+      NodeAssert.equal(NodePath.dirname(hidden), options.userHomeDirectory);
+      NodeFS.renameSync(original, hidden);
+      const selected = resolveNativeHomeSelection(options);
+      NodeAssert.equal(selected.homeDirectory, lan);
+      NodeAssert.equal(
+        selected.electronProfileDirectory,
+        NodePath.join(options.localAppData, "T3CodeLAN", "electron-profile"),
+      );
+      NodeAssert.doesNotThrow(() => assertNativeHomeMatchesSelection(lan, options));
+      const preview = previewHomeRepair(options);
+      NodeAssert.equal(preview.state, "lan-only");
+      const result = await executeHomeRepair(
+        options,
+        {
+          schemaVersion: 1,
+          expectedPlanId: preview.planId,
+          choice: "side-by-side-retain-original",
+          opaqueBackupApproved: true,
+          repairId: "e".repeat(32),
+        },
+        {
+          ...ports,
+          migrateStagedHome: async () => {},
+          validateStagedHome: async (home) => {
+            const db = new NodeSqlite.DatabaseSync(
+              NodePath.join(home, "userdata", "statev2.sqlite"),
+              { readOnly: true },
+            );
+            try {
+              NodeAssert.equal(
+                db.prepare("SELECT text FROM orchestration_v2_projection_messages").get()!.text,
+                "new LAN message",
+              );
+            } finally {
+              db.close();
+            }
+          },
+        },
+      );
+      NodeAssert.equal(result.homeDirectory, lan);
+      NodeAssert.equal(result.environmentId, "22222222-2222-4222-8222-222222222222");
+      NodeAssert.equal(NodeFS.existsSync(original), false);
+      NodeAssert.equal(resolveNativeHomeSelection(options).homeDirectory, lan);
+      await rollbackHomeRepair(options, "e".repeat(32), ports);
+      NodeAssert.equal(resolveNativeHomeSelection(options).homeDirectory, lan);
+      NodeAssert.equal(NodeFS.existsSync(original), false);
+    }),
+);
+
+NodeTest.test(
+  "LAN-only retention refuses an original home that appears during staging without discarding its work",
+  () =>
+    fixture(async ({ options, original, ports }) => {
+      const hidden = NodePath.join(options.userHomeDirectory, "fixture-unselected-original");
+      NodeAssert.equal(NodePath.dirname(original), options.userHomeDirectory);
+      NodeAssert.equal(NodePath.dirname(hidden), options.userHomeDirectory);
+      NodeFS.renameSync(original, hidden);
+      const preview = previewHomeRepair(options);
+      await NodeAssert.rejects(
+        executeHomeRepair(
+          options,
+          {
+            schemaVersion: 1,
+            expectedPlanId: preview.planId,
+            choice: "side-by-side-retain-original",
+            opaqueBackupApproved: true,
+            repairId: "f".repeat(32),
+          },
+          {
+            ...ports,
+            migrateStagedHome: async () => {
+              NodeFS.mkdirSync(original);
+              NodeFS.writeFileSync(NodePath.join(original, "preserve-work"), "new unrelated work");
+            },
+            validateStagedHome: async () => {},
+          },
+        ),
+        /inventory changed/,
+      );
+      NodeAssert.equal(
+        NodeFS.readFileSync(NodePath.join(original, "preserve-work"), "utf8"),
+        "new unrelated work",
+      );
+      NodeAssert.equal(
+        NodeFS.existsSync(
+          nativeHomePaths(options.userHomeDirectory, options.localAppData).selectionPath,
+        ),
+        false,
+      );
+    }),
+);

@@ -188,3 +188,53 @@ it.layer(NodeServices.layer)("native fresh-home bootstrap", (it) => {
       }).pipe(Effect.provide(layer)),
   );
 });
+
+it.effect(
+  "fresh drop-in bootstrap initializes the original .t3 home with its in-home journal and no conversation or grants",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-dropin-bootstrap-" });
+      const home = path.join(root, ".t3");
+      yield* fs.makeDirectory(path.join(home, "userdata"), { recursive: true });
+      yield* fs.writeFileString(path.join(home, "native-admission.lock"), "");
+      yield* fs.writeFileString(path.join(home, "userdata", "server-owner.sqlite"), "");
+      const request: NativeMaintenance.NativeMaintenanceRequest = {
+        schemaVersion: 1,
+        operation: "bootstrap",
+        nonce: "f".repeat(64),
+        bootstrapId: "e".repeat(64),
+        environmentId: "12345678-1234-4234-8234-123456789abc",
+        homeDirectory: home,
+        journalPath: path.join(home, "native-activation.json"),
+      };
+      yield* fs.writeFileString(
+        request.journalPath,
+        JSON.stringify({ ...request, kind: "bootstrap" }),
+      );
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const result = yield* service.bootstrap(request);
+      assert.equal(result.homeDirectory, home);
+      assert.equal(result.environmentId, request.environmentId);
+      assert.equal(
+        (yield* fs.readFileString(path.join(home, "userdata", "environment-id"))).trim(),
+        request.environmentId,
+      );
+      const db = new NodeSqlite.DatabaseSync(path.join(home, "userdata", "statev2.sqlite"), {
+        readOnly: true,
+      });
+      try {
+        assert.equal(
+          db.prepare("SELECT count(*) AS n FROM orchestration_v2_projection_messages").get()!.n,
+          0,
+        );
+        assert.equal(
+          db.prepare("SELECT max(migration_id) AS n FROM effect_sql_migrations").get()!.n,
+          71,
+        );
+      } finally {
+        db.close();
+      }
+    }).pipe(Effect.provide([NodeServices.layer, layer]), Effect.scoped),
+);

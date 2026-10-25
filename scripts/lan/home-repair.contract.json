@@ -117,14 +117,21 @@
     "receipt": "Contains bounded public path/digest metadata and opaque snapshot locations; startup requires its selection hash and both recorded identities to match.",
     "launch": "Hub active pointer homeDirectory and environmentId must equal the helper's selected result. Set T3CODE_HOME to that home. Keep installer/version root independent. Do not rewrite either environment-id. T3 derives Electron profile from the selection manifest.",
     "activationJournal": "For original .t3 use <selected-home>/native-activation.json. Existing separate LAN home continues using LOCALAPPDATA/T3CodeLAN/activation.json.",
-    "startupBinding": "T3 rechecks selection while holding startup admission; stale pre-admission home choices are refused."
+    "startupBinding": "T3 rechecks selection while holding startup admission; stale pre-admission home choices are refused.",
+    "defaultResolution": {
+      "fresh": "Use original .t3 and normal native-maintenance empty-home bootstrap with its native-activation.json journal; home-repair Apply is unnecessary and remains disabled.",
+      "original-only": "Use initialized original home and matching original Electron context.",
+      "lan-only": "Continue the existing LAN home and its electron-profile; never create an empty original home or regenerate its existing identity. Explicit side-by-side-retain-original Apply is supported with originalEnvironmentId:null.",
+      "split": "Require explicit reviewed home selection, preserve both complete initialized homes."
+    }
   },
   "retention": {
     "behavior": "Original and LAN histories, attachments, settings, encrypted stores and matching profiles are retained as complete separate homes; no database, credentials or provider-environment merge occurs.",
     "access": "Hub can explicitly select side-by-side-retain-original in a new stopped transaction to reopen retained LAN conversations and its existing Claude provider settings. Selecting adopt-original-retain-lan switches back. Every switch uses a fresh preview and repairId, backs up both current states and retains both histories.",
     "limitation": "The original home's conversation list and provider settings do not automatically include LAN-only entries. Consolidated history/provider import is not implemented; do not describe retained bytes as merged or restored into one list.",
     "rollback": "Rollback journals its selection restoration and can recover either side of an interrupted rollback while all source snapshots are unchanged. Any new work or durable schema/profile write refuses automatic data restoration; backups remain for reviewed recovery.",
-    "verification": "Apply returns selected-pending-verification. Hub must validate selected environment, readable old history and saved connection continuity using the normal app before reporting repair complete; restoredHistoryVerified remains false in this interface."
+    "verification": "Apply returns selected-pending-verification. Hub must validate selected environment, readable old history and saved connection continuity using the normal app before reporting repair complete; restoredHistoryVerified remains false in this interface.",
+    "lanOnly": "When original is missing/empty, explicit LAN retention backs up and validates the initialized LAN home and existing profiles only. Its retained-original path may remain absent. It does not restore missing original conversations."
   },
   "release": {
     "productionReady": false,

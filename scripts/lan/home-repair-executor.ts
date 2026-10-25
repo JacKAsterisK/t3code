@@ -158,9 +158,9 @@ export async function executeHomeRepair(
   if (
     preview.planId !== request.expectedPlanId ||
     preview.state === "blocked" ||
-    preview.original.state !== "initialized"
+    (request.choice === "adopt-original-retain-lan" && preview.original.state !== "initialized")
   )
-    throw new Error("Repair preview is stale or the original initialized home is unavailable.");
+    throw new Error("Repair preview is stale or the requested original home is unavailable.");
   const profile =
     request.choice === "adopt-original-retain-lan"
       ? originalProfile(options)
@@ -170,10 +170,9 @@ export async function executeHomeRepair(
   if (request.choice === "side-by-side-retain-original" && preview.lan.state !== "initialized")
     throw new Error("Side-by-side selection requires an existing initialized LAN home.");
   const paths = nativeHomePaths(options.userHomeDirectory, options.localAppData);
-  const homes = [
-    preview.original.homeDirectory,
-    ...(preview.lan.state === "initialized" ? [preview.lan.homeDirectory] : []),
-  ];
+  const preserved = [preview.original, preview.lan].filter((home) => home.state === "initialized");
+  const homes = preserved.map((home) => home.homeDirectory);
+  const validationSource = preserved[0]!;
   const profiles = preview.electronProfiles
     .filter((item) => item.localState.present)
     .map((item) => item.profileDirectory);
@@ -237,11 +236,11 @@ export async function executeHomeRepair(
       const stagedPreview = previewHomeRepair({ ...options, originalHomeDirectory: staged });
       if (
         stagedPreview.original.state !== "initialized" ||
-        stagedPreview.original.environmentId !== preview.original.environmentId ||
+        stagedPreview.original.environmentId !== validationSource.environmentId ||
         stagedPreview.original.counts.messages + stagedPreview.original.counts.legacyMessages <
-          preview.original.counts.messages + preview.original.counts.legacyMessages ||
+          validationSource.counts.messages + validationSource.counts.legacyMessages ||
         stagedPreview.original.counts.threads + stagedPreview.original.counts.legacyThreads <
-          preview.original.counts.threads + preview.original.counts.legacyThreads
+          validationSource.counts.threads + validationSource.counts.legacyThreads
       )
         throw new Error(
           "Staged migrations did not preserve the original identity and readable history.",
@@ -250,6 +249,14 @@ export async function executeHomeRepair(
       for (const snapshot of snapshots)
         if (treeDigest(snapshot.source).sha256 !== snapshot.sha256)
           throw new Error("Source state changed during staged verification.");
+      const finalInventory = previewHomeRepair(options);
+      const stableInventory = (inventory: typeof preview) =>
+        JSON.stringify(
+          [inventory.original, inventory.lan, inventory.electronProfiles],
+          (key, value: unknown) => (key.endsWith("-shm") ? undefined : value),
+        );
+      if (stableInventory(finalInventory) !== stableInventory(preview))
+        throw new Error("Home or profile inventory changed during staged verification.");
       const selection: NativeHomeSelection = {
         schemaVersion: 1,
         mode: request.choice === "adopt-original-retain-lan" ? "drop-in" : "side-by-side",
@@ -491,15 +498,14 @@ export async function recoverHomeRepair(
   }
   const snapshots = journal.snapshots ?? [];
   validateSnapshots(options, repairId, snapshots);
+  const currentInventory = previewHomeRepair(options);
   const resources = {
-    homes: [options.originalHomeDirectory ?? paths.originalHomeDirectory, paths.lanHomeDirectory],
-    electronProfiles: snapshots
-      .filter(
-        (snapshot) =>
-          !snapshot.source.endsWith(`${NodePath.sep}.t3`) &&
-          !snapshot.source.endsWith(`${NodePath.sep}data`),
-      )
-      .map((snapshot) => snapshot.source),
+    homes: [currentInventory.original, currentInventory.lan]
+      .filter((home) => home.state === "initialized")
+      .map((home) => home.homeDirectory),
+    electronProfiles: currentInventory.electronProfiles
+      .filter((profile) => profile.localState.present)
+      .map((profile) => profile.profileDirectory),
   };
   return ports.withExclusiveAdmission(resources, async () => {
     await ports.verifyStoppedAndIdle(resources);

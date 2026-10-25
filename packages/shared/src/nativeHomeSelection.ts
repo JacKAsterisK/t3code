@@ -165,10 +165,13 @@ export function resolveNativeHomeSelection(input: {
     throw new Error(
       "Both original and LAN T3 homes contain state. Use Hub repair preview and choose which home to use; neither home was changed.",
     );
+  // Preserve the only initialized installation; this does not create a new separate home.
   if (lan)
-    throw new Error(
-      "An existing separate LAN home needs an explicit retention selection in Hub before starting the drop-in build.",
-    );
+    return {
+      homeDirectory: paths.lanHomeDirectory,
+      electronProfileDirectory: NodePath.join(input.localAppData, "T3CodeLAN", "electron-profile"),
+      mode: "side-by-side",
+    };
   return { homeDirectory: paths.originalHomeDirectory, mode: "drop-in" };
 }
 
@@ -179,10 +182,11 @@ export function assertNativeHomeMatchesSelection(
 ) {
   const paths = nativeHomePaths(input.userHomeDirectory, input.localAppData);
   const selection = readNativeHomeSelection(paths);
-  if (!selection && nativeHomeIdentity(paths.lanHomeDirectory) !== null)
-    throw new Error("Separate LAN state requires an explicit selection before startup.");
+  const legacyLan = !selection && nativeHomeIdentity(paths.lanHomeDirectory) !== null;
+  if (legacyLan && nativeHomeIdentity(paths.originalHomeDirectory) !== null)
+    throw new Error("Both initialized homes require an explicit selection before startup.");
   const expected =
-    selection?.mode === "side-by-side"
+    selection?.mode === "side-by-side" || legacyLan
       ? paths.lanHomeDirectory
       : (selection?.originalHomeDirectory ?? paths.originalHomeDirectory);
   if (NodePath.resolve(homeDirectory).toLowerCase() !== NodePath.resolve(expected).toLowerCase())

@@ -20,7 +20,7 @@ import {
   readValidationFile,
 } from "./validate-windows-artifact.ts";
 import {
-  preparePinnedWindowsBuild,
+  capturePinnedWindowsBuildPreparation,
   WindowsBuildPreparationRequest,
   verifyWindowsPreparationEvidence,
 } from "./windows-build-preparation.ts";
@@ -294,7 +294,14 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     request.runnerSha256,
     "runner",
   );
-  await preparePinnedWindowsBuild(request.preparationRequestPath, request.preparationRequestSha256);
+  console.log("[native-build] Verifying frozen source and full pinned toolchain inventory.");
+  // Reuse the evidence just verified in this invocation; all source, ancestry,
+  // path and pin checks remain in preparation, with full inventories still
+  // checked again around lifecycle installation and the application build.
+  const { toolchainFiles } = await capturePinnedWindowsBuildPreparation(
+    request.preparationRequestPath,
+    request.preparationRequestSha256,
+  );
   const preparationBytes = requireNativeBuildInput(
     await readValidationFile(request.preparationRequestPath, 1024 * 1024),
     request.preparationRequestSha256,
@@ -340,7 +347,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     lock,
     execution.sourceDateEpoch,
   );
-  const toolchainFiles = await inspectValidationTree(preparation.toolchainRoot, true);
+  console.log("[native-build] Verified toolchain files: " + toolchainFiles.size);
   verifyWindowsPreparationEvidence({
     request: preparation,
     lockBytes,
@@ -392,6 +399,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
         mode: 0o600,
       });
     for (const name of ["pnpmStore", "cargoHome", "electronCache", "builderCache"] as const) {
+      console.log("[native-build] Copying exact pinned mutable cache: " + name);
       const prefix = relativeWindowsPath(execution.directories[name]) + "/";
       const pins = new Map(
         [...toolchainFiles]
@@ -449,6 +457,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
       },
       verifyUnchanged,
     };
+    console.log("[native-build] Verifying unchanged inputs before frozen workspace installation.");
     const bootstrap = createWindowsBuildExecution({ ...factoryInput, isolation: context });
     await verifyInventories();
     await Effect.runPromise(
@@ -465,6 +474,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
     await verifyInventories();
+    console.log("[native-build] Building the application from the frozen working snapshot.");
     const result = await runWorkingNativeWindowsBuild({
       sourceRoot: context.sourceRoot,
       binding,
@@ -472,6 +482,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
       policyPath: NodePath.join(context.inputsRoot, "identity.json"),
       buildLockPath: NodePath.join(context.inputsRoot, "build-lock.json"),
     });
+    console.log("[native-build] Verifying unchanged inventories after the application build.");
     await verifyInventories();
     return {
       schemaVersion: 1,

@@ -116,16 +116,25 @@ if (
     if (args[0] === "preview") {
       const report = homeRepairMain(args);
       // Eligibility does not replace Hub's process checks, held admission or explicit backup confirmation.
+      const initialized = [report.original, report.lan].filter(
+        (home) => home.state === "initialized",
+      );
+      const originalProfile = report.electronProfiles.some(
+        (profile) =>
+          profile.localState.present &&
+          !profile.profileDirectory.endsWith(NodePath.sep + "electron-profile"),
+      );
+      const lanProfile = report.electronProfiles.some(
+        (profile) =>
+          profile.localState.present &&
+          profile.profileDirectory.endsWith(NodePath.sep + "electron-profile"),
+      );
       const eligible =
-        ["split", "original-only"].includes(report.state) &&
-        report.original.activeWork === 0 &&
-        report.lan.activeWork !== null &&
-        report.lan.activeWork === 0 &&
-        report.electronProfiles.some(
-          (profile) =>
-            profile.localState.present &&
-            !profile.profileDirectory.endsWith(`${NodePath.sep}electron-profile`),
-        );
+        report.state !== "blocked" &&
+        initialized.length > 0 &&
+        initialized.every((home) => home.activeWork === 0) &&
+        ((report.original.state === "initialized" && originalProfile) ||
+          (report.lan.state === "initialized" && lanProfile));
       process.stdout.write(
         JSON.stringify({ ...report, applySupported: true, canApply: eligible }) + "\n",
       );

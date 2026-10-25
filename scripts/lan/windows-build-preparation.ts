@@ -241,7 +241,7 @@ export function verifyWindowsPreparationEvidence(input: {
   };
 }
 
-export async function preparePinnedWindowsBuild(
+export async function capturePinnedWindowsBuildPreparation(
   requestPath: string,
   approvedRequestSha256: string,
 ) {
@@ -292,6 +292,7 @@ export async function preparePinnedWindowsBuild(
   } catch {
     upstreamAncestor = false;
   }
+  const toolchainFiles = await inspectValidationTree(request.toolchainRoot, true);
   const result = verifyWindowsPreparationEvidence({
     request,
     lockBytes,
@@ -303,16 +304,26 @@ export async function preparePinnedWindowsBuild(
       upstreamAncestor,
       files: sourceFiles,
     },
-    toolchainFiles: await inspectValidationTree(request.toolchainRoot, true),
+    toolchainFiles,
   });
   const currentNode = await readValidationFile(process.execPath, 256 * 1024 * 1024);
   return {
-    ...result,
-    preparationRequestSha256: approvedRequestSha256,
-    preparationNodeMatches:
-      process.versions.node === lock.tools.node.version &&
-      sha256(currentNode) === lock.tools.node.sha256,
+    report: {
+      ...result,
+      preparationRequestSha256: approvedRequestSha256,
+      preparationNodeMatches:
+        process.versions.node === lock.tools.node.version &&
+        sha256(currentNode) === lock.tools.node.sha256,
+    },
+    toolchainFiles,
   };
+}
+
+export async function preparePinnedWindowsBuild(
+  requestPath: string,
+  approvedRequestSha256: string,
+) {
+  return (await capturePinnedWindowsBuildPreparation(requestPath, approvedRequestSha256)).report;
 }
 
 if (import.meta.main) {

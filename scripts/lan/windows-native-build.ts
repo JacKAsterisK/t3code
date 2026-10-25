@@ -493,7 +493,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
         );
         verifyPnpmMetadata = await measureBuildStage("native.pnpm-metadata", () =>
           prepareNativePnpmMetadata(
-            NodePath.join(context.toolchainRoot, metadataPrefix),
+            NodePath.resolve(context.toolchainRoot, metadataPrefix),
             NodePath.join(context.outputRoot, "caches", "pnpmMetadata"),
             metadataPins,
           ),

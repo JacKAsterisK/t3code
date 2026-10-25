@@ -242,6 +242,16 @@ function inspectDatabase(file: string, supportedMigrationIds: readonly number[])
         .prepare(`PRAGMA table_info(${table})`)
         .all()
         .map((row) => String(row.name));
+      if (table === "scheduled_tasks" && columns.includes("enabled")) {
+        const scheduledStates = db
+          .prepare("SELECT enabled, count(*) AS n FROM scheduled_tasks GROUP BY enabled")
+          .all();
+        for (const state of scheduledStates) {
+          if (state.enabled !== 0 && state.enabled !== 1) activeWork = null;
+          else if (state.enabled === 1 && activeWork !== null) activeWork += Number(state.n);
+        }
+        continue;
+      }
       if (!columns.includes("status")) {
         if (count(table) > 0) activeWork = null;
         continue;
@@ -335,6 +345,7 @@ function inspectHome(home: string, supportedMigrationIds: readonly number[]): Ho
       NodePath.join(home, "userdata", "statev2.sqlite"),
       supportedMigrationIds,
     ));
+    if (activeWork === null) blockers.push("active-work-inspection-unknown");
     providerInstances = inspectProviders(home);
     for (const directory of ["userdata/attachments", "userdata/secrets", "worktrees"])
       ordinaryAncestors(NodePath.join(home, directory));

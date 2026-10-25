@@ -355,7 +355,7 @@ it("uses the same pinned commands for a separately verified native backend witho
       command.args[command.args.indexOf("--store-dir") + 1],
       "C:\\T3LAN\\Tools\\pnpm-store",
     );
-    assert.include(command.args, "--config.cache-dir=C:\\T3LAN\\Output\\caches\\pnpmMetadata");
+    assert.include(command.args, "--config.cache-dir=C:\\T3LAN\\Tools\\pnpm-store\\metadata-cache");
   }
   assert.equal(asChildProcess(execution.resourceMonitor()).options.extendEnv, false);
   assert.throws(

@@ -575,10 +575,9 @@ export function createWindowsBuildExecution(input: {
         "--config.verify-store-integrity=true",
         "--store-dir",
         cache("pnpmStore"),
-        "--config.cache-dir=" +
-          (input.isolation.kind === "windows-native-directory"
-            ? path.join(output, "caches", "pnpmMetadata")
-            : path.join(cache("pnpmStore"), "metadata-cache")),
+        // Offline policy checks also need the pinned registry metadata. Frozen-store
+        // and offline mode keep it read-only; full inventories bracket installation.
+        "--config.cache-dir=" + path.join(cache("pnpmStore"), "metadata-cache"),
       ],
       workingDirectory,
     );

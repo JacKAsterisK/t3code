@@ -117,6 +117,12 @@ files to packages with [ci-changes.cjs](../../.github/scripts/ci-changes.cjs), a
 compares against the merge base with `origin/main`, or with a ref you pass. CI still runs the full
 test suites and the jobs the summary lists, so a local pass does not promise a green CI run.
 
+For local iteration, `vp run check:changed <ref> --defer-test path/to/slow.test.ts`
+defers one explicitly selected optional test file. Repeat the flag for more files.
+The file must be in the changed-test selection; LAN script, auth, trust, history and
+repair checks cannot be deferred. The summary names each deferred file and marks
+verification as partial. CI and release acceptance checks still apply.
+
 While you iterate, run single checks:
 
 ```sh

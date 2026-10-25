@@ -80,6 +80,28 @@ const decodeBuildLock = Schema.decodeUnknownSync(BuildLock);
 const decodeToolchainManifest = Schema.decodeUnknownSync(ToolchainManifest);
 const decodeFilePins = Schema.decodeUnknownSync(Schema.Array(FilePin));
 
+let cachedToolchainManifest:
+  | { readonly sha256: string; readonly value: ToolchainManifest }
+  | undefined;
+
+export function parseToolchainManifest(bytes: Uint8Array): ToolchainManifest {
+  if (bytes.length > TOOLCHAIN_LIMITS.manifestBytes)
+    throw new Error("Toolchain manifest exceeds its bounded local size.");
+  // Cache only immutable decoded data, never filesystem evidence. Rehash the
+  // current bytes even for the same buffer; retain at most one manifest per process.
+  const snapshot = Uint8Array.from(bytes);
+  const digest = sha256(snapshot);
+  if (cachedToolchainManifest?.sha256 === digest) return cachedToolchainManifest.value;
+  const value = decodeToolchainManifest(strictJson(snapshot), { onExcessProperty: "error" });
+  if (!value.files.length || value.files.length > TOOLCHAIN_LIMITS.files)
+    throw new Error("Toolchain manifest has an invalid file count.");
+  for (const pin of value.files) Object.freeze(pin);
+  Object.freeze(value.files);
+  Object.freeze(value);
+  cachedToolchainManifest = { sha256: digest, value };
+  return value;
+}
+
 export interface NativeEvidence {
   readonly sha256: string;
   readonly trustStatus: number;
@@ -480,9 +502,7 @@ export async function validateWindowsArtifact(input: {
   const lock = decodeBuildLock(strictJson(input.buildLockBytes), {
     onExcessProperty: "error",
   });
-  const toolchain = decodeToolchainManifest(strictJson(input.toolchainManifestBytes), {
-    onExcessProperty: "error",
-  });
+  const toolchain = parseToolchainManifest(input.toolchainManifestBytes);
   if (
     !/^[a-z0-9][a-z0-9.-]{2,127}$/iu.test(policy.identity.appId) ||
     policy.identity.appId.toLowerCase().startsWith("com.t3tools.") ||

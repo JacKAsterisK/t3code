@@ -72,6 +72,7 @@ export const BUILD_INPUT_FILES = [
   "scripts/lan/windows-build-execution.ts",
   "scripts/lan/windows-native-context.ts",
   "scripts/lan/windows-native-build.ts",
+  "scripts/lan/build-metrics.ts",
   "scripts/lan/windows-native-build.pack.ts",
   "scripts/lan/prepare-windows-sandbox.ts",
   "scripts/lan/windows-sandbox-context.ts",

@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
 import { BuildLock, sha256 } from "./hub-distribution.ts";
+import { buildInventoryCounts, measureBuildStage } from "./build-metrics.ts";
 import {
   inspectSourceGit,
   partitionTrackedSourceEntries,
@@ -147,19 +148,22 @@ export async function copyNativePinnedCache(
     // returning an error so callers can safely preserve a failed build directory.
     const settled = await Promise.allSettled(
       batch.splice(0).map(async ({ relative, parent, pin }) => {
-        await assertValidationRoot(parent);
+        if (!NodePath.isAbsolute(parent) || NodePath.resolve(parent) !== parent)
+          throw new Error("Native cache output parent must be canonical and absolute.");
+        let withinOutput = true;
+        // Check each ancestor once, combining the link check with the captured
+        // output-directory identity check. No path evidence survives this file.
         for (let at = parent; ; at = NodePath.dirname(at)) {
-          const expected = directories.get(at),
-            actual = await NodeFSP.lstat(at);
-          if (
-            !expected ||
-            !actual.isDirectory() ||
-            actual.isSymbolicLink() ||
-            actual.dev !== expected.dev ||
-            actual.ino !== expected.ino
-          )
+          const actual = await NodeFSP.lstat(at);
+          if (!actual.isDirectory() || actual.isSymbolicLink())
             throw new Error("Native cache output parent changed.");
-          if (at === outputRoot) break;
+          if (withinOutput) {
+            const expected = directories.get(at);
+            if (!expected || actual.dev !== expected.dev || actual.ino !== expected.ino)
+              throw new Error("Native cache output parent changed.");
+            if (at === outputRoot) withinOutput = false;
+          }
+          if (NodePath.dirname(at) === at) break;
         }
         const bytes = await readValidationFile(NodePath.join(sourceRoot, relative), pin.length);
         if (bytes.length !== pin.length || sha256(bytes) !== pin.sha256)
@@ -298,9 +302,14 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
   // Reuse the evidence just verified in this invocation; all source, ancestry,
   // path and pin checks remain in preparation, with full inventories still
   // checked again around lifecycle installation and the application build.
-  const { toolchainFiles } = await capturePinnedWindowsBuildPreparation(
-    request.preparationRequestPath,
-    request.preparationRequestSha256,
+  const { toolchainFiles } = await measureBuildStage(
+    "native.preparation",
+    () =>
+      capturePinnedWindowsBuildPreparation(
+        request.preparationRequestPath,
+        request.preparationRequestSha256,
+      ),
+    ({ toolchainFiles }) => buildInventoryCounts(toolchainFiles.values()),
   );
   const preparationBytes = requireNativeBuildInput(
     await readValidationFile(request.preparationRequestPath, 1024 * 1024),
@@ -342,10 +351,10 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     sha256(await readValidationFile(process.execPath, 256 * 1024 ** 2)) !== lock.tools.node.sha256
   )
     throw new Error("Native runner requires the exact approved Node executable/version.");
-  const { files, snapshot, snapshotBytes } = await captureNativeBuildSource(
-    preparation.sourceRoot,
-    lock,
-    execution.sourceDateEpoch,
+  const { files, snapshot, snapshotBytes } = await measureBuildStage(
+    "native.source-capture",
+    () => captureNativeBuildSource(preparation.sourceRoot, lock, execution.sourceDateEpoch),
+    ({ snapshot }) => buildInventoryCounts(snapshot.files),
   );
   console.log("[native-build] Verified toolchain files: " + toolchainFiles.size);
   verifyWindowsPreparationEvidence({
@@ -388,9 +397,18 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
       ["toolchain-manifest.json", toolchainManifestBytes],
       ["snapshot.json", snapshotBytes],
     ]);
-    await writeNewSnapshotTree(context.inputsRoot, inputFiles);
+    await measureBuildStage(
+      "native.input-snapshot",
+      () => writeNewSnapshotTree(context.inputsRoot, inputFiles),
+      () =>
+        buildInventoryCounts([...inputFiles.values()].map((bytes) => ({ length: bytes.length }))),
+    );
     await NodeFSP.mkdir(NodePath.dirname(context.sourceRoot));
-    await writeNewSnapshotTree(context.sourceRoot, files);
+    await measureBuildStage(
+      "native.source-snapshot",
+      () => writeNewSnapshotTree(context.sourceRoot, files),
+      () => buildInventoryCounts(snapshot.files),
+    );
     for (const name of ["temp", "home", "home/roaming", "home/local", "caches"])
       await NodeFSP.mkdir(NodePath.join(context.outputRoot, name));
     for (const name of ["empty.npmrc", "empty-global.npmrc"])
@@ -406,10 +424,15 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
           .filter(([relative]) => relative.startsWith(prefix))
           .map(([relative, pin]) => [relative.slice(prefix.length), pin]),
       );
-      await copyNativePinnedCache(
-        NodePath.join(context.toolchainRoot, prefix),
-        NodePath.join(context.outputRoot, "caches", name),
-        pins,
+      await measureBuildStage(
+        `native.cache-copy.${name}`,
+        () =>
+          copyNativePinnedCache(
+            NodePath.join(context.toolchainRoot, prefix),
+            NodePath.join(context.outputRoot, "caches", name),
+            pins,
+          ),
+        () => buildInventoryCounts(pins.values()),
       );
     }
     const verifyUnchanged = async () => {
@@ -423,15 +446,26 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     };
     // Ordinary processes do not make DLL/dependency closures immutable. Full inventories
     // bracket lifecycle installation and the build; selected tools are hashed per child.
-    const verifyInventories = async () => {
+    const verifyInventories = async (boundary: string) => {
       await verifyUnchanged();
-      const actualTools = await inspectValidationTree(context.toolchainRoot, true);
-      if (
-        actualTools.size !== toolchainFiles.size ||
-        [...toolchainFiles].some(([name, pin]) => actualTools.get(name)?.sha256 !== pin.sha256)
-      )
-        throw new Error("Native toolchain changed at a build boundary.");
-      await verifyNativeSnapshotFiles(context.sourceRoot, snapshot.files);
+      await measureBuildStage(
+        `native.toolchain-inventory.${boundary}`,
+        async () => {
+          const actualTools = await inspectValidationTree(context.toolchainRoot, true);
+          if (
+            actualTools.size !== toolchainFiles.size ||
+            [...toolchainFiles].some(([name, pin]) => actualTools.get(name)?.sha256 !== pin.sha256)
+          )
+            throw new Error("Native toolchain changed at a build boundary.");
+          return actualTools;
+        },
+        (files) => buildInventoryCounts(files.values()),
+      );
+      await measureBuildStage(
+        `native.source-inventory.${boundary}`,
+        () => verifyNativeSnapshotFiles(context.sourceRoot, snapshot.files),
+        () => buildInventoryCounts(snapshot.files),
+      );
     };
     const header = async (name: string) => {
       const relative = `${relativeWindowsPath(execution.directories.nodeHeaders)}/include/node/${name}`;
@@ -459,31 +493,35 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     };
     console.log("[native-build] Verifying unchanged inputs before frozen workspace installation.");
     const bootstrap = createWindowsBuildExecution({ ...factoryInput, isolation: context });
-    await verifyInventories();
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        yield* bootstrap.verify;
-        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-        const code = yield* spawner.exitCode(
-          bootstrap.prepare(asChildProcess(bootstrap.workspaceInstall(), "inherit")),
-        );
-        if (code !== 0)
-          return yield* Effect.fail(
-            new Error("Pinned offline workspace installation refused; no build was started."),
+    await verifyInventories("before-install");
+    await measureBuildStage("native.workspace-install", () =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          yield* bootstrap.verify;
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const code = yield* spawner.exitCode(
+            bootstrap.prepare(asChildProcess(bootstrap.workspaceInstall(), "inherit")),
           );
-      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+          if (code !== 0)
+            return yield* Effect.fail(
+              new Error("Pinned offline workspace installation refused; no build was started."),
+            );
+        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+      ),
     );
-    await verifyInventories();
+    await verifyInventories("after-install");
     console.log("[native-build] Building the application from the frozen working snapshot.");
-    const result = await runWorkingNativeWindowsBuild({
-      sourceRoot: context.sourceRoot,
-      binding,
-      factoryInput,
-      policyPath: NodePath.join(context.inputsRoot, "identity.json"),
-      buildLockPath: NodePath.join(context.inputsRoot, "build-lock.json"),
-    });
+    const result = await measureBuildStage("native.application-build", () =>
+      runWorkingNativeWindowsBuild({
+        sourceRoot: context.sourceRoot,
+        binding,
+        factoryInput,
+        policyPath: NodePath.join(context.inputsRoot, "identity.json"),
+        buildLockPath: NodePath.join(context.inputsRoot, "build-lock.json"),
+      }),
+    );
     console.log("[native-build] Verifying unchanged inventories after the application build.");
-    await verifyInventories();
+    await verifyInventories("after-build");
     return {
       schemaVersion: 1,
       backend: "windows-native-directory",

@@ -2,13 +2,14 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
+import { buildInventoryCounts, measureBuildStage } from "./build-metrics.ts";
 import { parseLanBuildIdentity } from "@t3tools/shared/distribution";
 import { BUILD_INPUT_FILES, BuildLock, sha256 } from "./hub-distribution.ts";
 import { LAN_STAGE_LOCK_FILES, readLanPackagingInputs } from "./lan-packaging.ts";
 import {
   relativeWindowsPath,
   strictJson,
-  ToolchainManifest,
+  parseToolchainManifest,
   TOOLCHAIN_LIMITS,
 } from "./windows-artifact.ts";
 import { inspectSourceGit, partitionTrackedSourceEntries } from "./source-git.ts";
@@ -44,7 +45,6 @@ export const WindowsBuildPreparationRequest = Schema.Struct({
 export type WindowsBuildPreparationRequest = typeof WindowsBuildPreparationRequest.Type;
 const decodeRequest = Schema.decodeUnknownSync(WindowsBuildPreparationRequest);
 const decodeLock = Schema.decodeUnknownSync(BuildLock);
-const decodeToolchain = Schema.decodeUnknownSync(ToolchainManifest);
 
 // Matching a supplied inventory proves its bytes, not that a later subprocess
 // uses those bytes or that native lifecycle scripts cannot fetch dependencies.
@@ -183,9 +183,7 @@ export function verifyWindowsPreparationEvidence(input: {
       return bytes;
     },
   );
-  const inventory = decodeToolchain(strictJson(input.toolchainManifestBytes), {
-    onExcessProperty: "error",
-  });
+  const inventory = parseToolchainManifest(input.toolchainManifestBytes);
   if (
     !inventory.files.length ||
     inventory.files.length > TOOLCHAIN_LIMITS.files ||
@@ -292,7 +290,11 @@ export async function capturePinnedWindowsBuildPreparation(
   } catch {
     upstreamAncestor = false;
   }
-  const toolchainFiles = await inspectValidationTree(request.toolchainRoot, true);
+  const toolchainFiles = await measureBuildStage(
+    "preparation.toolchain-scan",
+    () => inspectValidationTree(request.toolchainRoot, true),
+    (files) => buildInventoryCounts(files.values()),
+  );
   const result = verifyWindowsPreparationEvidence({
     request,
     lockBytes,

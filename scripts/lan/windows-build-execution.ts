@@ -10,7 +10,7 @@ import { BuildLock, sha256 } from "./hub-distribution.ts";
 import {
   relativeWindowsPath,
   strictJson,
-  ToolchainManifest,
+  parseToolchainManifest,
   TOOLCHAIN_LIMITS,
 } from "./windows-artifact.ts";
 import {
@@ -72,7 +72,6 @@ const decodeRequest = Schema.decodeUnknownSync(WindowsBuildExecutionRequest, {
   onExcessProperty: "error",
 });
 const decodeLock = Schema.decodeUnknownSync(BuildLock, { onExcessProperty: "error" });
-const decodeInventory = Schema.decodeUnknownSync(ToolchainManifest, { onExcessProperty: "error" });
 
 export class WindowsBuildExecutionError extends Schema.TaggedError<WindowsBuildExecutionError>()(
   "WindowsBuildExecutionError",
@@ -205,7 +204,7 @@ export function createWindowsBuildExecution(input: {
     throw new Error("The isolated snapshot differs from the approved native build source.");
   if (sha256(input.toolchainManifestBytes) !== request.toolchainManifestSha256)
     throw new Error("The toolchain inventory differs from the approved execution request.");
-  const inventory = decodeInventory(strictJson(input.toolchainManifestBytes));
+  const inventory = parseToolchainManifest(input.toolchainManifestBytes);
   const names = new Set<string>();
   if (
     !inventory.files.length ||
@@ -231,10 +230,19 @@ export function createWindowsBuildExecution(input: {
       throw new Error("An execution tool is absent from the reviewed closure.");
     return path.join(input.isolation.toolchainRoot, relative);
   };
+  const verifiedDirectories = new Set<string>();
   const directory = (relative: string) => {
     relativeWindowsPath(relative);
-    if (![...toolchainFiles.keys()].some((name) => name.startsWith(relative + "/")))
-      throw new Error("An execution directory is absent from the reviewed closure.");
+    if (!verifiedDirectories.has(relative)) {
+      let found = false;
+      for (const name of toolchainFiles.keys())
+        if (name.startsWith(relative + "/")) {
+          found = true;
+          break;
+        }
+      if (!found) throw new Error("An execution directory is absent from the reviewed closure.");
+      verifiedDirectories.add(relative);
+    }
     return path.join(input.isolation.toolchainRoot, relative);
   };
   const tools = Object.fromEntries(

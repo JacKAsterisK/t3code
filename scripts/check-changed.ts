@@ -6,6 +6,7 @@
 //
 //   vp run check:changed          compare against the merge base with origin/main
 //   vp run check:changed <ref>    compare against the merge base with <ref>
+//   vp run check:changed <ref> --defer-test path.test.ts  defer one optional slow file
 //
 // Uncommitted and untracked files count. Affected packages come from
 // .github/scripts/ci-changes.cjs, the same mapping CI uses to gate its jobs.
@@ -15,6 +16,7 @@ import * as NodePath from "node:path";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
+import { parseChangedCheckArgs, selectChangedTests } from "./lib/changed-tests.ts";
 
 const root = NodePath.resolve(import.meta.dirname, "..");
 const CODE = /\.[cm]?[jt]sx?$/;
@@ -24,7 +26,7 @@ const git = (...args: Array<string>) =>
     .split("\n")
     .filter(Boolean);
 
-const ref = process.argv[2] ?? "origin/main";
+const { ref, deferred } = parseChangedCheckArgs(process.argv.slice(2));
 const mergeBase = NodeChildProcess.spawnSync("git", ["merge-base", "HEAD", ref], {
   cwd: root,
   encoding: "utf8",
@@ -43,6 +45,7 @@ const files = [
 ].sort();
 
 if (files.length === 0) {
+  if (deferred.length) throw new Error("No changed tests are selected to defer.");
   console.log(`check:changed: no changes since ${base.slice(0, 12)}.`);
   process.exit(0);
 }
@@ -57,14 +60,15 @@ const { affected, outputs } = decide(files, packages, false);
 // `related` reaches most of a package: one leaf server file pulled in 252 of
 // 406 server test files and took 7 minutes. CI runs the rest.
 const TEST = /\.test\.[cm]?[jt]sx?$/;
-const tests = new Set(code.filter((file) => TEST.test(file)));
+const candidates = new Set(code.filter((file) => TEST.test(file)));
 for (const file of code) {
   const dir = NodePath.dirname(file);
   const prefix = `${NodePath.basename(file).replace(CODE, "")}.`;
   for (const entry of NodeFS.readdirSync(NodePath.join(root, dir))) {
-    if (entry.startsWith(prefix) && TEST.test(entry)) tests.add(NodePath.join(dir, entry));
+    if (entry.startsWith(prefix) && TEST.test(entry)) candidates.add(NodePath.join(dir, entry));
   }
 }
+const { tests, skipped } = selectChangedTests(candidates, deferred);
 
 // knip:check takes about 35 s and cannot be scoped to a package. Any code
 // change can leave a file, export, or dependency unused (removing the last
@@ -95,8 +99,8 @@ const steps = [
     args: ["run", "--cache", "--concurrency-limit", "4", ...filters(affected), "typecheck"],
   },
   // From the repo root, the root vite.config.ts hands each file to its package's config.
-  tests.size > 0 && {
-    name: `test (${tests.size} files)`,
+  tests.length > 0 && {
+    name: `test (${tests.length} files)`,
     args: ["test", "run", "--passWithNoTests", ...tests],
   },
 ].filter((step) => step !== false);
@@ -120,6 +124,11 @@ console.log("\ncheck:changed summary");
 for (const result of results) {
   console.log(`  ${result.ok ? "pass" : "FAIL"}  ${result.name}  ${result.seconds}s`);
 }
+for (const file of skipped) console.log(`  DEFERRED  ${file}  (--defer-test; not run)`);
+if (skipped.length)
+  console.log(
+    `  Partial verification: ${skipped.length} test files deferred; CI/release gates unchanged.`,
+  );
 const ciOnly = Object.entries({
   "full test suites": outputs.test || outputs.test_web || outputs.test_server,
   build: outputs.build,

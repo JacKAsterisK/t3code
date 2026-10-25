@@ -1,4 +1,8 @@
-import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
+import type {
+  DesktopSshEnvironmentTarget,
+  EnvironmentId,
+  FleetTlsIdentity,
+} from "@t3tools/contracts";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -40,6 +44,7 @@ export interface PairingConnectionInput {
   readonly pairingCode?: string;
   readonly expectedEnvironmentId?: EnvironmentId;
   readonly skipExisting?: boolean;
+  readonly tls?: FleetTlsIdentity;
 }
 
 export interface SshConnectionInput {
@@ -102,7 +107,25 @@ function differentMachineError(label: string) {
 export const preparePairingRegistration = Effect.fn(
   "clientRuntime.connection.onboarding.preparePairingRegistration",
 )(function* (input: PairingConnectionInput) {
-  const target = yield* resolvePairingTarget(input);
+  const resolved = yield* resolvePairingTarget(input);
+  if (
+    input.tls !== undefined &&
+    (input.expectedEnvironmentId === undefined ||
+      new URL(resolved.httpBaseUrl).origin !== input.tls.origin)
+  )
+    return yield* new ConnectionBlockedError({
+      reason: "configuration",
+      detail: "Fleet endpoint identity does not match this delivery.",
+    });
+  const gateway = yield* ClientCapabilities.FleetTlsGateway;
+  const protectedEndpoint =
+    input.tls === undefined
+      ? undefined
+      : yield* gateway.prepare({
+          environmentId: input.expectedEnvironmentId!,
+          identity: input.tls,
+        });
+  const target = { ...resolved, ...protectedEndpoint };
   const presentation = yield* ClientCapabilities.ClientPresentation;
   const descriptor = yield* fetchRemoteEnvironmentDescriptor({
     httpBaseUrl: target.httpBaseUrl,
@@ -124,7 +147,7 @@ export const preparePairingRegistration = Effect.fn(
     credential: target.credential,
     clientMetadata: presentation.metadata,
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
-  const connectionId = bearerConnectionId(descriptor.environmentId, target.httpBaseUrl);
+  const connectionId = bearerConnectionId(descriptor.environmentId, resolved.httpBaseUrl);
 
   return new BearerConnectionRegistration({
     target: new BearerConnectionTarget({
@@ -136,8 +159,9 @@ export const preparePairingRegistration = Effect.fn(
       connectionId,
       environmentId: descriptor.environmentId,
       label: descriptor.label,
-      httpBaseUrl: target.httpBaseUrl,
-      wsBaseUrl: target.wsBaseUrl,
+      httpBaseUrl: resolved.httpBaseUrl,
+      wsBaseUrl: resolved.wsBaseUrl,
+      ...(input.tls === undefined ? {} : { fleetTls: input.tls }),
     }),
     credential: new BearerConnectionCredential({
       token: access.access_token,
@@ -213,6 +237,11 @@ export const prepareBearerConnectionUpdate = Effect.fn(
     });
   }
 
+  if (entry.profile.value.fleetTls !== undefined)
+    return yield* new ConnectionBlockedError({
+      reason: "configuration",
+      detail: "A protected fleet endpoint must be changed through verified fleet setup.",
+    });
   const credential = options.credential;
   if (Option.isNone(credential) || !isBearerCredential(credential.value)) {
     return yield* new ConnectionBlockedError({

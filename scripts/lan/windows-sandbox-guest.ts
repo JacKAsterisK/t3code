@@ -21,6 +21,7 @@ import {
   asChildProcess,
   createWindowsBuildExecution,
   WindowsBuildExecutionRequest,
+  PinnedWorkspaceInstallRefused,
 } from "./windows-build-execution.ts";
 import {
   committedSnapshotFile,
@@ -287,10 +288,7 @@ export async function runWindowsSandboxGuest(approvedGuestRequestSha256: string)
           asChildProcess(bootstrapExecution.workspaceInstall(), "inherit"),
         ),
       );
-      if (exitCode !== 0)
-        return yield* Effect.fail(
-          new Error("Pinned offline workspace installation refused; no build was started."),
-        );
+      if (exitCode !== 0) return yield* Effect.fail(new PinnedWorkspaceInstallRefused());
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
   await verifyUnchanged();

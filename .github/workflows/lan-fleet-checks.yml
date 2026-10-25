@@ -2,7 +2,7 @@ name: LAN fleet checks
 
 on:
   push:
-    branches: [lan/fleet-links]
+    branches: [lan/fleet-links, lan/fleet-transport-compat]
   workflow_dispatch:
 
 permissions:
@@ -30,11 +30,18 @@ jobs:
           apps/server/src/lan/FleetDelivery.test.ts
           apps/server/src/lan/FleetFiles.test.ts
           apps/server/src/lan/FleetEnrollment.test.ts
+          apps/server/src/lan/FleetTransport.test.ts
+          apps/desktop/src/lan/DesktopFleetGateway.test.ts
+          packages/shared/src/fleetTlsCertificate.test.ts
+          packages/shared/src/fleetTlsProxy.test.ts
           apps/server/src/lan/LanFleet.test.ts
           apps/server/src/auth/RpcAuthorization.test.ts
           apps/server/src/ws.test.ts
           apps/desktop/src/app/DesktopDistribution.test.ts
           apps/server/src/lan/nativeBootstrap.test.ts
           packages/client-runtime/src/connection/onboarding.test.ts
+          packages/client-runtime/src/connection/resolver.test.ts
+          packages/client-runtime/src/connection/routes.test.ts
+          packages/client-runtime/src/connection/registry.test.ts
           packages/client-runtime/src/state/commandPermissions.test.ts
           apps/web/src/connection/lanFleetPolling.test.ts

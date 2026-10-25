@@ -7,6 +7,26 @@ links. **Sync now** picks up assignments immediately. If automatic pickup has be
 enabled, the open desktop app checks every five minutes. Existing connections are
 kept, and uncertain pickups pause for review instead of replacing credentials.
 
+Create the fleet on the machine that will approve its members. **Automatic LAN
+encryption** offers this machine's local addresses and a separate port; confirm
+the address, access scope and pickup schedule to enable it. Private keys stay in
+the OS credential store. This does not install system certificates, change
+firewall rules or require a VPN. The port must be reachable from your other
+machines. An existing HTTPS endpoint is also supported.
+
+On each other machine, join using the owner's verification code. The owner then
+compares that machine's code from its own app before approving it. Select approved
+members and use **Link both ways**. The shared roster contains discovery metadata;
+changing a name or adding a row does not grant access or approve a public key.
+
+After reopening the app, use **Start encrypted endpoint** on machines that should
+accept fleet connections. Inspection and background sync do not open the port.
+**Pause fleet** pauses linking while preserving established access. **Stop
+encrypted endpoint** closes that port without deleting saved keys, connections or
+grants. Existing HTTP connections are preserved; protected fleet links never fall
+back to plaintext. Install the updated desktop app on each fleet member before
+enabling encrypted fleet setup.
+
 Connect a phone, browser, or another desktop app to T3 Code running on a different
 machine. That machine must stay running and reachable while you work.
 

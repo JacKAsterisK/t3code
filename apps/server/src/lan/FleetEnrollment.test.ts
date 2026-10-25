@@ -12,6 +12,9 @@ import * as Layer from "effect/Layer";
 import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Context from "effect/Context";
+import * as FleetTransport from "./FleetTransport.ts";
+import * as FleetNetwork from "./FleetNetwork.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "../environment/DirectEndpoints.ts";
 import * as Config from "../config.ts";
@@ -24,7 +27,7 @@ import { FLEET_ROSTER_ENV } from "./FleetBootstrap.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 
 // Only this in-memory vault and temporary synthetic shares are used; the OS vault is never constructed.
-const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* () {
+const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (managedTls = false) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const base = yield* Config.ServerConfig;
@@ -60,20 +63,45 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* () {
         capabilities: { repositoryIdentity: true },
       }),
     });
-    const config = { ...base, stateDir };
-    const enrollment = yield* FleetEnrollment.FleetEnrollment.pipe(
-      Effect.provide(
-        FleetEnrollment.layerServices.pipe(
+    const config = { ...base, stateDir, port: 4000 };
+    let starts = 0;
+    let closes = 0;
+    const transportLayer = managedTls
+      ? FleetTransport.layerServices.pipe(
           Layer.provide(Config.layer(config)),
-          Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
           Layer.provide(Layer.succeed(FleetVault.FleetVault, vault)),
           Layer.provide(
-            Layer.mock(DirectEndpoints.DirectEndpoints)({ resolve: () => Effect.succeed([]) }),
+            Layer.succeed(FleetNetwork.FleetNetwork, {
+              addresses: Effect.succeed([name === "alpha" ? "192.168.40.10" : "192.168.40.11"]),
+              listen: (input) =>
+                Effect.sync(() => {
+                  starts++;
+                  return {
+                    httpBaseUrl: `https://${input.listen.address}:${input.listen.port}/`,
+                    wsBaseUrl: "wss://synthetic-only/",
+                    close: () => {
+                      closes++;
+                      return Promise.resolve();
+                    },
+                  };
+                }),
+            }),
           ),
-          Layer.provide(Layer.succeed(HostProcess.Environment, { [FLEET_ROSTER_ENV]: rosterPath })),
+        )
+      : Layer.empty;
+    const enrollmentServices = yield* Layer.build(
+      FleetEnrollment.layerServices.pipe(
+        Layer.provide(transportLayer),
+        Layer.provide(Config.layer(config)),
+        Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
+        Layer.provide(Layer.succeed(FleetVault.FleetVault, vault)),
+        Layer.provide(
+          Layer.mock(DirectEndpoints.DirectEndpoints)({ resolve: () => Effect.succeed([]) }),
         ),
+        Layer.provide(Layer.succeed(HostProcess.Environment, { [FLEET_ROSTER_ENV]: rosterPath })),
       ),
     );
+    const enrollment = Context.get(enrollmentServices, FleetEnrollment.FleetEnrollment);
     const links = yield* LanFleet.LanFleet.pipe(
       Effect.provide(
         LanFleet.layerServices.pipe(
@@ -100,7 +128,14 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* () {
         ),
       ),
     );
-    return { environmentId, enrollment, links, record: () => record, saves: () => saves };
+    return {
+      environmentId,
+      enrollment,
+      links,
+      record: () => record,
+      saves: () => saves,
+      network: () => ({ starts, closes }),
+    };
   });
   const a = yield* create("alpha");
   const b = yield* create("beta");
@@ -132,6 +167,81 @@ const configLayer = Config.ServerConfig.layerTest(process.cwd(), {
 });
 
 it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
+  it.effect(
+    "binds encrypted endpoints to explicit setup, approved peer codes and recipient-specific delivery",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(true);
+        assert.deepEqual((yield* f.a.enrollment.status).suggestedTlsOrigins, [
+          "https://192.168.40.10:4001",
+        ]);
+        assert.deepEqual(f.a.network(), { starts: 0, closes: 0 });
+        const input = {
+          operation: "start" as const,
+          confirmed: true,
+          origin: "https://192.168.40.10:4001",
+          managedTls: true,
+          autoPickup: true,
+          access: "read-only" as const,
+        };
+        yield* f.a.enrollment.configure({ ...input, confirmed: false }).pipe(Effect.flip);
+        assert.equal(f.a.record(), undefined);
+        assert.equal(f.a.network().starts, 0);
+        const owner = yield* f.a.enrollment.configure(input);
+        const before = f.a.record()!.tls;
+        yield* f.a.enrollment.configure(input);
+        assert.deepEqual(f.a.record()!.tls, before);
+        assert.equal(f.a.network().starts, 1);
+        assert.equal(owner.tlsReady, true);
+        const pending = yield* f.b.enrollment.configure({
+          ...input,
+          operation: "join",
+          origin: "https://192.168.40.11:4001",
+          ownerCode: owner.ownerCode!,
+        });
+        const peer = Authority.identityPeer(
+          f.b.record()!,
+          "Test beta",
+          "https://192.168.40.11:4001",
+        );
+        assert.notEqual(
+          Authority.peerVerificationCode({
+            ...peer,
+            tls: { ...peer.tls!, publicKeySha256: "0".repeat(64) },
+          }),
+          pending.deviceCode,
+        );
+        yield* f.approve(peer.machineId, pending.deviceCode!);
+        const roster = yield* f.fs.readFileString(f.rosterPath);
+        assert.equal(roster.includes("certificate"), false);
+        assert.equal(roster.includes("privateKey"), false);
+        const authority = yield* f.fs.readFileString(f.authorityFile);
+        assert.equal(authority.includes("BEGIN PRIVATE KEY"), false);
+        yield* f.b.enrollment
+          .configure({ operation: "link", confirmed: true, machineIds: [f.a.record()!.machineId] })
+          .pipe(Effect.flip);
+        yield* f.a.enrollment.configure({
+          operation: "link",
+          confirmed: true,
+          machineIds: [peer.machineId],
+        });
+        yield* f.sync(f.a, [f.a.environmentId]);
+        yield* f.sync(f.b, [f.b.environmentId]);
+        const received = (yield* f.sync(f.a, [f.a.environmentId])).incoming[0]!;
+        assert.deepEqual(received.tls, peer.tls);
+        yield* f.a.enrollment.configure({
+          operation: "transport",
+          confirmed: true,
+          enabled: false,
+        });
+        assert.equal((yield* f.a.enrollment.status).tlsReady, false);
+        assert.equal(f.a.network().closes, 1);
+        assert.equal(yield* f.a.enrollment.resolve, null);
+        yield* f.a.enrollment.configure({ operation: "transport", confirmed: true, enabled: true });
+        assert.deepEqual(f.a.record()!.tls, before);
+        assert.equal(f.a.network().starts, 2);
+      }).pipe(Effect.provide(configLayer)),
+  );
   it.effect(
     "does not issue a duplicate when only the recipient already has the source identity",
     () =>

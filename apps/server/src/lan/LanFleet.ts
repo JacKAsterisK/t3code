@@ -297,6 +297,7 @@ const make = Effect.gen(function* () {
                         environmentId: peer.environmentId,
                         host: payload.origin,
                         pairingCode: payload.credential,
+                        ...(peer.tls === undefined ? {} : { tls: peer.tls }),
                       });
                     }
                     if (

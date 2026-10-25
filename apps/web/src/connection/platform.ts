@@ -414,12 +414,44 @@ const layerCapabilities = Layer.effectContext(
       }),
     });
 
+    const fleetTls = ClientCapabilities.FleetTlsGateway.of({
+      disconnect: Effect.fn("web.connectionPlatform.fleetTls.disconnect")((environmentId) =>
+        Effect.tryPromise({
+          try: async () => {
+            await window.desktopBridge?.disconnectFleetGateway?.(environmentId);
+          },
+          catch: () =>
+            new ConnectionTransientError({
+              reason: "remote-unavailable",
+              detail: "The local encrypted fleet gateway could not close.",
+            }),
+        }),
+      ),
+      prepare: Effect.fn("web.connectionPlatform.fleetTls.prepare")(function* (input) {
+        const bridge = window.desktopBridge;
+        if (bridge?.prepareFleetGateway === undefined)
+          return yield* new ConnectionBlockedError({
+            reason: "unsupported",
+            detail: "Encrypted fleet connections require the updated native desktop app.",
+          });
+        return yield* Effect.tryPromise({
+          try: () => bridge.prepareFleetGateway!(input),
+          catch: () =>
+            new ConnectionBlockedError({
+              reason: "configuration",
+              detail: "The encrypted fleet gateway could not verify or reach its approved peer.",
+            }),
+        });
+      }),
+    });
+
     return Context.make(ClientCapabilities.CloudSession, cloudSession).pipe(
       Context.add(ClientCapabilities.AnalyticsDevice, analyticsDevice),
       Context.add(ClientCapabilities.PrimaryEnvironmentAuth, primaryAuth),
       Context.add(ClientCapabilities.RelayDeviceIdentity, identity),
       Context.add(ClientCapabilities.ClientPresentation, presentation),
       Context.add(ClientCapabilities.SshEnvironmentGateway, ssh),
+      Context.add(ClientCapabilities.FleetTlsGateway, fleetTls),
     );
   }),
 );

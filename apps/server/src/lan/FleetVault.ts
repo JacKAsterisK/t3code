@@ -49,7 +49,11 @@ const make = Effect.gen(function* () {
                 previous.encryptionPrivateKey !== record.encryptionPrivateKey ||
                 previous.signingPrivateKey !== record.signingPrivateKey ||
                 previous.rootPublicKey !== record.rootPublicKey ||
-                previous.rootPrivateKey !== record.rootPrivateKey))
+                previous.rootPrivateKey !== record.rootPrivateKey)) ||
+            (previous?.tls !== undefined &&
+              (previous.tls.privateKey !== record.tls?.privateKey ||
+                previous.tls.origin !== record.tls?.origin ||
+                previous.tls.publicKeySha256 !== record.tls?.publicKeySha256))
           )
             return yield* new LanFleetError({ reason: "configuration" });
           yield* Effect.tryPromise({

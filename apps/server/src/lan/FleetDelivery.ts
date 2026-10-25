@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- Node owns the key formats; canonical JSON contains only schema-validated envelope fields.
 import * as NodeCrypto from "node:crypto";
-import { FleetMachine, FleetMachineId } from "@t3tools/contracts";
+import { FleetMachine, FleetMachineId, FleetTlsIdentity } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 const Pem = Schema.String.check(Schema.isMaxLength(8192));
@@ -13,6 +13,7 @@ export const FleetPeer = Schema.Struct({
   ...FleetMachine.fields,
   encryptionPublicKey: Pem,
   signingPublicKey: Pem,
+  tls: Schema.optionalKey(FleetTlsIdentity),
 });
 export type FleetPeer = typeof FleetPeer.Type;
 export const FleetPrivateConfig = Schema.Struct({

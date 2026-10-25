@@ -29,6 +29,7 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
   const fleet = useLanFleet();
   const setup = fleet.setup;
   const [origin, setOrigin] = useState(setup?.origin ?? "");
+  const [managedTls, setManagedTls] = useState(setup?.managedTls === true);
   const [code, setCode] = useState("");
   const [access, setAccess] = useState<"read-only" | "standard">("read-only");
   const [automatic, setAutomatic] = useState(true);
@@ -56,8 +57,56 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
               automatically. Private keys stay in the OS credential store; only public enrollment
               data is shared.
             </p>
+            <Select
+              items={[
+                { value: "managed", label: "Automatic LAN encryption" },
+                { value: "existing", label: "Existing HTTPS endpoint" },
+              ]}
+              value={managedTls ? "managed" : "existing"}
+              onValueChange={(value) => {
+                setManagedTls(value === "managed");
+                setOrigin(
+                  value === "managed" && setup?.suggestedTlsOrigins?.length === 1
+                    ? setup.suggestedTlsOrigins[0]!
+                    : "",
+                );
+              }}
+            >
+              <SelectTrigger aria-label="Fleet transport">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectPopup>
+                <SelectItem value="managed">Automatic LAN encryption</SelectItem>
+                <SelectItem value="existing">Existing HTTPS endpoint</SelectItem>
+              </SelectPopup>
+            </Select>
+            {managedTls && (setup?.suggestedTlsOrigins?.length ?? 0) > 1 ? (
+              <Select
+                items={setup!.suggestedTlsOrigins!.map((address) => ({
+                  value: address,
+                  label: address,
+                }))}
+                value={origin || null}
+                onValueChange={(value) => {
+                  if (value !== null) setOrigin(value);
+                }}
+              >
+                <SelectTrigger aria-label="Local LAN address">
+                  <SelectValue placeholder="Choose this machine's LAN address" />
+                </SelectTrigger>
+                <SelectPopup>
+                  {setup!.suggestedTlsOrigins!.map((address) => (
+                    <SelectItem key={address} value={address}>
+                      {address}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            ) : null}
             <label className="block space-y-1 text-sm">
-              <span>Reachable HTTPS address</span>
+              <span>
+                {managedTls ? "Encrypted LAN address and port" : "Reachable HTTPS address"}
+              </span>
               <Input
                 value={origin}
                 onChange={(event) => setOrigin(event.currentTarget.value)}
@@ -65,6 +114,14 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
                 placeholder="https://machine.example.test"
               />
             </label>
+            {managedTls ? (
+              <p className="text-xs text-muted-foreground">
+                Confirming creates a local encryption key in the OS credential store and opens the
+                shown additional port while this app runs. The port must be available and reachable
+                on your LAN. No firewall rules or system certificate trust will be changed. Existing
+                HTTP connections are preserved.
+              </p>
+            ) : null}
             {joining ? (
               <label className="block space-y-1 text-sm">
                 <span>Owner verification code</span>
@@ -156,6 +213,7 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
                         ownerCode: code,
                         autoPickup: automatic,
                         access,
+                        managedTls,
                       }
                     : {
                         operation: "start",
@@ -163,6 +221,7 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
                         origin,
                         autoPickup: automatic,
                         access,
+                        managedTls,
                       },
                 )
                 .then((ok) => {
@@ -176,8 +235,12 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
             {fleet.busy
               ? "Setting up…"
               : joining
-                ? "Generate keys and request to join"
-                : "Generate keys and create fleet"}
+                ? managedTls
+                  ? "Enable encryption and request to join"
+                  : "Generate keys and request to join"
+                : managedTls
+                  ? "Enable encryption and create fleet"
+                  : "Generate keys and create fleet"}
           </Button>
         </DialogFooter>
       </DialogPopup>
@@ -269,6 +332,7 @@ export function LanFleetSetup() {
   const [review, setReview] = useState<Peer | null>(null);
   const [revoke, setRevoke] = useState<Peer | null>(null);
   const [scopeChange, setScopeChange] = useState<"read-only" | "standard" | null>(null);
+  const [transportChange, setTransportChange] = useState(false);
   if (setup === null)
     return (
       <Button
@@ -289,6 +353,12 @@ export function LanFleetSetup() {
     );
   return (
     <div className="space-y-3">
+      {setup.managedTls && setup.tlsEnabled && setup.tlsReady === false ? (
+        <p role="status" className="text-xs text-muted-foreground">
+          The encrypted endpoint is not running. Start it here to accept LAN connections. Saved keys
+          and connections are preserved.
+        </p>
+      ) : null}
       {setup.stage === "unconfigured" || setup.stage === "join" ? (
         <Button
           size="sm"
@@ -361,6 +431,16 @@ export function LanFleetSetup() {
             >
               {setup.stage === "paused" ? "Resume fleet" : "Pause fleet"}
             </Button>
+            {setup.managedTls ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={fleet.busy || !fleet.allowed}
+                onClick={() => setTransportChange(true)}
+              >
+                {setup.tlsReady ? "Stop encrypted endpoint" : "Start encrypted endpoint"}
+              </Button>
+            ) : null}
             {setup.stage === "active" ? (
               <Button
                 size="sm"
@@ -461,6 +541,48 @@ export function LanFleetSetup() {
                 }
               >
                 Confirm new-link access
+              </Button>
+            </DialogFooter>
+          </DialogPopup>
+        </Dialog>
+      ) : null}
+      {transportChange ? (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && !fleet.busy) setTransportChange(false);
+          }}
+        >
+          <DialogPopup>
+            <DialogHeader>
+              <DialogTitle>
+                {setup.tlsReady ? "Stop encrypted LAN access?" : "Start encrypted LAN access?"}
+              </DialogTitle>
+              <DialogDescription>
+                {setup.tlsReady
+                  ? "This closes the encrypted port and disconnects clients using it. Saved connections, keys and access grants stay available for a later restart. Existing HTTP connections are unchanged."
+                  : `This opens ${setup.origin} using its existing OS-stored key. It does not change firewall rules, rotate keys or create access grants.`}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <DialogClose render={<Button variant="outline" disabled={fleet.busy} />}>
+                Cancel
+              </DialogClose>
+              <Button
+                disabled={fleet.busy}
+                onClick={() => {
+                  void fleet
+                    .configure({
+                      operation: "transport",
+                      confirmed: true,
+                      enabled: !setup.tlsReady,
+                    })
+                    .then((ok) => {
+                      if (ok) setTransportChange(false);
+                    });
+                }}
+              >
+                {setup.tlsReady ? "Stop encrypted endpoint" : "Start encrypted endpoint"}
               </Button>
             </DialogFooter>
           </DialogPopup>

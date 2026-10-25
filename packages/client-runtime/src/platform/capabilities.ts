@@ -3,12 +3,14 @@ import {
   type DesktopSshEnvironmentBootstrap,
   type DesktopSshEnvironmentTarget,
   EnvironmentId,
+  type FleetTlsGatewayInput,
+  type FleetTlsGatewayResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
 
-import type { ConnectionAttemptError } from "../connection/model.ts";
+import { ConnectionBlockedError, type ConnectionAttemptError } from "../connection/model.ts";
 
 export interface PreparedSshEnvironment {
   readonly bootstrap: DesktopSshEnvironmentBootstrap;
@@ -93,3 +95,22 @@ export class SshEnvironmentGateway extends Context.Service<
     ) => Effect.Effect<void, ConnectionAttemptError>;
   }
 >()("@t3tools/client-runtime/platform/capabilities/SshEnvironmentGateway") {}
+
+export class FleetTlsGateway extends Context.Reference<{
+  readonly disconnect?: (
+    environmentId: EnvironmentId,
+  ) => Effect.Effect<void, ConnectionAttemptError>;
+  readonly prepare: (
+    input: FleetTlsGatewayInput,
+  ) => Effect.Effect<FleetTlsGatewayResult, ConnectionAttemptError>;
+}>("@t3tools/client-runtime/platform/capabilities/FleetTlsGateway", {
+  defaultValue: () => ({
+    prepare: () =>
+      Effect.fail(
+        new ConnectionBlockedError({
+          reason: "unsupported",
+          detail: "Encrypted fleet connections require the updated native desktop app.",
+        }),
+      ),
+  }),
+}) {}

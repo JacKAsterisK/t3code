@@ -18,6 +18,23 @@ export const FleetRoster = Schema.Struct({
 });
 export type FleetRoster = typeof FleetRoster.Type;
 
+export const FleetTlsIdentity = Schema.Struct({
+  origin: Schema.String.check(Schema.isMaxLength(2048)),
+  certificate: Schema.String.check(Schema.isMaxLength(8192)),
+  publicKeySha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+});
+export type FleetTlsIdentity = typeof FleetTlsIdentity.Type;
+export const FleetTlsGatewayInput = Schema.Struct({
+  environmentId: EnvironmentId,
+  identity: FleetTlsIdentity,
+});
+export type FleetTlsGatewayInput = typeof FleetTlsGatewayInput.Type;
+export const FleetTlsGatewayResult = Schema.Struct({
+  httpBaseUrl: Schema.String,
+  wsBaseUrl: Schema.String,
+});
+export type FleetTlsGatewayResult = typeof FleetTlsGatewayResult.Type;
+
 export const LanFleetSyncInput = Schema.Struct({
   mode: Schema.Literals(["status", "manual", "automatic"]),
   connectedEnvironmentIds: Schema.Array(EnvironmentId).check(Schema.isMaxLength(1000)),
@@ -50,6 +67,7 @@ export const LanFleetSyncResult = Schema.Struct({
       environmentId: EnvironmentId,
       host: Schema.String,
       pairingCode: Schema.String,
+      tls: Schema.optionalKey(FleetTlsIdentity),
     }),
   ),
 });
@@ -64,12 +82,14 @@ export const LanFleetSetupInput = Schema.Union([
     origin: Schema.String,
     autoPickup: Schema.Boolean,
     access: FleetAccess,
+    managedTls: Schema.optionalKey(Schema.Boolean),
   }),
   Schema.Struct({
     operation: Schema.Literal("join"),
     confirmed: Schema.Boolean,
     origin: Schema.String,
     ownerCode: VerificationCode,
+    managedTls: Schema.optionalKey(Schema.Boolean),
     autoPickup: Schema.Boolean,
     access: FleetAccess,
   }),
@@ -96,6 +116,11 @@ export const LanFleetSetupInput = Schema.Union([
     confirmed: Schema.Boolean,
     machineIds: Schema.Array(FleetMachineId).check(Schema.isMaxLength(100)),
   }),
+  Schema.Struct({
+    operation: Schema.Literal("transport"),
+    confirmed: Schema.Boolean,
+    enabled: Schema.Boolean,
+  }),
 ]);
 export type LanFleetSetupInput = typeof LanFleetSetupInput.Type;
 
@@ -108,6 +133,10 @@ export const LanFleetSetupState = Schema.Struct({
   environmentId: EnvironmentId,
   label: Schema.String,
   origin: Schema.String,
+  managedTls: Schema.optionalKey(Schema.Boolean),
+  tlsEnabled: Schema.optionalKey(Schema.Boolean),
+  tlsReady: Schema.optionalKey(Schema.Boolean),
+  suggestedTlsOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
   autoPickup: Schema.Boolean,
   access: FleetAccess,
   peers: Schema.Array(
@@ -124,9 +153,11 @@ export const LanFleetSetupState = Schema.Struct({
 export type LanFleetSetupState = typeof LanFleetSetupState.Type;
 
 export class LanFleetError extends Schema.TaggedError<LanFleetError>()("LanFleetError", {
-  reason: Schema.Literals(["configuration", "unavailable", "busy"]),
+  reason: Schema.Literals(["configuration", "unavailable", "busy", "transport"]),
 }) {
   override get message(): string {
+    if (this.reason === "transport")
+      return "The encrypted LAN endpoint could not start. Check that its selected address is local and its port is available; existing keys and connections were preserved.";
     return this.reason === "busy"
       ? "LAN link sync is already running or needs recovery after an interrupted sync."
       : this.reason === "configuration"

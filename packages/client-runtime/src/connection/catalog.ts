@@ -1,4 +1,8 @@
-import { DesktopSshEnvironmentTargetSchema, EnvironmentId } from "@t3tools/contracts";
+import {
+  DesktopSshEnvironmentTargetSchema,
+  EnvironmentId,
+  FleetTlsIdentity,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -29,6 +33,7 @@ export class BearerConnectionProfile extends Schema.TaggedClass<BearerConnection
      * interface. A bare 100.64.0.0/10 address could belong to any VPN.
      */
     network: Schema.optionalKey(Schema.Literal("tailscale")),
+    fleetTls: Schema.optionalKey(FleetTlsIdentity),
   },
 ) {}
 

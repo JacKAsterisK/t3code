@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import type { PreviewCaptureFailureEncoded } from "./previewCapture.ts";
+import type { FleetTlsGatewayInput, FleetTlsGatewayResult } from "./lanFleet.ts";
 
 import { SnapShotSource } from "./chatAttachment.ts";
 import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -1091,6 +1092,8 @@ export interface DesktopBridge {
     target: DesktopSshEnvironmentTarget,
     options?: { issuePairingToken?: boolean },
   ) => Promise<DesktopSshEnvironmentBootstrap>;
+  prepareFleetGateway?: (input: FleetTlsGatewayInput) => Promise<FleetTlsGatewayResult>;
+  disconnectFleetGateway?: (environmentId: EnvironmentId) => Promise<void>;
   disconnectSshEnvironment: (target: DesktopSshEnvironmentTarget) => Promise<void>;
   fetchSshEnvironmentDescriptor: (httpBaseUrl: string) => Promise<ExecutionEnvironmentDescriptor>;
   bootstrapSshBearerSession: (

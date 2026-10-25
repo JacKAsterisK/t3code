@@ -11,6 +11,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 // @effect-diagnostics-next-line nodeBuiltinImport:off - Version output must flush before Electron exits, without acquiring the runtime.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
+import * as DesktopFleetGateway from "./lan/DesktopFleetGateway.ts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Pre-ready admission must resolve the native home without yielding to asynchronous platform services.
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
@@ -214,6 +215,7 @@ const layerDesktopApplication = Layer.mergeAll(
   DesktopLinuxUrlHandler.layer,
   DesktopCliCommand.layer,
   layerDesktopSsh,
+  DesktopFleetGateway.layer,
 ).pipe(
   Layer.provideMerge(layerDesktopSnapShot),
   Layer.provideMerge(DesktopUpdates.layer),

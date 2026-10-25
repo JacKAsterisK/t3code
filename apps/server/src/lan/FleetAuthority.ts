@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- Ed25519 signs only schema-validated public metadata in a canonical field order.
 import * as NodeCrypto from "node:crypto";
-import { EnvironmentId, FleetMachineId } from "@t3tools/contracts";
+import { EnvironmentId, FleetMachineId, FleetTlsIdentity } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { FleetCampaign, FleetPeer } from "./FleetDelivery.ts";
 
@@ -18,6 +18,8 @@ export const FleetVaultRecord = Schema.Struct({
   enabled: Schema.Boolean,
   autoPickup: Schema.Boolean,
   access: Schema.Literals(["read-only", "standard"]),
+  tls: Schema.optionalKey(Schema.Struct({ ...FleetTlsIdentity.fields, privateKey: Pem })),
+  tlsEnabled: Schema.optionalKey(Schema.Boolean),
 });
 export type FleetVaultRecord = typeof FleetVaultRecord.Type;
 
@@ -73,6 +75,7 @@ export const peerVerificationCode = (peer: FleetPeer) =>
         peer.origin,
         peer.encryptionPublicKey,
         peer.signingPublicKey,
+        ...(peer.tls === undefined ? [] : [peer.tls]),
       ]),
     )
     .digest("hex")
@@ -118,6 +121,15 @@ export function identityPeer(record: FleetVaultRecord, label: string, origin: st
     enabled: true,
     encryptionPublicKey: publicPem(record.encryptionPrivateKey),
     signingPublicKey: publicPem(record.signingPrivateKey),
+    ...(record.tls === undefined
+      ? {}
+      : {
+          tls: {
+            origin: record.tls.origin,
+            certificate: record.tls.certificate,
+            publicKeySha256: record.tls.publicKeySha256,
+          },
+        }),
   };
 }
 

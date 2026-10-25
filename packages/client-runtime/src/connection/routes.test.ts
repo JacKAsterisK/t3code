@@ -63,6 +63,31 @@ function learned(id: string, httpBaseUrl: string): ConnectionRoute {
 }
 
 describe("connection routes", () => {
+  it("keeps a fleet-pinned credential on its approved route even when the peer advertises HTTPS or VPN alternatives", () => {
+    const profile = new BearerConnectionProfile({
+      ...(Option.getOrThrow(PUBLIC.profile) as BearerConnectionProfile),
+      fleetTls: {
+        origin: "https://desk.example.com",
+        certificate: "synthetic-public-certificate",
+        publicKeySha256: "a".repeat(64),
+      },
+    });
+    const route = { target: PUBLIC.target, profile: Option.some(profile) };
+    const entry: ConnectionCatalogEntry = { ...route, enabled: true };
+    expect(
+      mergeLearnedRoutes({
+        entry,
+        activeRoute: route,
+        allowInsecure: true,
+        reported: [
+          { kind: "lan", httpBaseUrl: "http://192.168.40.10:4000/" },
+          { kind: "tailnet", httpBaseUrl: "http://100.101.102.103:4000/" },
+          { kind: "lan", httpBaseUrl: "https://another.example.test/" },
+        ],
+      }),
+    ).toBeNull();
+    expect(entry.profile).toEqual(Option.some(profile));
+  });
   it("classifies direct routes by address", () => {
     expect(connectionRouteKind(LAN)).toBe("lan");
     // Tailscale, Cloudflare WARP and Mesh, and other VPNs share 100.64.0.0/10.

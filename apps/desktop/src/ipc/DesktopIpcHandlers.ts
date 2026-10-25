@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import { prepareFleetGateway, disconnectFleetGateway } from "./methods/fleetGateway.ts";
 
 import { receiveProviderAuthCallback, cancelProviderAuthCallback } from "./methods/providerAuth.ts";
 import * as DesktopIpc from "./DesktopIpc.ts";
@@ -123,6 +124,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(clearConnectionCatalog);
 
   yield* ipc.handle(discoverSshHosts);
+  yield* ipc.handle(prepareFleetGateway);
+  yield* ipc.handle(disconnectFleetGateway);
   yield* ipc.handle(resolveSshHost);
   yield* ipc.handle(ensureSshEnvironment);
   yield* ipc.handle(disconnectSshEnvironment);

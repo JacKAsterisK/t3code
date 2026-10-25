@@ -212,6 +212,10 @@ export function mergeLearnedRoutes(input: {
     return null;
   }
   const activeProfile = Option.getOrNull(input.activeRoute.profile);
+  // A pinned fleet credential belongs to its approved endpoint, including
+  // when a peer advertises another HTTPS or VPN route after authentication.
+  if (activeProfile?._tag === "BearerConnectionProfile" && activeProfile.fleetTls !== undefined)
+    return null;
   const authorization =
     active._tag === "RelayConnectionTarget" ||
     (activeProfile?._tag === "BearerConnectionProfile" &&

@@ -1,4 +1,6 @@
 export const PICK_FOLDER_CHANNEL = "desktop:pick-folder";
+export const PREPARE_FLEET_GATEWAY_CHANNEL = "desktop:prepare-fleet-gateway";
+export const DISCONNECT_FLEET_GATEWAY_CHANNEL = "desktop:disconnect-fleet-gateway";
 export const SET_NOTIFICATION_BADGE_CHANNEL = "desktop:set-notification-badge";
 export const PICK_PROJECT_FAVICON_CHANNEL = "desktop:pick-project-favicon";
 export const PICK_THEME_FILES_CHANNEL = "desktop:pick-theme-files";

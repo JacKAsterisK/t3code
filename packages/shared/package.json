@@ -3,6 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./fleetTlsCertificate": {
+      "types": "./src/fleetTlsCertificate.ts",
+      "import": "./src/fleetTlsCertificate.ts"
+    },
+    "./fleetTlsProxy": {
+      "types": "./src/fleetTlsProxy.ts",
+      "import": "./src/fleetTlsProxy.ts"
+    },
     "./lanUpdateChannel": {
       "types": "./src/lanUpdateChannel.ts",
       "import": "./src/lanUpdateChannel.ts"

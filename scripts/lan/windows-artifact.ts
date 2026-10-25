@@ -2,6 +2,7 @@
 import * as NodeZlib from "node:zlib";
 import * as NodeUtil from "node:util";
 import * as Schema from "effect/Schema";
+import * as DateTime from "effect/DateTime";
 import { isIndependentDistributionScheme } from "@t3tools/shared/distribution";
 import { strictJson } from "../lib/strict-json.ts";
 export { strictJson };
@@ -583,7 +584,7 @@ export async function validateWindowsArtifact(input: {
       !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u.test(manifest.builtUtc) ||
       !Number.isFinite(Date.parse(manifest.builtUtc)) ||
       Date.parse(manifest.builtUtc) <= 0 ||
-      new Date(manifest.builtUtc).toISOString().replace(".000Z", "Z") !==
+      DateTime.formatIso(DateTime.makeUnsafe(manifest.builtUtc)).replace(".000Z", "Z") !==
         manifest.builtUtc.replace(".000Z", "Z")
     )
       fail("Package build time is missing or invalid.");

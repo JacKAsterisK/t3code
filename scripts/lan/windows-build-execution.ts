@@ -138,7 +138,16 @@ export interface PinnedWindowsBuildExecution {
 export class WindowsBuildExecution extends Context.Service<
   WindowsBuildExecution,
   PinnedWindowsBuildExecution
->()("t3/lan/WindowsBuildExecution") {}
+>()("@t3tools/scripts/lan/windows-build-execution/WindowsBuildExecution") {}
+
+export class PinnedWorkspaceInstallRefused extends Schema.TaggedError<PinnedWorkspaceInstallRefused>()(
+  "PinnedWorkspaceInstallRefused",
+  {},
+) {
+  override get message(): string {
+    return "Pinned offline workspace installation refused; no build was started.";
+  }
+}
 
 export function assertWindowsBuildExecution(
   value: unknown,

@@ -136,6 +136,7 @@ export function useLanFleet() {
           const connected = await connect({
             host: delivery.host,
             pairingCode: delivery.pairingCode,
+            ...(delivery.tls === undefined ? {} : { tls: delivery.tls }),
             expectedEnvironmentId: delivery.environmentId,
             skipExisting: true,
           });

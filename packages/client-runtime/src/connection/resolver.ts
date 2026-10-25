@@ -163,10 +163,18 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
     if (!isBearerCredential(credential)) {
       return yield* credentialMissingError(target.connectionId);
     }
+    const gateway = yield* ClientCapabilities.FleetTlsGateway;
+    const endpoint =
+      profile.fleetTls === undefined
+        ? profile
+        : yield* gateway.prepare({
+            environmentId: target.environmentId,
+            identity: profile.fleetTls,
+          });
     const authorized = yield* remote.authorizeBearer({
       expectedEnvironmentId: target.environmentId,
-      httpBaseUrl: profile.httpBaseUrl,
-      wsBaseUrl: profile.wsBaseUrl,
+      httpBaseUrl: endpoint.httpBaseUrl,
+      wsBaseUrl: endpoint.wsBaseUrl,
       bearerToken: credential.token,
       connectionMethod: "direct",
     });

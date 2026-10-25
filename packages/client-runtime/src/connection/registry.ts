@@ -213,6 +213,7 @@ export const make = Effect.gen(function* () {
   const driver = yield* ConnectionDriver.ConnectionDriver;
   const wakeups = yield* ConnectionWakeups.ConnectionWakeups;
   const ssh = yield* ClientCapabilities.SshEnvironmentGateway;
+  const fleetTls = yield* ClientCapabilities.FleetTlsGateway;
   const persistedTargets = yield* storage.list;
   const disabledEnvironmentIds = new Set(yield* storage.listDisabled);
   const loadRoute = Effect.fn("EnvironmentRegistry.loadRoute")(function* (
@@ -844,6 +845,8 @@ export const make = Effect.gen(function* () {
       if (profile !== null && isSshConnectionProfile(profile)) {
         yield* disconnectSsh(environmentId, profile);
       }
+      if (profile?._tag === "BearerConnectionProfile" && profile.fleetTls !== undefined)
+        yield* (fleetTls.disconnect?.(environmentId) ?? Effect.void).pipe(Effect.ignore);
     }
   });
 

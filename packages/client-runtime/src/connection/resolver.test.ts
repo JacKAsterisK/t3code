@@ -14,6 +14,7 @@ import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import {
   BearerConnectionCredential,
+  BearerConnectionProfile,
   type ConnectionCatalogEntry,
   SshConnectionProfile,
   type ConnectionCredential,
@@ -22,6 +23,8 @@ import {
 import * as ConnectionCredentialStore from "./credentialStore.ts";
 import {
   ConnectionTransientError,
+  ConnectionBlockedError,
+  BearerConnectionTarget,
   PrimaryConnectionTarget,
   SshConnectionTarget,
   type ConnectionTarget,
@@ -167,6 +170,74 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
 });
 
 describe("ConnectionResolver", () => {
+  it.effect(
+    "reconnects a protected fleet profile through its gateway and never offers its token on gateway failure",
+    () =>
+      Effect.gen(function* () {
+        const offered: string[] = [];
+        const profile = new BearerConnectionProfile({
+          connectionId: "synthetic-fleet",
+          environmentId: ENVIRONMENT_ID,
+          label: "Synthetic peer",
+          httpBaseUrl: "https://192.168.40.10:4443/",
+          wsBaseUrl: "wss://192.168.40.10:4443/",
+          fleetTls: {
+            origin: "https://192.168.40.10:4443",
+            certificate: "synthetic-public-certificate",
+            publicKeySha256: "a".repeat(64),
+          },
+        });
+        const layer = yield* makeDependencies({
+          credentials: [
+            [profile.connectionId, new BearerConnectionCredential({ token: "synthetic-bearer" })],
+          ],
+          authorizeBearer: (input) =>
+            Effect.sync(() => {
+              offered.push(input.httpBaseUrl);
+              return {
+                environmentId: ENVIRONMENT_ID,
+                label: "Synthetic peer",
+                httpBaseUrl: input.httpBaseUrl,
+                socketUrl: `${input.wsBaseUrl}ws?wsTicket=synthetic`,
+                httpAuthorization: { _tag: "Bearer" as const, token: input.bearerToken },
+              };
+            }),
+        });
+        const resolver = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layer));
+        const entry = catalogEntry(
+          new BearerConnectionTarget({
+            environmentId: ENVIRONMENT_ID,
+            label: profile.label,
+            connectionId: profile.connectionId,
+          }),
+          Option.some(profile),
+        );
+        const prepared = yield* resolver.prepare(entry).pipe(
+          Effect.provideService(ClientCapabilities.FleetTlsGateway, {
+            prepare: () =>
+              Effect.succeed({
+                httpBaseUrl: "http://127.0.0.1:41001/",
+                wsBaseUrl: "ws://127.0.0.1:41001/",
+              }),
+          }),
+        );
+        expect(prepared.httpBaseUrl).toBe("http://127.0.0.1:41001/");
+        const error = yield* resolver.prepare(entry).pipe(
+          Effect.provideService(ClientCapabilities.FleetTlsGateway, {
+            prepare: () =>
+              Effect.fail(
+                new ConnectionBlockedError({
+                  reason: "configuration",
+                  detail: "Synthetic pin failure",
+                }),
+              ),
+          }),
+          Effect.flip,
+        );
+        expect(error).toMatchObject({ reason: "configuration" });
+        expect(offered).toEqual(["http://127.0.0.1:41001/"]);
+      }),
+  );
   it.effect("blocks an old host during discovery before opening orchestration RPC", () =>
     Effect.gen(function* () {
       const layerBroker = yield* makeDependencies({ descriptorProtocolVersion: null });

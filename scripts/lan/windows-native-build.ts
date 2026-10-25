@@ -29,6 +29,7 @@ import {
   asChildProcess,
   createWindowsBuildExecution,
   WindowsBuildExecutionRequest,
+  PinnedWorkspaceInstallRefused,
 } from "./windows-build-execution.ts";
 import {
   committedSnapshotFile,
@@ -502,10 +503,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
           const code = yield* spawner.exitCode(
             bootstrap.prepare(asChildProcess(bootstrap.workspaceInstall(), "inherit")),
           );
-          if (code !== 0)
-            return yield* Effect.fail(
-              new Error("Pinned offline workspace installation refused; no build was started."),
-            );
+          if (code !== 0) return yield* Effect.fail(new PinnedWorkspaceInstallRefused());
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
       ),
     );

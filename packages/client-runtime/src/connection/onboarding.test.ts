@@ -228,6 +228,67 @@ const registerSwitchedOffEnvironment = Effect.gen(function* () {
 
 describe("connection onboarding", () => {
   it.effect(
+    "keeps fleet pairing material behind the native pinned gateway and persists its original identity",
+    () =>
+      Effect.gen(function* () {
+        const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+        const tls = {
+          origin: "https://192.168.40.10:4443",
+          certificate: "synthetic-public-certificate",
+          publicKeySha256: "a".repeat(64),
+        };
+        const prepared: unknown[] = [];
+        const registration = yield* preparePairingRegistration({
+          host: tls.origin,
+          pairingCode: "synthetic-pairing-code",
+          expectedEnvironmentId: EnvironmentId.make("environment-paired"),
+          tls,
+        }).pipe(
+          Effect.provide(Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls))),
+          Effect.provideService(ClientCapabilities.FleetTlsGateway, {
+            prepare: (input) =>
+              Effect.sync(() => {
+                prepared.push(input);
+                return {
+                  httpBaseUrl: "http://127.0.0.1:41001/",
+                  wsBaseUrl: "ws://127.0.0.1:41001/",
+                };
+              }),
+          }),
+        );
+        expect(prepared).toEqual([{ environmentId: "environment-paired", identity: tls }]);
+        expect(calls.length).toBeGreaterThan(1);
+        expect(calls.every((call) => call.url.startsWith("http://127.0.0.1:41001/"))).toBe(true);
+        expect(registration.profile.fleetTls).toEqual(tls);
+        expect(registration.profile.httpBaseUrl).toBe(`${tls.origin}/`);
+        expect(registration.target.connectionId).toBe(`bearer:environment-paired:${tls.origin}`);
+      }),
+  );
+
+  it.effect(
+    "does not attempt fleet discovery or redeem a code without the protected native gateway",
+    () =>
+      Effect.gen(function* () {
+        const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+        const tls = {
+          origin: "https://192.168.40.10:4443",
+          certificate: "synthetic-public-certificate",
+          publicKeySha256: "a".repeat(64),
+        };
+        const error = yield* preparePairingRegistration({
+          host: tls.origin,
+          pairingCode: "synthetic-pairing-code",
+          expectedEnvironmentId: EnvironmentId.make("environment-paired"),
+          tls,
+        }).pipe(
+          Effect.provide(Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls))),
+          Effect.flip,
+        );
+        expect(error).toMatchObject({ reason: "unsupported" });
+        expect(calls).toEqual([]);
+      }),
+  );
+  it.effect(
     "skips a known fleet identity before discovery or spending a code and preserves its disabled state",
     () => {
       const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];

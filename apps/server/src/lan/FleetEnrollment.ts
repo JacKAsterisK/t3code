@@ -14,6 +14,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "../environment/DirectEndpoints.ts";
 import * as Config from "../config.ts";
@@ -23,6 +24,7 @@ import type { FleetPrivateConfig } from "./FleetDelivery.ts";
 import { resolveFleetBootstrap } from "./FleetBootstrap.ts";
 import { readFleetJson, validateRoster, writeFleetJson, writeFleetRoster } from "./FleetFiles.ts";
 import { secureOrigin } from "./GatewayT3OAuthClient.ts";
+import * as FleetTransport from "./FleetTransport.ts";
 
 export class FleetEnrollment extends Context.Service<
   FleetEnrollment,
@@ -48,6 +50,7 @@ const make = Effect.gen(function* () {
   const endpoints = yield* DirectEndpoints.DirectEndpoints;
   const config = yield* Config.ServerConfig;
   const vault = yield* Vault.FleetVault;
+  const transport = yield* Effect.serviceOption(FleetTransport.FleetTransport);
   const setupLock = path.join(config.stateDir, "lan-fleet-setup.lock");
   const bootstrap = () =>
     Effect.try({ try: () => resolveFleetBootstrap(processEnvironment), catch: configurationError });
@@ -83,11 +86,19 @@ const make = Effect.gen(function* () {
       (machine) => machine.environmentId === descriptor.environmentId,
     );
     const advertised = yield* endpoints.resolve();
+    const suggestedTlsOrigins = Option.isSome(transport) ? yield* transport.value.suggestions : [];
+    const tlsReady =
+      current?.record?.tls !== undefined &&
+      current.record.tlsEnabled !== false &&
+      Option.isSome(transport)
+        ? yield* transport.value.ready(current.record)
+        : false;
     const origin =
       local?.origin ??
       advertised
         .find((endpoint) => endpoint.httpBaseUrl.startsWith("https://"))
         ?.httpBaseUrl.replace(/\/$/u, "") ??
+      (suggestedTlsOrigins.length === 1 ? suggestedTlsOrigins[0] : "") ??
       "";
     const base: LanFleetSetupState = {
       available: current !== undefined,
@@ -98,6 +109,14 @@ const make = Effect.gen(function* () {
       environmentId: descriptor.environmentId,
       label: local?.label ?? descriptor.label,
       origin,
+      managedTls:
+        current?.record?.tls !== undefined ||
+        (local === undefined &&
+          !advertised.some((endpoint) => endpoint.httpBaseUrl.startsWith("https://")) &&
+          suggestedTlsOrigins.length > 0),
+      suggestedTlsOrigins,
+      tlsEnabled: current?.record?.tls !== undefined && current.record.tlsEnabled !== false,
+      tlsReady,
       autoPickup: false,
       access: "standard",
       peers: [],
@@ -188,14 +207,22 @@ const make = Effect.gen(function* () {
             const current = yield* load();
             if (current === undefined) return yield* configurationError();
             const descriptor = yield* environment.getDescriptor;
+            if (input.operation === "transport") {
+              if (current.record?.tls === undefined || Option.isNone(transport))
+                return yield* configurationError();
+              const updated = { ...current.record, tlsEnabled: input.enabled };
+              yield* transport.value.persist(updated);
+              return;
+            }
             if (input.operation === "settings") {
               if (current.record === undefined) return yield* configurationError();
-              yield* vault.save({
+              const updated = {
                 ...current.record,
                 enabled: input.enabled,
                 autoPickup: input.autoPickup,
                 access: input.access,
-              });
+              };
+              yield* vault.save(updated);
               return;
             }
             yield* fs.makeDirectory(current.root, { recursive: true });
@@ -230,7 +257,7 @@ const make = Effect.gen(function* () {
                         Authority.ownerVerificationCode(fresh.authority) !== input.ownerCode)
                     )
                       return yield* configurationError();
-                    const record =
+                    const original =
                       fresh.record ??
                       Authority.generateFleetIdentity(
                         descriptor.environmentId,
@@ -240,16 +267,37 @@ const make = Effect.gen(function* () {
                         input,
                         existing?.machineId,
                       );
+                    if (input.managedTls === true && Option.isNone(transport))
+                      return yield* configurationError();
+                    const tls =
+                      input.managedTls === true && Option.isSome(transport)
+                        ? yield* transport.value.prepare(origin, original.tls)
+                        : original.tls;
+                    if (tls !== undefined && tls.origin !== origin)
+                      return yield* configurationError();
+                    const record = {
+                      ...original,
+                      ...(tls === undefined
+                        ? {}
+                        : { tls, tlsEnabled: original.tlsEnabled ?? true }),
+                    };
                     if (record.environmentId !== descriptor.environmentId)
                       return yield* configurationError();
                     // Save once before publishing. A retry reuses these exact keys, including after a share outage.
-                    yield* vault.save(record);
+                    if (record.tls !== undefined && Option.isSome(transport))
+                      yield* transport.value.persist(record);
+                    else yield* vault.save(record);
                     const peer = Authority.identityPeer(
                       record,
                       existing?.label ?? descriptor.label,
                       origin,
                     );
-                    const { encryptionPublicKey: _e, signingPublicKey: _s, ...metadata } = peer;
+                    const {
+                      encryptionPublicKey: _e,
+                      signingPublicKey: _s,
+                      tls: _tls,
+                      ...metadata
+                    } = peer;
                     if (existing === undefined)
                       yield* writeFleetRoster(fresh.rosterPath, {
                         ...fresh.roster,
@@ -395,6 +443,12 @@ const make = Effect.gen(function* () {
     const current = yield* load();
     if (current?.record === undefined) return undefined;
     if (!current.record.enabled || current.authority === undefined) return null;
+    if (current.record.tls !== undefined && current.record.tlsEnabled === false) return null;
+    if (
+      current.record.tls !== undefined &&
+      (Option.isNone(transport) || !(yield* transport.value.ready(current.record)))
+    )
+      return yield* new LanFleetError({ reason: "transport" });
     const { record, authority } = current;
     const self = authority.peers.find(
       (peer) =>

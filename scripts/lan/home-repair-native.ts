@@ -17,6 +17,12 @@ import {
 import { migrateRepairStagedHome, validateRepairStagedHome } from "./home-repair-migrations.ts";
 import { assertOrdinaryNativePath } from "../../packages/shared/src/nativeHomeSelection.ts";
 import { inspectStoppedRepairWork } from "../../apps/server/src/lan/NativeMaintenance.ts";
+import {
+  cancelOriginalWork,
+  rollbackOriginalWorkCancellation,
+  type WorkCancellationRequest,
+  type WorkCancellationPorts,
+} from "./home-repair-cancel.ts";
 import { strictJson } from "../../packages/shared/src/strictJson.ts";
 
 function heldByHost(file: string) {
@@ -37,12 +43,16 @@ function heldByHost(file: string) {
 }
 
 /** Conflicting opens check protocol sanity only. Hub must establish actual kernel ownership, process/profile quiescence, and hold it until this process exits. */
-export function verifyHostAdmission(resources: RepairAdmissionResources) {
+export function verifyHostAdmission(
+  resources: RepairAdmissionResources,
+  cancellationOriginal?: string,
+) {
   if (Effect.runSync(HostProcess.Platform) !== "win32")
     throw new Error("Native home repair requires Windows admission.");
   for (const home of resources.homes) {
     heldByHost(NodePath.join(home, "native-admission.lock"));
     heldByHost(NodePath.join(home, "userdata", "server-owner.sqlite"));
+    if (home === cancellationOriginal) continue;
     const work = inspectStoppedRepairWork(NodePath.join(home, "userdata", "statev2.sqlite"));
     if (
       [
@@ -72,6 +82,23 @@ const nativePorts: HomeRepairExecutionPorts = {
   validateStagedHome: validateRepairStagedHome,
 };
 
+// The Hub-owned session keeps its actual Windows handles across all children and awaits exit before disposal.
+// The child checks the live parent and incompatible kernel opens; it cannot acquire locks already held by that parent.
+function verifyCancellationAdmission(resources: RepairAdmissionResources, original: string) {
+  if (original !== NodePath.join(NodeOS.homedir(), ".t3"))
+    throw new Error("Cancellation is limited to the current user original home.");
+  if (process.ppid <= 0) throw new Error("Cancellation requires a live owning Hub parent.");
+  process.kill(process.ppid, 0);
+  verifyHostAdmission(resources, original);
+}
+const cancellationPorts: WorkCancellationPorts = {
+  withExclusiveAdmission: async (resources, operation) => {
+    verifyCancellationAdmission(resources, NodePath.join(NodeOS.homedir(), ".t3"));
+    return operation();
+  },
+  verifyStoppedForCancellation: async (resources, original) =>
+    verifyCancellationAdmission(resources, original),
+};
 function decodeRequest(raw: unknown, operation: string): Record<string, unknown> {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw))
     throw new Error("Invalid repair request.");
@@ -79,7 +106,18 @@ function decodeRequest(raw: unknown, operation: string): Record<string, unknown>
   const allowed =
     operation === "apply"
       ? ["schemaVersion", "expectedPlanId", "choice", "opaqueBackupApproved", "repairId"]
-      : ["schemaVersion", "repairId"];
+      : operation === "cancel-original-work"
+        ? [
+            "schemaVersion",
+            "expectedPlanId",
+            "cancelUnfinishedWorkApproved",
+            "opaqueBackupApproved",
+            "repairId",
+            "admissionOwnerPid",
+          ]
+        : operation.endsWith("work-cancellation")
+          ? ["schemaVersion", "repairId", "admissionOwnerPid"]
+          : ["schemaVersion", "repairId"];
   if (
     request.schemaVersion !== 1 ||
     typeof request.repairId !== "string" ||
@@ -88,6 +126,11 @@ function decodeRequest(raw: unknown, operation: string): Record<string, unknown>
     allowed.some((name) => !(name in request))
   )
     throw new Error("Invalid or incomplete repair request.");
+  if (
+    (operation === "cancel-original-work" || operation.endsWith("work-cancellation")) &&
+    (!Number.isSafeInteger(request.admissionOwnerPid) || request.admissionOwnerPid !== process.ppid)
+  )
+    throw new Error("Cancellation admission owner is not this native child parent.");
   return request;
 }
 
@@ -96,10 +139,29 @@ export async function runNativeHomeRepair(
   raw: unknown,
   options: PreviewOptions,
   ports: HomeRepairExecutionPorts = nativePorts,
+  cancellation: WorkCancellationPorts = cancellationPorts,
 ) {
-  if (!["apply", "rollback", "recover"].includes(operation))
+  if (
+    ![
+      "apply",
+      "rollback",
+      "recover",
+      "cancel-original-work",
+      "rollback-work-cancellation",
+      "recover-work-cancellation",
+    ].includes(operation)
+  )
     throw new Error("Unknown repair operation.");
   const request = decodeRequest(raw, operation);
+  if (operation === "cancel-original-work")
+    return cancelOriginalWork(options, request as unknown as WorkCancellationRequest, cancellation);
+  if (operation === "rollback-work-cancellation" || operation === "recover-work-cancellation")
+    return rollbackOriginalWorkCancellation(
+      options,
+      String(request.repairId),
+      cancellation,
+      operation === "recover-work-cancellation",
+    );
   return operation === "apply"
     ? executeHomeRepair(options, request as unknown as HomeRepairApplyRequest, ports)
     : operation === "rollback"
@@ -136,7 +198,19 @@ if (
         ((report.original.state === "initialized" && originalProfile) ||
           (report.lan.state === "initialized" && lanProfile));
       process.stdout.write(
-        JSON.stringify({ ...report, applySupported: true, canApply: eligible }) + "\n",
+        JSON.stringify({
+          ...report,
+          applySupported: true,
+          canApply: eligible,
+          cancellationSupported: true,
+          canCancelOriginalWork:
+            report.state !== "blocked" &&
+            report.original.state === "initialized" &&
+            report.original.activeWork !== null &&
+            report.original.activeWork > 0 &&
+            (report.lan.state !== "initialized" || report.lan.activeWork === 0) &&
+            originalProfile,
+        }) + "\n",
       );
     } else {
       if (args.length !== 2 || args[1] !== "--json") throw new Error("Invalid repair arguments.");

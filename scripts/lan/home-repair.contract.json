@@ -50,6 +50,58 @@
         "schemaVersion": 1,
         "status": "rolled-back"
       }
+    },
+    "cancel-original-work": {
+      "arguments": ["cancel-original-work", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "expectedPlanId": "<64 lowercase hex from exact current preview>",
+        "repairId": "<new 32 lowercase hex>",
+        "cancelUnfinishedWorkApproved": true,
+        "opaqueBackupApproved": true,
+        "admissionOwnerPid": "<integer: the actual owning Hub process ID, equal to native child process.ppid>"
+      },
+      "stdout": {
+        "schemaVersion": 1,
+        "status": "unfinished-work-cancelled",
+        "repairId": "<same cancellation ID>",
+        "receiptPath": "<absolute recovery/ID/cancellation-receipt.json>",
+        "summary": {
+          "schemaVersion": 1,
+          "reason": "Cancelled by the user during offline T3 home recovery; conversation and session history retained.",
+          "counts": {
+            "<fixed work table>:<original status>": "<nonnegative integer>"
+          },
+          "events": "<nonnegative integer>",
+          "threads": "<nonnegative integer>",
+          "providerLaunches": 0
+        },
+        "expectedPlanId": "<fresh preview plan ID>"
+      }
+    },
+    "rollback-work-cancellation": {
+      "arguments": ["rollback-work-cancellation", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "repairId": "<cancellation ID>",
+        "admissionOwnerPid": "<integer: owning Hub process ID>"
+      },
+      "stdout": {
+        "schemaVersion": 1,
+        "status": "rolled-back"
+      }
+    },
+    "recover-work-cancellation": {
+      "arguments": ["recover-work-cancellation", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "repairId": "<cancellation ID>",
+        "admissionOwnerPid": "<integer: owning Hub process ID>"
+      },
+      "stdout": {
+        "schemaVersion": 1,
+        "status": "rolled-back"
+      }
     }
   },
   "input": {
@@ -136,5 +188,16 @@
   "release": {
     "productionReady": false,
     "reason": "Requires matching Hub admission/selection/pointer/recovery UI, production artifact policy/hash pins, scoped checks and release review. Do not publish preview-only or claim verified repair."
+  },
+  "cancellation": {
+    "previewAdditions": {
+      "canCancelOriginalWork": "boolean offer; full native checks still authoritative",
+      "cancellationSupported": "boolean"
+    },
+    "scope": "Only current user default original .t3; retained LAN home must remain idle and unchanged. Enabled schedules and deferred/restart work are refused.",
+    "ownership": "One actual Hub-owned session holds installation and native admission continuously across all child calls and awaits child exit before disposal. Child verifies live actual parent PID and conflicting Windows kernel opens, never a caller boolean alone.",
+    "sequence": "After cancellation, obtain a fresh preview and ordinary Apply with a DIFFERENT new repair ID. Retain both receipts. Rollback ordinary selection before cancellation rollback; never overwrite newer work.",
+    "journal": "home-repair.json operation=cancel-original-work, schemaVersion1, repairId and receiptPath; unresolved journal blocks startup until recover-work-cancellation restores original snapshot state.",
+    "history": "Opaque complete original-home snapshot; domain lifecycle cancellation and command receipts append without deleting conversations/messages/attachments/session records. No provider, scheduler or worker runs."
   }
 }

@@ -12,6 +12,7 @@ import { sourceGitEnvironment } from "./source-git.ts";
 import {
   captureNativeBuildSource,
   copyNativePinnedCache,
+  prepareNativePnpmMetadata,
   requireNativeBuildInput,
   verifyNativeSnapshotFiles,
 } from "./windows-native-build.ts";
@@ -95,6 +96,48 @@ const git = (cwd: string, args: readonly string[]) =>
       (error, stdout) => (error ? reject(error) : resolve(stdout.trim())),
     );
   });
+
+it("isolates pnpm policy memo writes and refuses redirected pinned metadata mappings", async () => {
+  const fixture = await fixtureRoot("t3-lan-pnpm-metadata-");
+  try {
+    const source = NodePath.join(fixture.root, "source"),
+      output = NodePath.join(fixture.root, "output"),
+      foreign = NodePath.join(fixture.root, "foreign");
+    await NodeFSP.mkdir(NodePath.join(source, "v12"), { recursive: true });
+    await NodeFSP.mkdir(foreign);
+    const entries = new Map([
+      ["lockfile-verified.jsonl", "verified policy"],
+      ["v12/registry.jsonl", "pinned registry"],
+    ]);
+    const pins = new Map();
+    for (const [relative, text] of entries) {
+      const bytes = new TextEncoder().encode(text);
+      await NodeFSP.writeFile(NodePath.join(source, relative), bytes);
+      pins.set(relative, { length: bytes.length, sha256: sha256(bytes) });
+    }
+    const verify = await prepareNativePnpmMetadata(source, output, pins);
+    await NodeFSP.appendFile(NodePath.join(output, "lockfile-verified.jsonl"), "new build record");
+    expect(await NodeFSP.readFile(NodePath.join(source, "lockfile-verified.jsonl"), "utf8")).toBe(
+      "verified policy",
+    );
+    expect(await NodeFSP.readFile(NodePath.join(output, "v12", "registry.jsonl"), "utf8")).toBe(
+      "pinned registry",
+    );
+    await verify();
+    await NodeFSP.unlink(NodePath.join(output, "v12"));
+    await NodeFSP.symlink(foreign, NodePath.join(output, "v12"), "junction");
+    await expect(verify()).rejects.toThrow(/mapping changed/u);
+    await expect(
+      prepareNativePnpmMetadata(
+        source,
+        NodePath.join(fixture.root, "refused"),
+        new Map([["unexpected/registry.jsonl", { length: 1, sha256: "a".repeat(64) }]]),
+      ),
+    ).rejects.toThrow(/metadata layout/u);
+  } finally {
+    await fixture.cleanup();
+  }
+});
 
 it("copies only pinned cache bytes into new files and preserves existing output on refusal", async () => {
   const fixture = await fixtureRoot("t3-lan-native-cache-");

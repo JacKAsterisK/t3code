@@ -198,6 +198,53 @@ export async function copyNativePinnedCache(
     throw new Error("Copied native cache differs from its approved inventory.");
 }
 
+export async function prepareNativePnpmMetadata(
+  sourceRoot: string,
+  outputRoot: string,
+  pins: ReadonlyMap<string, { readonly length: number; readonly sha256: string }>,
+) {
+  const memo = pins.get("lockfile-verified.jsonl");
+  const versions = new Set<string>();
+  for (const relative of pins.keys()) {
+    relativeWindowsPath(relative);
+    if (relative === "lockfile-verified.jsonl") continue;
+    const version = relative.split("/")[0]!;
+    if (!relative.includes("/") || !/^v[1-9]\d*$/u.test(version))
+      throw new Error("Unreviewed pnpm metadata layout.");
+    versions.add(version);
+  }
+  if (!memo || !versions.size) throw new Error("Pinned pnpm policy metadata is incomplete.");
+  await assertValidationRoot(sourceRoot);
+  // This file is mutable even with frozen-store. Versioned registry records are
+  // read offline; their complete pinned inventory still brackets every build.
+  await copyNativePinnedCache(sourceRoot, outputRoot, new Map([["lockfile-verified.jsonl", memo]]));
+  const links: Array<{ source: string; target: string; dev: number; ino: number }> = [];
+  for (const version of versions) {
+    const source = NodePath.join(sourceRoot, version),
+      target = NodePath.join(outputRoot, version);
+    await assertValidationRoot(source);
+    await NodeFSP.symlink(source, target, "junction");
+    const stat = await NodeFSP.lstat(target);
+    links.push({ source, target, dev: stat.dev, ino: stat.ino });
+  }
+  const verify = async () => {
+    await assertValidationRoot(outputRoot);
+    for (const link of links) {
+      const stat = await NodeFSP.lstat(link.target);
+      await assertValidationRoot(link.source);
+      if (
+        !stat.isSymbolicLink() ||
+        stat.dev !== link.dev ||
+        stat.ino !== link.ino ||
+        (await NodeFSP.realpath(link.target)) !== link.source
+      )
+        throw new Error("Native pnpm metadata mapping changed.");
+    }
+  };
+  await verify();
+  return verify;
+}
+
 export async function captureNativeBuildSource(
   sourceRoot: string,
   lock: BuildLock,
@@ -417,6 +464,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
         flag: "wx",
         mode: 0o600,
       });
+    let verifyPnpmMetadata: (() => Promise<void>) | undefined;
     for (const name of ["pnpmStore", "cargoHome", "electronCache", "builderCache"] as const) {
       const prefix = relativeWindowsPath(execution.directories[name]) + "/";
       const pins = new Map(
@@ -437,6 +485,19 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
             ),
           () => buildInventoryCounts(pins.values()),
         );
+        const metadataPrefix = prefix + "metadata-cache/";
+        const metadataPins = new Map(
+          [...toolchainFiles]
+            .filter(([relative]) => relative.startsWith(metadataPrefix))
+            .map(([relative, pin]) => [relative.slice(metadataPrefix.length), pin]),
+        );
+        verifyPnpmMetadata = await measureBuildStage("native.pnpm-metadata", () =>
+          prepareNativePnpmMetadata(
+            NodePath.join(context.toolchainRoot, metadataPrefix),
+            NodePath.join(context.outputRoot, "caches", "pnpmMetadata"),
+            metadataPins,
+          ),
+        );
         continue;
       }
       console.log("[native-build] Copying exact pinned mutable cache: " + name);
@@ -452,6 +513,8 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
       );
     }
     const verifyUnchanged = async () => {
+      if (!verifyPnpmMetadata) throw new Error("Native pnpm metadata was not prepared.");
+      await verifyPnpmMetadata();
       await verifyWindowsNativeContextFacts(context);
       const actualInputs = await inspectValidationTree(context.inputsRoot, true);
       if (

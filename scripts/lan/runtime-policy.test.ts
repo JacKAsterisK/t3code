@@ -94,10 +94,10 @@ import { providerAuthReturnUrl } from ${JSON.stringify(NodePath.join(shared, "pr
 import { buildNewThreadLink, promptLinkAppPath, promptLinkDeepLink } from ${JSON.stringify(NodePath.join(shared, "promptLinks.ts"))};
 import * as Effect from ${JSON.stringify(NodePath.resolve(import.meta.dirname, "../../apps/server/node_modules/effect/dist/Effect.js"))};
 import * as path from 'node:path';
-const home = policy.resolveDistributionHome({ homeDirectory: 'C:\\\\Users\\\\fixture', platform:'win32',localAppData:'C:\\\\Users\\\\fixture\\\\AppData\\\\Local',joinPath:path.win32.join });
+const home = policy.resolveDistributionHome({ homeDirectory: 'C:\\\\Users\\\\fixture', platform:'win32',localAppData:'C:\\\\Users\\\\fixture\\\\AppData\\\\Local',joinPath:path.win32.join,homeMode:'side-by-side' });
 const invalidHomes = ['C:\\\\Users\\\\fixture\\\\.t3','C:\\\\Users\\\\fixture\\\\.codex\\\\cache','C:\\\\Users\\\\fixture\\\\AppData\\\\Local\\\\Packages\\\\sandbox'];
 const refused = invalidHomes.map(value=>{try{policy.assertDistributionHome(value,home);return false}catch{return true}});
-const invalidRoots = invalidHomes.map(value=>{try{policy.resolveDistributionHome({homeDirectory:'C:\\\\Users\\\\fixture',platform:'win32',localAppData:value,joinPath:path.win32.join});return false}catch{return true}});
+const invalidRoots = invalidHomes.map(value=>{try{policy.resolveDistributionHome({homeDirectory:'C:\\\\Users\\\\fixture',platform:'win32',localAppData:value,joinPath:path.win32.join,homeMode:'side-by-side'});return false}catch{return true}});
 const loaded = await Effect.runPromise(otel.load);
 const result = {
   flags:[policy.cloudEnabled,policy.telemetryEnabled,policy.nativeUpdatesEnabled],

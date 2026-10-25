@@ -230,8 +230,22 @@ function assertEmptyBootstrapDatabase(databasePath: string) {
   safeFile(databasePath);
   const db = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
   try {
+    // FTS5 has bookkeeping rows even before any messages have been indexed.
+    // Its visible table must still be empty, and only SQLite-owned shadows qualify.
+    const searchShadows = new Set(
+      db
+        .prepare("PRAGMA table_list")
+        .all()
+        .filter(
+          (row) =>
+            row.type === "shadow" &&
+            String(row.name).startsWith("orchestration_v2_message_search_"),
+        )
+        .map((row) => String(row.name)),
+    );
     for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all()) {
       const name = String(row.name);
+      if (searchShadows.has(name)) continue;
       if (name === "effect_sql_migrations") {
         const history = db
           .prepare("SELECT migration_id,name FROM effect_sql_migrations ORDER BY migration_id")

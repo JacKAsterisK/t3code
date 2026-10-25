@@ -22,6 +22,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
 import { parseChangedCheckArgs, selectChangedTests } from "./lib/changed-tests.ts";
+import { generatedCheckInputs } from "./lib/check-inputs.ts";
 
 const root = NodePath.resolve(import.meta.dirname, "..");
 const CODE = /\.[cm]?[jt]sx?$/;
@@ -67,7 +68,9 @@ console.log(`check:changed: ${files.length} files since ${base.slice(0, 12)}`);
 const inputKey = () => {
   const hash = NodeCrypto.createHash("sha256");
   // CI changes test behavior (vite.config.ts rejects .only under CI).
-  hash.update(`${process.version}\0${base}\0${process.env.CI ?? ""}\0${JSON.stringify([...deferred].sort())}\0`);
+  hash.update(
+    `${process.version}\0${base}\0${process.env.CI ?? ""}\0${JSON.stringify([...deferred].sort())}\0`,
+  );
   hash.update(
     NodeChildProcess.execFileSync(
       "git",
@@ -75,18 +78,7 @@ const inputKey = () => {
       { cwd: root, maxBuffer: 1024 * 1024 * 1024 },
     ),
   );
-  const ignored = git(
-    "ls-files",
-    "--others",
-    "--ignored",
-    "--exclude-standard",
-    "--",
-    ":(glob)**/.generated/**",
-    ":(glob)**/.astro/**",
-    ":(glob)**/*.d.ts",
-    ":(glob)**/.env*",
-    ":(exclude,glob)**/node_modules/**",
-  );
+  const ignored = generatedCheckInputs(root);
   for (const file of [
     // Raw bytes of changed files too: .gitattributes normalizes line endings in
     // the diff, but the formatter reads the file as it is on disk.
@@ -201,8 +193,17 @@ const checkPatches = (): boolean => {
       if (NodeFS.existsSync(NodePath.join(root, extra))) copy(extra);
     }
     const { status, stdout, stderr, error } = NodeChildProcess.spawnSync(
-      Effect.runSync(HostProcess.Platform) === "win32" ? Effect.runSync(HostProcess.ExecutablePath) : "vp",
-      [...(Effect.runSync(HostProcess.Platform) === "win32" ? [NodePath.join(root, "node_modules/vite-plus/bin/vp")] : []), "install", "--lockfile-only", "--ignore-scripts"],
+      Effect.runSync(HostProcess.Platform) === "win32"
+        ? Effect.runSync(HostProcess.ExecutablePath)
+        : "vp",
+      [
+        ...(Effect.runSync(HostProcess.Platform) === "win32"
+          ? [NodePath.join(root, "node_modules/vite-plus/bin/vp")]
+          : []),
+        "install",
+        "--lockfile-only",
+        "--ignore-scripts",
+      ],
       { cwd: temp, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
     );
     if (status === 0) return true;
@@ -282,7 +283,9 @@ const results = await Promise.all(
         const output: Array<Buffer> = [];
         const windows = Effect.runSync(HostProcess.Platform) === "win32";
         const command = windows ? Effect.runSync(HostProcess.ExecutablePath) : "vp";
-        const args = windows ? [NodePath.join(root, "node_modules/vite-plus/bin/vp"), ...step.args] : step.args;
+        const args = windows
+          ? [NodePath.join(root, "node_modules/vite-plus/bin/vp"), ...step.args]
+          : step.args;
         const child = NodeChildProcess.spawn(command, args, { cwd: root, env });
         child.stdout.on("data", (chunk: Buffer) => output.push(chunk));
         child.stderr.on("data", (chunk: Buffer) => output.push(chunk));

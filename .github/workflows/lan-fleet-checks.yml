@@ -33,6 +33,25 @@ jobs:
           vp test run
           apps/web/src/components/sidebar/SidebarBrandMark.browser.test.tsx
           apps/web/src/components/settings/LanFleetSetup.browser.test.tsx
+      - name: Verify build reuse, native bootstrap and both MCP access paths
+        shell: bash
+        run: >-
+          vp test run
+          scripts/lan/source-git.test.ts
+          scripts/lan/windows-native-build.test.ts
+          scripts/lan/windows-build-execution.test.ts
+          scripts/lan/windows-build-preparation.test.ts
+          scripts/lib/check-inputs.test.ts
+          scripts/lib/changed-tests.test.ts
+          scripts/lan/runtime-policy.test.ts
+          scripts/lan/native-helper-output.test.ts
+          scripts/lan/home-repair.test.ts
+          apps/server/src/mcp/McpToolAccess.test.ts
+          apps/server/src/lan/EnvironmentRouting.test.ts
+          apps/server/src/lan/NativeTaskService.test.ts
+          apps/server/src/lan/RemoteTaskTransport.test.ts
+          apps/server/src/persistence/reconcileV2PreviewMigration.test.ts
+          apps/server/src/persistence/Migrations/073_ThreadMessageSearch.test.ts
       - name: Verify synthetic enrollment, delivery, polling, and retained-home behavior
         shell: bash
         run: >-

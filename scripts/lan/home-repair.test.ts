@@ -174,7 +174,7 @@ NodeTest.test(
 
 NodeTest.test("a newer schema fails closed instead of suggesting downgrade", () =>
   fixture(({ original, options }) => {
-    const dbPath = home(original, oldId, 72, 1);
+    const dbPath = home(original, oldId, Math.max(...supportedMigrationIds) + 1, 1);
     const before = hash(dbPath);
     const report = previewHomeRepair(options);
     NodeAssert.equal(report.state, "blocked");

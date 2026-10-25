@@ -2219,7 +2219,8 @@ export const layerWsRpc = (
             Effect.andThen(scheduledTasks.getWebhookDelivery(input)),
           ),
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
-        [WS_METHODS.serverGetConfig]: (_input) => loadServerConfig({ usageLimitsCommand: false, workspaceSnapshotsOnDemand: false }),
+        [WS_METHODS.serverGetConfig]: (_input) =>
+          loadServerConfig({ usageLimitsCommand: false, workspaceSnapshotsOnDemand: false }),
         [WS_METHODS.serverSyncLanFleet]: (input) => lanFleet.sync(input),
         [WS_METHODS.serverGetLanFleetSetup]: () => lanFleet.setup,
         [WS_METHODS.serverConfigureLanFleet]: (input) => lanFleet.configure(input),

@@ -59,9 +59,7 @@ export const inspectOrdinaryDirectoryAncestors = Effect.fn("desktop.profile.insp
     }),
 );
 
-/**
- * @public Service construction is part of the canonical Effect module API.
- */
+/** @public */
 export const make = FileSystem.makeNoop({
   exists: (path) =>
     syncFs("exists", path, () => {

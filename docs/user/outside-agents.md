@@ -6,6 +6,12 @@ check which providers and models are available. This covers Claude Code or
 Codex in your own terminal, ChatGPT, and bots that support MCP. Each agent signs
 in once, and you choose what it may do.
 
+For direct access, register each machine's MCP URL with the agent. Its standard
+T3 tools act on that machine. For one entry point across an approved LAN fleet,
+connect a fleet client to the gateway environment: its `t3_lan_*` tools select
+the destination machine. Fleet credentials keep their machine, project and task
+limits; they do not become general-access credentials.
+
 ## Get the MCP URL
 
 In **Settings → Connections**, open a saved environment's menu and choose

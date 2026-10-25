@@ -97,7 +97,7 @@ it.live(
 import * as path from "node:path";
 import { isEntrypoint } from "../entrypoint.ts";
 import { lanBuildIdentity, resolveDistributionHome, assertDistributionHome, cloudEnabled, telemetryEnabled, nativeUpdatesEnabled } from "../../../../packages/shared/src/distribution.ts";
-const home = resolveDistributionHome({ homeDirectory: "C:/PublicFixture", platform: "win32", localAppData: "C:/PublicFixture/Local", joinPath: path.win32.join });
+const home = resolveDistributionHome({ homeDirectory: "C:/PublicFixture", platform: "win32", localAppData: "C:/PublicFixture/Local", joinPath: path.win32.join, homeMode: "side-by-side" });
 let conflictingHomeRefused = false;
 try { assertDistributionHome("C:/PublicFixture/.t3", home); } catch { conflictingHomeRefused = true; }
 export const observation = { identity: lanBuildIdentity, home, conflictingHomeRefused, cloudEnabled, telemetryEnabled, nativeUpdatesEnabled, moduleUrl: import.meta.url };

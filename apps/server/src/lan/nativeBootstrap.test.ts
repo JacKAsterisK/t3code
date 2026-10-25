@@ -89,11 +89,25 @@ it.layer(NodeServices.layer)("native fresh-home bootstrap", (it) => {
         yield* Effect.sync(() => {
           const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
           try {
+            const searchShadows = new Set(
+              db
+                .prepare("PRAGMA table_list")
+                .all()
+                .filter(
+                  (row) =>
+                    row.type === "shadow" &&
+                    String(row.name).startsWith("orchestration_v2_message_search_"),
+                )
+                .map((row) => String(row.name)),
+            );
             for (const row of db
               .prepare("SELECT name FROM sqlite_master WHERE type='table'")
               .all()) {
               const name = String(row.name);
-              if (!["effect_sql_migrations", "orchestration_v2_projection_metadata"].includes(name))
+              if (
+                !searchShadows.has(name) &&
+                !["effect_sql_migrations", "orchestration_v2_projection_metadata"].includes(name)
+              )
                 assert.isUndefined(
                   db.prepare('SELECT 1 FROM "' + name.replaceAll('"', '""') + '" LIMIT 1').get(),
                 );
@@ -231,7 +245,7 @@ it.effect(
         );
         assert.equal(
           db.prepare("SELECT max(migration_id) AS n FROM effect_sql_migrations").get()!.n,
-          71,
+          73,
         );
       } finally {
         db.close();

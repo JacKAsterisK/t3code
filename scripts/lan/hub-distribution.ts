@@ -84,6 +84,7 @@ export const BUILD_INPUT_FILES = [
   "apps/desktop/src/app/DesktopUserData.ts",
   "apps/server/src/os-jank.ts",
   "apps/server/src/lan/NativeMaintenance.ts",
+  "apps/server/src/lan/nativeWorkStates.ts",
   "scripts/lan/home-repair.ts",
   "scripts/lan/home-repair-executor.ts",
   "scripts/lan/home-repair-migrations.ts",

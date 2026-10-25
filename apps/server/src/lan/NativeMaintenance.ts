@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- The offline native lease helper reads closed SQLite state and hashes files without loading the server runtime.
+import { nativeWorkStatusDefinitions } from "./nativeWorkStates.ts";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
@@ -302,65 +303,12 @@ export const layerNativeLease = Layer.succeed(NativeMaintenanceLease, {
   }),
 });
 
-const terminal = ["completed", "interrupted", "failed", "cancelled", "rolled_back"];
-const completed = ["completed", "interrupted", "failed", "cancelled"];
 const decodePayload = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
 );
 const decodeCohort = Schema.decodeUnknownSync(OrchestrationV2DelegatedCompletionCohort);
 const decodeTaskDelivery = Schema.decodeUnknownSync(OrchestrationV2DelegatedCompletionTaskDelivery);
-const statuses = [
-  [
-    "orchestration_v2_projection_runs",
-    ["preparing", "queued", "starting", "running", "waiting", ...terminal],
-    ["preparing", "starting", "running", "waiting"],
-  ],
-  [
-    "orchestration_v2_projection_run_attempts",
-    ["pending", "running", "superseded", ...completed],
-    ["pending", "running"],
-  ],
-  [
-    "orchestration_v2_projection_nodes",
-    ["idle", "pending", "running", "waiting", ...terminal],
-    ["pending", "running", "waiting"],
-  ],
-  [
-    "orchestration_v2_projection_provider_sessions",
-    ["starting", "ready", "running", "waiting", "stopped", "error"],
-    ["starting", "ready", "running", "waiting"],
-  ],
-  [
-    "orchestration_v2_projection_provider_threads",
-    ["not_loaded", "idle", "active", "archived", "closed", "error"],
-    ["active"],
-  ],
-  [
-    "orchestration_v2_projection_provider_turns",
-    ["pending", "running", ...completed],
-    ["pending", "running"],
-  ],
-  [
-    "orchestration_v2_projection_runtime_requests",
-    ["pending", "resolved", "expired", "cancelled"],
-    ["pending"],
-  ],
-  [
-    "orchestration_v2_projection_subagents",
-    ["idle", "pending", "running", "waiting", ...completed],
-    ["pending", "running", "waiting"],
-  ],
-  [
-    "orchestration_v2_projection_turn_items",
-    ["idle", "pending", "running", "waiting", ...completed],
-    ["pending", "running", "waiting"],
-  ],
-  [
-    "orchestration_v2_effect_outbox",
-    ["pending", "running", "succeeded", "failed", "cancelled"],
-    ["pending", "running"],
-  ],
-] as const;
+const statuses = nativeWorkStatusDefinitions;
 
 // All identifiers below are fixed source constants, never request-derived SQL.
 export const inspectStoppedRepairWork = (databasePath: string) => {

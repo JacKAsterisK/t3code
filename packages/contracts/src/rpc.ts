@@ -22,6 +22,13 @@ import {
   ChatGptHandoffState,
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
+import {
+  LanFleetError,
+  LanFleetSyncInput,
+  LanFleetSyncResult,
+  LanFleetSetupInput,
+  LanFleetSetupState,
+} from "./lanFleet.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
@@ -472,6 +479,9 @@ export const WS_METHODS = {
 
   serverProbe: "server.probe",
   serverGetConfig: "server.getConfig",
+  serverSyncLanFleet: "server.syncLanFleet",
+  serverGetLanFleetSetup: "server.getLanFleetSetup",
+  serverConfigureLanFleet: "server.configureLanFleet",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
   serverUpdateServer: "server.updateServer",
@@ -603,6 +613,22 @@ const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
   payload: Schema.Struct({}),
   success: ServerConfig,
   error: Schema.Union([KeybindingsConfigError, ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+const WsServerSyncLanFleetRpc = Rpc.make(WS_METHODS.serverSyncLanFleet, {
+  payload: LanFleetSyncInput,
+  success: LanFleetSyncResult,
+  error: Schema.Union([LanFleetError, EnvironmentAuthorizationError]),
+});
+const WsServerGetLanFleetSetupRpc = Rpc.make(WS_METHODS.serverGetLanFleetSetup, {
+  payload: Schema.Struct({}),
+  success: LanFleetSetupState,
+  error: Schema.Union([LanFleetError, EnvironmentAuthorizationError]),
+});
+const WsServerConfigureLanFleetRpc = Rpc.make(WS_METHODS.serverConfigureLanFleet, {
+  payload: LanFleetSetupInput,
+  success: LanFleetSetupState,
+  error: Schema.Union([LanFleetError, EnvironmentAuthorizationError]),
 });
 
 const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
@@ -1882,6 +1908,9 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
+  WsServerSyncLanFleetRpc,
+  WsServerGetLanFleetSetupRpc,
+  WsServerConfigureLanFleetRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsProviderConsumeResetCreditRpc,

@@ -1,0 +1,40 @@
+name: LAN fleet checks
+
+on:
+  push:
+    branches: [lan/fleet-links]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lan-fleet-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-ci-deps
+      - name: Typecheck affected applications and contracts
+        shell: bash
+        run: vp run --filter t3 --filter @t3tools/web --filter @t3tools/desktop --filter @t3tools/contracts --filter @t3tools/client-runtime typecheck
+      - name: Verify synthetic enrollment, delivery, polling, and retained-home behavior
+        shell: bash
+        run: >-
+          vp test run
+          apps/server/src/lan/FleetBootstrap.test.ts
+          apps/server/src/lan/FleetDelivery.test.ts
+          apps/server/src/lan/FleetFiles.test.ts
+          apps/server/src/lan/FleetEnrollment.test.ts
+          apps/server/src/lan/LanFleet.test.ts
+          apps/server/src/auth/RpcAuthorization.test.ts
+          apps/server/src/ws.test.ts
+          apps/desktop/src/app/DesktopDistribution.test.ts
+          apps/server/src/lan/nativeBootstrap.test.ts
+          packages/client-runtime/src/connection/onboarding.test.ts
+          packages/client-runtime/src/state/commandPermissions.test.ts
+          apps/web/src/connection/lanFleetPolling.test.ts

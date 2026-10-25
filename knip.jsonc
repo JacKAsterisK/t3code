@@ -45,6 +45,8 @@
         "src/claude-history-worker.ts!",
         "src/lan/nativeMaintenanceEntry.ts!",
         "scripts/cli.ts",
+        // Offline roster metadata editor is invoked explicitly by filename.
+        "scripts/lan-fleet-roster.ts",
         "scripts/evaluate-thread-titles.ts",
         "scripts/fetch-expo-schema.ts",
         "scripts/measure-pr-preview.ts",

@@ -11,6 +11,7 @@ import {
   AuthOrchestrationReadScope,
   AuthPreviewOperateScope,
   AuthSettingsWriteScope,
+  AuthEnvironmentMaintainScope,
   AuthSourceControlWriteScope,
   ThreadId,
   EnvironmentId,
@@ -60,6 +61,29 @@ const setup = Effect.gen(function* () {
 });
 
 describe("command permissions", () => {
+  it.effect("keeps fleet credential delivery behind the destination maintenance grant", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const fleet = createCommandPermissions(runtime, WS_METHODS.serverSyncLanFleet);
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(fleet.permissionAtom(env))).toBe(false);
+        expect((yield* fleet.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthEnvironmentMaintainScope],
+            permissions: [AuthEnvironmentMaintainScope],
+          }),
+        );
+        expect(registry.get(fleet.permissionAtom(env))).toBe(true);
+        yield* fleet.authorize(registry, env);
+      }),
+    ),
+  );
   it.effect("requires the destination preview grant to close a browser tab", () =>
     Effect.scoped(
       Effect.gen(function* () {

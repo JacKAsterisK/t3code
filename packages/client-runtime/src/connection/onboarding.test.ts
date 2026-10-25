@@ -154,10 +154,13 @@ function layerPairingHttp(
   return RpcHttp.layerRemoteHttpClient(fetchFn);
 }
 
-function layerPairingOnboarding(options?: Parameters<typeof layerPairingHttp>[1]) {
+function layerPairingOnboarding(
+  options?: Parameters<typeof layerPairingHttp>[1],
+  calls: Array<{ readonly url: string; readonly init: RequestInit }> = [],
+) {
   const dependencies = Layer.mergeAll(
     layerClientPresentation,
-    layerPairingHttp([], options),
+    layerPairingHttp(calls, options),
     Layer.mock(Persistence.ConnectionTargetStore)({
       list: Effect.succeed([]),
       listDisabled: Effect.succeed([]),
@@ -224,6 +227,25 @@ const registerSwitchedOffEnvironment = Effect.gen(function* () {
 });
 
 describe("connection onboarding", () => {
+  it.effect(
+    "skips a known fleet identity before discovery or spending a code and preserves its disabled state",
+    () => {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      return Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        const before = yield* registerSwitchedOffEnvironment;
+        const result = yield* onboarding.registerPairing({
+          ...PAIRING_INPUT,
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          skipExisting: true,
+        });
+        expect(result).toBe(PAIRED_ENVIRONMENT_ID);
+        expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
+        expect(calls).toEqual([]);
+      }).pipe(Effect.provide(layerPairingOnboarding(undefined, calls)));
+    },
+  );
   it.effect("prepares a persisted bearer registration from pairing details", () =>
     Effect.gen(function* () {
       const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];

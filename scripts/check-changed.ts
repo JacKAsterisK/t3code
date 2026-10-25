@@ -12,6 +12,8 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Effect from "effect/Effect";
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
 
 const root = NodePath.resolve(import.meta.dirname, "..");
@@ -103,7 +105,13 @@ console.log(`check:changed: ${files.length} files since ${base.slice(0, 12)}`);
 const results = steps.map((step) => {
   console.log(`\n> vp ${step.name}`);
   const started = performance.now();
-  const { status } = NodeChildProcess.spawnSync("vp", step.args, { cwd: root, stdio: "inherit" });
+  // Windows cannot execute npm's .cmd shim through spawnSync without a shell.
+  const windows = Effect.runSync(HostProcess.Platform) === "win32";
+  const command = windows ? Effect.runSync(HostProcess.ExecutablePath) : "vp";
+  const args = windows
+    ? [NodePath.join(root, "node_modules/vite-plus/bin/vp"), ...step.args]
+    : step.args;
+  const { status } = NodeChildProcess.spawnSync(command, args, { cwd: root, stdio: "inherit" });
   const seconds = ((performance.now() - started) / 1000).toFixed(1);
   return { name: step.name, ok: status === 0, seconds };
 });

@@ -29,6 +29,14 @@ import {
 import * as RpcAuthorization from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
+  it("requires maintenance permission to issue or receive fleet pairing credentials", () => {
+    for (const method of [
+      WS_METHODS.serverSyncLanFleet,
+      WS_METHODS.serverGetLanFleetSetup,
+      WS_METHODS.serverConfigureLanFleet,
+    ])
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthEnvironmentMaintainScope);
+  });
   it("declares exactly one scope for every RPC in the server group", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });

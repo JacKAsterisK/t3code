@@ -39,6 +39,7 @@ export interface PairingConnectionInput {
   readonly host?: string;
   readonly pairingCode?: string;
   readonly expectedEnvironmentId?: EnvironmentId;
+  readonly skipExisting?: boolean;
 }
 
 export interface SshConnectionInput {
@@ -147,8 +148,14 @@ export const preparePairingRegistration = Effect.fn(
 const registerPairingConnection = Effect.fn(
   "clientRuntime.connection.onboarding.registerPairingConnection",
 )(function* (input: PairingConnectionInput) {
-  const registration = yield* preparePairingRegistration(input);
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  if (
+    input.skipExisting === true &&
+    input.expectedEnvironmentId !== undefined &&
+    (yield* SubscriptionRef.get(registry.entries)).has(input.expectedEnvironmentId)
+  )
+    return input.expectedEnvironmentId;
+  const registration = yield* preparePairingRegistration(input);
   if (!(yield* registry.register(registration))) return registration.target.environmentId;
   yield* registry.setCompatibility(registration.target.environmentId, null);
   yield* registry

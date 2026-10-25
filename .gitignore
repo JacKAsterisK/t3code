@@ -46,3 +46,9 @@ node_modules/
 
 # pnpm content-addressable store; never belongs in the repo.
 .pnpm-store/
+
+# Private fleet metadata and enrollment state belong in runtime storage.
+lan-fleet-private.json
+lan-fleet-state.json
+fleet-roster.json
+fleet-deliveries/

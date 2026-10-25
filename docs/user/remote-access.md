@@ -1,5 +1,12 @@
 # Remote access
 
+For an administrator-configured LAN desktop fleet, **Settings → Connections →
+LAN machine links** can send links to approved recipients and collect links
+assigned to this machine. Choose one recipient or all ready machines, then create
+links. **Sync now** picks up assignments immediately. If automatic pickup has been
+enabled, the open desktop app checks every five minutes. Existing connections are
+kept, and uncertain pickups pause for review instead of replacing credentials.
+
 Connect a phone, browser, or another desktop app to T3 Code running on a different
 machine. That machine must stay running and reachable while you work.
 

@@ -134,40 +134,34 @@ export const make = Effect.gen(function* () {
   const passwordPrompt = SshAuth.SshPasswordPrompt.of(makePasswordPrompt(prompts));
 
   return DesktopSshEnvironment.of({
-    discoverHosts: (input) =>
-      discoverDesktopSshHostsEffect(input).pipe(
-        Effect.provide(runtimeContext),
-        Effect.withSpan("desktop.ssh.discoverHosts"),
-      ),
-    resolveHost: (alias) =>
-      resolveSshTarget(alias.trim()).pipe(
-        Effect.provide(runtimeContext),
-        Effect.withSpan("desktop.ssh.resolveHost"),
-      ),
-    ensureEnvironment: (target, ensureOptions) =>
-      isLanDistribution
-        ? Effect.fail(
+    discoverHosts: Effect.fn("desktop.ssh.discoverHosts")(function* (input) {
+      return yield* discoverDesktopSshHostsEffect(input);
+    }, Effect.provide(runtimeContext)),
+    resolveHost: Effect.fn("desktop.ssh.resolveHost")(function* (alias) {
+      return yield* resolveSshTarget(alias.trim());
+    }, Effect.provide(runtimeContext)),
+    ensureEnvironment: Effect.fn("desktop.ssh.ensureEnvironment")(
+      function* (target, ensureOptions) {
+        if (isLanDistribution)
+          return yield* Effect.fail(
             new SshLaunchError({
               message:
                 "Automatic SSH runtime installation and pairing are unavailable in this LAN distribution. Connect to an independently installed, approved native environment instead.",
               stdout: "",
             }),
-          )
-        : manager
-            .ensureEnvironment(target, ensureOptions)
-            .pipe(
-              Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
-              Effect.provide(runtimeContext),
-              Effect.withSpan("desktop.ssh.ensureEnvironment"),
-            ),
-    disconnectEnvironment: (target) =>
-      manager
-        .disconnectEnvironment(target)
-        .pipe(
-          Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
-          Effect.provide(runtimeContext),
-          Effect.withSpan("desktop.ssh.disconnectEnvironment"),
-        ),
+          );
+        return yield* manager.ensureEnvironment(target, ensureOptions);
+      },
+      Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
+      Effect.provide(runtimeContext),
+    ),
+    disconnectEnvironment: Effect.fn("desktop.ssh.disconnectEnvironment")(
+      function* (target) {
+        return yield* manager.disconnectEnvironment(target);
+      },
+      Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
+      Effect.provide(runtimeContext),
+    ),
   });
 });
 

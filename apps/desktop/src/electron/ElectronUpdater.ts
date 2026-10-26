@@ -83,57 +83,67 @@ export class ElectronUpdater extends Context.Service<
 
 /** @public */
 export const make = ElectronUpdater.of({
-  setFeedURL: (options) =>
-    Effect.suspend(() => {
+  setFeedURL: Effect.fn("ElectronUpdater.setFeedURL")(function (options) {
+    return Effect.suspend(() => {
       if (!nativeUpdatesEnabled) return Effect.void;
       ElectronUpdaterRuntime.autoUpdater.setFeedURL(options);
       return Effect.void;
-    }),
-  setAutoDownload: (value) =>
-    Effect.suspend(() => {
+    });
+  }),
+  setAutoDownload: Effect.fn("ElectronUpdater.setAutoDownload")(function (value) {
+    return Effect.suspend(() => {
       if (!nativeUpdatesEnabled) return Effect.void;
       ElectronUpdaterRuntime.autoUpdater.autoDownload = value;
       return Effect.void;
-    }),
-  setAutoInstallOnAppQuit: (value) =>
-    Effect.suspend(() => {
+    });
+  }),
+  setAutoInstallOnAppQuit: Effect.fn("ElectronUpdater.setAutoInstallOnAppQuit")(function (value) {
+    return Effect.suspend(() => {
       if (!nativeUpdatesEnabled) return Effect.void;
       ElectronUpdaterRuntime.autoUpdater.autoInstallOnAppQuit = value;
       return Effect.void;
-    }),
-  setChannel: (channel) =>
-    Effect.suspend(() => {
+    });
+  }),
+  setChannel: Effect.fn("ElectronUpdater.setChannel")(function (channel) {
+    return Effect.suspend(() => {
       if (!nativeUpdatesEnabled) return Effect.void;
       ElectronUpdaterRuntime.autoUpdater.channel = channel;
       return Effect.void;
-    }),
-  setAllowPrerelease: (value) =>
-    Effect.suspend(() => {
+    });
+  }),
+  setAllowPrerelease: Effect.fn("ElectronUpdater.setAllowPrerelease")(function (value) {
+    return Effect.suspend(() => {
       if (!nativeUpdatesEnabled) return Effect.void;
       ElectronUpdaterRuntime.autoUpdater.allowPrerelease = value;
       return Effect.void;
-    }),
+    });
+  }),
   allowDowngrade: Effect.sync(() =>
     nativeUpdatesEnabled ? ElectronUpdaterRuntime.autoUpdater.allowDowngrade : false,
   ),
-  setAllowDowngrade: (value) =>
-    Effect.suspend(() => {
+  setAllowDowngrade: Effect.fn("ElectronUpdater.setAllowDowngrade")(function (value) {
+    return Effect.suspend(() => {
       if (!nativeUpdatesEnabled) return Effect.void;
       ElectronUpdaterRuntime.autoUpdater.allowDowngrade = value;
       return Effect.void;
-    }),
-  setFullChangelog: (value) =>
-    Effect.suspend(() => {
+    });
+  }),
+  setFullChangelog: Effect.fn("ElectronUpdater.setFullChangelog")(function (value) {
+    return Effect.suspend(() => {
       if (!nativeUpdatesEnabled) return Effect.void;
       ElectronUpdaterRuntime.autoUpdater.fullChangelog = value;
       return Effect.void;
-    }),
-  setDisableDifferentialDownload: (value) =>
-    Effect.suspend(() => {
-      if (!nativeUpdatesEnabled) return Effect.void;
-      ElectronUpdaterRuntime.autoUpdater.disableDifferentialDownload = value;
-      return Effect.void;
-    }),
+    });
+  }),
+  setDisableDifferentialDownload: Effect.fn("ElectronUpdater.setDisableDifferentialDownload")(
+    function (value) {
+      return Effect.suspend(() => {
+        if (!nativeUpdatesEnabled) return Effect.void;
+        ElectronUpdaterRuntime.autoUpdater.disableDifferentialDownload = value;
+        return Effect.void;
+      });
+    },
+  ),
   checkForUpdates: Effect.suspend(() => {
     if (!nativeUpdatesEnabled)
       return Effect.fail(
@@ -162,8 +172,11 @@ export const make = ElectronUpdater.of({
       catch: (cause) => new ElectronUpdaterDownloadUpdateError({ channel, cause }),
     }).pipe(Effect.asVoid);
   }),
-  quitAndInstall: ({ isSilent, isForceRunAfter }) =>
-    Effect.suspend(() => {
+  quitAndInstall: Effect.fn("ElectronUpdater.quitAndInstall")(function ({
+    isSilent,
+    isForceRunAfter,
+  }) {
+    return Effect.suspend(() => {
       if (!nativeUpdatesEnabled)
         return Effect.fail(
           new ElectronUpdaterQuitAndInstallError({
@@ -184,8 +197,9 @@ export const make = ElectronUpdater.of({
             cause,
           }),
       });
-    }),
-  on: (eventName, listener) => {
+    });
+  }),
+  on: Effect.fn("ElectronUpdater.on")(function (eventName, listener) {
     if (!nativeUpdatesEnabled) return Effect.void;
     const eventTarget = ElectronUpdaterRuntime.autoUpdater as unknown as {
       on: (eventName: string, listener: (...args: Array<unknown>) => void) => void;
@@ -201,7 +215,7 @@ export const make = ElectronUpdater.of({
           eventTarget.removeListener(eventName, untypedListener);
         }),
     ).pipe(Effect.asVoid);
-  },
+  }),
 });
 
 export const layer = Layer.succeed(ElectronUpdater, make);

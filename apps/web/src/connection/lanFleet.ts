@@ -15,7 +15,7 @@ import {
 import { Atom } from "effect/reactivity";
 import * as Schema from "effect/Schema";
 import { environmentCatalog } from "./catalog";
-import { resolveFleetEnvironmentId } from "./lanFleetEnvironment";
+import { resolveFleetEnvironmentId, resolveNativeWindowsPrimary } from "./lanFleetEnvironment";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { connectPairing } from "./onboarding";
 import { connectionAtomRuntime } from "./runtime";
@@ -49,15 +49,22 @@ const isFleetError = Schema.is(LanFleetError);
 export function useLanFleet() {
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   // Only the desktop-managed primary is a local Windows host; web and configured remotes are not.
-  let isDesktopManagedPrimary = false;
+  let nativePrimary: ReturnType<typeof resolveNativeWindowsPrimary> = null;
+  let isWindows = false;
   try {
-    isDesktopManagedPrimary = readPrimaryEnvironmentTarget()?.source === "desktop-managed";
+    isWindows = window.desktopBridge?.getClientPlatform?.() === "win32";
+    nativePrimary = resolveNativeWindowsPrimary(
+      window.desktopBridge,
+      readPrimaryEnvironmentTarget(),
+    );
   } catch {
     // An incomplete desktop bootstrap is not evidence that the primary is local.
+    isWindows = false;
   }
   const environmentId = resolveFleetEnvironmentId(
     [...catalog.entries.values()].map((entry) => entry.target),
-    isDesktopManagedPrimary,
+    nativePrimary,
+    isWindows,
   );
   const allowed = useAtomValue(
     environmentId === null ? deniedAtom : syncFleet.permissionAtom(environmentId),

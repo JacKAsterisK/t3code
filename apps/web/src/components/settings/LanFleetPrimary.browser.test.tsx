@@ -13,9 +13,12 @@ vi.mock(import("@effect/atom-react"), async (original) => ({
   ...(await original()),
   useAtomValue: ((atom: unknown) => (atom === state.catalogKey ? state.catalog : null)) as never,
 }));
-vi.mock(import("../../connection/catalog"), () => ({
-  environmentCatalog: { catalogValueAtom: state.catalogKey } as never,
-}));
+vi.mock(import("../../connection/catalog"), async () => {
+  const { Atom } = await import("effect/reactivity");
+  // Upstream primary-environment state reads this atom before React renders.
+  state.catalogKey = Atom.make(() => state.catalog);
+  return { environmentCatalog: { catalogValueAtom: state.catalogKey } as never };
+});
 vi.mock(import("../../environments/primary/target"), async (original) => ({
   ...(await original()),
   readPrimaryEnvironmentTarget: (() =>

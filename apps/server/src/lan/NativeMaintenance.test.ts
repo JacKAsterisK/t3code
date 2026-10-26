@@ -109,7 +109,29 @@ const fixtureAtMigration = (toMigrationInclusive?: number) =>
           thread_id: "thread:warm",
         });
       });
-    return { request, mutate, insert, warm, dbPath };
+    const appendEvent = (aggregateKind: "project" | "thread", sequence: number) =>
+      insert("orchestration_events", "fixture", {
+        sequence,
+        event_id: `event:${sequence}`,
+        aggregate_kind: aggregateKind,
+        stream_id: `${aggregateKind}:fixture`,
+        stream_version: sequence,
+        event_type: `${aggregateKind}.created`,
+        occurred_at: "2026-10-25T00:00:00.000Z",
+        actor_kind: "user",
+        application_event_version: 2,
+        metadata_json: "{}",
+        payload_json: JSON.stringify({
+          id: `${aggregateKind}:fixture`,
+          title: "Retained project history",
+          workspaceRoot: "C:/fixture/project",
+          scripts: [],
+          createdAt: "2026-10-25T00:00:00.000Z",
+          updatedAt: "2026-10-25T00:00:00.000Z",
+          deletedAt: null,
+        }),
+      });
+    return { request, mutate, insert, warm, dbPath, appendEvent };
   });
 const fixture = fixtureAtMigration();
 const testLayer = NativeMaintenance.layer(identity).pipe(
@@ -149,6 +171,51 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
         "native_maintenance_refused:io\n",
       );
     }),
+  );
+
+  it.effect.each([
+    { name: "project-only history", threadHead: 0, projectHead: 1 },
+    { name: "project events after thread history", threadHead: 4, projectHead: 5 },
+  ])("accepts the current thread projection with $name", ({ threadHead, projectHead }) =>
+    Effect.gen(function* () {
+      const { request, mutate, appendEvent } = yield* fixture;
+      if (threadHead > 0) yield* appendEvent("thread", threadHead);
+      yield* appendEvent("project", projectHead);
+      yield* mutate(
+        `UPDATE orchestration_v2_projection_metadata SET last_sequence=${threadHead} WHERE projection_name='thread-projections'`,
+      );
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const observed = yield* service.inspect(request);
+      assert.deepEqual(
+        [
+          observed.activeRuns,
+          observed.queuedRuns,
+          observed.pendingRequests,
+          observed.backgroundAgents,
+          observed.scheduledWork,
+          observed.restartContinuations,
+        ],
+        [0, 0, 0, 0, 0, 0],
+      );
+      assert.equal((yield* service.inspect(request)).dataGeneration, observed.dataGeneration);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect.each([
+    { name: "lagging thread projection", lastSequence: 3, schemaVersion: 2 },
+    { name: "thread projection ahead of thread events", lastSequence: 5, schemaVersion: 2 },
+    { name: "unknown thread projection schema", lastSequence: 4, schemaVersion: 3 },
+  ])("refuses a $name even with a later project event", ({ lastSequence, schemaVersion }) =>
+    Effect.gen(function* () {
+      const { request, mutate, appendEvent } = yield* fixture;
+      yield* appendEvent("thread", 4);
+      yield* appendEvent("project", 5);
+      yield* mutate(
+        `UPDATE orchestration_v2_projection_metadata SET last_sequence=${lastSequence},schema_version=${schemaVersion} WHERE projection_name='thread-projections'`,
+      );
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "projection");
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("binds real nonempty WAL bytes even when the main database is unchanged", () =>
@@ -192,7 +259,8 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
     "verifies stopped schema71 history when real SQLite read-only connections create an empty WAL",
     () =>
       Effect.gen(function* () {
-        const { request, mutate, insert, dbPath } = yield* fixtureAtMigration(71);
+        const { request, mutate, insert, dbPath, appendEvent } = yield* fixtureAtMigration(71);
+        yield* appendEvent("project", 1);
         yield* insert("orchestration_v2_projection_runs", "completed", {
           run_id: "run:retained-schema71",
           payload_json: '{"status":"completed","note":"Retained schema71 terminal history"}',
@@ -200,7 +268,9 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
         yield* mutate("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
         assert.isFalse(NodeFS.existsSync(dbPath + "-wal"));
         const service = yield* NativeMaintenance.NativeMaintenance;
+        const inspected = yield* service.inspect(request);
         const result = yield* service.verify({ ...request, operation: "verify" });
+        assert.equal(result.workGeneration, inspected.workGeneration);
         assert.deepEqual(
           [
             result.activeRuns,

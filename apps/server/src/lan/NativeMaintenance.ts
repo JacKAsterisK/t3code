@@ -405,9 +405,10 @@ export const inspectStoppedRepairWork = (databasePath: string) => {
       )
     )
       throw new NativeMaintenanceError({ reason: "schema" });
+    // Match EventStore.latestAgentSequence: thread projections never replay project events.
     const head = db
       .prepare(
-        "SELECT COALESCE(MAX(sequence),0) AS sequence FROM orchestration_events WHERE application_event_version=2",
+        "SELECT COALESCE(MAX(sequence),0) AS sequence FROM orchestration_events WHERE application_event_version=2 AND aggregate_kind='thread'",
       )
       .get()!;
     const projection = db

@@ -43,7 +43,7 @@ const MAX_FILE = 256 * 1024 ** 2;
 const keyPaths = (relative: string) =>
   relative === "package.json" ||
   relative.endsWith("/package.json") ||
-  ["pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc"].includes(relative) ||
+  ["pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".pnpmfile.cjs"].includes(relative) ||
   relative.startsWith("patches/");
 
 export function nativeDependencyRecipeSha256(
@@ -57,6 +57,21 @@ export function nativeDependencyRecipeSha256(
 ) {
   if (command.env.SOURCE_DATE_EPOCH !== "0")
     throw new Error("Reusable dependency installation requires its stable zero build epoch.");
+  const hookFlags = command.args.filter((arg) =>
+    /^--(?:no-)?(?:config\.)?ignore[-_]?pnpmfile(?:=|$)/iu.test(arg),
+  );
+  const hookEnvironment = Object.entries(command.env).filter(
+    ([name]) => name.toLowerCase() === "npm_config_ignore_pnpmfile",
+  );
+  const separator = command.args.indexOf("--");
+  if (
+    hookFlags.length !== 1 ||
+    hookFlags[0] !== "--ignore-pnpmfile" ||
+    (separator >= 0 && command.args.indexOf("--ignore-pnpmfile") > separator) ||
+    hookEnvironment.length !== 1 ||
+    command.env.npm_config_ignore_pnpmfile !== "true"
+  )
+    throw new Error("Dependency reuse requires both explicit package-manager hook ignore guards.");
   const entries = Object.entries(roots).sort(([, a], [, b]) => b.length - a.length);
   for (const [name, root] of entries) {
     if (!/^[A-Z_]+$/u.test(name)) throw new Error("Invalid dependency recipe root name.");
@@ -95,7 +110,12 @@ export function nativeDependencyInputs(
   const packageRoots: string[] = [];
   const localFiles = new Set<string>();
   for (const [relative, bytes] of files) {
-    if (/(?:^|\/)(?:\.pnpmfile\.[cm]?js|pnpm\.config\.[cm]?[jt]s)$/u.test(relative))
+    // Only the root hook disabled by both validated recipe guards is approved.
+    // Its bytes still participate in the key; other hook/config surfaces fail closed.
+    if (
+      relative !== ".pnpmfile.cjs" &&
+      /(?:^|\/)(?:\.pnpmfile\.[cm]?js|pnpm\.config\.[^/]+)$/u.test(relative)
+    )
       throw new Error("Dependency reuse refuses an unreviewed package-manager hook.");
     if (!(relative === "package.json" || relative.endsWith("/package.json"))) continue;
     const value = strictJson(bytes) as {

@@ -251,9 +251,14 @@ it("keys the normalized exact install recipe and refuses varying lifecycle times
     tools = NodePath.resolve(NodeOS.tmpdir(), "recipe-tools");
   const command = {
     executable: NodePath.join(tools, "node.exe"),
-    args: ["install", "--frozen-lockfile"],
+    args: ["install", "--frozen-lockfile", "--ignore-pnpmfile"],
     cwd: source,
-    env: { SOURCE_DATE_EPOCH: "0", ABI: "node26", CACHE: NodePath.join(source, "cache") },
+    env: {
+      SOURCE_DATE_EPOCH: "0",
+      ABI: "node26",
+      CACHE: NodePath.join(source, "cache"),
+      npm_config_ignore_pnpmfile: "true",
+    },
   };
   const first = nativeDependencyRecipeSha256(command, { SOURCE: source, TOOLS: tools });
   const secondSource = NodePath.resolve(NodeOS.tmpdir(), "recipe-two");
@@ -269,7 +274,7 @@ it("keys the normalized exact install recipe and refuses varying lifecycle times
   ).toBe(first);
   expect(
     nativeDependencyRecipeSha256(
-      { ...command, args: ["install", "--prod"] },
+      { ...command, args: ["install", "--prod", "--ignore-pnpmfile"] },
       { SOURCE: source, TOOLS: tools },
     ),
   ).not.toBe(first);
@@ -349,5 +354,74 @@ it("relocates the pinned pnpm store path outside the source root into the new bu
     expect(metadata.storeDir).toBe(NodePath.join(nextOutput, "caches", "pnpmStore"));
   } finally {
     await f.cleanup();
+  }
+});
+
+it("keys the ignored root pnpm hook bytes without allowing other package-manager hooks", () => {
+  const source = NodePath.resolve(NodeOS.tmpdir(), "ignored-hook-recipe");
+  const recipe = nativeDependencyRecipeSha256(
+    {
+      executable: NodePath.join(source, "node.exe"),
+      cwd: source,
+      args: ["install", "--ignore-pnpmfile"],
+      env: { SOURCE_DATE_EPOCH: "0", npm_config_ignore_pnpmfile: "true" },
+    },
+    { SOURCE: source },
+  );
+  const original = inputs();
+  const withoutHook = nativeDependencyInputs(original, "a".repeat(64), recipe);
+  original.set(".pnpmfile.cjs", bytes("throw new Error('must never execute')"));
+  const first = nativeDependencyInputs(original, "a".repeat(64), recipe);
+  expect(first.keySha256).not.toBe(withoutHook.keySha256);
+  const changed = new Map(original);
+  changed.set(".pnpmfile.cjs", bytes("throw new Error('changed ignored hook')"));
+  expect(nativeDependencyInputs(changed, "a".repeat(64), recipe).keySha256).not.toBe(
+    first.keySha256,
+  );
+  for (const name of [
+    ".pnpmfile.mjs",
+    "packages/local/.pnpmfile.cjs",
+    "pnpm.config.js",
+    "pnpm.config.cjs",
+    "pnpm.config.ts",
+    "pnpm.config.json",
+    "packages/local/pnpm.config.mts",
+  ]) {
+    const unknown = new Map(original);
+    unknown.set(name, bytes("throw new Error('unreviewed hook')"));
+    expect(() => nativeDependencyInputs(unknown, "a".repeat(64), recipe)).toThrow(/hook/u);
+  }
+  for (const name of [".npmrc", "pnpm-workspace.yaml"]) {
+    const configured = new Map(original);
+    configured.set(name, bytes("pnpmfile: ./custom-hook.cjs"));
+    expect(() => nativeDependencyInputs(configured, "a".repeat(64), recipe)).toThrow(/hook/u);
+  }
+});
+
+it("requires both pnpm hook ignore guards and refuses contradictory recipe flags", () => {
+  const source = NodePath.resolve(NodeOS.tmpdir(), "ignored-hook-recipe");
+  const command = {
+    executable: NodePath.join(source, "node.exe"),
+    cwd: source,
+    args: ["install", "--ignore-pnpmfile"],
+    env: { SOURCE_DATE_EPOCH: "0", npm_config_ignore_pnpmfile: "true" },
+  };
+  const roots = { SOURCE: source };
+  expect(nativeDependencyRecipeSha256(command, roots)).toMatch(/^[a-f0-9]{64}$/u);
+  for (const args of [
+    ["install"],
+    ["install", "--ignore-pnpmfile=false"],
+    [...command.args, "--ignore-pnpmfile=false"],
+    [...command.args, "--no-ignore-pnpmfile"],
+    [...command.args, "--config.ignore-pnpmfile=false"],
+  ]) {
+    expect(() => nativeDependencyRecipeSha256({ ...command, args }, roots)).toThrow(/hook/u);
+  }
+  for (const env of [
+    { SOURCE_DATE_EPOCH: "0" },
+    { ...command.env, npm_config_ignore_pnpmfile: "false" },
+    { ...command.env, NPM_CONFIG_IGNORE_PNPMFILE: "false" },
+  ]) {
+    expect(() => nativeDependencyRecipeSha256({ ...command, env }, roots)).toThrow(/hook/u);
   }
 });

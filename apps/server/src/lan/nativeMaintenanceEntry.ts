@@ -53,11 +53,13 @@ if (
     const result = await Effect.runPromise(
       Effect.gen(function* () {
         const service = yield* NativeMaintenance.NativeMaintenance;
-        return yield* request.operation === "bootstrap"
-          ? service.bootstrap(request)
-          : request.operation === "inspect"
-            ? service.inspect(request)
-            : service.verify(request);
+        return yield* request.operation === "probe"
+          ? service.probe(request)
+          : request.operation === "bootstrap"
+            ? service.bootstrap(request)
+            : request.operation === "inspect"
+              ? service.inspect(request)
+              : service.verify(request);
       }).pipe(
         Effect.provide([
           NativeMaintenance.layer(identity).pipe(Layer.provide(NativeMaintenance.layerNativeLease)),

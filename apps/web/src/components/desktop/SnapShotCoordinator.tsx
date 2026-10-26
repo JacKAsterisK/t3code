@@ -1,3 +1,4 @@
+import { beginNativePromptWork } from "../../lib/nativePromptReadiness";
 import {
   type DesktopPendingSnapShot,
   type DesktopSnapShotEvent,
@@ -5,7 +6,7 @@ import {
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useEffectEvent, useRef, useState } from "react";
 
 import {
   type DraftId,
@@ -38,6 +39,17 @@ import {
   openQuestionAttachmentDraft,
 } from "../../questionAttachments";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+
+// Native capture can outlive a route/coordinator and arrives before the composer has an image placeholder.
+const nativeCaptureClaims = new Map<string, () => void>();
+export function retainNativeSnapShotUpdate(id: string): void {
+  if (!nativeCaptureClaims.has(id)) nativeCaptureClaims.set(id, beginNativePromptWork());
+}
+export function settleNativeSnapShotUpdate(id: string): void {
+  const release = nativeCaptureClaims.get(id);
+  nativeCaptureClaims.delete(id);
+  release?.();
+}
 
 type CaptureTarget = DraftId | ScopedThreadRef;
 type CaptureFailure = "missing-project" | "delivery";
@@ -158,6 +170,7 @@ export async function deliverSnapShot(
   item: DesktopPendingSnapShot,
   resolveTarget: () => CaptureTarget,
 ): Promise<void> {
+  retainNativeSnapShotUpdate(item.id);
   const store = useComposerDraftStore.getState();
   updateSnapShotAnimationSource(item.id, item.source);
   const capture = await bridge.readSnapShot(item.id);
@@ -222,6 +235,8 @@ export async function deliverSnapShot(
   }
   await bridge.acknowledgeSnapShot(capture.id);
   dispatchSnapShotComposerFocus();
+  // Failed delivery retains the capture for retry; release only after attachment persistence and native acknowledgement.
+  settleNativeSnapShotUpdate(item.id);
 }
 
 export function SnapShotCoordinator() {
@@ -327,10 +342,13 @@ export function SnapShotCoordinator() {
       return drainingRef.current;
     }
 
+    // Enumeration is unknown until every queued native capture has its own persistent claim.
+    const releaseEnumeration = beginNativePromptWork();
     const operation = (async () => {
       do {
         rerunRequestedRef.current = false;
         const pending = await bridge.listPendingSnapShots();
+        for (const item of pending) retainNativeSnapShotUpdate(item.id);
         for (const item of pending) {
           if (!getClientSettings().snapShotEnabled) return;
           playCaptureSound(item.id);
@@ -396,6 +414,7 @@ export function SnapShotCoordinator() {
         );
       })
       .finally(() => {
+        releaseEnumeration();
         drainingRef.current = null;
       });
     drainingRef.current = operation;
@@ -405,7 +424,10 @@ export function SnapShotCoordinator() {
   const drainPending = useEffectEvent(() => drain());
   const handleSnapShotEvent = useEffectEvent(
     (bridge: DesktopSnapShotBridge, event: DesktopSnapShotEvent) => {
+      if (event.type === "failed" && event.id) settleNativeSnapShotUpdate(event.id);
       if (!getClientSettings().snapShotEnabled) return;
+      if (event.type === "requested" || event.type === "started" || event.type === "ready")
+        retainNativeSnapShotUpdate(event.id);
       switch (event.type) {
         case "requested": {
           const current = readSettledTarget(readLastRouteTarget());
@@ -470,7 +492,8 @@ export function SnapShotCoordinator() {
       }
     },
   );
-  useEffect(() => {
+  // Begin pending-queue enumeration before the parent root can acknowledge an empty renderer.
+  useLayoutEffect(() => {
     const bridge = getDesktopSnapShotBridge();
     if (!bridge || !enabled) return;
     void drainPending();

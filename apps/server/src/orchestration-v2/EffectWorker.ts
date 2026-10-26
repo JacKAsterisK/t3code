@@ -1,3 +1,4 @@
+import * as NativeUpdateGate from "../lan/NativeUpdateGate.ts";
 import { CommandId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -606,6 +607,7 @@ export const layerWithOptions = (
     OrchestrationEffectWorkerV2,
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const nativeUpdateAdmission = yield* NativeUpdateGate.captureAdmission();
       const executor = yield* OrchestrationEffectExecutorV2;
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const leaseDurationMs = Math.max(1, options.leaseDurationMs ?? 30_000);
@@ -805,13 +807,15 @@ export const layerWithOptions = (
           return true;
         },
         (effect, _excludeRestartContinuations?: boolean) =>
-          effect.pipe(
-            Effect.mapError((cause) =>
-              isOrchestrationEffectWorkerError(cause)
-                ? cause
-                : new OrchestrationEffectWorkerError({ operation: "run", cause }),
+          nativeUpdateAdmission
+            .withAdmission(effect)
+            .pipe(
+              Effect.mapError((cause) =>
+                isOrchestrationEffectWorkerError(cause)
+                  ? cause
+                  : new OrchestrationEffectWorkerError({ operation: "run", cause }),
+              ),
             ),
-          ),
       );
 
       return OrchestrationEffectWorkerV2.of({

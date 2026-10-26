@@ -154,13 +154,14 @@ const make = Effect.gen(function* () {
     suggestions,
     prepare,
     persist,
-    ready: (record) =>
+    ready: Effect.fn("FleetTransport.ready")((record) =>
       Effect.sync(
         () =>
           record.tls !== undefined &&
           record.tlsEnabled !== false &&
           running?.origin === record.tls.origin,
       ),
+    ),
   });
 });
 export const layerServices = Layer.effect(FleetTransport, make);

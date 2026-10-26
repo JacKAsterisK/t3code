@@ -31,6 +31,8 @@ jobs:
         shell: bash
         run: >-
           vp test run
+          apps/web/src/components/desktop/SnapShotCoordinator.browser.test.ts
+          apps/web/src/lib/nativePromptReadiness.browser.test.tsx
           apps/web/src/components/sidebar/SidebarBrandMark.browser.test.tsx
           apps/web/src/components/settings/LanFleetSetup.browser.test.tsx
           apps/web/src/components/settings/LanFleetPrimary.browser.test.tsx
@@ -63,18 +65,33 @@ jobs:
           scripts/lan/home-repair-cancel.test.ts
           scripts/lan/home-repair-scheduled.test.ts
           scripts/lan/home-repair-work-states.test.ts
+          apps/desktop/src/snapShot/DesktopSnapShot.test.ts
+          apps/desktop/src/updates/DesktopNativeUpdateClose.test.ts
           apps/desktop/src/backend/DesktopBackendManager.test.ts
           apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
           apps/server/src/launcherWatch.test.ts
           apps/server/src/cli/config.test.ts
           apps/server/src/orchestration-v2/ProjectionRecovery.test.ts
           apps/server/src/lan/NativeMaintenance.test.ts
+          apps/server/src/lan/NativeUpdateGate.test.ts
+          apps/server/src/lan/NativeUpdateControl.test.ts
+          apps/server/src/lan/NativeUpdateReadiness.test.ts
+          apps/server/src/background/NativePromptReadiness.test.ts
+          apps/server/src/background/BackgroundPolicy.test.ts
+          apps/server/src/orchestration-v2/EffectWorker.test.ts
+          apps/server/src/orchestration-v2/ThreadLaunchService.test.ts
+          packages/shared/src/nativeUpdateControl.test.ts
+          apps/web/src/lib/nativePromptReadiness.test.ts
+          apps/web/src/lib/backgroundActivityReporter.test.ts
           apps/server/src/mcp/McpToolAccess.test.ts
           apps/server/src/lan/EnvironmentRouting.test.ts
           apps/server/src/lan/NativeTaskService.test.ts
           apps/server/src/lan/RemoteTaskTransport.test.ts
           apps/server/src/persistence/reconcileV2PreviewMigration.test.ts
           apps/server/src/persistence/Migrations/073_ThreadMessageSearch.test.ts
+      - name: Verify execution intake is fenced before persistence
+        shell: bash
+        run: vp test run apps/server/src/orchestration-v2/runtimeLayer.test.ts apps/server/src/scheduledTasks/ScheduledTaskService.webhook.test.ts -t 'native update admission'
       - name: Verify synthetic enrollment, delivery, polling, and retained-home behavior
         shell: bash
         run: >-

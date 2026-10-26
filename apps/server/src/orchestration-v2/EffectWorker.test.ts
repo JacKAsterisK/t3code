@@ -21,6 +21,8 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Fiber from "effect/Fiber";
+import * as NativeUpdateGate from "../lan/NativeUpdateGate.ts";
 
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as CheckpointService from "./CheckpointService.ts";
@@ -36,6 +38,43 @@ import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
+
+it.effect(
+  "defers effect claims before side effects while native update admission is reserved",
+  () =>
+    Effect.gen(function* () {
+      const gate = yield* NativeUpdateGate.NativeUpdateGate;
+      const claims = yield* Ref.make(0);
+      const layerWorker = EffectWorker.layerWithOptions().pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(EffectOutbox.EffectOutboxV2)({
+              claimNext: () =>
+                Ref.update(claims, (count) => count + 1).pipe(Effect.as(Option.none())),
+            }),
+            Layer.mock(EffectWorker.OrchestrationEffectExecutorV2)({}),
+          ),
+        ),
+      );
+      const reservation = yield* gate.reserve({
+        id: "effect-worker-update",
+        timeout: "1 second",
+        inspectReady: Effect.succeed(true),
+        freezeDrafts: () => Effect.succeed(true),
+        verifyFrozenDrafts: () => Effect.succeed(true),
+        thawDrafts: () => Effect.void,
+      });
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
+        Effect.flatMap((service) => service.runOnce),
+        Effect.provide(layerWorker),
+        Effect.forkChild({ startImmediately: true }),
+      );
+      assert.strictEqual(yield* Ref.get(claims), 0);
+      yield* reservation.release;
+      assert.strictEqual(yield* Fiber.join(worker), false);
+      assert.strictEqual(yield* Ref.get(claims), 1);
+    }).pipe(Effect.provide(NativeUpdateGate.layer)),
+);
 const oldSessionId = ProviderSessionId.make("provider-session:effect-worker-restart:old");
 const providerThreadId = ProviderThreadId.make("provider-thread:effect-worker-restart");
 const providerTurnId = ProviderTurnId.make("provider-turn:effect-worker-restart");

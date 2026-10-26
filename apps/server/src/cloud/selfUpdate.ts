@@ -212,7 +212,10 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         reason: distributionUpdateGuidance,
       }),
     );
-    return ServerSelfUpdate.of({ update: () => refusal, commitDesktopUpdate: () => refusal });
+    return ServerSelfUpdate.of({
+      update: Effect.fn("ServerSelfUpdate.update")(() => refusal),
+      commitDesktopUpdate: Effect.fn("ServerSelfUpdate.commitDesktopUpdate")(() => refusal),
+    });
   }
   const serverConfig = yield* ServerConfig.ServerConfig;
   const desktopAppUpdate = yield* DesktopAppUpdate.DesktopAppUpdate;

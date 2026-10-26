@@ -64,6 +64,13 @@ export type ClientKind = typeof ClientKind.Type;
 export const ClientActivityClientId = TrimmedNonEmptyString.check(Schema.isMaxLength(128));
 export type ClientActivityClientId = typeof ClientActivityClientId.Type;
 
+export const NativePromptActivity = Schema.Struct({
+  protocolVersion: Schema.Literal(1),
+  hasUnsentPrompt: Schema.Boolean,
+  preparedReservationId: Schema.NullOr(Schema.String),
+});
+export type NativePromptActivity = typeof NativePromptActivity.Type;
+
 export const ClientActivityReportInput = Schema.Struct({
   environmentId: Schema.optionalKey(EnvironmentId),
   clientId: ClientActivityClientId,
@@ -75,6 +82,7 @@ export const ClientActivityReportInput = Schema.Struct({
   lowPowerMode: Schema.optionalKey(BackgroundBooleanState),
   batteryState: Schema.optionalKey(Schema.Literals(["unknown", "unplugged", "charging", "full"])),
   networkType: Schema.optionalKey(Schema.String),
+  nativeUpdate: Schema.optionalKey(NativePromptActivity),
   scopes: Schema.Array(BackgroundScope),
   ttlMs: Schema.optionalKey(Schema.Number),
   observedAt: Schema.DateTimeUtc,
@@ -93,6 +101,7 @@ export const ClientActivityLease = Schema.Struct({
   lowPowerMode: Schema.optionalKey(BackgroundBooleanState),
   batteryState: Schema.optionalKey(Schema.Literals(["unknown", "unplugged", "charging", "full"])),
   networkType: Schema.optionalKey(Schema.String),
+  nativeUpdate: Schema.optionalKey(NativePromptActivity),
   scopes: Schema.Array(BackgroundScope),
   updatedAt: Schema.DateTimeUtc,
   expiresAt: Schema.DateTimeUtc,
@@ -100,6 +109,7 @@ export const ClientActivityLease = Schema.Struct({
 export type ClientActivityLease = typeof ClientActivityLease.Type;
 
 export const BackgroundPolicySnapshot = Schema.Struct({
+  nativeUpdate: Schema.optionalKey(Schema.Struct({ reservationId: Schema.NullOr(Schema.String) })),
   hostPower: HostPowerSnapshot,
   leases: Schema.Array(ClientActivityLease),
   activeForegroundLeaseCount: Schema.Number,

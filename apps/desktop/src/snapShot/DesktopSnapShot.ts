@@ -128,6 +128,7 @@ const DesktopSnapShotOperation = Schema.Literals([
   "no-window-selected",
   "window-unavailable",
   "capture",
+  "update-reserved",
 ]);
 
 export class DesktopSnapShotError extends Schema.TaggedError<DesktopSnapShotError>()(
@@ -156,6 +157,8 @@ export class DesktopSnapShotError extends Schema.TaggedError<DesktopSnapShotErro
         return "The active window is not available for capture.";
       case "capture":
         return "Could not capture the active window.";
+      case "update-reserved":
+        return "An update is being prepared. Try the snapshot again shortly.";
     }
   }
 }
@@ -190,6 +193,10 @@ export class DesktopSnapShot extends Context.Service<
     ) => Effect.Effect<DesktopSnapShotShortcutAvailability>;
     readonly setShortcutSuppressed: (suppressed: boolean) => Effect.Effect<void>;
     readonly capture: Effect.Effect<void, DesktopSnapShotError>;
+    readonly reserveNativeUpdateClose: Effect.Effect<
+      Option.Option<{ readonly release: Effect.Effect<void> }>,
+      DesktopSnapShotError
+    >;
     readonly listPending: Effect.Effect<
       ReadonlyArray<DesktopPendingSnapShot>,
       DesktopSnapShotError
@@ -808,6 +815,8 @@ export const make = Effect.gen(function* () {
   let portalShortcut: PortalCaptureShortcut | undefined;
   let shortcutGeneration = 0;
   let shortcutSuppressed = false;
+  let nativeUpdateOwner: symbol | undefined;
+  let activeCaptures = 0;
   let lastShortcutAt: bigint | undefined;
   let stopShiftShortcut: (() => void) | undefined;
   const showCaptureWindow =
@@ -997,7 +1006,7 @@ export const make = Effect.gen(function* () {
     }).pipe(Effect.mapError((cause) => captureFailure(cause, id)));
   });
 
-  const capture = Effect.gen(function* () {
+  const captureBody = Effect.gen(function* () {
     const settings = yield* Ref.get(settingsRef);
     if (!settings.snapShotEnabled) {
       return yield* new DesktopSnapShotError({ operation: "disabled" });
@@ -1027,9 +1036,57 @@ export const make = Effect.gen(function* () {
     );
   }).pipe(Effect.withSpan("desktop.snapShot.capture"));
 
+  const capture = Effect.acquireUseRelease(
+    Effect.sync(() => {
+      if (nativeUpdateOwner !== undefined) return false;
+      activeCaptures++;
+      return true;
+    }),
+    (admitted) =>
+      admitted
+        ? captureBody
+        : Effect.fail(new DesktopSnapShotError({ operation: "update-reserved" })),
+    (admitted) =>
+      Effect.sync(() => {
+        if (admitted) activeCaptures--;
+      }),
+  );
+
+  const reserveNativeUpdateClose = Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function* () {
+      const owner = yield* Effect.sync(() => {
+        if (nativeUpdateOwner !== undefined || activeCaptures > 0 || transition.isAnimating)
+          return undefined;
+        const owner = Symbol();
+        nativeUpdateOwner = owner;
+        return owner;
+      });
+      if (owner === undefined) return Option.none();
+      const release = Effect.sync(() => {
+        if (nativeUpdateOwner === owner) nativeUpdateOwner = undefined;
+      });
+      const names = yield* restore(
+        fileSystem.readDirectory(captureDirectory).pipe(
+          Effect.catchTags({
+            PlatformError: (cause) =>
+              cause.reason._tag === "NotFound" ? Effect.succeed([]) : Effect.fail(cause),
+          }),
+          Effect.mapError(
+            (cause) => new DesktopSnapShotError({ operation: "list-pending", cause }),
+          ),
+        ),
+      ).pipe(Effect.onError(() => release));
+      if (names.length > 0) {
+        yield* release;
+        return Option.none();
+      }
+      return Option.some({ release });
+    }),
+  );
+
   const captureFromShortcut = Effect.gen(function* () {
     // Repeated shortcuts must not replace a capture during its flight.
-    if (shortcutSuppressed || transition.isAnimating) return;
+    if (shortcutSuppressed || nativeUpdateOwner !== undefined || transition.isAnimating) return;
     shortcutVerified = true;
     const now = yield* Clock.currentTimeNanos;
     if (lastShortcutAt !== undefined && now - lastShortcutAt < SHORTCUT_COOLDOWN_NS) return;
@@ -1677,6 +1734,7 @@ export const make = Effect.gen(function* () {
     checkShortcut,
     setShortcutSuppressed,
     capture,
+    reserveNativeUpdateClose,
     listPending: fileSystem.readDirectory(captureDirectory).pipe(
       Effect.catchTags({
         PlatformError: (cause) =>

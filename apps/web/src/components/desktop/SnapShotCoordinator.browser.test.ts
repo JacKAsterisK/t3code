@@ -1,3 +1,4 @@
+import { nativePromptReadiness } from "../../lib/nativePromptReadiness";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -12,6 +13,8 @@ import {
 import {
   beginSnapShotAnimationWhenReady,
   deliverSnapShot,
+  retainNativeSnapShotUpdate,
+  settleNativeSnapShotUpdate,
   dismissFailedSnapShot,
   resolveExistingSnapShotTarget,
   resolveSnapShotAttachmentTarget,
@@ -50,6 +53,7 @@ const projectRef = scopeProjectRef(environmentId, ProjectId.make("snap-shot-proj
 
 // Tests stub globals and spy on module exports freely; disposing restores all of them.
 function setup(): Disposable {
+  nativePromptReadiness.setRootReady(true);
   storage.clear();
   vi.stubGlobal("localStorage", storage);
   useComposerDraftStore.setState({
@@ -61,6 +65,8 @@ function setup(): Disposable {
   });
   return {
     [Symbol.dispose]() {
+      settleNativeSnapShotUpdate("12345678-1234-1234-1234-123456789abc");
+      nativePromptReadiness.setRootReady(false);
       dismissAllSnapShotAnimations();
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
@@ -129,6 +135,25 @@ describe("open question delivery", () => {
     const bridge = { readSnapShot, acknowledgeSnapShot } as unknown as DesktopSnapShotBridge;
     return { bridge, acknowledgeSnapShot };
   };
+
+  it("claims capture work from native request through delayed read and durable delivery", async () => {
+    using _env = setup();
+    let finishRead!: (value: typeof capture) => void;
+    const read = new Promise<typeof capture>((resolve) => {
+      finishRead = resolve;
+    });
+    const { bridge } = makeBridge(() => read);
+    retainNativeSnapShotUpdate(capture.id);
+    expect(nativePromptReadiness.report(environmentId)?.hasUnsentPrompt).toBe(true);
+    const delivered = deliverSnapShot(bridge, capture, () => threadRef);
+    expect(nativePromptReadiness.report(environmentId)?.hasUnsentPrompt).toBe(true);
+    finishRead(capture);
+    await delivered;
+    expect(
+      useComposerDraftStore.getState().getComposerDraft(threadRef)?.persistedAttachments,
+    ).toHaveLength(1);
+    expect(nativePromptReadiness.report(environmentId)?.hasUnsentPrompt).toBe(false);
+  });
 
   it("attaches a capture to the open question draft and leaves the thread draft alone", async () => {
     using _env = setup();
@@ -246,6 +271,7 @@ describe("durable snapshot delivery", () => {
           "could not be saved",
         );
         expect(acknowledgeSnapShot).not.toHaveBeenCalled();
+        expect(nativePromptReadiness.report(environmentId)?.hasUnsentPrompt).toBe(true);
         expect(
           useComposerDraftStore.getState().getComposerDraft(target)?.nonPersistedImageIds,
         ).toContain(capture.id);

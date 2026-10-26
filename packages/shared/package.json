@@ -27,6 +27,10 @@
       "types": "./src/nativeHomeSelection.ts",
       "import": "./src/nativeHomeSelection.ts"
     },
+    "./nativeUpdateControl": {
+      "types": "./src/nativeUpdateControl.ts",
+      "import": "./src/nativeUpdateControl.ts"
+    },
     "./nativeAdmission": {
       "types": "./src/nativeAdmission.ts",
       "import": "./src/nativeAdmission.ts"

@@ -1,7 +1,9 @@
+import { nativePromptReadiness } from "./nativePromptReadiness";
 import { EnvironmentRegistry } from "@t3tools/client-runtime/connection";
 import {
   EnvironmentRpcSubscriptionObserver,
   request,
+  subscribe,
   type EnvironmentRpcSubscriptionObservation,
 } from "@t3tools/client-runtime/rpc";
 import {
@@ -93,6 +95,7 @@ function createActivityReport(
       scopes.push(entry.scope);
     }
   }
+  const nativeUpdate = nativePromptReadiness.report(environmentId);
   return {
     environmentId,
     clientId: getClientId(),
@@ -104,6 +107,7 @@ function createActivityReport(
     scopes,
     ttlMs: LEASE_TTL_MS,
     observedAt: DateTime.makeUnsafe(observedAtMs),
+    ...(nativeUpdate === undefined ? {} : { nativeUpdate }),
   };
 }
 
@@ -215,6 +219,7 @@ export const layer = Layer.effectDiscard(
     yield* Effect.acquireRelease(
       Effect.sync(() => {
         retainedScopeListeners.add(requestReport);
+        const releaseNativePromptListener = nativePromptReadiness.subscribe(requestReport);
         document.addEventListener("visibilitychange", requestReport);
         window.addEventListener("focus", requestReport);
         window.addEventListener("blur", requestReport);
@@ -223,9 +228,11 @@ export const layer = Layer.effectDiscard(
         window.addEventListener("keydown", recordInteraction);
         window.addEventListener("wheel", recordInteraction, passiveListenerOptions);
         window.addEventListener("touchstart", recordInteraction, passiveListenerOptions);
+        return releaseNativePromptListener;
       }),
-      () =>
+      (releaseNativePromptListener) =>
         Effect.sync(() => {
+          releaseNativePromptListener();
           retainedScopeListeners.delete(requestReport);
           document.removeEventListener("visibilitychange", requestReport);
           window.removeEventListener("focus", requestReport);
@@ -238,6 +245,32 @@ export const layer = Layer.effectDiscard(
         }),
     );
 
+    yield* SubscriptionRef.changes(registry.entries).pipe(
+      Stream.switchMap((entries) =>
+        Stream.mergeAll(
+          Array.from(entries.keys(), (environmentId) =>
+            registry
+              .runStream(environmentId, subscribe(WS_METHODS.subscribeBackgroundPolicy, {}))
+              .pipe(
+                Stream.tap((policy) =>
+                  Effect.sync(() => {
+                    // Missing policy and disconnects never thaw a possibly terminal closing reservation.
+                    if (policy.nativeUpdate !== undefined)
+                      nativePromptReadiness.setReservation(
+                        environmentId,
+                        policy.nativeUpdate.reservationId,
+                      );
+                  }),
+                ),
+                Stream.catchCause(() => Stream.empty),
+              ),
+          ),
+          { concurrency: "unbounded" },
+        ),
+      ),
+      Stream.runDrain,
+      Effect.forkScoped,
+    );
     yield* SubscriptionRef.changes(registry.entries).pipe(
       Stream.runForEach(() => Effect.sync(requestReport)),
       Effect.forkScoped,

@@ -1,3 +1,4 @@
+import { NativePromptFreezeRoot } from "../lib/nativePromptReadiness";
 import { LanFleetCoordinator } from "../components/settings/LanFleetSettings";
 import { type ServerLifecycleWelcomePayload } from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -134,7 +135,9 @@ function RootRouteView() {
   return (
     <ToastProvider>
       <AnchoredToastProvider>
-        <RootRouteBranch />
+        <NativePromptFreezeRoot>
+          <RootRouteBranch />
+        </NativePromptFreezeRoot>
       </AnchoredToastProvider>
     </ToastProvider>
   );

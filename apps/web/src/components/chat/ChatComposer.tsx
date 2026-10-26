@@ -1,3 +1,4 @@
+import { beginNativePromptWork, useNativePromptDraft } from "../../lib/nativePromptReadiness";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
@@ -1125,6 +1126,47 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const windowRefocusInFlightRef = useRef(false);
   const composerScrollGestureRef = useRef(createComposerScrollGestureState());
   const pendingThreadImportsRef = useRef<Map<string, number>>(new Map());
+  const nativePromptTargetKeys = useRef(new Set([attachmentTargetKey]));
+  // oxlint-disable-next-line t3code/react-effect-budget -- Retain committed draft targets until asynchronous imports for previous targets settle.
+  useLayoutEffect(() => {
+    nativePromptTargetKeys.current.add(attachmentTargetKey);
+  });
+  const nativePendingPromptWork = () => {
+    let pending = pendingThreadImportsRef.current.size > 0;
+    for (const key of nativePromptTargetKeys.current) {
+      const active =
+        countPreparingComposerImages(key) > 0 ||
+        pendingDraftWork.has(key) ||
+        (useQuestionAttachmentPreparation.getState().counts[key] ?? 0) > 0;
+      pending ||= active;
+      if (!active && key !== attachmentTargetKey) nativePromptTargetKeys.current.delete(key);
+    }
+    return pending;
+  };
+  useNativePromptDraft(
+    () =>
+      // Intake stores attachments before React paints; do not acknowledge the gap after an async import settles.
+      (useComposerDraftStore.getState().getComposerDraft(attachmentDraftTarget)?.images.length ??
+        0) > 0 ||
+      (useComposerDraftStore.getState().getComposerDraft(attachmentDraftTarget)?.files.length ??
+        0) > 0 ||
+      prompt.length > 0 ||
+      composerImages.length > 0 ||
+      composerFiles.length > 0 ||
+      composerTerminalContexts.length > 0 ||
+      composerPreviewAnnotations.length > 0 ||
+      composerReviewComments.length > 0 ||
+      composerThreadContexts.length > 0 ||
+      (editingQueuedAttachments?.length ?? 0) > 0 ||
+      nativePendingPromptWork() ||
+      Object.values(activePendingDraftAnswers).some(
+        (answer) =>
+          (answer.customAnswer?.length ?? 0) > 0 ||
+          (answer.selectedOptionValues?.length ?? 0) > 0 ||
+          (answer.attachmentCount ?? 0) > 0,
+      ),
+    nativePendingPromptWork,
+  );
   const isRevertingCheckpointRef = useRef(isRevertingCheckpoint);
   useLayoutEffect(() => {
     isRevertingCheckpointRef.current = isRevertingCheckpoint;
@@ -2705,32 +2747,45 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     });
   };
 
-  const { addComposerAttachments, removeComposerImage, foldPastedText } =
-    useComposerAttachmentIntake({
-      activeThreadId,
-      activePendingProgress,
-      activePendingIsResponding,
-      pendingUserInputs,
-      supportsQuestionAttachments,
-      isLiteralPendingAnswer,
-      isConnecting,
-      projectSelectionRequired,
-      questionAttachmentTarget,
-      attachmentTargetKey,
-      fileStagingLimit,
-      promptRef,
-      composerImagesRef,
-      composerFilesRef,
-      composerEditorRef,
-      isRevertingCheckpointRef,
-      setThreadError,
-      countReservedAttachments,
-      addComposerImage,
-      addComposerImagesToDraft,
-      addComposerFilesToDraft,
-      removeComposerImageFromDraft,
-      insertAttachmentReferences,
-    });
+  const {
+    addComposerAttachments: addComposerAttachmentsImpl,
+    removeComposerImage,
+    foldPastedText,
+  } = useComposerAttachmentIntake({
+    activeThreadId,
+    activePendingProgress,
+    activePendingIsResponding,
+    pendingUserInputs,
+    supportsQuestionAttachments,
+    isLiteralPendingAnswer,
+    isConnecting,
+    projectSelectionRequired,
+    questionAttachmentTarget,
+    attachmentTargetKey,
+    fileStagingLimit,
+    promptRef,
+    composerImagesRef,
+    composerFilesRef,
+    composerEditorRef,
+    isRevertingCheckpointRef,
+    setThreadError,
+    countReservedAttachments,
+    addComposerImage,
+    addComposerImagesToDraft,
+    addComposerFilesToDraft,
+    removeComposerImageFromDraft,
+    insertAttachmentReferences,
+  });
+
+  const addComposerAttachments = (...args: Parameters<typeof addComposerAttachmentsImpl>) => {
+    const release = beginNativePromptWork();
+    try {
+      return addComposerAttachmentsImpl(...args).finally(release);
+    } catch (error) {
+      release();
+      throw error;
+    }
+  };
 
   const onComposerCommandKeyStable = useStableCallback(onComposerCommandKey);
   const isPathQueryActiveStable = useStableCallback(
@@ -2859,54 +2914,59 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const importDroppedThread = useEffectEvent(
     async (ref: ScopedThreadRef, isActive: () => boolean) => {
       const targetKey = attachmentTargetKey;
+      const releaseNativePromptWork = beginNativePromptWork();
       pendingDraftWork.begin(targetKey);
-      const loadingToast = toastManager.add({
-        type: "loading",
-        title: "Loading thread context…",
-        timeout: 0,
-        data: { threadRef: routeThreadRef, hideCopyButton: true },
-      });
-      const importResult = await settlePromise(() =>
-        importComposerThreadAttachment({
-          targetKey,
-          pendingImports: pendingThreadImportsRef.current,
-          countReservedAttachments: countReservedAttachmentsStable,
-          load: async () => {
-            const result = await loadThreadTranscript({
-              environmentId: ref.environmentId,
-              input: { threadId: ref.threadId },
-            });
-            if (result._tag !== "Success") {
-              throw squashAtomCommandFailure(result);
-            }
-            return threadContextAttachment(ref.environmentId, result.value);
-          },
-          isActive,
-          attach: attachDroppedThreadFile,
-          onLimitReached: () => {
-            if (activeThreadId) {
-              setThreadError(
-                activeThreadId,
-                `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`,
-              );
-            }
-          },
-        }),
-      );
-      if (importResult._tag === "Failure" && isActive()) {
-        const error = squashAtomCommandFailure(importResult);
-        toastManager.add({
-          type: "error",
-          title: "Unable to read the dropped thread",
-          description:
-            isEnvironmentRequestInvalidError(error) &&
-            error.reason === "thread_transcript_too_large"
-              ? "This thread exceeds the attachment size limit. Try a shorter thread."
-              : "Check that its environment is connected and up to date, then try again.",
+      try {
+        const loadingToast = toastManager.add({
+          type: "loading",
+          title: "Loading thread context…",
+          timeout: 0,
+          data: { threadRef: routeThreadRef, hideCopyButton: true },
         });
+        const importResult = await settlePromise(() =>
+          importComposerThreadAttachment({
+            targetKey,
+            pendingImports: pendingThreadImportsRef.current,
+            countReservedAttachments: countReservedAttachmentsStable,
+            load: async () => {
+              const result = await loadThreadTranscript({
+                environmentId: ref.environmentId,
+                input: { threadId: ref.threadId },
+              });
+              if (result._tag !== "Success") {
+                throw squashAtomCommandFailure(result);
+              }
+              return threadContextAttachment(ref.environmentId, result.value);
+            },
+            isActive,
+            attach: attachDroppedThreadFile,
+            onLimitReached: () => {
+              if (activeThreadId) {
+                setThreadError(
+                  activeThreadId,
+                  `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`,
+                );
+              }
+            },
+          }),
+        );
+        if (importResult._tag === "Failure" && isActive()) {
+          const error = squashAtomCommandFailure(importResult);
+          toastManager.add({
+            type: "error",
+            title: "Unable to read the dropped thread",
+            description:
+              isEnvironmentRequestInvalidError(error) &&
+              error.reason === "thread_transcript_too_large"
+                ? "This thread exceeds the attachment size limit. Try a shorter thread."
+                : "Check that its environment is connected and up to date, then try again.",
+          });
+        }
+        toastManager.close(loadingToast);
+      } finally {
+        pendingDraftWork.end(targetKey);
+        releaseNativePromptWork();
       }
-      toastManager.close(loadingToast);
-      pendingDraftWork.end(targetKey);
     },
   );
 

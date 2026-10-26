@@ -527,9 +527,9 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       }),
     );
     return BootService.of({
-      install: () => refusal,
+      install: Effect.fn("BootService.install")(() => refusal),
       restart: refusal,
-      withStopped: () => refusal,
+      withStopped: Effect.fn("BootService.withStopped")(() => refusal),
       uninstall: refusal,
       status: Effect.succeed({
         supported: false,

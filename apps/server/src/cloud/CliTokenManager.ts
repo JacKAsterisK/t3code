@@ -479,7 +479,7 @@ export const make = Effect.gen(function* () {
       get: refusal,
       getExisting: Effect.succeedNone,
       hasCredential: Effect.succeed(false),
-      store: () => refusal,
+      store: Effect.fn("CloudCliTokenManager.store")(() => refusal),
       clear: refusal,
     });
   }

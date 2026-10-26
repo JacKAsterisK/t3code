@@ -143,13 +143,11 @@ export const make = Effect.gen(function* () {
     ensureEnvironment: Effect.fn("desktop.ssh.ensureEnvironment")(
       function* (target, ensureOptions) {
         if (isLanDistribution)
-          return yield* Effect.fail(
-            new SshLaunchError({
-              message:
-                "Automatic SSH runtime installation and pairing are unavailable in this LAN distribution. Connect to an independently installed, approved native environment instead.",
-              stdout: "",
-            }),
-          );
+          return yield* new SshLaunchError({
+            message:
+              "Automatic SSH runtime installation and pairing are unavailable in this LAN distribution. Connect to an independently installed, approved native environment instead.",
+            stdout: "",
+          });
         return yield* manager.ensureEnvironment(target, ensureOptions);
       },
       Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),

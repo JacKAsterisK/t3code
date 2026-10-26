@@ -373,11 +373,63 @@ installed artifact and selected desired artifact under that lock. Evidence
 older than 30 seconds, unknown state, an unverified candidate or an unverified
 recovery snapshot defers activation.
 
-Admission includes active and queued runs, pending questions/approvals,
-background agents, scheduled work and restart continuations. Every class must
-be known and empty. Do not interrupt tasks or block descendants to drain a host.
-T3 must remain stopped throughout the transaction; a preflight idle check does
-not close the race with a new task. Hub holds Windows `FileShare.None` handles
+Update admission splits six blocking counters from a `carriedWork` object
+with the same category names. Blocking counters must be known and zero; carried
+work remains intact across the migration. Original-home repair keeps its stricter
+classification, including enabled schedules. Do not interrupt or cancel work to
+drain a host. T3 remains stopped throughout the activation transaction; a live
+probe alone does not close the race with new execution.
+
+| Work                                                                                             | Normal restart behavior                                                              | Update admission                                                                                |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| Preparing, starting or running runs; running attempts, nodes, provider turns or effects          | Reconciled as interrupted/cancelled, or replayed after interruption                  | Blocks                                                                                          |
+| Ordinary queued input with its retained message                                                  | Queue is held during provider recovery                                               | Carried; buffered provider notifications and unknown queue records block                        |
+| Waiting run with a pending replayable checkpoint                                                 | Recovery leaves the run for checkpoint replay                                        | Carried; other waiting runs and a running checkpoint block                                      |
+| App-owned message questions and their waiting nodes                                              | Kept for a later message response                                                    | Carried                                                                                         |
+| Provider-bound approvals/questions                                                               | Shutdown cancels them; startup expires them and marks them not resumable             | Blocks; providers advertise `pendingRequestsSurviveRestart: false`                              |
+| App-owned pending/waiting delegated tasks and their nodes/items                                  | Child settlement owns their completion                                               | Carried; running children and native provider work still block                                  |
+| Warm ready provider session / active provider-thread label                                       | Reconciliation stops/detaches the warm session                                       | Carried when no blocking work refers to it                                                      |
+| Active native goal or pending native background tasks                                            | Goal may continue beyond a terminal turn; background handles are cleared on recovery | Blocks                                                                                          |
+| Pending replay-safe outbox effect                                                                | Process-loss recovery requeues/replays the request                                   | Carried; pending process-bound or unknown effects block                                         |
+| Enabled idle schedule and pending webhook coalescing window                                      | Configuration and queued payload are persisted and reread                            | Carried; any running schedule, including a disabled one, and dispatching/running webhooks block |
+| Delegated completion cohort, app-owned completion delivery and uncollected terminal child result | Startup delegated-task recovery resumes delivery/collection                          | Carried; unknown/native delivery ownership blocks                                               |
+| Resolved unconsumed context transfer                                                             | Persisted transfer remains available for consumption                                 | Carried; pending export and open launch workflows block because safe completion is unproven     |
+
+These decisions follow `ProviderRuntimeRecoveryService`, `EffectOutbox`,
+`ScheduledTaskService` and `Orchestrator.recoverDelegatedTasks`. The native helper's
+restart-effect subset is fail-closed and checked against the outbox replay policy
+by a focused test. Unknown status, migration history, projection cursor or SQLite
+integrity continues to refuse admission.
+
+The helper adds a lease-free, read-only `probe` operation on its existing bounded
+stdin/stdout protocol. It reads one coherent WAL snapshot and returns the blocking
+counts, carried counts, work generation, process liveness and observation time.
+It does not start the server or providers. It is advisory: automatic close also
+requires an application-owned execution reservation and fresh draft readiness;
+stopped inspect/verify and the native locks remain authoritative for activation.
+
+Draft readiness is `userdata/native-update-readiness.json`, schema 1, bound to the
+environment and the current `server-runtime.json` owner. Its `draftStateKnown`,
+`hasUnsentPrompt` and `observedUtc` become probe fields `draftStateKnown`,
+`hasUnsentPrompt` and `draftsObservedUtc`. Evidence older than 30 seconds, future
+observations, an owner mismatch, unsupported clients or unknown draft state makes
+a running app ineligible for unattended close. Unsent text or attachments in an
+open client's prompt also blocks; there is no input-inactivity timer.
+The probe also returns `serverProcessId`, `serverOwnerId`, `updateControlPipe`,
+`updateControlVersion` and `guardedCloseSupported`. Control capability is trusted
+only from a fresh owner-bound record advertising protocol 1 and the exact local
+pipe derived from that owner. Missing/legacy capability returns null/false and
+cannot authorize unattended close.
+
+The work-generation guard includes durable work projections, retained
+messages/thread lineage, session bindings and webhook queue/replay keys as well
+as events, command receipts, launch workflows and schedule configuration.
+Projection payloads and original linkage/status columns are guarded; added
+provider-instance/driver indexes derived from unchanged payloads do not cause a
+false migration refusal. Search indexes and empty newly introduced queue tables
+are not work. A migration changing carried work refuses with `changed`.
+
+Hub holds Windows `FileShare.None` handles
 on the permanent `data/native-admission.lock` and existing
 `data/userdata/server-owner.sqlite` throughout snapshot, swap, verification and
 rollback. Ordinary fork startup and maintenance hold shared admission handles

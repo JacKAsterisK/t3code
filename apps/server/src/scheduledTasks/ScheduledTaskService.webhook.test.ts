@@ -1,3 +1,6 @@
+import * as NativeUpdateGate from "../lan/NativeUpdateGate.ts";
+import * as Context from "effect/Context";
+import * as Option from "effect/Option";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHmac.
 import * as NodeCrypto from "node:crypto";
 
@@ -160,6 +163,7 @@ const withService = <A, E>(
     readonly secretsByRef: Map<string, string>;
   }) => Effect.Effect<A, E, never>,
   options: {
+    readonly nativeAdmission?: NativeUpdateGate.NativeUpdateGate["Service"];
     readonly onFrame?: () => void;
     readonly frameGate?: {
       readonly started: Deferred.Deferred<void>;
@@ -178,6 +182,9 @@ const withService = <A, E>(
     const launches = yield* Queue.unbounded<LaunchInput>();
     const secretsByRef = new Map<string, string>();
     const layerDependencies = Layer.mergeAll(
+      options.nativeAdmission === undefined
+        ? Layer.empty
+        : Layer.succeed(NativeUpdateGate.NativeUpdateGate, options.nativeAdmission),
       options.frameGate === undefined && options.onFrame === undefined
         ? NodePlatformCrypto.layer
         : Layer.effect(
@@ -205,7 +212,16 @@ const withService = <A, E>(
             register: <E, R>(name: string, work: Effect.Effect<void, E, R>) =>
               Effect.gen(function* () {
                 const context = yield* Effect.context<R>();
-                options.workers!.set(name, work.pipe(Effect.provideContext(context), Effect.orDie));
+                // Native admission is intentionally absent at invocation; the service must retain its construction instance.
+                const callContext = (
+                  options.nativeAdmission === undefined
+                    ? context
+                    : Context.omit(NativeUpdateGate.NativeUpdateGate)(context)
+                ) as typeof context;
+                options.workers!.set(
+                  name,
+                  work.pipe(Effect.provideContext(callContext), Effect.orDie),
+                );
               }),
           }),
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({
@@ -1896,3 +1912,109 @@ it.effect("filters run before replay and coalescing without claiming ignored del
     { workers },
   );
 });
+
+it.effect.each([false, true])(
+  "native update admission parks schedule pickup webhook promotion and new claims (consumed: %s)",
+  (consumed) =>
+    Effect.gen(function* () {
+      const gateContext = yield* Layer.build(NativeUpdateGate.layer);
+      const gate = Context.get(gateContext, NativeUpdateGate.NativeUpdateGate);
+      const workers = new Map<string, Effect.Effect<void>>();
+      yield* withService(
+        ({ service, sql, launches }) =>
+          Effect.gen(function* () {
+            assert.isTrue(
+              Option.isNone(yield* Effect.serviceOption(NativeUpdateGate.NativeUpdateGate)),
+            );
+            const { task: scheduled } = yield* service.upsert(
+              yield* webhookTaskInput({
+                id: "native-due",
+                schedule: { type: "interval", everyMs: 60000 },
+              }),
+            );
+            const { task: hook } = yield* service.upsert(
+              yield* webhookTaskInput({
+                id: "native-hook",
+                schedule: {
+                  type: "webhook",
+                  dedupe: { coalesceKey: "{{body.group}}", coalesceWindowSeconds: 10 },
+                },
+              }),
+            );
+            yield* service.triggerWebhook(
+              requestFor(hook, {
+                bodyText: '{"group":"original"}',
+                body: new TextEncoder().encode('{"group":"original"}'),
+              }),
+            );
+            yield* TestClock.adjust("11 seconds");
+            yield* sql`UPDATE scheduled_tasks SET next_run_at = '1970-01-01T00:00:00.000Z' WHERE task_id = ${scheduled.id}`;
+            const tasksBefore =
+              yield* sql`SELECT task_id, last_run_status, run_count, next_run_at FROM scheduled_tasks ORDER BY task_id`;
+            const pendingBefore =
+              yield* sql`SELECT delivery_id, state, due_at FROM scheduled_task_webhook_pending ORDER BY delivery_id`;
+            const relayBefore = yield* sql`SELECT * FROM scheduled_task_webhook_relay_deliveries`;
+            const lease = yield* gate.reserve({
+              id: "native-schedule-reservation",
+              timeout: "1 second",
+              inspectReady: Effect.succeed(true),
+              freezeDrafts: () => Effect.succeed(true),
+              verifyFrozenDrafts: () => Effect.succeed(true),
+              thawDrafts: () => Effect.void,
+            });
+            yield* Effect.gen(function* () {
+              if (consumed) yield* lease.consume;
+              const scheduledPickup = yield* workers
+                .get("scheduled-tasks")!
+                .pipe(Effect.forkChild({ startImmediately: true }));
+              const pendingPickup = yield* drainPendingDispatch(workers).pipe(
+                Effect.forkChild({ startImmediately: true }),
+              );
+              const intake = yield* service
+                .triggerWebhook(
+                  requestFor(hook, {
+                    relayDeliveryId: "native-blocked-intake",
+                    bodyText: '{"group":"new"}',
+                    body: new TextEncoder().encode('{"group":"new"}'),
+                  }),
+                )
+                .pipe(Effect.forkChild({ startImmediately: true }));
+              yield* Effect.yieldNow;
+              assert.deepEqual(
+                yield* sql`SELECT task_id, last_run_status, run_count, next_run_at FROM scheduled_tasks ORDER BY task_id`,
+                tasksBefore,
+              );
+              assert.deepEqual(
+                yield* sql`SELECT delivery_id, state, due_at FROM scheduled_task_webhook_pending ORDER BY delivery_id`,
+                pendingBefore,
+              );
+              assert.deepEqual(
+                yield* sql`SELECT * FROM scheduled_task_webhook_relay_deliveries`,
+                relayBefore,
+              );
+              assert.equal(yield* Queue.size(launches), 0);
+              assert.equal((yield* gate.status).activeCount, 0);
+              yield* consumed ? lease.abortClose : lease.release;
+              yield* Fiber.join(scheduledPickup);
+              yield* Fiber.join(pendingPickup);
+              assert.equal((yield* Fiber.join(intake))._tag, "accepted");
+              const dispatches = [yield* Queue.take(launches), yield* Queue.take(launches)];
+              assert.deepEqual(
+                dispatches.map((launch) => launch.initialMessage?.scheduledTaskId).sort(),
+                [scheduled.id, hook.id].sort(),
+              );
+              const completed = yield* sql<{
+                run_count: number;
+                last_run_status: string;
+              }>`SELECT run_count, last_run_status FROM scheduled_tasks ORDER BY task_id`;
+              assert.isTrue(
+                completed.every(
+                  (row) => row.run_count === 1 && row.last_run_status === "succeeded",
+                ),
+              );
+            }).pipe(Effect.ensuring(lease.abortClose));
+          }),
+        { workers, nativeAdmission: gate },
+      );
+    }).pipe(Effect.scoped),
+);

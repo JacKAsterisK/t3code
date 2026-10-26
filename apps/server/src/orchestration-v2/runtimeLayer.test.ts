@@ -1,3 +1,5 @@
+import * as Context from "effect/Context";
+import * as Option from "effect/Option";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -84,6 +86,7 @@ import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as NativeUpdateGate from "../lan/NativeUpdateGate.ts";
 
 const layerPlatformTest = Layer.merge(
   NodeServices.layer,
@@ -288,6 +291,60 @@ const layerTest = Layer.mergeAll(
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
   Layer.provide(layerPlatformTest),
+);
+
+it.effect(
+  "native update admission defers command intake without committing or rejecting the command",
+  () =>
+    Effect.gen(function* () {
+      const gate = yield* NativeUpdateGate.NativeUpdateGate;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const events = yield* EventSink.EventSinkV2;
+      const before = yield* events.latestSequence();
+      const reservation = yield* gate.reserve({
+        id: "runtime-update",
+        timeout: "1 second",
+        inspectReady: Effect.succeed(true),
+        freezeDrafts: () => Effect.succeed(true),
+        verifyFrozenDrafts: () => Effect.succeed(true),
+        thawDrafts: () => Effect.void,
+      });
+      const threadId = ThreadId.make("native-update-thread");
+      const dispatch = yield* orchestrator
+        .dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("native-update-create"),
+          createdBy: "user",
+          creationSource: "web",
+          threadId,
+          projectId: ProjectId.make("native-update-project"),
+          title: "Native update intake",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        })
+        .pipe(
+          Effect.tap(() =>
+            Effect.serviceOption(NativeUpdateGate.NativeUpdateGate).pipe(
+              Effect.map((provided) => assert.isTrue(Option.isNone(provided))),
+            ),
+          ),
+          Effect.updateContext((context: Context.Context<never>) =>
+            Context.omit(NativeUpdateGate.NativeUpdateGate)(context),
+          ),
+          Effect.forkChild({ startImmediately: true }),
+        );
+      assert.strictEqual(yield* events.latestSequence(), before);
+      yield* reservation.release;
+      const result = yield* Fiber.join(dispatch);
+      assert.isAbove(result.sequence, before);
+      assert.strictEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.title,
+        "Native update intake",
+      );
+    }).pipe(Effect.provide(layerTest.pipe(Layer.provideMerge(NativeUpdateGate.layer)))),
 );
 
 const layerLegacyImportTest = RuntimeLayer.layer.pipe(

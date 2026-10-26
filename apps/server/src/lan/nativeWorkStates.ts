@@ -53,3 +53,35 @@ export const nativeWorkStatusDefinitions = [
     ["pending", "running"],
   ],
 ] as const;
+
+const nativeWorkCategories = [
+  "activeRuns",
+  "queuedRuns",
+  "pendingRequests",
+  "backgroundAgents",
+  "scheduledWork",
+  "restartContinuations",
+] as const;
+type NativeWorkCategory = (typeof nativeWorkCategories)[number];
+export const emptyNativeWork = (): Record<NativeWorkCategory, number> => ({
+  activeRuns: 0,
+  queuedRuns: 0,
+  pendingRequests: 0,
+  backgroundAgents: 0,
+  scheduledWork: 0,
+  restartContinuations: 0,
+});
+
+// Keep this fail-closed subset aligned with EffectOutbox's process-loss replay policy.
+export const nativeRestartSafeEffects: Readonly<Record<string, ReadonlyArray<string>>> = {
+  "provider-runtime.continue": ["sourceRunId"],
+  "provider-session.detach": ["providerSessionId"],
+  "provider-thread.rollback": ["providerThreadId", "checkpointId", "scopeId"],
+  "checkpoint.capture": ["runId", "scopeId"],
+  "scheduled-tasks.cleanup": [],
+  "terminal.cleanup": [],
+  "preview.cleanup": [],
+  "attachment.cleanup": [],
+  "thread-title.generate": [],
+  "delegated-tasks.stop": [],
+};

@@ -38,7 +38,10 @@ export class RelayDeliveryProof extends Context.Service<
 >()("t3/scheduledTasks/RelayDeliveryProof") {}
 
 const make = Effect.gen(function* () {
-  if (!cloudEnabled) return RelayDeliveryProof.of({ verify: () => Effect.succeed(Option.none()) });
+  if (!cloudEnabled)
+    return RelayDeliveryProof.of({
+      verify: Effect.fn("RelayDeliveryProof.verify")(() => Effect.succeedNone),
+    });
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const verify: RelayDeliveryProof["Service"]["verify"] = Effect.fn("webhook.verifyRelayDelivery")(

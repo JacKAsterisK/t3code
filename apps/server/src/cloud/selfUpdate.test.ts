@@ -1,3 +1,6 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- The fixture needs an unprivileged native Windows directory junction.
+import * as NodeFSP from "node:fs/promises";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { ServerSelfUpdateError, ThreadId } from "@t3tools/contracts";
@@ -423,7 +426,12 @@ it.layer(NodeServices.layer)("pruning runtimes on start", (it) => {
       yield* fs.writeFileString(sentinel, `${version}\n`);
       yield* fs.utimes(sentinel, 0, 0);
     }
-    if (input.symlinkedHome) yield* fs.symlink(realHome, baseDir);
+    if (input.symlinkedHome) {
+      // Windows directory junctions exercise the same real-path alias without symlink privileges.
+      yield* Effect.promise(() =>
+        NodeFSP.symlink(realHome, baseDir, path.sep === "\\" ? "junction" : "dir"),
+      );
+    }
     // Like `process.execPath`, the running runtime is reported by its real path.
     const executablePath =
       input.executable === "own runtime"

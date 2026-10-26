@@ -288,7 +288,7 @@ export async function runWindowsSandboxGuest(approvedGuestRequestSha256: string)
           asChildProcess(bootstrapExecution.workspaceInstall(), "inherit"),
         ),
       );
-      if (exitCode !== 0) return yield* Effect.fail(new PinnedWorkspaceInstallRefused());
+      if (exitCode !== 0) return yield* new PinnedWorkspaceInstallRefused();
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
   await verifyUnchanged();

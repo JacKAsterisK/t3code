@@ -16,7 +16,7 @@ export type NativeActivationBuildIdentity = typeof NativeActivationBuildIdentity
 
 export const NativeMaintenanceRequest = Schema.Struct({
   schemaVersion: Schema.Literal(1),
-  operation: Schema.Literals(["inspect", "verify", "bootstrap"]),
+  operation: Schema.Literals(["inspect", "verify", "bootstrap", "probe"]),
   nonce: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
   homeDirectory: Schema.NonEmptyString,
   environmentId: Schema.NonEmptyString,

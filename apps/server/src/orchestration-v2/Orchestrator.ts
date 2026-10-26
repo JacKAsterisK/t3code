@@ -1,3 +1,4 @@
+import * as NativeUpdateGate from "../lan/NativeUpdateGate.ts";
 import type {
   GuestShareId,
   OrchestrationV2SearchThreadInput,
@@ -948,6 +949,7 @@ function lastDeliveredRunForProviderThread(
 }
 
 const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(function* () {
+  const nativeUpdateAdmission = yield* NativeUpdateGate.captureAdmission();
   const checkpointService = yield* CheckpointServiceV2;
   const commandPolicy = yield* CommandPolicyV2;
   const contextHandoffService = yield* ContextHandoffServiceV2;
@@ -12313,23 +12315,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   }, withCommandMetrics);
 
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
-  const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
-    const dispatch = threadDispatch.withLock(
-      commandThreadId(command),
-      dispatchWithReceiptEffect(command),
-    );
-    if (command.type !== "message.dispatch" || !mayStartSubagentFollowup(command))
-      return yield* dispatch;
-    const parentThreadId = yield* appOwnedSubagentParentThreadId(command.threadId).pipe(
-      Effect.mapError(
-        (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-      ),
-    );
-    // Follow-up intake and Stop serialize on the parent before taking the child lock.
-    return yield* parentThreadId === undefined
-      ? dispatch
-      : threadDispatch.withLock(parentThreadId, dispatch);
-  });
+  const dispatchWithReceipt = Effect.fnUntraced(
+    function* (command: OrchestrationV2ServerCommand) {
+      const dispatch = threadDispatch.withLock(
+        commandThreadId(command),
+        dispatchWithReceiptEffect(command),
+      );
+      if (command.type !== "message.dispatch" || !mayStartSubagentFollowup(command))
+        return yield* dispatch;
+      const parentThreadId = yield* appOwnedSubagentParentThreadId(command.threadId).pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+        ),
+      );
+      // Follow-up intake and Stop serialize on the parent before taking the child lock.
+      return yield* parentThreadId === undefined
+        ? dispatch
+        : threadDispatch.withLock(parentThreadId, dispatch);
+    },
+    (effect) => nativeUpdateAdmission.withAdmission(effect),
+  );
 
   const handleRunUpdate = Effect.fn("Orchestrator.handleRunUpdate")(
     function* (stored: OrchestrationV2StoredEvent) {
@@ -12397,7 +12402,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             stored.event.payload.status === "cancelled" ||
             stored.event.payload.status === "rolled_back"),
       ),
-      Stream.runForEach(handleRunUpdate),
+      Stream.runForEach((stored) => nativeUpdateAdmission.withAdmission(handleRunUpdate(stored))),
       Effect.forkDetach,
     );
 
@@ -12438,6 +12443,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             cause,
           }),
         ),
+        (effect) => nativeUpdateAdmission.withAdmission(effect),
       ),
     ),
     Effect.forkDetach,
@@ -12588,9 +12594,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     new OrchestratorProjectionError({ threadId: ThreadId.make("thread:shell"), cause });
 
   return OrchestratorV2.of({
-    resumeQueuedRuns,
-    recoverDelegatedTasks,
-    recoverDelegatedTask,
+    resumeQueuedRuns: nativeUpdateAdmission.withAdmission(resumeQueuedRuns),
+    recoverDelegatedTasks: nativeUpdateAdmission.withAdmission(recoverDelegatedTasks),
+    // The delegated operation already owns the trace span.
+    recoverDelegatedTask: Effect.fnUntraced(function* (threadId, sourceRunId) {
+      return yield* nativeUpdateAdmission.withAdmission(
+        recoverDelegatedTask(threadId, sourceRunId),
+      );
+    }),
     delegatedTaskResultPending,
     restartContinuationPending: Effect.fn("OrchestratorV2.restartContinuationPending")(
       function (run) {
@@ -12602,25 +12613,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }),
     dispatch: dispatchWithReceipt,
     autoArmLimitRecovery: Effect.fn("OrchestratorV2.autoArmLimitRecovery")(function (input) {
-      return threadDispatch.withLock(
-        input.threadId,
-        Effect.gen(function* () {
-          const thread = yield* projectionStore
-            .getThread(input.threadId)
-            .pipe(
-              Effect.mapError(
-                (cause) => new OrchestratorProjectionError({ threadId: input.threadId, cause }),
-              ),
-            );
-          // Stop or an explicit recovery choice can commit after the sweep reads its candidate.
-          if (
-            thread.limitRecovery?.runId === input.limitRecovery.runId &&
-            thread.limitRecovery.resetAt === input.limitRecovery.resetAt
-          )
-            return;
-          yield* dispatchWithReceiptEffect({ type: "thread.metadata.update", ...input });
-        }),
-      );
+      return threadDispatch
+        .withLock(
+          input.threadId,
+          Effect.gen(function* () {
+            const thread = yield* projectionStore
+              .getThread(input.threadId)
+              .pipe(
+                Effect.mapError(
+                  (cause) => new OrchestratorProjectionError({ threadId: input.threadId, cause }),
+                ),
+              );
+            // Stop or an explicit recovery choice can commit after the sweep reads its candidate.
+            if (
+              thread.limitRecovery?.runId === input.limitRecovery.runId &&
+              thread.limitRecovery.resetAt === input.limitRecovery.resetAt
+            )
+              return;
+            yield* dispatchWithReceiptEffect({ type: "thread.metadata.update", ...input });
+          }),
+        )
+        .pipe((effect) => nativeUpdateAdmission.withAdmission(effect));
     }),
     searchThreadStream: (input) =>
       projectionStore

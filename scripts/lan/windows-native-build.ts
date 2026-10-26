@@ -715,7 +715,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
             const code = yield* spawner.exitCode(
               bootstrap.prepare(asChildProcess(bootstrap.workspaceInstall(), "inherit")),
             );
-            if (code !== 0) return yield* Effect.fail(new PinnedWorkspaceInstallRefused());
+            if (code !== 0) return yield* new PinnedWorkspaceInstallRefused();
           }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
         ),
       );

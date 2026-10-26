@@ -145,14 +145,15 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
   if (!nativeUpdatesEnabled)
     return ServiceLauncherClient.of({
       managed: false,
-      requestUpdate: (input) =>
+      requestUpdate: Effect.fn("ServiceLauncherClient.requestUpdate")((input) =>
         Effect.fail(
           new ServiceLauncherRejectedError({
             targetVersion: input.targetVersion,
             reason: distributionUpdateGuidance,
           }),
         ),
-      prepareTrial: Effect.succeed(undefined),
+      ),
+      prepareTrial: Effect.as(Effect.void, undefined),
     });
   const { host, context, managed } = yield* resolveStartup(options);
 

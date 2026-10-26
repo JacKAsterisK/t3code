@@ -1,3 +1,4 @@
+import * as NativeUpdateGate from "../lan/NativeUpdateGate.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
@@ -194,6 +195,7 @@ function failureDetail(error: unknown): string {
 }
 
 const make = Effect.gen(function* () {
+  const nativeUpdateAdmission = yield* NativeUpdateGate.captureAdmission();
   const projects = yield* ProjectService.ProjectService;
   const setupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
@@ -545,7 +547,7 @@ const make = Effect.gen(function* () {
               cause,
             }),
           ),
-          Effect.forkIn(preparationScope),
+          (effect) => nativeUpdateAdmission.forkIn(effect, preparationScope),
         );
       }
 
@@ -795,7 +797,7 @@ const make = Effect.gen(function* () {
       ),
       Effect.ignoreCause,
       Effect.ensuring(releasePreparation(input.commandId)),
-      Effect.forkIn(preparationScope),
+      (effect) => nativeUpdateAdmission.forkIn(effect, preparationScope),
     );
   });
 
@@ -1108,7 +1110,19 @@ const make = Effect.gen(function* () {
     );
   };
 
-  return ThreadLaunchService.of({ launch, checkWorktreeBase, retryPreparation, prepareRun });
+  return ThreadLaunchService.of({
+    // Each delegated operation already owns its trace span.
+    launch: Effect.fnUntraced(function* (input) {
+      return yield* nativeUpdateAdmission.withAdmission(launch(input));
+    }),
+    checkWorktreeBase,
+    retryPreparation: Effect.fnUntraced(function* (input) {
+      return yield* nativeUpdateAdmission.withAdmission(retryPreparation(input));
+    }),
+    prepareRun: Effect.fnUntraced(function* (input) {
+      return yield* nativeUpdateAdmission.withAdmission(prepareRun(input));
+    }),
+  });
 });
 
 export const layer = Layer.effect(ThreadLaunchService, make);

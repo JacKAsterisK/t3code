@@ -31,7 +31,7 @@ function fixture(directOverride = false) {
     if (!bytes) throw new Error(`Missing fixture ${name}.`);
     return bytes;
   };
-  const workspace = Schema.decodeUnknownSync(fromYaml(Schema.Unknown))(
+  const workspace = Schema.decodeSync(fromYaml(Schema.Unknown))(
     read("pnpm-workspace.yaml").toString("utf8"),
   );
   const stages = deriveWindowsProductionStages({

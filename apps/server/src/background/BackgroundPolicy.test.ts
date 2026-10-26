@@ -72,6 +72,53 @@ function layerFor(
 }
 
 describe("BackgroundPolicy", () => {
+  it.effect("freezes every connected prompt before acknowledging an idle update", () =>
+    Effect.gen(function* () {
+      const policy = yield* BackgroundPolicy.BackgroundPolicy;
+      const native = policy.nativeUpdate!;
+      const session = AuthSessionId.make("draft-session");
+      const client = RpcClientId.make(42);
+      const activity = (preparedReservationId: string | null) =>
+        makeReport({
+          nativeUpdate: { protocolVersion: 1, hasUnsentPrompt: false, preparedReservationId },
+        });
+      yield* native.registerClient(session, client);
+      yield* policy.reportClientActivity(session, client, activity(null));
+      const subscribed = yield* policy.subscribe;
+      const preparing = yield* native.freeze("update-reservation").pipe(Effect.forkScoped);
+      yield* subscribed.changes.pipe(
+        Stream.filter((state) => state.nativeUpdate?.reservationId === "update-reservation"),
+        Stream.runHead,
+      );
+      assert.equal(yield* native.verify("update-reservation"), false);
+      yield* policy.reportClientActivity(session, client, activity("update-reservation"));
+      assert.equal(yield* Fiber.join(preparing), true);
+      assert.equal(yield* native.verify("update-reservation"), true);
+      const legacy = RpcClientId.make(43);
+      yield* native.registerClient(session, legacy);
+      assert.equal(yield* native.verify("update-reservation"), false);
+      yield* policy.removeRpcClient(session, legacy);
+      assert.equal(yield* native.verify("update-reservation"), true);
+      yield* native.thaw("update-reservation");
+      assert.equal((yield* policy.snapshot).nativeUpdate?.reservationId, null);
+    }).pipe(Effect.provide(layerFor(nominalHostPower))),
+  );
+
+  it.effect("declines freeze when a client reports an unsent prompt", () =>
+    Effect.gen(function* () {
+      const policy = yield* BackgroundPolicy.BackgroundPolicy;
+      yield* policy.reportClientActivity(
+        AuthSessionId.make("draft"),
+        RpcClientId.make(9),
+        makeReport({
+          nativeUpdate: { protocolVersion: 1, hasUnsentPrompt: true, preparedReservationId: null },
+        }),
+      );
+      assert.equal(yield* policy.nativeUpdate!.freeze("update-reservation"), false);
+      yield* policy.nativeUpdate!.thaw("update-reservation");
+    }).pipe(Effect.provide(layerFor(nominalHostPower))),
+  );
+
   it.effect("removes all leases for a disconnected websocket connection", () =>
     Effect.gen(function* () {
       const policy = yield* BackgroundPolicy.BackgroundPolicy;

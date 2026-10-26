@@ -52,7 +52,9 @@ const setup = Effect.fn("FleetTest.setup")(function* (autoPickup = true, failIss
       Effect.provide(
         LanFleet.layerServices.pipe(
           Layer.provide(
-            Layer.mock(FleetEnrollment.FleetEnrollment)({ resolve: Effect.succeed(undefined) }),
+            Layer.mock(FleetEnrollment.FleetEnrollment)({
+              resolve: Effect.as(Effect.void, undefined),
+            }),
           ),
           Layer.provide(Config.layer({ ...base, stateDir })),
           Layer.provide(

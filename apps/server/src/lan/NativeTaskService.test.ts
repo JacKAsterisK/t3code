@@ -22,7 +22,6 @@ import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -219,21 +218,19 @@ function layer(
         }),
         Layer.mock(ProjectService.ProjectService)({
           getById: () =>
-            Effect.succeed(
-              Option.some({
-                id: projectId,
-                title: "LAN",
-                workspaceRoot: "/repo",
-                repositoryIdentity: null,
-                faviconPath: null,
-                defaultModelSelection: null,
-                defaultThreadEnvMode: null,
-                scripts: [],
-                createdAt: "2026-01-01T00:00:00.000Z",
-                updatedAt: "2026-01-01T00:00:00.000Z",
-                deletedAt: null,
-              }),
-            ),
+            Effect.succeedSome({
+              id: projectId,
+              title: "LAN",
+              workspaceRoot: "/repo",
+              repositoryIdentity: null,
+              faviconPath: null,
+              defaultModelSelection: null,
+              defaultThreadEnvMode: null,
+              scripts: [],
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+              deletedAt: null,
+            }),
         }),
         Layer.mock(ProviderRegistry.ProviderRegistry)({
           getProviders: Effect.succeed([

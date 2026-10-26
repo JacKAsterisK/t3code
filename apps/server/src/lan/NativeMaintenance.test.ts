@@ -6,6 +6,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeURL from "node:url";
 import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -14,6 +15,11 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrations } from "../persistence/Migrations.ts";
 import * as NativeMaintenance from "./NativeMaintenance.ts";
 import { nativeMaintenanceRefusalMessage } from "./nativeMaintenanceEntry.ts";
+import { nativeRestartSafeEffects } from "./nativeWorkStates.ts";
+import {
+  REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS,
+  PROCESS_BOUND_EFFECT_TYPES,
+} from "../orchestration-v2/EffectOutbox.ts";
 
 const identity: NativeMaintenance.NativeBuildIdentity = {
   appId: "com.spiderpunch.t3code.lan",
@@ -27,6 +33,7 @@ const identity: NativeMaintenance.NativeBuildIdentity = {
   applicationVersion: "0.1.2",
   sourceCommit: "a".repeat(40),
 };
+const migrationSeeds = new Map<number | undefined, Buffer>();
 const fixtureAtMigration = (toMigrationInclusive?: number) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -36,10 +43,16 @@ const fixtureAtMigration = (toMigrationInclusive?: number) =>
     yield* fs.makeDirectory(path.join(home, "userdata"), { recursive: true });
     yield* fs.writeFileString(path.join(home, "userdata", "environment-id"), "environment:fixture");
     const dbPath = path.join(home, "userdata", "statev2.sqlite");
-    yield* runMigrations({ toMigrationInclusive }).pipe(
-      Effect.provide(NodeSqliteClient.layer({ filename: dbPath })),
-      Effect.scoped,
-    );
+    const seed = migrationSeeds.get(toMigrationInclusive);
+    if (seed === undefined) {
+      yield* runMigrations({ toMigrationInclusive }).pipe(
+        Effect.provide(NodeSqliteClient.layer({ filename: dbPath })),
+        Effect.scoped,
+      );
+      if (NodeFS.existsSync(dbPath + "-wal") && NodeFS.statSync(dbPath + "-wal").size !== 0)
+        throw new Error("Synthetic migration seed still has uncheckpointed WAL frames.");
+      migrationSeeds.set(toMigrationInclusive, NodeFS.readFileSync(dbPath));
+    } else yield* fs.writeFile(dbPath, seed);
     const mutate = (sql: string) =>
       Effect.sync(() => {
         const db = new NodeSqlite.DatabaseSync(dbPath);
@@ -500,17 +513,6 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
 
   it.effect.each([
     {
-      table: "orchestration_v2_projection_runs",
-      status: "completed",
-      payload: {
-        delegatedCompletion: {
-          disposition: "open",
-          nextGeneration: 2,
-          delivery: { generation: 1, messageId: "message:pending", taskIds: ["task:child"] },
-        },
-      },
-    },
-    {
       table: "orchestration_v2_projection_subagents",
       status: "idle",
       payload: { completionDelivery: { state: "claimed", observedByRunId: null } },
@@ -688,13 +690,70 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
     }).pipe(Effect.provide(testLayer)),
   );
 
-  it.effect("refuses enabled schedules and unknown or lagging state", () =>
+  it.effect(
+    "carries an enabled idle schedule across migrations while original repair stays strict",
+    () =>
+      Effect.gen(function* () {
+        const { request, insert, dbPath } = yield* fixtureAtMigration(71);
+        yield* insert("scheduled_tasks", "fixture", { enabled: 1, last_run_status: "never" });
+        const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+        const before = db.prepare("SELECT * FROM scheduled_tasks").all();
+        db.close();
+        assert.equal(NativeMaintenance.inspectStoppedRepairWork(dbPath).scheduledWork, 1);
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        const observed = yield* service.inspect(request);
+        assert.equal(observed.scheduledWork, 0);
+        assert.equal(observed.carriedWork.scheduledWork, 1);
+        const verified = yield* service.verify({ ...request, operation: "verify" });
+        assert.equal(verified.workGeneration, observed.workGeneration);
+        const after = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+        assert.deepEqual(after.prepare("SELECT * FROM scheduled_tasks").all(), before);
+        after.close();
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("probes an active WAL snapshot without admission or durable file writes", () =>
+    Effect.gen(function* () {
+      const { request, mutate, dbPath } = yield* fixture;
+      yield* mutate("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
+      const writer = new NodeSqlite.DatabaseSync(dbPath);
+      try {
+        writer.exec(
+          "PRAGMA wal_autocheckpoint=0; CREATE TABLE probe_writer(value TEXT); INSERT INTO probe_writer VALUES('retained')",
+        );
+        const before = [NodeFS.readFileSync(dbPath), NodeFS.readFileSync(dbPath + "-wal")];
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        const observed = yield* service.probe({ ...request, operation: "probe" });
+        assert.equal(observed.operation, "probe");
+        assert.equal(observed.draftStateKnown, false);
+        assert.equal(observed.hasUnsentPrompt, null);
+        assert.deepEqual(
+          [NodeFS.readFileSync(dbPath), NodeFS.readFileSync(dbPath + "-wal")],
+          before,
+        );
+      } finally {
+        writer.close();
+      }
+    }).pipe(
+      Effect.provide(
+        NativeMaintenance.layer(identity).pipe(
+          Layer.provide(
+            Layer.succeed(NativeMaintenance.NativeMaintenanceLease, {
+              verify: () => Effect.die("probe acquired admission"),
+            }),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("carries idle schedules but refuses unknown or lagging state", () =>
     Effect.gen(function* () {
       const { request, insert, mutate } = yield* fixture;
       const service = yield* NativeMaintenance.NativeMaintenance;
-      yield* insert("scheduled_tasks", "fixture");
+      yield* insert("scheduled_tasks", "fixture", { last_run_status: "never" });
       yield* mutate("UPDATE scheduled_tasks SET enabled=1");
-      assert.equal((yield* service.inspect(request)).scheduledWork, 1);
+      assert.equal((yield* service.inspect(request)).carriedWork.scheduledWork, 1);
       yield* mutate("UPDATE orchestration_v2_projection_metadata SET last_sequence=1");
       assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "projection");
       yield* mutate(
@@ -723,36 +782,35 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
     }).pipe(Effect.provide(testLayer)),
   );
 
-  it.effect(
-    "refuses delegated completion and background recovery behind terminal or idle statuses",
-    () =>
-      Effect.gen(function* () {
-        const { request, mutate, insert } = yield* fixture;
-        const service = yield* NativeMaintenance.NativeMaintenance;
-        yield* insert("orchestration_v2_projection_runs", "completed");
-        yield* mutate(
-          `UPDATE orchestration_v2_projection_runs SET payload_json='{"delegatedCompletion":{"disposition":"open","nextGeneration":2,"delivery":{"generation":1,"messageId":"message:pending","taskIds":["task:child"]}}}'`,
-        );
-        assert.isAbove((yield* service.inspect(request)).restartContinuations, 0);
-        assert.equal(
-          (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
-          "busy",
-        );
-        yield* mutate("DELETE FROM orchestration_v2_projection_runs");
-        yield* insert("orchestration_v2_projection_subagents", "idle");
-        yield* mutate(
-          `UPDATE orchestration_v2_projection_subagents SET payload_json='{"completionDelivery":{"state":"claimed","observedByRunId":null}}'`,
-        );
-        assert.isAbove((yield* service.inspect(request)).restartContinuations, 0);
-        yield* mutate(
-          `UPDATE orchestration_v2_projection_subagents SET payload_json='{"completionDelivery":{"state":"future","observedByRunId":null}}'`,
-        );
-        assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "schema");
-        yield* mutate(
-          "UPDATE orchestration_v2_projection_subagents SET status='rolled_back',payload_json='{}'",
-        );
-        assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "schema");
-      }).pipe(Effect.provide(testLayer)),
+  it.effect("carries durable delegated completions but refuses unknown background delivery", () =>
+    Effect.gen(function* () {
+      const { request, mutate, insert } = yield* fixture;
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      yield* insert("orchestration_v2_projection_runs", "completed");
+      yield* mutate(
+        `UPDATE orchestration_v2_projection_runs SET payload_json='{"delegatedCompletion":{"disposition":"open","nextGeneration":2,"delivery":{"generation":1,"messageId":"message:pending","taskIds":["task:child"]}}}'`,
+      );
+      assert.equal((yield* service.inspect(request)).restartContinuations, 0);
+      assert.equal(
+        (yield* service.verify({ ...request, operation: "verify" })).carriedWork
+          .restartContinuations,
+        1,
+      );
+      yield* mutate("DELETE FROM orchestration_v2_projection_runs");
+      yield* insert("orchestration_v2_projection_subagents", "idle");
+      yield* mutate(
+        `UPDATE orchestration_v2_projection_subagents SET payload_json='{"completionDelivery":{"state":"claimed","observedByRunId":null}}'`,
+      );
+      assert.isAbove((yield* service.inspect(request)).restartContinuations, 0);
+      yield* mutate(
+        `UPDATE orchestration_v2_projection_subagents SET payload_json='{"completionDelivery":{"state":"future","observedByRunId":null}}'`,
+      );
+      assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "schema");
+      yield* mutate(
+        "UPDATE orchestration_v2_projection_subagents SET status='rolled_back',payload_json='{}'",
+      );
+      assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "schema");
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("requires native exclusive lease proof before reading the home", () =>
@@ -783,6 +841,334 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
       assert.isAbove((yield* service.inspect(request)).restartContinuations, 0);
       yield* mutate("UPDATE orchestration_v2_projection_context_transfers SET status='future'");
       assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "schema");
+    }).pipe(Effect.provide(testLayer)),
+  );
+  it.effect.each([
+    "queued input",
+    "app question",
+    "checkpoint",
+    "delegation",
+    "continuation",
+    "resolved context",
+  ] as const)("preserves %s across candidate migrations", (kind) =>
+    Effect.gen(function* () {
+      const { request, insert, dbPath } = yield* fixtureAtMigration(71);
+      let category: keyof ReturnType<
+        typeof NativeMaintenance.inspectNativeUpdateWork
+      >["carriedWork"] = "restartContinuations";
+      if (kind === "queued input") {
+        category = "queuedRuns";
+        yield* insert("orchestration_v2_projection_messages", "fixture", {
+          message_id: "message:queued",
+          thread_id: "thread:queued",
+          role: "user",
+          streaming: 0,
+          payload_json: JSON.stringify({
+            id: "message:queued",
+            createdBy: "user",
+            creationSource: "client",
+            text: "Keep this input",
+          }),
+        });
+        yield* insert("orchestration_v2_projection_runs", "queued", {
+          run_id: "run:queued",
+          thread_id: "thread:queued",
+          payload_json: JSON.stringify({ userMessageId: "message:queued" }),
+        });
+      } else if (kind === "app question") {
+        category = "pendingRequests";
+        yield* insert("orchestration_v2_projection_runtime_requests", "pending", {
+          node_id: "node:question",
+          payload_json: JSON.stringify({
+            responseCapability: { type: "message" },
+            prompt: "Keep this question",
+          }),
+        });
+        yield* insert("orchestration_v2_projection_nodes", "waiting", { node_id: "node:question" });
+      } else if (kind === "checkpoint") {
+        category = "activeRuns";
+        yield* insert("orchestration_v2_projection_runs", "waiting", { run_id: "run:checkpoint" });
+        yield* insert("orchestration_v2_effect_outbox", "pending", {
+          effect_type: "checkpoint.capture",
+          payload_json: JSON.stringify({
+            type: "checkpoint.capture",
+            runId: "run:checkpoint",
+            scopeId: "scope:checkpoint",
+          }),
+        });
+      } else if (kind === "delegation") {
+        category = "backgroundAgents";
+        yield* insert("orchestration_v2_projection_subagents", "waiting", {
+          origin: "app_owned",
+          child_thread_id: "thread:child",
+          payload_json: JSON.stringify({
+            origin: "app_owned",
+            childThreadId: "thread:child",
+            result: null,
+          }),
+        });
+      } else if (kind === "continuation") {
+        yield* insert("orchestration_v2_effect_outbox", "pending", {
+          effect_type: "provider-runtime.continue",
+          payload_json: JSON.stringify({
+            type: "provider-runtime.continue",
+            sourceRunId: "run:previous",
+          }),
+        });
+      } else yield* insert("orchestration_v2_projection_context_transfers", "resolved_portable");
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const before = yield* service.inspect(request);
+      assert.isAbove(before.carriedWork[category], 0);
+      assert.equal(NativeMaintenance.inspectStoppedRepairWork(dbPath).workGeneration.length, 64);
+      const after = yield* service.verify({ ...request, operation: "verify" });
+      assert.equal(after.workGeneration, before.workGeneration);
+      assert.deepEqual(
+        [
+          after.activeRuns,
+          after.queuedRuns,
+          after.pendingRequests,
+          after.backgroundAgents,
+          after.scheduledWork,
+          after.restartContinuations,
+        ],
+        [0, 0, 0, 0, 0, 0],
+      );
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect.each(["pending", "dispatching", "running"] as const)(
+    "carries only undispatched webhook work in state %s",
+    (state) =>
+      Effect.gen(function* () {
+        const { request, insert } = yield* fixture;
+        yield* insert("scheduled_tasks", "fixture", {
+          task_id: "task:webhook",
+          enabled: 1,
+          last_run_status: "never",
+        });
+        yield* insert("scheduled_task_webhook_pending", "fixture", {
+          task_id: "task:webhook",
+          state,
+        });
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        const observed = yield* service.inspect(request);
+        assert.equal(observed.scheduledWork, state === "pending" ? 0 : 1);
+        assert.equal(observed.carriedWork.scheduledWork, state === "pending" ? 2 : 1);
+        if (state !== "pending")
+          assert.equal(
+            (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+            "busy",
+          );
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("blocks a running disabled schedule and unknown schedule states", () =>
+    Effect.gen(function* () {
+      const { request, insert, mutate } = yield* fixture;
+      yield* insert("scheduled_tasks", "fixture", { enabled: 0, last_run_status: "running" });
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      assert.equal((yield* service.inspect(request)).scheduledWork, 1);
+      assert.equal(
+        (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+        "busy",
+      );
+      yield* mutate("UPDATE scheduled_tasks SET last_run_status='future'");
+      assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "schema");
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps provider-bound approvals blocking beside a durable app question", () =>
+    Effect.gen(function* () {
+      const { request, insert } = yield* fixture;
+      for (const type of ["message", "provider"])
+        yield* insert("orchestration_v2_projection_runtime_requests", "pending", {
+          runtime_request_id: "request:" + type,
+          node_id: "node:shared",
+          payload_json: JSON.stringify({ responseCapability: { type } }),
+        });
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const observed = yield* service.inspect(request);
+      assert.equal(observed.carriedWork.pendingRequests, 1);
+      assert.equal(observed.pendingRequests, 1);
+      assert.equal(
+        (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+        "busy",
+      );
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect.each([
+    "clean",
+    "draft",
+    "unknown",
+    "stale",
+    "future",
+    "foreign owner",
+    "foreign environment",
+    "missing",
+  ] as const)("binds live draft readiness for %s state", (kind) =>
+    Effect.gen(function* () {
+      const { request } = yield* fixture;
+      const now = yield* DateTime.now;
+      const state = request.homeDirectory + "/userdata/";
+      NodeFS.writeFileSync(
+        state + "server-runtime.json",
+        JSON.stringify({ version: 1, pid: process.pid, ownerId: "owner:fixture" }),
+      );
+      if (kind !== "missing")
+        NodeFS.writeFileSync(
+          state + "native-update-readiness.json",
+          JSON.stringify({
+            schemaVersion: 1,
+            environmentId:
+              kind === "foreign environment" ? "environment:other" : request.environmentId,
+            ownerId: kind === "foreign owner" ? "owner:other" : "owner:fixture",
+            draftStateKnown: kind !== "unknown",
+            hasUnsentPrompt: kind === "unknown" ? null : kind === "draft",
+            observedUtc: DateTime.formatIso(
+              DateTime.add(now, { seconds: kind === "stale" ? -31 : kind === "future" ? 1 : 0 }),
+            ),
+          }),
+        );
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const observed = yield* service.probe({ ...request, operation: "probe" });
+      assert.isTrue(observed.processRunning);
+      assert.equal(observed.draftStateKnown, kind === "clean" || kind === "draft");
+      assert.equal(
+        observed.hasUnsentPrompt,
+        kind === "clean" ? false : kind === "draft" ? true : null,
+      );
+      assert.equal(
+        observed.draftsObservedUtc,
+        kind === "clean" || kind === "draft" ? DateTime.formatIso(now) : null,
+      );
+    }).pipe(Effect.provide(testLayer)),
+  );
+  it.effect("keeps the native replay subset aligned with authoritative process-loss recovery", () =>
+    Effect.sync(() => {
+      assert.deepEqual(
+        Object.keys(nativeRestartSafeEffects).sort(),
+        [...REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS].sort(),
+      );
+      assert.isFalse(
+        PROCESS_BOUND_EFFECT_TYPES.some((type) => Object.hasOwn(nativeRestartSafeEffects, type)),
+      );
+    }),
+  );
+
+  it.effect("refuses a candidate migration if carried work changes without a domain event", () =>
+    Effect.gen(function* () {
+      const { request, insert, dbPath } = yield* fixtureAtMigration(71);
+      yield* insert("orchestration_v2_projection_context_transfers", "resolved_portable", {
+        payload_json: JSON.stringify({ text: "Retain the exact transfer" }),
+      });
+      const close = NodeSqlite.DatabaseSync.prototype.close;
+      let closes = 0;
+      let changed = false;
+      using _close = vi
+        .spyOn(NodeSqlite.DatabaseSync.prototype, "close")
+        .mockImplementation(function (this: NodeSqlite.DatabaseSync) {
+          close.call(this);
+          closes++;
+          if (closes !== 2) return;
+          changed = true;
+          const writer = new NodeSqlite.DatabaseSync(dbPath);
+          try {
+            writer.exec(
+              "UPDATE orchestration_v2_projection_context_transfers SET payload_json='{}'",
+            );
+          } finally {
+            writer.close();
+          }
+        });
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      assert.equal(
+        (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+        "changed",
+      );
+      assert.isTrue(changed);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  effectIt.live(
+    "serves the probe through the real helper entry without a stopped admission lease",
+    () =>
+      Effect.gen(function* () {
+        const { request } = yield* fixture;
+        const entry = NodeURL.fileURLToPath(
+          new URL("./nativeMaintenanceEntry.ts", import.meta.url),
+        );
+        const preload =
+          "data:text/javascript," +
+          encodeURIComponent(
+            "globalThis.__T3_LAN_BUILD_IDENTITY__=" + JSON.stringify(identity) + ";",
+          );
+        const child = NodeChildProcess.spawnSync(process.execPath, ["--import", preload, entry], {
+          input: JSON.stringify({ ...request, operation: "probe" }),
+          encoding: "utf8",
+          windowsHide: true,
+          env: {
+            SystemRoot: "C:/Windows",
+            WINDIR: "C:/Windows",
+            NODE_NO_WARNINGS: "1",
+            USERPROFILE: request.homeDirectory,
+            TEMP: request.homeDirectory,
+            TMP: request.homeDirectory,
+          },
+        });
+        assert.equal(child.status, 0);
+        assert.equal(child.stderr, "");
+        const reply = JSON.parse(child.stdout);
+        assert.equal(reply.operation, "probe");
+        assert.equal(reply.nonce, request.nonce);
+        assert.deepEqual(reply.compiledIdentity, identity);
+        assert.equal(reply.processRunning, false);
+        assert.equal(reply.draftStateKnown, false);
+        assert.equal(reply.hasUnsentPrompt, null);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+  it.effect.each([
+    "supported",
+    "legacy",
+    "foreign pipe",
+    "unsupported version",
+    "guard disabled",
+  ] as const)("trusts guarded close only for %s capability", (kind) =>
+    Effect.gen(function* () {
+      const { request } = yield* fixture;
+      const now = yield* DateTime.now;
+      const state = request.homeDirectory + "/userdata/";
+      const ownerId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const pipe = "\\\\.\\pipe\\t3code-lan-update-v1-" + ownerId;
+      NodeFS.writeFileSync(
+        state + "server-runtime.json",
+        JSON.stringify({ version: 1, pid: process.pid, ownerId }),
+      );
+      NodeFS.writeFileSync(
+        state + "native-update-readiness.json",
+        JSON.stringify({
+          schemaVersion: 1,
+          environmentId: request.environmentId,
+          ownerId,
+          draftStateKnown: true,
+          hasUnsentPrompt: false,
+          observedUtc: DateTime.formatIso(now),
+          ...(kind === "legacy"
+            ? {}
+            : {
+                guardedCloseSupported: kind !== "guard disabled",
+                updateControlVersion: kind === "unsupported version" ? 2 : 1,
+                updateControlPipe: kind === "foreign pipe" ? "\\\\.\\pipe\\unrelated" : pipe,
+              }),
+        }),
+      );
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const observed = yield* service.probe({ ...request, operation: "probe" });
+      assert.equal(observed.serverProcessId, process.pid);
+      assert.equal(observed.serverOwnerId, ownerId);
+      assert.equal(observed.guardedCloseSupported, kind === "supported");
+      assert.equal(observed.updateControlVersion, kind === "supported" ? 1 : null);
+      assert.equal(observed.updateControlPipe, kind === "supported" ? pipe : null);
     }).pipe(Effect.provide(testLayer)),
   );
 });

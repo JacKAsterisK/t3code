@@ -21,8 +21,13 @@ import {
   OrchestrationV2ProviderGoal,
 } from "@t3tools/contracts";
 import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
+import {
+  emptyNativeWork,
+  nativeRestartSafeEffects,
+  nativeWorkStatusDefinitions,
+} from "./nativeWorkStates.ts";
 
-export type NativeBuildIdentity = typeof NativeActivationBuildIdentity.Type;
+export type NativeBuildIdentity = NativeActivationBuildIdentity;
 export type { NativeMaintenanceRequest };
 
 export class NativeMaintenanceError extends Schema.TaggedError<NativeMaintenanceError>()(
@@ -317,73 +322,20 @@ export const layerNativeLease = Layer.succeed(NativeMaintenanceLease, {
   }),
 });
 
-const terminal = ["completed", "interrupted", "failed", "cancelled", "rolled_back"];
-const completed = ["completed", "interrupted", "failed", "cancelled"];
 const decodePayload = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
 );
 const decodeCohort = Schema.decodeUnknownSync(OrchestrationV2DelegatedCompletionCohort);
 const decodeTaskDelivery = Schema.decodeUnknownSync(OrchestrationV2DelegatedCompletionTaskDelivery);
 const decodeGoal = Schema.decodeUnknownSync(OrchestrationV2ProviderGoal);
-const statuses = [
-  [
-    "orchestration_v2_projection_runs",
-    ["preparing", "queued", "starting", "running", "waiting", ...terminal],
-    ["preparing", "starting", "running", "waiting"],
-  ],
-  [
-    "orchestration_v2_projection_run_attempts",
-    ["pending", "running", "superseded", ...completed],
-    ["pending", "running"],
-  ],
-  [
-    "orchestration_v2_projection_nodes",
-    ["idle", "pending", "running", "waiting", ...terminal],
-    ["pending", "running", "waiting"],
-  ],
-  [
-    "orchestration_v2_projection_provider_sessions",
-    ["starting", "ready", "running", "waiting", "stopped", "error"],
-    ["starting", "ready", "running", "waiting"],
-  ],
-  [
-    "orchestration_v2_projection_provider_threads",
-    ["not_loaded", "idle", "active", "archived", "closed", "error"],
-    ["active"],
-  ],
-  [
-    "orchestration_v2_projection_provider_turns",
-    ["pending", "running", ...completed],
-    ["pending", "running"],
-  ],
-  [
-    "orchestration_v2_projection_runtime_requests",
-    ["pending", "resolved", "expired", "cancelled"],
-    ["pending"],
-  ],
-  [
-    "orchestration_v2_projection_subagents",
-    ["idle", "pending", "running", "waiting", ...completed],
-    ["pending", "running", "waiting"],
-  ],
-  [
-    "orchestration_v2_projection_turn_items",
-    ["idle", "pending", "running", "waiting", ...completed],
-    ["pending", "running", "waiting"],
-  ],
-  [
-    "orchestration_v2_effect_outbox",
-    ["pending", "running", "succeeded", "failed", "cancelled"],
-    ["pending", "running"],
-  ],
-] as const;
+const statuses = nativeWorkStatusDefinitions;
 
 const isWarmProviderState = (table: string, status: unknown) =>
   (table === "orchestration_v2_projection_provider_sessions" && status === "ready") ||
   (table === "orchestration_v2_projection_provider_threads" && status === "active");
 
 // All identifiers below are fixed source constants, never request-derived SQL.
-export const inspectStoppedRepairWork = (databasePath: string) => {
+const inspectWork = (databasePath: string, update: boolean) => {
   const db = new NodeSqlite.DatabaseSync(databasePath, {
     readOnly: true,
     enableForeignKeyConstraints: true,
@@ -634,6 +586,7 @@ export const inspectStoppedRepairWork = (databasePath: string) => {
       deferredDelivery +
       unconsumedContext +
       childResults;
+    const updateWork = update ? classifyUpdateWork(db, childResults) : undefined;
     const hash = NodeCrypto.createHash("sha256");
     for (const [table, key] of [
       ["orchestration_events", "sequence"],
@@ -645,6 +598,53 @@ export const inspectStoppedRepairWork = (databasePath: string) => {
       for (const row of db.prepare(`SELECT * FROM ${table} ORDER BY ${key}`).iterate())
         hash.update(JSON.stringify(row));
     }
+    if (update) {
+      for (const [table, key] of [
+        ["orchestration_v2_projection_runs", "run_id"],
+        ["orchestration_v2_projection_run_attempts", "attempt_id"],
+        ["orchestration_v2_projection_nodes", "node_id"],
+        ["orchestration_v2_projection_provider_sessions", "provider_session_id"],
+        ["orchestration_v2_projection_provider_threads", "provider_thread_id"],
+        ["orchestration_v2_projection_provider_turns", "provider_turn_id"],
+        ["orchestration_v2_projection_runtime_requests", "runtime_request_id"],
+        ["orchestration_v2_projection_subagents", "subagent_id"],
+        ["orchestration_v2_projection_turn_items", "turn_item_id"],
+        ["orchestration_v2_projection_context_transfers", "context_transfer_id"],
+        ["orchestration_v2_projection_messages", "message_id"],
+        ["orchestration_v2_projection_threads", "thread_id"],
+        ["orchestration_v2_effect_outbox", "effect_id"],
+      ]) {
+        for (const row of db.prepare("SELECT * FROM " + table + " ORDER BY " + key).iterate()) {
+          hash.update(table!);
+          const durable = { ...row };
+          for (const derived of [
+            "provider_instance_id",
+            "driver",
+            "source_provider_instance_id",
+            "target_provider_instance_id",
+          ])
+            delete durable[derived];
+          hash.update(JSON.stringify(durable));
+        }
+      }
+      for (const table of [
+        "orchestration_v2_projection_provider_session_bindings",
+        "scheduled_task_webhook_pending",
+        "scheduled_task_webhook_replay_keys",
+      ]) {
+        if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))
+          continue;
+        const rows = db
+          .prepare("SELECT * FROM " + table)
+          .all()
+          .map((row) => JSON.stringify(row))
+          .sort();
+        for (const row of rows) {
+          hash.update(table);
+          hash.update(row);
+        }
+      }
+    }
     db.exec("COMMIT");
     return {
       activeRuns,
@@ -653,11 +653,240 @@ export const inspectStoppedRepairWork = (databasePath: string) => {
       backgroundAgents,
       scheduledWork,
       restartContinuations,
+      ...updateWork,
       workGeneration: hash.digest("hex"),
     };
   } finally {
     db.close();
   }
+};
+
+export const inspectStoppedRepairWork = (databasePath: string) => inspectWork(databasePath, false);
+export const inspectNativeUpdateWork = (databasePath: string) => {
+  const work = inspectWork(databasePath, true);
+  return { ...work, carriedWork: work.carriedWork ?? emptyNativeWork() };
+};
+
+type WorkRow = Record<string, NodeSqlite.SQLOutputValue>;
+const classifyUpdateWork = (db: NodeSqlite.DatabaseSync, childResults: number) => {
+  const blocking = emptyNativeWork();
+  const carriedWork = emptyNativeWork();
+  const rows = (table: string) => db.prepare("SELECT * FROM " + table).all();
+  const payload = (row: WorkRow) => {
+    try {
+      return decodePayload(row.payload_json);
+    } catch (cause) {
+      throw new NativeMaintenanceError({ reason: "schema", cause });
+    }
+  };
+  const text = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+  const object = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const effects = rows("orchestration_v2_effect_outbox");
+  const replayable = (row: WorkRow) => {
+    const value = payload(row);
+    if (
+      row.status !== "pending" ||
+      !text(value.type) ||
+      value.type !== row.effect_type ||
+      !Object.hasOwn(nativeRestartSafeEffects, value.type)
+    )
+      return false;
+    if (!nativeRestartSafeEffects[value.type]!.every((key) => text(value[key]))) return false;
+    if (
+      value.type === "attachment.cleanup" &&
+      (!Array.isArray(value.attachmentIds) || !value.attachmentIds.every(text))
+    )
+      return false;
+    if (
+      value.type === "thread-title.generate" &&
+      (!object(value.kind) ||
+        !["initial", "regenerate"].includes(String(value.kind.type)) ||
+        (value.kind.type === "initial" && !text(value.kind.messageId)))
+    )
+      return false;
+    return true;
+  };
+  const checkpointRuns = new Set(
+    effects
+      .filter((row) => row.effect_type === "checkpoint.capture" && replayable(row))
+      .map((row) => payload(row).runId),
+  );
+  const requests = rows("orchestration_v2_projection_runtime_requests");
+  const messageRequest = (row: WorkRow) => {
+    const value = payload(row);
+    return (
+      row.status === "pending" &&
+      object(value.responseCapability) &&
+      value.responseCapability.type === "message"
+    );
+  };
+  const messageNodes = new Set(requests.filter(messageRequest).map((row) => row.node_id));
+  const tasks = rows("orchestration_v2_projection_subagents");
+  const appTask = (row: WorkRow) => {
+    const value = payload(row);
+    return (
+      value.origin === "app_owned" &&
+      text(value.childThreadId) &&
+      row.origin === "app_owned" &&
+      row.child_thread_id === value.childThreadId
+    );
+  };
+  const delegatedNodes = new Set(tasks.filter(appTask).map((row) => row.subagent_id));
+  const carriedRunIds = new Set<unknown>();
+  const blockingThreads = new Set<unknown>();
+  const blockingProviderThreads = new Set<unknown>();
+  const block = (row: WorkRow, category: keyof typeof blocking, count = 1) => {
+    blocking[category] += count;
+    if (text(row.thread_id)) blockingThreads.add(row.thread_id);
+    if (text(row.provider_thread_id)) blockingProviderThreads.add(row.provider_thread_id);
+  };
+  for (const row of rows("orchestration_v2_projection_runs")) {
+    const value = payload(row);
+    if (row.status === "queued") {
+      const message = text(value.userMessageId)
+        ? db
+            .prepare(
+              "SELECT payload_json FROM orchestration_v2_projection_messages WHERE message_id=? AND thread_id=?",
+            )
+            .get(value.userMessageId, row.thread_id!)
+        : undefined;
+      const input = message === undefined ? undefined : payload(message);
+      const preserved =
+        input !== undefined &&
+        !(
+          input.createdBy === "agent" &&
+          input.creationSource === "provider" &&
+          input.notification !== undefined &&
+          input.delegatedCompletion === undefined
+        );
+      if (preserved) {
+        carriedWork.queuedRuns++;
+        carriedRunIds.add(row.run_id);
+      } else block(row, "queuedRuns");
+    } else if (["preparing", "starting", "running", "waiting"].includes(String(row.status))) {
+      if (row.status === "waiting" && checkpointRuns.has(row.run_id)) {
+        carriedWork.activeRuns++;
+        carriedRunIds.add(row.run_id);
+      } else block(row, "activeRuns");
+    }
+    if (value.delegatedCompletion != null) {
+      const cohort = decodeCohort(value.delegatedCompletion);
+      if (cohort.disposition === "open" && cohort.delivery !== null)
+        carriedWork.restartContinuations++;
+    }
+  }
+  for (const row of requests) {
+    if (row.status !== "pending") continue;
+    if (messageRequest(row)) carriedWork.pendingRequests++;
+    else block(row, "pendingRequests");
+  }
+  for (const [table, , busy] of statuses) {
+    if (
+      [
+        "orchestration_v2_projection_runs",
+        "orchestration_v2_projection_runtime_requests",
+        "orchestration_v2_effect_outbox",
+        "orchestration_v2_projection_provider_sessions",
+        "orchestration_v2_projection_provider_threads",
+      ].includes(table)
+    )
+      continue;
+    for (const row of rows(table)) {
+      if (!(busy as ReadonlyArray<unknown>).includes(row.status)) continue;
+      const value = payload(row);
+      const preserved =
+        row.status !== "running" &&
+        ((table === "orchestration_v2_projection_run_attempts" && carriedRunIds.has(row.run_id)) ||
+          (table === "orchestration_v2_projection_nodes" &&
+            (messageNodes.has(row.node_id) ||
+              delegatedNodes.has(row.node_id) ||
+              carriedRunIds.has(row.run_id))) ||
+          (table === "orchestration_v2_projection_subagents" && appTask(row)) ||
+          (table === "orchestration_v2_projection_turn_items" &&
+            value.type === "subagent" &&
+            value.origin === "app_owned" &&
+            text(value.childThreadId) &&
+            text(value.subagentId) &&
+            delegatedNodes.has(value.subagentId)));
+      if (preserved) carriedWork.backgroundAgents++;
+      else block(row, "backgroundAgents");
+    }
+  }
+  for (const row of tasks) {
+    const value = payload(row);
+    if (value.completionDelivery !== undefined) {
+      const delivery = decodeTaskDelivery(value.completionDelivery);
+      if (["pending", "claimed"].includes(delivery.state)) {
+        if (appTask(row)) carriedWork.restartContinuations++;
+        else block(row, "restartContinuations");
+      }
+    }
+    if (value.origin === "app_owned" && value.childThreadId != null && value.result == null) {
+      if (appTask(row)) carriedWork.restartContinuations++;
+      else block(row, "restartContinuations");
+    }
+  }
+  for (const row of effects) {
+    if (!["pending", "running"].includes(String(row.status))) continue;
+    if (replayable(row)) carriedWork.restartContinuations++;
+    else block(row, "restartContinuations");
+  }
+  for (const row of rows("orchestration_v2_thread_launch_workflows"))
+    if (!["completed", "failed"].includes(String(row.status))) block(row, "restartContinuations");
+  for (const row of rows("orchestration_v2_projection_context_transfers")) {
+    if (row.status === "pending") block(row, "restartContinuations");
+    else if (["resolved_native", "resolved_portable"].includes(String(row.status)))
+      carriedWork.restartContinuations++;
+  }
+  carriedWork.restartContinuations += childResults;
+  for (const row of rows("scheduled_tasks")) {
+    if (!["never", "running", "succeeded", "failed"].includes(String(row.last_run_status)))
+      throw new NativeMaintenanceError({ reason: "schema" });
+    if (row.last_run_status === "running") blocking.scheduledWork++;
+    else if (row.enabled === 1) carriedWork.scheduledWork++;
+  }
+  if (
+    db
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_task_webhook_pending'",
+      )
+      .get()
+  ) {
+    for (const row of rows("scheduled_task_webhook_pending")) {
+      if (!["pending", "dispatching", "running", "completed", "failed"].includes(String(row.state)))
+        throw new NativeMaintenanceError({ reason: "schema" });
+      if (["dispatching", "running"].includes(String(row.state))) blocking.scheduledWork++;
+      else if (row.state === "pending") carriedWork.scheduledWork++;
+    }
+  }
+  const providerThreads = rows("orchestration_v2_projection_provider_threads");
+  for (const row of providerThreads) {
+    const value = payload(row);
+    if (value.goal != null && decodeGoal(value.goal).status === "active")
+      block(row, "backgroundAgents");
+    if (Array.isArray(value.pendingBackgroundTasks) && value.pendingBackgroundTasks.length > 0)
+      block(row, "restartContinuations", value.pendingBackgroundTasks.length);
+  }
+  const busySessions = new Set<unknown>();
+  for (const row of providerThreads) {
+    if (blockingThreads.has(row.thread_id) || blockingProviderThreads.has(row.provider_thread_id)) {
+      if (row.status === "active") blocking.backgroundAgents++;
+      if (row.provider_session_id !== null) busySessions.add(row.provider_session_id);
+    } else if (row.status === "active") carriedWork.backgroundAgents++;
+  }
+  for (const row of rows("orchestration_v2_projection_provider_session_bindings"))
+    if (blockingThreads.has(row.thread_id)) busySessions.add(row.provider_session_id);
+  for (const row of rows("orchestration_v2_projection_provider_sessions")) {
+    if (["starting", "running", "waiting"].includes(String(row.status)))
+      blocking.backgroundAgents++;
+    else if (row.status === "ready") {
+      if (blockingThreads.has(row.thread_id) || busySessions.has(row.provider_session_id))
+        blocking.backgroundAgents++;
+      else carriedWork.backgroundAgents++;
+    }
+  }
+  return { ...blocking, carriedWork };
 };
 
 const filesGeneration = async (databasePath: string) => {
@@ -688,6 +917,108 @@ const filesGeneration = async (databasePath: string) => {
   return hash.digest("hex");
 };
 
+const probeRuntime = Schema.decodeUnknownSync(
+  Schema.Struct({
+    version: Schema.Literal(1),
+    pid: Schema.Int.check(Schema.isGreaterThan(0)),
+    ownerId: Schema.NonEmptyString,
+  }),
+);
+const probeReadiness = Schema.decodeUnknownSync(
+  Schema.Struct({
+    schemaVersion: Schema.Literal(1),
+    environmentId: Schema.NonEmptyString,
+    ownerId: Schema.NonEmptyString,
+    draftStateKnown: Schema.Boolean,
+    hasUnsentPrompt: Schema.NullOr(Schema.Boolean),
+    observedUtc: Schema.String,
+    guardedCloseSupported: Schema.optionalKey(Schema.Boolean),
+    updateControlVersion: Schema.optionalKey(Schema.Literal(1)),
+    updateControlPipe: Schema.optionalKey(Schema.String),
+  }),
+  { onExcessProperty: "error" },
+);
+const boundedRecord = (path: string) => {
+  try {
+    if (safeFile(path).size > 8192) throw new NativeMaintenanceError({ reason: "identity" });
+    return NodeFS.readFileSync(path, "utf8");
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT") return null;
+    throw cause;
+  }
+};
+const processAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    return cause instanceof Error && "code" in cause && cause.code === "EPERM";
+  }
+};
+const readNativeUpdateReadiness = (home: string, environmentId: string, now: number) => {
+  const unknown = {
+    processRunning: false,
+    serverProcessId: null,
+    serverOwnerId: null,
+    draftStateKnown: false,
+    hasUnsentPrompt: null,
+    draftsObservedUtc: null,
+    updateControlPipe: null,
+    updateControlVersion: null,
+    guardedCloseSupported: false,
+  } as const;
+  const runtime = boundedRecord(NodePath.join(home, "userdata", "server-runtime.json"));
+  if (runtime === null) return unknown;
+  let owner;
+  try {
+    owner = probeRuntime(strictJson(Buffer.from(runtime)));
+  } catch {
+    return unknown;
+  }
+  if (!processAlive(owner.pid)) return unknown;
+  const running = {
+    ...unknown,
+    processRunning: true,
+    serverProcessId: owner.pid,
+    serverOwnerId: owner.ownerId,
+  };
+  const raw = boundedRecord(NodePath.join(home, "userdata", "native-update-readiness.json"));
+  if (raw === null) return running;
+  let readiness;
+  try {
+    readiness = probeReadiness(strictJson(Buffer.from(raw)));
+  } catch {
+    return running;
+  }
+  const observed = Date.parse(readiness.observedUtc);
+  if (
+    readiness.environmentId !== environmentId ||
+    readiness.ownerId !== owner.ownerId ||
+    !Number.isFinite(observed) ||
+    observed > now ||
+    now - observed > 30_000 ||
+    !readiness.draftStateKnown ||
+    readiness.hasUnsentPrompt === null
+  )
+    return running;
+  if (boundedRecord(NodePath.join(home, "userdata", "server-runtime.json")) !== runtime)
+    throw new NativeMaintenanceError({ reason: "changed" });
+  const expectedPipe = "\\\\.\\pipe\\t3code-lan-update-v1-" + owner.ownerId;
+  const guardedCloseSupported =
+    /^[a-z0-9-]{1,128}$/iu.test(owner.ownerId) &&
+    readiness.guardedCloseSupported === true &&
+    readiness.updateControlVersion === 1 &&
+    readiness.updateControlPipe === expectedPipe;
+  return {
+    ...running,
+    draftStateKnown: true,
+    hasUnsentPrompt: readiness.hasUnsentPrompt,
+    draftsObservedUtc: readiness.observedUtc,
+    updateControlPipe: guardedCloseSupported ? expectedPipe : null,
+    updateControlVersion: guardedCloseSupported ? (1 as const) : null,
+    guardedCloseSupported,
+  };
+};
 export const layer = (compiledIdentity: NativeBuildIdentity) =>
   Layer.effect(
     NativeMaintenance,
@@ -717,7 +1048,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
             const dbPath = NodePath.join(state, "statev2.sqlite");
             safeFile(dbPath);
             const before = await filesGeneration(dbPath);
-            const work = inspectStoppedRepairWork(dbPath);
+            const work = inspectNativeUpdateWork(dbPath);
             const after = await filesGeneration(dbPath);
             if (before !== after) throw new NativeMaintenanceError({ reason: "changed" });
             return {
@@ -735,6 +1066,62 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
           catch: ioError,
         });
         return { ...snapshot, observedUtc: DateTime.formatIso(yield* DateTime.now) };
+      });
+      const probe = Effect.fn("NativeMaintenance.probe")(function* (
+        request: NativeMaintenanceRequest,
+      ) {
+        const now = yield* DateTime.now;
+        return yield* Effect.try({
+          try: () => {
+            const home = NodePath.resolve(request.homeDirectory);
+            if (
+              home !== request.homeDirectory ||
+              !isAllowedMaintenanceLayout(home, request.journalPath)
+            )
+              throw new NativeMaintenanceError({ reason: "identity" });
+            safeParents(home);
+            const state = NodePath.join(home, "userdata");
+            safeParents(state);
+            const identityPath = NodePath.join(state, "environment-id");
+            if (
+              safeFile(identityPath).size > 256 ||
+              NodeFS.readFileSync(identityPath, "utf8").trim() !== request.environmentId
+            )
+              throw new NativeMaintenanceError({ reason: "identity" });
+            const dbPath = NodePath.join(state, "statev2.sqlite");
+            safeFile(dbPath);
+            for (const sidecar of [dbPath + "-wal", dbPath + "-shm"]) {
+              try {
+                safeFile(sidecar);
+              } catch (cause) {
+                if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT"))
+                  throw cause;
+              }
+            }
+            const runtimePath = NodePath.join(state, "server-runtime.json");
+            const owner = boundedRecord(runtimePath);
+            const work = inspectNativeUpdateWork(dbPath);
+            const readiness = readNativeUpdateReadiness(
+              home,
+              request.environmentId,
+              DateTime.toEpochMillis(now),
+            );
+            if (boundedRecord(runtimePath) !== owner)
+              throw new NativeMaintenanceError({ reason: "changed" });
+            return {
+              schemaVersion: request.schemaVersion,
+              nonce: request.nonce,
+              operation: "probe" as const,
+              environmentId: request.environmentId,
+              homeDirectory: request.homeDirectory,
+              ...work,
+              ...readiness,
+              compiledIdentity,
+              observedUtc: DateTime.formatIso(now),
+            };
+          },
+          catch: ioError,
+        });
       });
       const verify = Effect.fn("NativeMaintenance.verify")(function* (
         request: NativeMaintenanceRequest,
@@ -860,7 +1247,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
         });
         return yield* inspect(request);
       });
-      return NativeMaintenance.of({ inspect, verify, bootstrap });
+      return NativeMaintenance.of({ inspect, verify, bootstrap, probe });
     }),
   );
 
@@ -870,6 +1257,7 @@ type Snapshot = Omit<NativeMaintenanceRequest, "journalPath"> & {
   workGeneration: string;
   processStopped: true;
   compiledIdentity: NativeBuildIdentity;
+  carriedWork: ReturnType<typeof emptyNativeWork>;
   activeRuns: number;
   queuedRuns: number;
   pendingRequests: number;
@@ -880,6 +1268,21 @@ type Snapshot = Omit<NativeMaintenanceRequest, "journalPath"> & {
 export class NativeMaintenance extends Context.Service<
   NativeMaintenance,
   {
+    readonly probe: (request: NativeMaintenanceRequest) => Effect.Effect<
+      Omit<Snapshot, "dataGeneration" | "processStopped"> & {
+        operation: "probe";
+        processRunning: boolean;
+        draftStateKnown: boolean;
+        hasUnsentPrompt: boolean | null;
+        draftsObservedUtc: string | null;
+        serverProcessId: number | null;
+        serverOwnerId: string | null;
+        updateControlPipe: string | null;
+        updateControlVersion: 1 | null;
+        guardedCloseSupported: boolean;
+      },
+      NativeMaintenanceError
+    >;
     readonly inspect: (
       request: NativeMaintenanceRequest,
     ) => Effect.Effect<Snapshot, NativeMaintenanceError>;

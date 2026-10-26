@@ -39,7 +39,7 @@ export const cancelOfflineWork = Effect.fn("OfflineWorkCancellation.cancel")(fun
   repairId: string,
 ) {
   if (!/^[a-f0-9]{32}$/.test(repairId))
-    return yield* Effect.fail(new OfflineWorkCancellationError({ reason: "invalid-state" }));
+    return yield* new OfflineWorkCancellationError({ reason: "invalid-state" });
   const sql = yield* SqlClient.SqlClient;
   const sink = yield* EventSink.EventSinkV2;
   return yield* sql.withTransaction(
@@ -52,10 +52,10 @@ export const cancelOfflineWork = Effect.fn("OfflineWorkCancellation.cancel")(fun
       // Per-row planning is covered by the enclosing cancellation transaction span.
       const append = Effect.fnUntraced(function* (raw: Record<string, unknown>) {
         if (++total > 20_000)
-          return yield* Effect.fail(new OfflineWorkCancellationError({ reason: "invalid-state" }));
+          return yield* new OfflineWorkCancellationError({ reason: "invalid-state" });
         const threadId = raw.threadId;
         if (typeof threadId !== "string")
-          return yield* Effect.fail(new OfflineWorkCancellationError({ reason: "invalid-state" }));
+          return yield* new OfflineWorkCancellationError({ reason: "invalid-state" });
         const event = yield* decodeEvent({
           ...raw,
           id: EventId.make(`event:home-repair:${repairId}:${total}`),
@@ -78,17 +78,13 @@ export const cancelOfflineWork = Effect.fn("OfflineWorkCancellation.cancel")(fun
         for (const row of rows) {
           const parsed: unknown = strictJson(Buffer.from(row.payload_json));
           if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-            return yield* Effect.fail(
-              new OfflineWorkCancellationError({ reason: "invalid-state" }),
-            );
+            return yield* new OfflineWorkCancellationError({ reason: "invalid-state" });
           const prior = parsed as Record<string, unknown>;
           if (
             prior.status !== row.status ||
             (prior.threadId !== undefined && prior.threadId !== row.thread_id)
           )
-            return yield* Effect.fail(
-              new OfflineWorkCancellationError({ reason: "invalid-state" }),
-            );
+            return yield* new OfflineWorkCancellationError({ reason: "invalid-state" });
           const payload = { ...prior };
           if (index === 3) Object.assign(payload, { status: "stopped", updatedAt: occurredAt });
           else if (index === 4) {
@@ -141,7 +137,7 @@ export const cancelOfflineWork = Effect.fn("OfflineWorkCancellation.cancel")(fun
       for (const row of messages) {
         const prior: unknown = strictJson(Buffer.from(row.payload_json));
         if (prior === null || typeof prior !== "object" || Array.isArray(prior))
-          return yield* Effect.fail(new OfflineWorkCancellationError({ reason: "invalid-state" }));
+          return yield* new OfflineWorkCancellationError({ reason: "invalid-state" });
         yield* append({
           type: "message.updated",
           threadId: row.thread_id,
@@ -152,7 +148,7 @@ export const cancelOfflineWork = Effect.fn("OfflineWorkCancellation.cancel")(fun
         const thread =
           yield* sql`SELECT thread_id FROM orchestration_v2_projection_threads WHERE thread_id=${threadId}`;
         if (thread.length !== 1)
-          return yield* Effect.fail(new OfflineWorkCancellationError({ reason: "invalid-state" }));
+          return yield* new OfflineWorkCancellationError({ reason: "invalid-state" });
         yield* sink.commitCommand({
           commandId: CommandId.make(`command:home-repair-cancel:${repairId}:${threadId}`),
           threadId: ThreadId.make(threadId),

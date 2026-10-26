@@ -536,7 +536,7 @@ const make = Effect.gen(function* () {
     return CloudLink.of({
       linkProof: refuse,
       applyRelayConfig: refuse,
-      linkState: () =>
+      linkState: Effect.fn("CloudLink.linkState")(() =>
         Effect.succeed({
           linked: false,
           cloudUserId: null,
@@ -546,6 +546,7 @@ const make = Effect.gen(function* () {
           publishAgentActivity: false,
           holdWebhooksWhileOffline: false,
         }),
+      ),
       unlink: refuse,
       updatePreferences: refuse,
       answerHealthRequest: refuse,
@@ -554,8 +555,12 @@ const make = Effect.gen(function* () {
       reconcileDesiredLinkIfStillDesired: refuse,
       registerManagedTunnelRecovery: refuse,
       recoverManagedTunnel: refuse,
-      startManagedTunnelIfOriginConfirmed: () => Effect.succeed(false),
-      releaseManagedTunnelOnShutdown: () => Effect.succeed(false),
+      startManagedTunnelIfOriginConfirmed: Effect.fn(
+        "CloudLink.startManagedTunnelIfOriginConfirmed",
+      )(() => Effect.succeed(false)),
+      releaseManagedTunnelOnShutdown: Effect.fn("CloudLink.releaseManagedTunnelOnShutdown")(() =>
+        Effect.succeed(false),
+      ),
     });
   }
   const secrets = yield* ServerSecretStore.ServerSecretStore;

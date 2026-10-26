@@ -178,13 +178,17 @@ const stopConnector = (connector: ActiveConnector | null) =>
 export const make = Effect.gen(function* () {
   if (!cloudEnabled)
     return CloudManagedEndpointRuntime.of({
-      applyConfig: () => Effect.succeed({ status: "disabled" }),
+      applyConfig: Effect.fn("CloudManagedEndpointRuntime.applyConfig")(() =>
+        Effect.succeed({ status: "disabled" as const }),
+      ),
       inspectConnector: Effect.succeed(null),
       readinessChanged: Stream.never,
       recoveryRequests: Stream.never,
-      requestRecovery: () => Effect.void,
+      requestRecovery: Effect.fn("CloudManagedEndpointRuntime.requestRecovery")(() => Effect.void),
       tunnelConnected: Stream.never,
-      withLinkStateLock: (effect) => effect,
+      withLinkStateLock: Effect.fn("CloudManagedEndpointRuntime.withLinkStateLock")(
+        <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+      ),
     });
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const relayClient = yield* RelayClient.RelayClient;

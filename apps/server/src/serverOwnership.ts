@@ -236,6 +236,7 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
   }
 
   return {
+    ownerId,
     publish: (state: PersistedServerRuntimeState) =>
       persistServerRuntimeState({ path: statePath, state: { ...state, ownerId } }),
   };

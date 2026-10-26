@@ -61,7 +61,11 @@ export const make = Effect.fn("desktopUpdate.desktopAppUpdate.make")(function* (
         reason: distributionUpdateGuidance,
       }),
     );
-    return DesktopAppUpdate.of({ available: false, run: () => refusal, commit: () => refusal });
+    return DesktopAppUpdate.of({
+      available: false,
+      run: Effect.fn("DesktopAppUpdate.run")(() => refusal),
+      commit: Effect.fn("DesktopAppUpdate.commit")(() => refusal),
+    });
   }
   const config = yield* ServerConfig.ServerConfig;
   const crypto = yield* Crypto.Crypto;

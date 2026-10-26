@@ -7,6 +7,7 @@ import {
   type DesktopSnapShotEvent,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -534,7 +535,11 @@ const enabledSettings = (overrides: Partial<ClientSettings> = {}): ClientSetting
   ...overrides,
 });
 
-function concurrentCaptureFixture(platform: NodeJS.Platform, animations: boolean) {
+function concurrentCaptureFixture(
+  platform: NodeJS.Platform,
+  animations: boolean,
+  fileSystemOverrides: Parameters<typeof FileSystem.layerNoop>[0] = {},
+) {
   vi.stubEnv("XDG_SESSION_TYPE", "wayland");
   focusedWindowMock.mockReturnValue(undefined);
   allWindowsMock.mockReturnValue([]);
@@ -573,6 +578,7 @@ function concurrentCaptureFixture(platform: NodeJS.Platform, animations: boolean
     preparations: 0,
     preparedWithoutOverlay: true,
     failFirstPersistence: false,
+    beforeReady: Effect.void,
   };
   const images = new Map<string, Uint8Array>();
   const metadata = new Map<string, string>();
@@ -672,6 +678,13 @@ function concurrentCaptureFixture(platform: NodeJS.Platform, animations: boolean
         }),
       readFile: (path) => Effect.sync(() => images.get(path)!),
       readFileString: (path) => Effect.sync(() => metadata.get(path)!),
+      readDirectory: () =>
+        Effect.sync(() =>
+          [...new Set([...images.keys(), ...metadata.keys()])].map((file) =>
+            file.split(/[\\/]/u).at(-1)!,
+          ),
+        ),
+      ...fileSystemOverrides,
     }),
     Layer.succeed(
       Crypto.Crypto,
@@ -700,7 +713,7 @@ function concurrentCaptureFixture(platform: NodeJS.Platform, animations: boolean
             case "ready":
               return Effect.sync(() => {
                 readyIds.push(event.id);
-              });
+              }).pipe(Effect.andThen(() => state.beforeReady));
             default:
               return Effect.void;
           }
@@ -714,6 +727,8 @@ function concurrentCaptureFixture(platform: NodeJS.Platform, animations: boolean
     state,
     readyIds,
     requestedIds,
+    images,
+    metadata,
     layer,
     settings: {
       ...DEFAULT_CLIENT_SETTINGS,
@@ -1856,6 +1871,279 @@ it.effect("an unrelated client-setting change keeps the registered shortcut", ()
     }),
   ).pipe(Effect.provide(layerTest("win32")));
 });
+
+it.effect(
+  "native update reservation blocks direct and OS capture without changing another suppression owner",
+  () => {
+    const fixture = concurrentCaptureFixture("win32", false);
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* DesktopSnapShot.make;
+        yield* service.configure({
+          ...fixture.settings,
+          snapShotFlash: false,
+          snapShotPlaySound: false,
+        });
+        yield* service.setShortcutSuppressed(true);
+        const reservation = yield* service.reserveNativeUpdateClose;
+        assert.isTrue(Option.isSome(reservation));
+        if (Option.isNone(reservation)) return;
+        yield* service.setShortcutSuppressed(false);
+        assert.strictEqual((yield* service.capture.pipe(Effect.flip)).operation, "update-reserved");
+        yield* Effect.promise(fixture.trigger);
+        assert.lengthOf(activeWindowMock.mock.calls, 0);
+        assert.lengthOf(regionCaptureMock.mock.calls, 0);
+        assert.lengthOf(fixture.requestedIds, 0);
+        assert.strictEqual(fixture.state.preparations, 0);
+        assert.strictEqual(fixture.state.handoffs, 0);
+        assert.strictEqual(fixture.images.size + fixture.metadata.size, 0);
+        yield* service.setShortcutSuppressed(true);
+        yield* reservation.value.release;
+        yield* Effect.promise(fixture.trigger);
+        assert.strictEqual(fixture.state.snapshots, 0);
+        yield* service.setShortcutSuppressed(false);
+        fixture.first.pixels.resolve();
+        fixture.first.context.resolve({ accessibleText: "Restored capture" });
+        yield* Effect.promise(fixture.trigger);
+        assert.strictEqual(fixture.state.snapshots, 1);
+        assert.lengthOf(fixture.readyIds, 1);
+      }).pipe(Effect.ensuring(Effect.sync(fixture.releaseAll))),
+    ).pipe(Effect.provide(fixture.layer), Effect.ensuring(Effect.sync(fixture.reset)));
+  },
+);
+
+it.effect(
+  "native update reservation stays unavailable through capture preparation, persistence and ready delivery",
+  () => {
+    const fixture = concurrentCaptureFixture("win32", false);
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const readyEntered = yield* Deferred.make<void>();
+        const finishReady = yield* Deferred.make<void>();
+        fixture.state.beforeReady = Deferred.succeed(readyEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(finishReady)),
+        );
+        const service = yield* DesktopSnapShot.make;
+        yield* service.configure({
+          ...fixture.settings,
+          snapShotFlash: false,
+          snapShotPlaySound: false,
+        });
+        const capture = yield* service.capture.pipe(Effect.forkChild);
+        yield* Effect.promise(() => fixture.first.started.promise);
+        assert.isTrue(Option.isNone(yield* service.reserveNativeUpdateClose));
+        fixture.first.pixels.resolve();
+        yield* Effect.promise(() => fixture.first.handoff.promise);
+        assert.lengthOf(fixture.readyIds, 0);
+        assert.isTrue(Option.isNone(yield* service.reserveNativeUpdateClose));
+        fixture.first.context.resolve({ accessibleText: "Persisted capture" });
+        yield* Deferred.await(readyEntered);
+        assert.lengthOf(fixture.readyIds, 1);
+        yield* service.acknowledge(fixture.readyIds[0]!);
+        assert.strictEqual(fixture.images.size + fixture.metadata.size, 0);
+        assert.isTrue(Option.isNone(yield* service.reserveNativeUpdateClose));
+        yield* Deferred.succeed(finishReady, undefined);
+        yield* Fiber.join(capture);
+        const reservation = yield* service.reserveNativeUpdateClose;
+        assert.isTrue(Option.isSome(reservation));
+        if (Option.isSome(reservation)) yield* reservation.value.release;
+      }).pipe(Effect.ensuring(Effect.sync(fixture.releaseAll))),
+    ).pipe(Effect.provide(fixture.layer), Effect.ensuring(Effect.sync(fixture.reset)));
+  },
+);
+
+it.effect(
+  "native update reservation preserves a completed pending capture until acknowledgement",
+  () => {
+    const fixture = concurrentCaptureFixture("win32", false);
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* DesktopSnapShot.make;
+        yield* service.configure({
+          ...fixture.settings,
+          snapShotFlash: false,
+          snapShotPlaySound: false,
+        });
+        fixture.first.pixels.resolve();
+        fixture.first.context.resolve({ accessibleText: "Retained pending capture" });
+        yield* service.capture;
+        const pending = yield* service.listPending;
+        assert.lengthOf(pending, 1);
+        yield* service.configure({ ...fixture.settings, snapShotEnabled: false });
+        assert.isTrue(Option.isNone(yield* service.reserveNativeUpdateClose));
+        assert.strictEqual(
+          (yield* service.read(pending[0]!.id)).source.accessibleText,
+          "Retained pending capture",
+        );
+        yield* service.acknowledge(pending[0]!.id);
+        const reservation = yield* service.reserveNativeUpdateClose;
+        assert.isTrue(Option.isSome(reservation));
+        if (Option.isSome(reservation)) yield* reservation.value.release;
+      }).pipe(Effect.ensuring(Effect.sync(fixture.releaseAll))),
+    ).pipe(Effect.provide(fixture.layer), Effect.ensuring(Effect.sync(fixture.reset)));
+  },
+);
+
+it.effect(
+  "native update reservation prevents captures while its pending-file inspection is in flight",
+  () =>
+    Effect.gen(function* () {
+      const inspecting = yield* Deferred.make<void>();
+      const finishInspection = yield* Deferred.make<void>();
+      const fixture = concurrentCaptureFixture("win32", false, {
+        readDirectory: () =>
+          Deferred.succeed(inspecting, undefined).pipe(
+            Effect.andThen(Deferred.await(finishInspection)),
+            Effect.as([]),
+          ),
+      });
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const service = yield* DesktopSnapShot.make;
+          yield* service.configure({
+            ...fixture.settings,
+            snapShotFlash: false,
+            snapShotPlaySound: false,
+          });
+          const reserving = yield* service.reserveNativeUpdateClose.pipe(Effect.forkChild);
+          yield* Deferred.await(inspecting);
+          assert.strictEqual(
+            (yield* service.capture.pipe(Effect.flip)).operation,
+            "update-reserved",
+          );
+          yield* Effect.promise(fixture.trigger);
+          assert.strictEqual(fixture.state.snapshots, 0);
+          assert.lengthOf(fixture.requestedIds, 0);
+          yield* Deferred.succeed(finishInspection, undefined);
+          const reservation = yield* Fiber.join(reserving);
+          assert.isTrue(Option.isSome(reservation));
+          if (Option.isSome(reservation)) yield* reservation.value.release;
+        }),
+      ).pipe(Effect.provide(fixture.layer), Effect.ensuring(Effect.sync(fixture.reset)));
+    }),
+);
+
+it.effect.each([
+  "retained.json",
+  "orphan.png",
+  "unfinished.tmp.png",
+  "unfinished.json.tmp",
+  "unknown-file",
+])("native update reservation refuses retained or malformed capture data: %s", (name) => {
+  let files = [name];
+  const fixture = concurrentCaptureFixture("win32", false, {
+    readDirectory: () => Effect.sync(() => files),
+    readFileString: () =>
+      Effect.die("Update admission must not discard malformed capture metadata."),
+  });
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* DesktopSnapShot.make;
+      assert.isTrue(Option.isNone(yield* service.reserveNativeUpdateClose));
+      files = [];
+      const reservation = yield* service.reserveNativeUpdateClose;
+      assert.isTrue(Option.isSome(reservation));
+      if (Option.isSome(reservation)) yield* reservation.value.release;
+      assert.strictEqual(fixture.state.snapshots, 0);
+    }),
+  ).pipe(Effect.provide(fixture.layer), Effect.ensuring(Effect.sync(fixture.reset)));
+});
+
+it.effect(
+  "native update reservation fails closed on unreadable pending data and releases for retry",
+  () => {
+    let unreadable = true;
+    const fixture = concurrentCaptureFixture("win32", false, {
+      readDirectory: () =>
+        unreadable
+          ? Effect.fail(
+              PlatformError.systemError({
+                _tag: "PermissionDenied",
+                module: "FileSystem",
+                method: "readDirectory",
+              }),
+            )
+          : Effect.succeed([]),
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const service = yield* DesktopSnapShot.make;
+        const failure = yield* service.reserveNativeUpdateClose.pipe(Effect.flip);
+        assert.instanceOf(failure, DesktopSnapShot.DesktopSnapShotError);
+        unreadable = false;
+        const reservation = yield* service.reserveNativeUpdateClose;
+        assert.isTrue(Option.isSome(reservation));
+        if (Option.isSome(reservation)) yield* reservation.value.release;
+      }),
+    ).pipe(Effect.provide(fixture.layer), Effect.ensuring(Effect.sync(fixture.reset)));
+  },
+);
+
+it.effect("native update reservation treats a missing capture directory as empty", () => {
+  const fixture = concurrentCaptureFixture("win32", false, {
+    readDirectory: () =>
+      Effect.fail(
+        PlatformError.systemError({
+          _tag: "NotFound",
+          module: "FileSystem",
+          method: "readDirectory",
+        }),
+      ),
+  });
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const service = yield* DesktopSnapShot.make;
+      const reservation = yield* service.reserveNativeUpdateClose;
+      assert.isTrue(Option.isSome(reservation));
+      if (Option.isSome(reservation)) yield* reservation.value.release;
+    }),
+  ).pipe(Effect.provide(fixture.layer), Effect.ensuring(Effect.sync(fixture.reset)));
+});
+
+it.effect(
+  "native update reservation releases a cancelled inspection without releasing a newer owner",
+  () =>
+    Effect.gen(function* () {
+      const inspecting = yield* Deferred.make<void>();
+      let block = true;
+      const fixture = concurrentCaptureFixture("win32", false, {
+        readDirectory: () =>
+          block
+            ? Deferred.succeed(inspecting, undefined).pipe(Effect.andThen(Effect.never))
+            : Effect.succeed([]),
+      });
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const service = yield* DesktopSnapShot.make;
+          yield* service.configure({
+            ...fixture.settings,
+            snapShotFlash: false,
+            snapShotPlaySound: false,
+          });
+          const reserving = yield* service.reserveNativeUpdateClose.pipe(Effect.forkChild);
+          yield* Deferred.await(inspecting);
+          yield* Fiber.interrupt(reserving);
+          block = false;
+          const first = yield* service.reserveNativeUpdateClose;
+          assert.isTrue(Option.isSome(first));
+          if (Option.isNone(first)) return;
+          yield* first.value.release;
+          const second = yield* service.reserveNativeUpdateClose;
+          assert.isTrue(Option.isSome(second));
+          if (Option.isNone(second)) return;
+          yield* first.value.release;
+          assert.strictEqual(
+            (yield* service.capture.pipe(Effect.flip)).operation,
+            "update-reserved",
+          );
+          yield* second.value.release;
+          const third = yield* service.reserveNativeUpdateClose;
+          assert.isTrue(Option.isSome(third));
+          if (Option.isSome(third)) yield* third.value.release;
+        }),
+      ).pipe(Effect.provide(fixture.layer), Effect.ensuring(Effect.sync(fixture.reset)));
+    }),
+);
 
 it.effect("capture fails closed while snapshots are disabled", () => {
   activeWindowMock.mockClear();

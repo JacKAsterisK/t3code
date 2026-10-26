@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as TestClock from "effect/testing/TestClock";
 import { vi } from "vite-plus/test";
@@ -95,6 +96,7 @@ describe("layer", () => {
       let calls = 0;
       const registry = EnvironmentRegistry.EnvironmentRegistry.of({
         entries,
+        runStream: () => Stream.never,
         run: () => {
           calls += 1;
           return calls === 1 ? Effect.failCause(Cause.interrupt()) : Effect.void;

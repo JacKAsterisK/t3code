@@ -87,28 +87,39 @@ export const layer = (relayUrl: string) =>
           ManagedRelay.ManagedRelayClient,
           ManagedRelay.ManagedRelayClient.of({
             relayUrl: "",
-            listEnvironments: () =>
+            listEnvironments: Effect.fn("ManagedRelay.ManagedRelayClient.listEnvironments")(() =>
               Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
-            listDevices: () =>
+            ),
+            listDevices: Effect.fn("ManagedRelay.ManagedRelayClient.listDevices")(() =>
               Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
-            createEnvironmentLinkChallenge: () =>
+            ),
+            createEnvironmentLinkChallenge: Effect.fn(
+              "ManagedRelay.ManagedRelayClient.createEnvironmentLinkChallenge",
+            )(() => Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" }))),
+            linkEnvironment: Effect.fn("ManagedRelay.ManagedRelayClient.linkEnvironment")(() =>
               Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
-            linkEnvironment: () =>
+            ),
+            unlinkEnvironment: Effect.fn("ManagedRelay.ManagedRelayClient.unlinkEnvironment")(() =>
               Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
-            unlinkEnvironment: () =>
+            ),
+            getEnvironmentStatus: Effect.fn("ManagedRelay.ManagedRelayClient.getEnvironmentStatus")(
+              () => Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            ),
+            connectEnvironment: Effect.fn("ManagedRelay.ManagedRelayClient.connectEnvironment")(
+              () => Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            ),
+            registerDevice: Effect.fn("ManagedRelay.ManagedRelayClient.registerDevice")(() =>
               Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
-            getEnvironmentStatus: () =>
+            ),
+            unregisterDevice: Effect.fn("ManagedRelay.ManagedRelayClient.unregisterDevice")(() =>
               Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
-            connectEnvironment: () =>
-              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
-            registerDevice: () =>
-              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
-            unregisterDevice: () =>
-              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
-            registerLiveActivity: () =>
-              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
-            getAgentActivitySnapshot: () =>
-              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            ),
+            registerLiveActivity: Effect.fn("ManagedRelay.ManagedRelayClient.registerLiveActivity")(
+              () => Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            ),
+            getAgentActivitySnapshot: Effect.fn(
+              "ManagedRelay.ManagedRelayClient.getAgentActivitySnapshot",
+            )(() => Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" }))),
             resetTokenCache: Effect.void,
           }),
         ),
@@ -121,7 +132,7 @@ export const layer = (relayUrl: string) =>
                 cause: new Error("T3 Connect is disabled in this LAN distribution."),
               }),
             ),
-            createProof: (input) =>
+            createProof: Effect.fn("ManagedRelay.ManagedRelayDpopSigner.createProof")((input) =>
               Effect.fail(
                 new ManagedRelay.ManagedRelayDpopProofCreationError({
                   method: input.method,
@@ -129,6 +140,7 @@ export const layer = (relayUrl: string) =>
                   cause: new Error("T3 Connect is disabled in this LAN distribution."),
                 }),
               ),
+            ),
           }),
         ),
       );

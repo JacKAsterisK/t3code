@@ -1231,6 +1231,9 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
   },
 );
 
+// Each HTTP upgrade owns a new RPC protocol whose wire client IDs restart at zero.
+let nextBackgroundRpcClientId = 0;
+
 export const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientOrigin: OrchestrationClientOrigin,
@@ -1350,12 +1353,39 @@ export const layerWsRpc = (
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
-      const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
+      const rpcClientIds = yield* Ref.make(new Map<RpcClientId, RpcClientId>());
+      // Registration and finalizer bookkeeping must survive a cancelled initial config request together.
+      const registerRpcClient = Effect.fn("ws.registerRpcClient")(function* (id: number) {
+        const wireId = RpcClientId.make(id);
+        const client = yield* Ref.modify(
+          rpcClientIds,
+          (
+            ids,
+          ): readonly [
+            { readonly first: boolean; readonly id: RpcClientId },
+            Map<RpcClientId, RpcClientId>,
+          ] => {
+            const known = ids.get(wireId);
+            if (known !== undefined) return [{ first: false, id: known }, ids] as const;
+            const connectionId = RpcClientId.make(nextBackgroundRpcClientId++);
+            return [
+              { first: true, id: connectionId },
+              new Map(ids).set(wireId, connectionId),
+            ] as const;
+          },
+        );
+        if (client.first)
+          yield* (
+            backgroundPolicy.nativeUpdate?.registerClient(currentSessionId, client.id) ??
+              Effect.void
+          );
+        return client.id;
+      }, Effect.uninterruptible);
       yield* Effect.addFinalizer(() =>
         Ref.get(rpcClientIds).pipe(
           Effect.flatMap((clientIds) =>
             Effect.forEach(
-              clientIds,
+              clientIds.values(),
               (clientId) => backgroundPolicy.removeRpcClient(currentSessionId, clientId),
               {
                 discard: true,
@@ -2218,8 +2248,13 @@ export const layerWsRpc = (
             Effect.andThen(scheduledTasks.getWebhookDelivery(input)),
           ),
         [WS_METHODS.serverProbe]: (_input) => Effect.succeed({}),
-        [WS_METHODS.serverGetConfig]: (_input) =>
-          loadServerConfig({ usageLimitsCommand: false, workspaceSnapshotsOnDemand: false }),
+        [WS_METHODS.serverGetConfig]: Effect.fn("ws.serverGetConfig")(function* (_input, metadata) {
+          yield* registerRpcClient(metadata.client.id);
+          return yield* loadServerConfig({
+            usageLimitsCommand: false,
+            workspaceSnapshotsOnDemand: false,
+          });
+        }),
         [WS_METHODS.serverSyncLanFleet]: (input) => lanFleet.sync(input),
         [WS_METHODS.serverGetLanFleetSetup]: () => lanFleet.setup,
         [WS_METHODS.serverConfigureLanFleet]: (input) => lanFleet.configure(input),
@@ -2575,17 +2610,9 @@ export const layerWsRpc = (
         [WS_METHODS.serverCheckOtlpEndpoint]: (input) => otlpEndpointCheck.check(input),
         [WS_METHODS.serverSignalProcess]: (input) => processDiagnostics.signal(input),
         [WS_METHODS.serverReportClientActivity]: (input, metadata) =>
-          Ref.update(rpcClientIds, (clientIds) => {
-            const next = new Set(clientIds);
-            next.add(RpcClientId.make(metadata.client.id));
-            return next;
-          }).pipe(
-            Effect.andThen(
-              backgroundPolicy.reportClientActivity(
-                currentSessionId,
-                RpcClientId.make(metadata.client.id),
-                input,
-              ),
+          registerRpcClient(metadata.client.id).pipe(
+            Effect.flatMap((rpcClientId) =>
+              backgroundPolicy.reportClientActivity(currentSessionId, rpcClientId, input),
             ),
           ),
         [WS_METHODS.serverReportHostPowerState]: (input) =>
@@ -3120,9 +3147,11 @@ export const layerWsRpc = (
               );
             }),
           ),
-        [WS_METHODS.subscribeServerConfig]: (input) =>
+        [WS_METHODS.subscribeServerConfig]: (input, metadata) =>
           Stream.unwrap(
             Effect.gen(function* () {
+              // A connected renderer is unknown before any config can make its UI usable.
+              yield* registerRpcClient(metadata.client.id);
               const usageLimitsCommand = input.usageLimitsCommand === true;
               const workspaceSnapshotsOnDemand = input.workspaceSnapshotsOnDemand === true;
               // Buffer changes through discovery and the initial snapshot's RPC ACK wait.
@@ -3347,7 +3376,7 @@ export const layer = Layer.unwrap(
         const clientAnalyticsProps = readClientAnalyticsProps(request);
         yield* sessions.recordClientConnection(session.sessionId, clientOrigin);
         yield* analytics.recordOwners(readClientOwners(request), "client");
-        const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
+        const rpcWebSocketHttpEffect = Effect.gen(function* () {
           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
           yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
             Effect.provideService(RpcServer.Protocol, withTerminalOutputWindow(protocol)),
@@ -3373,8 +3402,9 @@ export const layer = Layer.unwrap(
             ),
             Effect.forkScoped,
           );
-          return httpEffect;
+          return yield* httpEffect;
         }).pipe(
+          Effect.scoped,
           Effect.provide(
             layerWsRpc(
               session,

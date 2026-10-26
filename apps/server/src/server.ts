@@ -24,6 +24,8 @@ import { FetchHttpClient, HttpRouter, HttpServer } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
+import * as NativeUpdateGate from "./lan/NativeUpdateGate.ts";
+import { startNativeUpdateReadiness } from "./lan/NativeUpdateReadiness.ts";
 import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
 import { cloudEnabled } from "@t3tools/shared/distribution";
@@ -301,13 +303,14 @@ const layerRelayClient = Layer.unwrap(
               message: "T3 Connect is disabled in this LAN distribution.",
             }),
           ),
-          installWithProgress: () =>
+          installWithProgress: Effect.fn("RelayClient.Lan.installWithProgress")(() =>
             Effect.fail(
               new RelayClient.RelayClientInstallError({
                 reason: "unsupported_platform",
                 message: "T3 Connect is disabled in this LAN distribution.",
               }),
             ),
+          ),
           pruneManagedVersions: Effect.void,
         }),
       );
@@ -816,6 +819,7 @@ const layerMakeServer = Layer.unwrap(
               Effect.logWarning("Failed to persist server runtime state", { cause }),
             ),
           );
+        yield* startNativeUpdateReadiness({ config, ownerId: ownership.ownerId });
       }),
     );
     const layerTailscaleServe = config.tailscaleServeEnabled
@@ -1104,6 +1108,6 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(layerPlatformServices),
     );
   }),
-).pipe(Layer.provide(ProcessRunner.layer));
+).pipe(Layer.provide(NativeUpdateGate.layer), Layer.provide(ProcessRunner.layer));
 
 export const runServer = Layer.launch(layerMakeServer);

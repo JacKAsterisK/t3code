@@ -364,10 +364,10 @@ export function resolveAgentAwarenessRelayActiveThreadIds(input: {
 export const make = Effect.gen(function* () {
   if (!cloudEnabled)
     return AgentAwarenessRelay.of({
-      publishThread: () => Effect.void,
+      publishThread: Effect.fn("AgentAwarenessRelay.publishThread")(() => Effect.void),
       drain: Effect.void,
-      requestCatchUp: () => Effect.void,
-      start: () => Effect.void,
+      requestCatchUp: Effect.fn("AgentAwarenessRelay.requestCatchUp")(() => Effect.void),
+      start: Effect.fn("AgentAwarenessRelay.start")(() => Effect.void),
     });
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;

@@ -17,6 +17,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -25,10 +26,25 @@ import * as Stream from "effect/Stream";
 import * as ServerSettings from "../serverSettings.ts";
 import { subscribeBeforeSnapshot } from "../utils/subscribeBeforeSnapshot.ts";
 import * as HostPowerMonitor from "./HostPowerMonitor.ts";
+import { makeNativePromptReadiness } from "./NativePromptReadiness.ts";
 
 export class BackgroundPolicy extends Context.Service<
   BackgroundPolicy,
   {
+    readonly nativeUpdate?: {
+      readonly registerClient: (
+        sessionId: AuthSessionId,
+        rpcClientId: RpcClientId,
+      ) => Effect.Effect<void>;
+      readonly snapshot: Effect.Effect<{
+        readonly draftStateKnown: boolean;
+        readonly hasUnsentPrompt: boolean | null;
+        readonly observedUtc: string;
+      }>;
+      readonly freeze: (id: string) => Effect.Effect<boolean>;
+      readonly verify: (id: string) => Effect.Effect<boolean>;
+      readonly thaw: (id: string) => Effect.Effect<void>;
+    };
     readonly reportClientActivity: (
       sessionId: AuthSessionId,
       rpcClientId: RpcClientId,
@@ -215,6 +231,7 @@ export const make = Effect.fn("background.policy.make")(function* () {
   const leasesRef = yield* Ref.make(new Map<string, ClientActivityLease>());
   const changes = yield* PubSub.sliding<BackgroundPolicySnapshot>(1);
   const publishMutex = yield* Semaphore.make(1);
+  const nativePrompts = makeNativePromptReadiness();
 
   const backgroundActivitySettings = serverSettings.getSettings.pipe(
     Effect.map(resolveServerBackgroundActivitySettings),
@@ -228,7 +245,12 @@ export const make = Effect.fn("background.policy.make")(function* () {
       DateTime.now,
       backgroundActivitySettings,
     ]);
-    return computeSnapshot({ hostPower, leases, now, settings, updatedAt: now });
+    return {
+      ...computeSnapshot({ hostPower, leases, now, settings, updatedAt: now }),
+      nativeUpdate: {
+        reservationId: nativePrompts.snapshot(DateTime.toEpochMillis(now)).reservationId,
+      },
+    };
   });
 
   const publishSnapshotUnlocked = snapshot.pipe(
@@ -261,10 +283,12 @@ export const make = Effect.fn("background.policy.make")(function* () {
           ...(input.lowPowerMode !== undefined ? { lowPowerMode: input.lowPowerMode } : {}),
           ...(input.batteryState !== undefined ? { batteryState: input.batteryState } : {}),
           ...(input.networkType !== undefined ? { networkType: input.networkType } : {}),
+          ...(input.nativeUpdate !== undefined ? { nativeUpdate: input.nativeUpdate } : {}),
           scopes: input.scopes,
           updatedAt: now,
           expiresAt,
         };
+        nativePrompts.report(sessionId, rpcClientId, input, DateTime.toEpochMillis(now));
         yield* Ref.update(leasesRef, (leases) => upsertClientActivityLease(leases, lease, now));
         yield* publishSnapshotUnlocked;
       }),
@@ -275,16 +299,85 @@ export const make = Effect.fn("background.policy.make")(function* () {
     rpcClientId,
   ) =>
     publishMutex.withPermits(1)(
-      Ref.update(leasesRef, (leases) => {
-        const next = new Map(leases);
-        for (const [key, lease] of next) {
-          if (lease.sessionId === sessionId && lease.rpcClientId === rpcClientId) {
-            next.delete(key);
-          }
-        }
-        return next;
-      }).pipe(Effect.andThen(publishSnapshotUnlocked), Effect.asVoid),
+      Effect.sync(() => nativePrompts.remove(sessionId, rpcClientId)).pipe(
+        Effect.andThen(
+          Ref.update(leasesRef, (leases) => {
+            const next = new Map(leases);
+            for (const [key, lease] of next) {
+              if (lease.sessionId === sessionId && lease.rpcClientId === rpcClientId) {
+                next.delete(key);
+              }
+            }
+            return next;
+          }),
+        ),
+        Effect.andThen(publishSnapshotUnlocked),
+        Effect.asVoid,
+      ),
     );
+
+  const nativeDraftSnapshot = Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    return {
+      ...nativePrompts.snapshot(DateTime.toEpochMillis(now)),
+      observedUtc: DateTime.formatIso(now),
+    };
+  });
+  const nativeUpdate: NonNullable<BackgroundPolicy["Service"]["nativeUpdate"]> = {
+    registerClient: Effect.fn("BackgroundPolicy.nativeUpdate.registerClient")(
+      (sessionId, rpcClientId) =>
+        publishMutex.withPermits(1)(
+          Effect.sync(() => {
+            nativePrompts.register(sessionId, rpcClientId);
+          }).pipe(Effect.andThen(publishSnapshotUnlocked), Effect.asVoid),
+        ),
+    ),
+    snapshot: nativeDraftSnapshot,
+    freeze: Effect.fn("BackgroundPolicy.nativeUpdate.freeze")((id) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          // Subscribe before publishing the freeze so a fast renderer acknowledgement cannot be missed.
+          const subscription = yield* subscribeBeforeSnapshot(changes, snapshot, publishMutex);
+          const accepted = yield* publishMutex.withPermits(1)(
+            Effect.gen(function* () {
+              const now = yield* DateTime.now;
+              const accepted = nativePrompts.freeze(id, DateTime.toEpochMillis(now));
+              if (accepted) yield* publishSnapshotUnlocked;
+              return accepted;
+            }),
+          );
+          if (!accepted) return false;
+          const check = nativeDraftSnapshot.pipe(
+            Effect.map((current) => {
+              if (current.reservationId !== id || current.hasUnsentPrompt === true) return false;
+              return current.prepared ? true : undefined;
+            }),
+          );
+          const first = yield* check;
+          if (first !== undefined) return first;
+          const result = yield* subscription.changes.pipe(
+            Stream.mapEffect(() => check),
+            Stream.filter((ready): ready is boolean => ready !== undefined),
+            Stream.runHead,
+          );
+          return Option.getOrElse(result, () => false);
+        }),
+      ),
+    ),
+    verify: Effect.fn("BackgroundPolicy.nativeUpdate.verify")((id) =>
+      nativeDraftSnapshot.pipe(
+        Effect.map((current) => current.reservationId === id && current.prepared),
+      ),
+    ),
+    thaw: Effect.fn("BackgroundPolicy.nativeUpdate.thaw")((id) =>
+      publishMutex.withPermits(1)(
+        Effect.sync(() => nativePrompts.thaw(id)).pipe(
+          Effect.andThen(publishSnapshotUnlocked),
+          Effect.asVoid,
+        ),
+      ),
+    ),
+  };
 
   const hasDemand: BackgroundPolicy["Service"]["hasDemand"] = (scope) =>
     Effect.map(snapshot, (current) => current.activeScopeKeys.includes(scopeKey(scope)));
@@ -336,6 +429,7 @@ export const make = Effect.fn("background.policy.make")(function* () {
   ).pipe(Effect.forkScoped);
 
   return BackgroundPolicy.of({
+    nativeUpdate,
     reportClientActivity,
     removeRpcClient,
     reportHostPowerState: hostPowerMonitor.report,

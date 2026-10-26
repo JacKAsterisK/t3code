@@ -523,6 +523,26 @@ it("binds Cargo, Rust, MSVC, SDK, Python and builder to reviewed paths without a
   assert.equal(cargo.env.PYTHONDONTWRITEBYTECODE, "1");
   assert.equal(cargo.env.GYP_MSVS_OVERRIDE_PATH, "C:\\T3LAN\\Tools\\vs");
   assert.equal(cargo.env.T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR, "false");
+  assert.equal(cargo.env.SOURCE_DATE_EPOCH, "0");
+  assert.equal(execution.prepare(asChildProcess(cargo)).options.env?.SOURCE_DATE_EPOCH, "0");
+  assert.throws(() =>
+    execution.prepare(
+      ChildProcess.make(cargo.executable, ["build"], {
+        cwd: cargo.cwd,
+        env: { SOURCE_DATE_EPOCH: "0" },
+      }),
+    ),
+  );
+  assert.equal(execution.workspaceInstall().env.SOURCE_DATE_EPOCH, "0");
+  assert.equal(
+    execution.prepare(asChildProcess(execution.workspaceInstall())).options.env?.SOURCE_DATE_EPOCH,
+    "0",
+  );
+  assert.notEqual(execution.env.SOURCE_DATE_EPOCH, "0");
+  assert.notEqual(
+    execution.stageInstall("C:\\T3LAN\\Output\\stage\\app").env.SOURCE_DATE_EPOCH,
+    "0",
+  );
   assert.equal(
     cargo.env.INCLUDE,
     "C:\\T3LAN\\Tools\\vs\\VC\\Tools\\MSVC\\14.44.35207\\include;C:\\T3LAN\\Tools\\sdk\\include\\10.0.26100.0\\um",
@@ -774,3 +794,25 @@ it.effect(
       assert.throws(() => execution.prepare(command), /changed/u);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it("captures an explicit pinned resource-monitor cache without accepting ambient or mutable descriptors", () => {
+  const test = fixture();
+  const cache = { root: "C:\\T3LAN\\ApprovedNativeArtifacts", manifestSha256: "f".repeat(64) };
+  const execution = createWindowsBuildExecution({ ...test.input, resourceMonitorCache: cache });
+  cache.manifestSha256 = "e".repeat(64);
+  assert.equal(execution.resourceMonitorCache?.manifestSha256, "f".repeat(64));
+  assert.isTrue(Object.isFrozen(execution.resourceMonitorCache));
+  assert.throws(() =>
+    createWindowsBuildExecution({
+      ...test.input,
+      resourceMonitorCache: { root: "relative", manifestSha256: "f".repeat(64) },
+    }),
+  );
+  assert.throws(() =>
+    createWindowsBuildExecution({
+      ...test.input,
+      resourceMonitorCache: { root: cache.root, manifestSha256: "unreviewed" },
+    }),
+  );
+  assert.isUndefined(test.create().resourceMonitorCache);
+});

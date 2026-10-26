@@ -8,6 +8,13 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
 import { BuildLock, sha256 } from "./hub-distribution.ts";
+import {
+  assertNativeDependencyCacheSeparation,
+  captureNativeDependencyCache,
+  nativeDependencyInputs,
+  nativeDependencyRecipeSha256,
+  restoreNativeDependencyCache,
+} from "./native-dependency-cache.ts";
 import { buildInventoryCounts, measureBuildStage } from "./build-metrics.ts";
 import {
   inspectSourceGit,
@@ -52,6 +59,13 @@ export const WindowsNativeBuildRequest = Schema.Struct({
   executionRequestSha256: Hash,
   runnerSha256: Hash,
   inputsRoot: Schema.String,
+  workspaceDependencyCache: Schema.optional(
+    Schema.Struct({ root: Schema.String, manifestSha256: Hash }),
+  ),
+  workspaceDependencyCacheOutputRoot: Schema.optional(Schema.String),
+  resourceMonitorCache: Schema.optional(
+    Schema.Struct({ root: Schema.String, manifestSha256: Hash }),
+  ),
 });
 export type WindowsNativeBuildRequest = typeof WindowsNativeBuildRequest.Type;
 const decodeNative = Schema.decodeUnknownSync(WindowsNativeBuildRequest, {
@@ -71,6 +85,70 @@ export function requireNativeBuildInput(bytes: Uint8Array, digest: string, label
   if (!/^[a-f0-9]{64}$/u.test(digest) || sha256(bytes) !== digest)
     throw new Error(`Approved native ${label} bytes changed.`);
   return bytes;
+}
+
+export async function writeNativeSnapshotTree(
+  root: string,
+  files: ReadonlyMap<string, Uint8Array>,
+) {
+  await assertValidationRoot(NodePath.dirname(root));
+  await NodeFSP.mkdir(root);
+  const directories = new Map<string, { dev: number; ino: number }>();
+  const register = async (directory: string) => {
+    const stat = await NodeFSP.lstat(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      throw new Error("Native source snapshot parent changed.");
+    directories.set(directory, { dev: stat.dev, ino: stat.ino });
+  };
+  await register(root);
+  const entries: Array<{ name: string; bytes: Uint8Array; parent: string }> = [];
+  for (const [name, bytes] of [...files].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    relativeWindowsPath(name);
+    let parent = root;
+    for (const part of name.split("/").slice(0, -1)) {
+      parent = NodePath.join(parent, part);
+      if (!directories.has(parent)) {
+        await NodeFSP.mkdir(parent);
+        await register(parent);
+      }
+    }
+    entries.push({ name, bytes, parent });
+  }
+  for (let offset = 0; offset < entries.length; offset += 32) {
+    const results = await Promise.allSettled(
+      entries.slice(offset, offset + 32).map(async (entry) => {
+        await assertValidationRoot(entry.parent);
+        for (let at = entry.parent; ; at = NodePath.dirname(at)) {
+          const expected = directories.get(at),
+            actual = await NodeFSP.lstat(at);
+          if (
+            !expected ||
+            !actual.isDirectory() ||
+            actual.isSymbolicLink() ||
+            expected.dev !== actual.dev ||
+            expected.ino !== actual.ino
+          )
+            throw new Error("Native source snapshot parent changed.");
+          if (at === root) break;
+        }
+        const handle = await NodeFSP.open(NodePath.join(root, entry.name), "wx", 0o600);
+        try {
+          await handle.writeFile(entry.bytes);
+        } finally {
+          await handle.close();
+        }
+      }),
+    );
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+  }
+  // This is a disposable source copy, not a durable journal. Avoid thousands
+  // of per-file flushes; verify every closed file before any build can start.
+  const actual = await inspectValidationTree(root, true);
+  if (
+    actual.size !== files.size ||
+    [...files].some(([name, bytes]) => actual.get(name)?.sha256 !== sha256(bytes))
+  )
+    throw new Error("Native source snapshot differs from committed bytes.");
 }
 
 export async function verifyNativeSnapshotFiles(
@@ -423,6 +501,20 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     preparationRequestSha256: request.preparationRequestSha256,
   };
   const context = await establishWindowsNativeContext(binding);
+  if (request.workspaceDependencyCache && request.workspaceDependencyCacheOutputRoot)
+    throw new Error("Dependency cache input and output must be separate build operations.");
+  for (const cacheRoot of [
+    request.workspaceDependencyCache?.root,
+    request.workspaceDependencyCacheOutputRoot,
+  ])
+    if (cacheRoot !== undefined)
+      assertNativeDependencyCacheSeparation(cacheRoot, [
+        context.sourceRoot,
+        context.outputRoot,
+        context.inputsRoot,
+        context.toolchainRoot,
+        preparation.sourceRoot,
+      ]);
   if ((await NodeFSP.readdir(context.outputRoot)).length)
     throw new Error("Native output contains existing work and is never cleaned.");
   await assertValidationRoot(NodePath.dirname(context.inputsRoot));
@@ -454,7 +546,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     await NodeFSP.mkdir(NodePath.dirname(context.sourceRoot));
     await measureBuildStage(
       "native.source-snapshot",
-      () => writeNewSnapshotTree(context.sourceRoot, files),
+      () => writeNativeSnapshotTree(context.sourceRoot, files),
       () => buildInventoryCounts(snapshot.files),
     );
     for (const name of ["temp", "home", "home/roaming", "home/local", "caches"])
@@ -569,23 +661,89 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
         configGypi: await header("config.gypi"),
       },
       verifyUnchanged,
+      ...(request.resourceMonitorCache
+        ? { resourceMonitorCache: request.resourceMonitorCache }
+        : {}),
     };
     console.log("[native-build] Verifying unchanged inputs before frozen workspace installation.");
     const bootstrap = createWindowsBuildExecution({ ...factoryInput, isolation: context });
+    const dependencyRoots = {
+      SOURCE: context.sourceRoot,
+      OUTPUT: context.outputRoot,
+      INPUTS: context.inputsRoot,
+      TOOLS: context.toolchainRoot,
+      MAPPED_SOURCE: preparation.sourceRoot,
+    };
+    const dependencyInputs =
+      request.workspaceDependencyCache || request.workspaceDependencyCacheOutputRoot
+        ? nativeDependencyInputs(
+            files,
+            preparation.toolchainManifestSha256,
+            nativeDependencyRecipeSha256(bootstrap.workspaceInstall(), {
+              SOURCE: context.sourceRoot,
+              OUTPUT: context.outputRoot,
+              INPUTS: context.inputsRoot,
+              TOOLS: context.toolchainRoot,
+              MAPPED_SOURCE: preparation.sourceRoot,
+            }),
+          )
+        : undefined;
     await verifyInventories("before-install");
-    await measureBuildStage("native.workspace-install", () =>
-      Effect.runPromise(
-        Effect.gen(function* () {
-          yield* bootstrap.verify;
-          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-          const code = yield* spawner.exitCode(
-            bootstrap.prepare(asChildProcess(bootstrap.workspaceInstall(), "inherit")),
-          );
-          if (code !== 0) return yield* Effect.fail(new PinnedWorkspaceInstallRefused());
-        }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
-      ),
-    );
+    if (request.workspaceDependencyCache) {
+      if (!dependencyInputs) throw new Error("Dependency reuse inputs were not captured.");
+      const restored = await measureBuildStage(
+        "native.workspace-restore",
+        () =>
+          restoreNativeDependencyCache({
+            sourceRoot: context.sourceRoot,
+            cache: request.workspaceDependencyCache!,
+            inputs: dependencyInputs,
+            relocationRoots: dependencyRoots,
+          }),
+        (counts) => ({ files: counts.files, bytes: counts.byteLength }),
+      );
+      console.log(
+        "[native-build] Restored independent dependency bytes and relocated workspace links: " +
+          restored.files,
+      );
+    } else
+      await measureBuildStage("native.workspace-install", () =>
+        Effect.runPromise(
+          Effect.gen(function* () {
+            yield* bootstrap.verify;
+            const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+            const code = yield* spawner.exitCode(
+              bootstrap.prepare(asChildProcess(bootstrap.workspaceInstall(), "inherit")),
+            );
+            if (code !== 0) return yield* Effect.fail(new PinnedWorkspaceInstallRefused());
+          }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+        ),
+      );
     await verifyInventories("after-install");
+    if (request.workspaceDependencyCacheOutputRoot) {
+      if (!dependencyInputs) throw new Error("Dependency capture inputs were not captured.");
+      const cache = await measureBuildStage(
+        "native.workspace-cache-capture",
+        () =>
+          captureNativeDependencyCache({
+            sourceRoot: context.sourceRoot,
+            cacheRoot: request.workspaceDependencyCacheOutputRoot!,
+            sourceCommit: snapshot.sourceCommit,
+            inputs: dependencyInputs,
+            relocationRoots: dependencyRoots,
+          }),
+        (counts) => ({ files: counts.files, bytes: counts.byteLength }),
+      );
+      await NodeFSP.writeFile(
+        NodePath.join(context.outputRoot, "workspace-dependency-cache.json"),
+        encode(cache),
+        { flag: "wx", mode: 0o600 },
+      );
+      console.log(
+        "[native-build] Captured dependency cache for separately approved reuse: " +
+          JSON.stringify(cache),
+      );
+    }
     console.log("[native-build] Building the application from the frozen working snapshot.");
     const result = await measureBuildStage("native.application-build", () =>
       runWorkingNativeWindowsBuild({

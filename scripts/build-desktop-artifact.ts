@@ -68,6 +68,11 @@ import {
 import { buildNativeMaintenance } from "./lan/native-maintenance.pack.ts";
 import { buildHomeRepair } from "./lan/home-repair.pack.ts";
 import {
+  readResourceMonitorCache,
+  resourceMonitorRecipeSha256,
+  writeResourceMonitorCache,
+} from "./lan/native-resource-cache.ts";
+import {
   WindowsBuildExecution,
   WindowsBuildExecutionError,
   asChildProcess,
@@ -78,6 +83,7 @@ import {
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Config from "effect/Config";
+import * as Console from "effect/Console";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -91,6 +97,23 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+
+const measureDesktopStage = Effect.fn("build-desktop-artifact.measureStage")(function* <A, E, R>(
+  stage: string,
+  build: Effect.Effect<A, E, R>,
+) {
+  const [duration, result] = yield* Effect.timed(Effect.exit(build));
+  yield* Console.log(
+    "[build-metrics] " +
+      (yield* encodeJsonString({
+        stage,
+        status: Exit.isSuccess(result) ? "passed" : "failed",
+        elapsedMs: Math.round(Duration.toMillis(duration)),
+      })),
+  );
+  if (Exit.isFailure(result)) return yield* Effect.failCause(result.cause);
+  return result.value;
+});
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const DESKTOP_APP_ID = "com.t3tools.t3code";
@@ -2538,10 +2561,51 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* 
           return yield* new WindowsBuildExecutionError({
             message: "The native helper build target differs from its isolated Windows source.",
           });
-        yield* runCommand(asChildProcess(execution.value.resourceMonitor()), {
-          label: "Pinned offline Cargo resource monitor",
-          verbose: input.verbose,
-        });
+        const command = execution.value.resourceMonitor();
+        if (execution.value.resourceMonitorCache === undefined) {
+          yield* measureDesktopStage(
+            "desktop.resource-monitor.compile",
+            runCommand(asChildProcess(command), {
+              label: "Pinned offline Cargo resource monitor",
+              verbose: input.verbose,
+            }),
+          );
+        } else {
+          const capability = execution.value;
+          const bytes = yield* measureDesktopStage(
+            "desktop.resource-monitor.cache-restore",
+            Effect.tryPromise({
+              try: () =>
+                readResourceMonitorCache({
+                  sourceRoot: input.repoRoot,
+                  descriptor: capability.resourceMonitorCache!,
+                  toolchainManifestSha256: capability.request.toolchainManifestSha256,
+                  recipeSha256: resourceMonitorRecipeSha256(command, {
+                    ...capability.isolation,
+                    toolchainManifestSha256: capability.request.toolchainManifestSha256,
+                  }),
+                }),
+              catch: () =>
+                new WindowsBuildExecutionError({
+                  message:
+                    "The approved native artifact cache changed or does not match this build.",
+                }),
+            }),
+          );
+          const output = path.join(
+            input.repoRoot,
+            "native/resource-monitor/target",
+            rustTarget,
+            "release",
+            executableName,
+          );
+          if (yield* fs.exists(output))
+            return yield* new WindowsBuildExecutionError({
+              message: "Native cache restore refuses existing output.",
+            });
+          yield* fs.makeDirectory(path.dirname(output), { recursive: true });
+          yield* fs.writeFile(output, bytes);
+        }
       } else {
         const spawnCommand = yield* resolveSpawnCommand("cargo", [
           "build",
@@ -2600,6 +2664,30 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* 
         label: "lipo resource monitor universal binary",
         verbose: input.verbose,
       },
+    );
+  }
+
+  if (Option.isSome(execution) && execution.value.isolation.kind === "windows-native-directory") {
+    const capability = execution.value;
+    yield* measureDesktopStage(
+      "desktop.resource-monitor.cache-capture",
+      Effect.tryPromise({
+        try: () =>
+          writeResourceMonitorCache({
+            sourceRoot: input.repoRoot,
+            outputRoot: capability.isolation.outputRoot,
+            binaryPath: destinationPath,
+            recipeSha256: resourceMonitorRecipeSha256(capability.resourceMonitor(), {
+              ...capability.isolation,
+              toolchainManifestSha256: capability.request.toolchainManifestSha256,
+            }),
+            toolchainManifestSha256: capability.request.toolchainManifestSha256,
+          }),
+        catch: () =>
+          new WindowsBuildExecutionError({
+            message: "Native artifact cache capture refused changed or existing output.",
+          }),
+      }),
     );
   }
 
@@ -4125,13 +4213,16 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   if (options.platform !== "win") {
     yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
   }
-  yield* stageResourceMonitor({
-    repoRoot,
-    stageResourcesDir,
-    platform: options.platform,
-    arch: options.arch,
-    verbose: options.verbose,
-  });
+  yield* measureDesktopStage(
+    "desktop.resource-monitor",
+    stageResourceMonitor({
+      repoRoot,
+      stageResourcesDir,
+      platform: options.platform,
+      arch: options.arch,
+      verbose: options.verbose,
+    }),
+  );
   if (options.platform === "linux") {
     for (const backend of ["kde", "hyprland"] as const)
       yield* stageLinuxCaptureHelper({
@@ -4165,27 +4256,33 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const stageProdResourcesDir = path.join(stageAppDir, "apps/desktop/prod-resources");
   yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
   if (options.lanBuild !== undefined)
-    yield* Effect.tryPromise({
-      try: () =>
-        buildNativeMaintenance(
-          options.lanBuild!.selection.identity,
-          options.lanBuild!.lockBytes,
-          path.join(stageProdResourcesDir, "lan-native-maintenance"),
-        ),
-      catch: (cause) =>
-        new LanBuildConfigurationError({
-          reason: cause instanceof Error ? cause.message : "LAN native helper build failed.",
-        }),
-    });
+    yield* measureDesktopStage(
+      "desktop.native-maintenance",
+      Effect.tryPromise({
+        try: () =>
+          buildNativeMaintenance(
+            options.lanBuild!.selection.identity,
+            options.lanBuild!.lockBytes,
+            path.join(stageProdResourcesDir, "lan-native-maintenance"),
+          ),
+        catch: (cause) =>
+          new LanBuildConfigurationError({
+            reason: cause instanceof Error ? cause.message : "LAN native helper build failed.",
+          }),
+      }),
+    );
 
   if (options.lanBuild !== undefined)
-    yield* Effect.tryPromise({
-      try: () => buildHomeRepair(path.join(stageProdResourcesDir, "lan-native-home-repair")),
-      catch: (cause) =>
-        new LanBuildConfigurationError({
-          reason: cause instanceof Error ? cause.message : "LAN home repair helper build failed.",
-        }),
-    });
+    yield* measureDesktopStage(
+      "desktop.home-repair",
+      Effect.tryPromise({
+        try: () => buildHomeRepair(path.join(stageProdResourcesDir, "lan-native-home-repair")),
+        catch: (cause) =>
+          new LanBuildConfigurationError({
+            reason: cause instanceof Error ? cause.message : "LAN home repair helper build failed.",
+          }),
+      }),
+    );
 
   const configuredMacPasskeySigning =
     options.platform === "mac" && options.signed

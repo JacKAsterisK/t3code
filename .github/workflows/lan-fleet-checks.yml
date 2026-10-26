@@ -48,6 +48,9 @@ jobs:
           scripts/lan/accept-stage-locks.test.ts
           scripts/lan/source-git.test.ts
           scripts/lan/windows-native-build.test.ts
+          scripts/lan/native-dependency-cache.test.ts
+          scripts/lan/native-resource-cache.test.ts
+          scripts/lan/release-pipeline.test.ts
           scripts/lan/windows-build-execution.test.ts
           scripts/lan/windows-build-preparation.test.ts
           scripts/lib/check-inputs.test.ts

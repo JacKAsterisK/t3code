@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { ChildProcess } from "effect/process";
 import { BuildLock, sha256 } from "./hub-distribution.ts";
+import type { ResourceMonitorCacheDescriptor } from "./native-resource-cache.ts";
 import {
   relativeWindowsPath,
   strictJson,
@@ -130,6 +131,7 @@ export interface PinnedWindowsBuildExecution {
   ) => readonly PinnedWindowsBuildCommand[];
   readonly stageInstall: (cwd: string) => PinnedWindowsBuildCommand;
   readonly resourceMonitor: () => PinnedWindowsBuildCommand;
+  readonly resourceMonitorCache?: ResourceMonitorCacheDescriptor;
   readonly builder: (stageAppDir: string) => PinnedWindowsBuildCommand;
   readonly registerPackagedElectronProbe: (command: ChildProcess.StandardCommand) => void;
   readonly prepare: (command: ChildProcess.Command) => ChildProcess.StandardCommand;
@@ -186,6 +188,7 @@ export function createWindowsBuildExecution(input: {
   >;
   readonly isolation: WindowsBuildContext;
   readonly verifyUnchanged: () => Promise<void>;
+  readonly resourceMonitorCache?: ResourceMonitorCacheDescriptor;
 }): PinnedWindowsBuildExecution {
   assertWindowsBuildContext(input.isolation);
   if (
@@ -193,6 +196,12 @@ export function createWindowsBuildExecution(input: {
     sha256(input.requestBytes) !== input.approvedRequestSha256
   )
     throw new Error("The execution request differs from the separately reviewed bytes.");
+  if (
+    input.resourceMonitorCache !== undefined &&
+    (!path.isAbsolute(input.resourceMonitorCache.root) ||
+      !/^[a-f0-9]{64}$/u.test(input.resourceMonitorCache.manifestSha256))
+  )
+    throw new Error("Native artifact reuse requires a separately pinned absolute cache root.");
   const request = freezeTree(decodeRequest(strictJson(input.requestBytes)));
   const lock = freezeTree(decodeLock(strictJson(input.lockBytes)));
   if (lock.tools.pnpm.version !== "12.14.0")
@@ -583,6 +592,8 @@ export function createWindowsBuildExecution(input: {
             : path.join(cache("pnpmStore"), "metadata-cache")),
       ],
       workingDirectory,
+      // Installed dependency artifacts have no application release identity.
+      production ? {} : { SOURCE_DATE_EPOCH: "0" },
     );
   let candidate:
     | {
@@ -596,6 +607,9 @@ export function createWindowsBuildExecution(input: {
     | undefined;
   const value: PinnedWindowsBuildExecution = {
     isolation: input.isolation,
+    ...(input.resourceMonitorCache === undefined
+      ? {}
+      : { resourceMonitorCache: Object.freeze({ ...input.resourceMonitorCache }) }),
     request,
     lock,
     get lockBytes() {
@@ -659,6 +673,8 @@ export function createWindowsBuildExecution(input: {
           "x86_64-pc-windows-msvc",
         ],
         source,
+        // The identity-free monitor has a stable epoch so frontend releases reuse identical native bytes.
+        { SOURCE_DATE_EPOCH: "0" },
       ),
     builder: (stageAppDir) =>
       command(
@@ -739,10 +755,20 @@ export function createWindowsBuildExecution(input: {
         )
           throw new Error("The captured packaged Electron probe changed before execution.");
       }
+      const stableEpochCommands = [value.resourceMonitor(), value.workspaceInstall()];
       const extra: Record<string, string> = {};
       for (const [key, value] of Object.entries(original.options.env ?? {})) {
         if (value === undefined || env[key] === value) continue;
         if (
+          (key === "SOURCE_DATE_EPOCH" &&
+            value === "0" &&
+            stableEpochCommands.some(
+              (expected) =>
+                executable === expected.executable &&
+                normalize(original.options.cwd ?? source) === normalize(expected.cwd) &&
+                original.args.length === expected.args.length &&
+                original.args.every((argument, index) => argument === expected.args[index]),
+            )) ||
           (key === "APP_VERSION" && value === lock.applicationVersion) ||
           (key === "T3CODE_FORK_BUILD_VERSION" && value === lock.distributionVersion) ||
           (key === "T3CODE_LAN_BUILD_POLICY" && isInside(value, input.isolation.inputsRoot)) ||

@@ -15,6 +15,7 @@ import {
   prepareNativePnpmMetadata,
   requireNativeBuildInput,
   verifyNativeSnapshotFiles,
+  writeNativeSnapshotTree,
 } from "./windows-native-build.ts";
 import {
   assertWindowsNativeContext,
@@ -505,6 +506,33 @@ it("bundles the normal native runner and crosses into working-source Effect serv
       osIsolation: false,
       networkIsolation: false,
       filesystem: true,
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+it("materializes a fresh independently verified source tree and refuses traversal or overwrite", async () => {
+  const fixture = await fixtureRoot("t3-lan-native-source-");
+  try {
+    const output = NodePath.join(fixture.root, "output");
+    const files = new Map<string, Uint8Array>([
+      ["package.json", Buffer.from("exact manifest")],
+      ["apps/web/source.ts", Buffer.from("exact source")],
+    ]);
+    await writeNativeSnapshotTree(output, files);
+    expect(await NodeFSP.readFile(NodePath.join(output, "apps/web/source.ts"), "utf8")).toBe(
+      "exact source",
+    );
+    await expect(writeNativeSnapshotTree(output, files)).rejects.toThrow();
+    await expect(
+      writeNativeSnapshotTree(
+        NodePath.join(fixture.root, "unsafe"),
+        new Map([["../escaped", Buffer.from("no")]]),
+      ),
+    ).rejects.toThrow();
+    await expect(NodeFSP.lstat(NodePath.join(fixture.root, "escaped"))).rejects.toMatchObject({
+      code: "ENOENT",
     });
   } finally {
     await fixture.cleanup();

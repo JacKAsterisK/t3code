@@ -69,7 +69,7 @@ describe("native Windows primary guard", () => {
       {
         id: "primary",
         label: "Primary",
-        runningDistro: distro,
+        ...(distro === undefined ? {} : { runningDistro: distro }),
         httpBaseUrl: `http://127.0.0.1:${port}/`,
         wsBaseUrl: `ws://127.0.0.1:${port}/`,
       },

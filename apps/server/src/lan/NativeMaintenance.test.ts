@@ -1,6 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Offline SQLite fixtures exercise the native stopped-state inspector without touching installed homes.
-import { assert, it } from "@effect/vitest";
+import { assert, it as effectIt } from "@effect/vitest";
 import * as NodeSqlite from "node:sqlite";
+import * as NodeFS from "node:fs";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeURL from "node:url";
+import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -9,6 +13,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrations } from "../persistence/Migrations.ts";
 import * as NativeMaintenance from "./NativeMaintenance.ts";
+import { nativeMaintenanceRefusalMessage } from "./nativeMaintenanceEntry.ts";
 
 const identity: NativeMaintenance.NativeBuildIdentity = {
   appId: "com.spiderpunch.t3code.lan",
@@ -22,96 +27,291 @@ const identity: NativeMaintenance.NativeBuildIdentity = {
   applicationVersion: "0.1.2",
   sourceCommit: "a".repeat(40),
 };
-const fixture = Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-maintenance-" });
-  const home = path.join(root, "T3CodeLAN", "data");
-  yield* fs.makeDirectory(path.join(home, "userdata"), { recursive: true });
-  yield* fs.writeFileString(path.join(home, "userdata", "environment-id"), "environment:fixture");
-  const dbPath = path.join(home, "userdata", "statev2.sqlite");
-  yield* runMigrations().pipe(
-    Effect.provide(NodeSqliteClient.layer({ filename: dbPath })),
-    Effect.scoped,
-  );
-  const mutate = (sql: string) =>
-    Effect.sync(() => {
-      const db = new NodeSqlite.DatabaseSync(dbPath);
-      try {
-        db.exec(sql);
-      } finally {
-        db.close();
-      }
-    });
-  yield* mutate(
-    "UPDATE orchestration_v2_projection_metadata SET schema_version=2,last_sequence=0 WHERE projection_name='thread-projections'",
-  );
-  const request: NativeMaintenance.NativeMaintenanceRequest = {
-    schemaVersion: 1,
-    operation: "inspect",
-    nonce: "b".repeat(64),
-    homeDirectory: home,
-    environmentId: "environment:fixture",
-    journalPath: path.join(root, "T3CodeLAN", "activation.json"),
-  };
-  const insert = (
-    table: string,
-    status: string,
-    values: Readonly<Record<string, string | number | null>> = {},
-  ) =>
-    Effect.sync(() => {
-      const db = new NodeSqlite.DatabaseSync(dbPath);
-      try {
-        const columns = db
-          .prepare(`PRAGMA table_info(${table})`)
-          .all()
-          .filter(
-            (row) =>
-              row.pk ||
-              (row.notnull && row.dflt_value === null) ||
-              Object.hasOwn(values, String(row.name)),
+const fixtureAtMigration = (toMigrationInclusive?: number) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-maintenance-" });
+    const home = path.join(root, "T3CodeLAN", "data");
+    yield* fs.makeDirectory(path.join(home, "userdata"), { recursive: true });
+    yield* fs.writeFileString(path.join(home, "userdata", "environment-id"), "environment:fixture");
+    const dbPath = path.join(home, "userdata", "statev2.sqlite");
+    yield* runMigrations({ toMigrationInclusive }).pipe(
+      Effect.provide(NodeSqliteClient.layer({ filename: dbPath })),
+      Effect.scoped,
+    );
+    const mutate = (sql: string) =>
+      Effect.sync(() => {
+        const db = new NodeSqlite.DatabaseSync(dbPath);
+        try {
+          db.exec(sql);
+        } finally {
+          db.close();
+        }
+      });
+    yield* mutate(
+      "UPDATE orchestration_v2_projection_metadata SET schema_version=2,last_sequence=0 WHERE projection_name='thread-projections'",
+    );
+    const request: NativeMaintenance.NativeMaintenanceRequest = {
+      schemaVersion: 1,
+      operation: "inspect",
+      nonce: "b".repeat(64),
+      homeDirectory: home,
+      environmentId: "environment:fixture",
+      journalPath: path.join(root, "T3CodeLAN", "activation.json"),
+    };
+    const insert = (
+      table: string,
+      status: string,
+      values: Readonly<Record<string, string | number | null>> = {},
+    ) =>
+      Effect.sync(() => {
+        const db = new NodeSqlite.DatabaseSync(dbPath);
+        try {
+          const columns = db
+            .prepare(`PRAGMA table_info(${table})`)
+            .all()
+            .filter(
+              (row) =>
+                row.pk ||
+                (row.notnull && row.dflt_value === null) ||
+                Object.hasOwn(values, String(row.name)),
+            );
+          const names = columns.map((row) => String(row.name));
+          db.prepare(
+            `INSERT INTO ${table} (${names.join(",")}) VALUES (${names.map(() => "?").join(",")})`,
+          ).run(
+            ...columns.map((row) =>
+              Object.hasOwn(values, String(row.name))
+                ? values[String(row.name)]!
+                : row.name === "status"
+                  ? status
+                  : String(row.type).includes("INT")
+                    ? 0
+                    : String(row.name).endsWith("json")
+                      ? "{}"
+                      : "fixture",
+            ),
           );
-        const names = columns.map((row) => String(row.name));
-        db.prepare(
-          `INSERT INTO ${table} (${names.join(",")}) VALUES (${names.map(() => "?").join(",")})`,
-        ).run(
-          ...columns.map((row) =>
-            Object.hasOwn(values, String(row.name))
-              ? values[String(row.name)]!
-              : row.name === "status"
-                ? status
-                : String(row.type).includes("INT")
-                  ? 0
-                  : String(row.name).endsWith("json")
-                    ? "{}"
-                    : "fixture",
-          ),
-        );
-      } finally {
-        db.close();
-      }
-    });
-  const warm = () =>
-    Effect.gen(function* () {
-      yield* insert("orchestration_v2_projection_provider_sessions", "ready", {
-        provider_session_id: "session:warm",
-        thread_id: "thread:warm",
+        } finally {
+          db.close();
+        }
       });
-      yield* insert("orchestration_v2_projection_provider_threads", "active", {
-        provider_thread_id: "provider-thread:warm",
-        provider_session_id: "session:warm",
-        thread_id: "thread:warm",
+    const warm = () =>
+      Effect.gen(function* () {
+        yield* insert("orchestration_v2_projection_provider_sessions", "ready", {
+          provider_session_id: "session:warm",
+          thread_id: "thread:warm",
+        });
+        yield* insert("orchestration_v2_projection_provider_threads", "active", {
+          provider_thread_id: "provider-thread:warm",
+          provider_session_id: "session:warm",
+          thread_id: "thread:warm",
+        });
       });
-    });
-  return { request, mutate, insert, warm, dbPath };
-});
+    return { request, mutate, insert, warm, dbPath };
+  });
+const fixture = fixtureAtMigration();
 const testLayer = NativeMaintenance.layer(identity).pipe(
   Layer.provide(
     Layer.succeed(NativeMaintenance.NativeMaintenanceLease, { verify: () => Effect.void }),
   ),
 );
 
-it.layer(NodeServices.layer)("NativeMaintenance", (it) => {
+effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
+  it.effect.each(["identity", "lease", "schema", "projection", "busy", "changed", "io"] as const)(
+    "limits the $1 refusal to its reason token even with a private nested cause",
+    (reason) =>
+      Effect.sync(() => {
+        assert.equal(
+          nativeMaintenanceRefusalMessage(
+            new NativeMaintenance.NativeMaintenanceError({
+              reason,
+              cause: new Error("C:\\private-fixture\\statev2.sqlite: internal cause"),
+            }),
+          ),
+          `native_maintenance_refused:${reason}\n`,
+        );
+      }),
+  );
+
+  it.effect("redacts unexpected and forged refusal errors", () =>
+    Effect.sync(() => {
+      assert.equal(
+        nativeMaintenanceRefusalMessage(new Error("C:\\private-fixture\\statev2.sqlite")),
+        "native_maintenance_refused:io\n",
+      );
+      assert.equal(
+        nativeMaintenanceRefusalMessage({
+          _tag: "NativeMaintenanceError",
+          reason: "changed:C:\\private-fixture",
+        }),
+        "native_maintenance_refused:io\n",
+      );
+    }),
+  );
+
+  it.effect("binds real nonempty WAL bytes even when the main database is unchanged", () =>
+    Effect.gen(function* () {
+      const { request, mutate, dbPath } = yield* fixture;
+      yield* mutate("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
+      const writer = new NodeSqlite.DatabaseSync(dbPath);
+      try {
+        writer.exec(
+          "PRAGMA wal_autocheckpoint=0; CREATE TABLE maintenance_wal_payload(value TEXT); INSERT INTO maintenance_wal_payload VALUES('before')",
+        );
+        const main = NodeFS.readFileSync(dbPath);
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        const first = yield* service.inspect(request);
+        writer.exec("INSERT INTO maintenance_wal_payload VALUES('after')");
+        assert.isAbove(NodeFS.statSync(dbPath + "-wal").size, 0);
+        assert.deepEqual(NodeFS.readFileSync(dbPath), main);
+        const second = yield* service.inspect(request);
+        assert.notEqual(first.dataGeneration, second.dataGeneration);
+        assert.equal(first.workGeneration, second.workGeneration);
+      } finally {
+        writer.close();
+      }
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("refuses an empty WAL alias before applying absent-WAL equivalence", () =>
+    Effect.gen(function* () {
+      const { request, mutate, dbPath } = yield* fixture;
+      yield* mutate("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
+      const alias = dbPath + ".empty-fixture";
+      NodeFS.writeFileSync(alias, "");
+      NodeFS.linkSync(alias, dbPath + "-wal");
+      assert.equal(NodeFS.lstatSync(dbPath + "-wal").nlink, 2);
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "identity");
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "verifies stopped schema71 history when real SQLite read-only connections create an empty WAL",
+    () =>
+      Effect.gen(function* () {
+        const { request, mutate, insert, dbPath } = yield* fixtureAtMigration(71);
+        yield* insert("orchestration_v2_projection_runs", "completed", {
+          run_id: "run:retained-schema71",
+          payload_json: '{"status":"completed","note":"Retained schema71 terminal history"}',
+        });
+        yield* mutate("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
+        assert.isFalse(NodeFS.existsSync(dbPath + "-wal"));
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        const result = yield* service.verify({ ...request, operation: "verify" });
+        assert.deepEqual(
+          [
+            result.activeRuns,
+            result.queuedRuns,
+            result.pendingRequests,
+            result.backgroundAgents,
+            result.scheduledWork,
+            result.restartContinuations,
+          ],
+          [0, 0, 0, 0, 0, 0],
+        );
+        const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+        try {
+          assert.equal(
+            db.prepare("SELECT MAX(migration_id) n FROM effect_sql_migrations").get()!.n,
+            73,
+          );
+          assert.equal(
+            db
+              .prepare(
+                "SELECT payload_json FROM orchestration_v2_projection_runs WHERE run_id='run:retained-schema71'",
+              )
+              .get()!.payload_json,
+            '{"status":"completed","note":"Retained schema71 terminal history"}',
+          );
+        } finally {
+          db.close();
+        }
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "keeps two absent-WAL inspections stable across actual empty-WAL read connection closure",
+    () =>
+      Effect.gen(function* () {
+        const { request, mutate, dbPath } = yield* fixture;
+        yield* mutate("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
+        assert.isFalse(NodeFS.existsSync(dbPath + "-wal"));
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        const first = yield* service.inspect(request);
+        assert.equal(NodeFS.statSync(dbPath + "-wal").size, 0);
+        NodeFS.unlinkSync(dbPath + "-wal");
+        if (NodeFS.existsSync(dbPath + "-shm")) NodeFS.unlinkSync(dbPath + "-shm");
+        assert.isFalse(NodeFS.existsSync(dbPath + "-wal"));
+        const second = yield* service.inspect(request);
+        const third = yield* service.inspect(request);
+        assert.equal(first.dataGeneration, second.dataGeneration);
+        assert.equal(second.dataGeneration, third.dataGeneration);
+        assert.equal(first.workGeneration, second.workGeneration);
+        assert.equal(NodeFS.statSync(dbPath + "-wal").size, 0);
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("refuses a real SQLite write committed after the stopped read connection closes", () =>
+    Effect.gen(function* () {
+      const { request, mutate, dbPath } = yield* fixture;
+      yield* mutate("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
+      const close = NodeSqlite.DatabaseSync.prototype.close;
+      let written = false;
+      using _close = vi
+        .spyOn(NodeSqlite.DatabaseSync.prototype, "close")
+        .mockImplementation(function (this: NodeSqlite.DatabaseSync) {
+          close.call(this);
+          if (written) return;
+          written = true;
+          const writer = new NodeSqlite.DatabaseSync(dbPath);
+          try {
+            writer.exec(
+              "INSERT INTO orchestration_command_receipts (command_id,aggregate_kind,aggregate_id,accepted_at,result_sequence,status,error,command_type) VALUES ('concurrent-write','thread','thread:fixture','2026-10-25T00:00:00Z',0,'accepted',NULL,'thread.send')",
+            );
+          } finally {
+            writer.close();
+          }
+        });
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      assert.equal((yield* service.inspect(request).pipe(Effect.flip)).reason, "changed");
+      assert.isTrue(written);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  effectIt.live("writes only the native refusal reason to stderr without paths or causes", () =>
+    Effect.gen(function* () {
+      const { request } = yield* fixture;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fs.writeFileString(path.join(request.homeDirectory, "native-admission.lock"), "");
+      const entry = NodeURL.fileURLToPath(new URL("./nativeMaintenanceEntry.ts", import.meta.url));
+      const preload =
+        "data:text/javascript," +
+        encodeURIComponent(
+          "globalThis.__T3_LAN_BUILD_IDENTITY__=" + JSON.stringify(identity) + ";",
+        );
+      const child = NodeChildProcess.spawnSync(process.execPath, ["--import", preload, entry], {
+        input: JSON.stringify(request),
+        encoding: "utf8",
+        windowsHide: true,
+        env: {
+          SystemRoot: "C:\\Windows",
+          WINDIR: "C:\\Windows",
+          NODE_NO_WARNINGS: "1",
+          USERPROFILE: request.homeDirectory,
+          TEMP: request.homeDirectory,
+          TMP: request.homeDirectory,
+        },
+      });
+      assert.equal(child.status, 1);
+      assert.equal(child.stdout, "");
+      assert.equal(child.stderr, "native_maintenance_refused:lease\n");
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.effect(
     "reads stopped state without starting providers, rewriting identity or changing database bytes",
     () =>

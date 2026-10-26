@@ -665,6 +665,8 @@ export function createWindowsBuildExecution(input: {
         tools.node,
         [
           tools.builderCli,
+          // The raw ZIP is unpacked and sealed separately; compression only wastes release time.
+          "--config.compression=store",
           "--projectDir",
           cwd(stageAppDir),
           "--win",

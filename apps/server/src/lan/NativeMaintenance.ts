@@ -664,7 +664,12 @@ const filesGeneration = async (databasePath: string) => {
   for (const file of [databasePath, `${databasePath}-wal`]) {
     hash.update(NodePath.basename(file));
     try {
-      safeFile(file);
+      const stat = safeFile(file);
+      if (file.endsWith("-wal") && stat.size === 0) {
+        // SQLite read-only connections can create an empty WAL without changing durable state.
+        hash.update("absent");
+        continue;
+      }
     } catch (cause) {
       if (
         cause instanceof Error &&

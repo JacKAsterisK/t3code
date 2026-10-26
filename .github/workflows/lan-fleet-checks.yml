@@ -33,6 +33,8 @@ jobs:
           vp test run
           apps/web/src/components/sidebar/SidebarBrandMark.browser.test.tsx
           apps/web/src/components/settings/LanFleetSetup.browser.test.tsx
+          apps/web/src/components/settings/LanFleetPrimary.browser.test.tsx
+          apps/web/src/connection/lanFleetEnvironment.test.ts
       - name: Verify native Windows packaging and manifest restoration
         shell: bash
         run: >-

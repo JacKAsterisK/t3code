@@ -438,6 +438,7 @@ export const inspectStoppedRepairWork = (databasePath: string) => {
       counts.set(table, count);
     }
     let deferredDelivery = 0;
+    let activeGoals = 0;
     const unfinishedThreads = new Set<string>();
     const unfinishedProviderThreads = new Set<string>();
     const readySessions = new Map<string, string | null>();
@@ -491,7 +492,11 @@ export const inspectStoppedRepairWork = (databasePath: string) => {
             } catch (cause) {
               throw new NativeMaintenanceError({ reason: "schema", cause });
             }
-            if (goal.status === "active") rememberWork(row);
+            if (goal.status === "active") {
+              // Native goals can continue after a terminal turn or an idle recovery label.
+              activeGoals++;
+              rememberWork(row);
+            }
           }
         } else if (
           typeof row.status === "string" &&
@@ -621,7 +626,7 @@ export const inspectStoppedRepairWork = (databasePath: string) => {
             "orchestration_v2_effect_outbox",
           ].includes(table),
       )
-      .reduce((total, [, value]) => total + value, 0);
+      .reduce((total, [, value]) => total + value, activeGoals);
     const restartContinuations =
       counts.get("orchestration_v2_effect_outbox")! +
       workflows +

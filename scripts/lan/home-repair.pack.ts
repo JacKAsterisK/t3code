@@ -33,12 +33,9 @@ export async function buildHomeRepair(outDir: string) {
     sourcemap: false,
     dts: false,
     deps: {
-      alwaysBundle: [
-        /^effect(?:\/|$)/,
-        /^@effect\/platform-node(?:-shared)?(?:\/|$)/,
-        /^@t3tools\/(?:contracts|shared)(?:\/|$)/,
-      ],
-      onlyBundle: ["effect", "@effect/platform-node", "@effect/platform-node-shared"],
+      alwaysBundle: [/.*/],
+      // Normal event projection imports parser utilities; the offline artifact must have no package dependencies.
+      onlyBundle: [/.*/],
     },
   });
   for (const name of ["schema", "fixture", "contract"])
@@ -108,7 +105,15 @@ export async function buildHomeRepair(outDir: string) {
         interfaceVersion: 1,
         release: false,
         applySupported: true,
-        operations: ["preview", "apply", "rollback", "recover"],
+        operations: [
+          "preview",
+          "apply",
+          "rollback",
+          "recover",
+          "cancel-original-work",
+          "rollback-work-cancellation",
+          "recover-work-cancellation",
+        ],
         admission: "hub-held-windows-handles-v1",
         files,
       },

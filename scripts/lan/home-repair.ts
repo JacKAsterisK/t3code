@@ -1,4 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- This standalone preview reads only metadata and read-only SQLite aggregates; it never initializes T3 services.
+import { nativeWorkStatusDefinitions } from "../../apps/server/src/lan/nativeWorkStates.ts";
+import { inspectStoppedRepairWork } from "../../apps/server/src/lan/NativeMaintenance.ts";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
@@ -242,29 +244,50 @@ function inspectDatabase(file: string, supportedMigrationIds: readonly number[])
         .prepare(`PRAGMA table_info(${table})`)
         .all()
         .map((row) => String(row.name));
+      if (table === "scheduled_tasks" && columns.includes("enabled")) {
+        const scheduledStates = db
+          .prepare("SELECT enabled, count(*) AS n FROM scheduled_tasks GROUP BY enabled")
+          .all();
+        for (const state of scheduledStates) {
+          if (state.enabled !== 0 && state.enabled !== 1) activeWork = null;
+          else if (state.enabled === 1 && activeWork !== null) activeWork += Number(state.n);
+        }
+        continue;
+      }
       if (!columns.includes("status")) {
         if (count(table) > 0) activeWork = null;
         continue;
       }
       const states = db.prepare(`SELECT status, count(*) AS n FROM ${table} GROUP BY status`).all();
+      const definition = nativeWorkStatusDefinitions.find(([name]) => name === table);
       for (const state of states) {
         if (
-          [
-            "completed",
-            "failed",
-            "cancelled",
-            "interrupted",
-            "done",
-            "succeeded",
-            "resolved",
-            "rejected",
-            "dismissed",
-            "expired",
-            "stopped",
-          ].includes(String(state.status))
-        )
+          !definition ||
+          typeof state.status !== "string" ||
+          !(definition[1] as readonly string[]).includes(state.status)
+        ) {
+          activeWork = null;
           continue;
-        if (activeWork !== null) activeWork += Number(state.n);
+        }
+        // Native inspection counts queued runs separately from active runs.
+        const busy =
+          (definition[2] as readonly string[]).includes(state.status) ||
+          (table === "orchestration_v2_projection_runs" && state.status === "queued");
+        if (busy && activeWork !== null) activeWork += Number(state.n);
+      }
+    }
+    if (tables.has("orchestration_v2_projection_metadata")) {
+      try {
+        const work = inspectStoppedRepairWork(file);
+        activeWork =
+          work.activeRuns +
+          work.queuedRuns +
+          work.pendingRequests +
+          work.backgroundAgents +
+          work.scheduledWork +
+          work.restartContinuations;
+      } catch {
+        activeWork = null;
       }
     }
     db.exec("ROLLBACK");
@@ -335,6 +358,7 @@ function inspectHome(home: string, supportedMigrationIds: readonly number[]): Ho
       NodePath.join(home, "userdata", "statev2.sqlite"),
       supportedMigrationIds,
     ));
+    if (activeWork === null) blockers.push("active-work-inspection-unknown");
     providerInstances = inspectProviders(home);
     for (const directory of ["userdata/attachments", "userdata/secrets", "worktrees"])
       ordinaryAncestors(NodePath.join(home, directory));

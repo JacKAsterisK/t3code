@@ -27,6 +27,8 @@
         "resolve-blockers"
       ]
     },
+    "cancellationSupported": { "type": "boolean" },
+    "canCancelOriginalWork": { "type": "boolean" },
     "canApply": {
       "type": "boolean"
     },

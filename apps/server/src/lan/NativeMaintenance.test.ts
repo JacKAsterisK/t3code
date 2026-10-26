@@ -292,7 +292,7 @@ it.layer(NodeServices.layer)("NativeMaintenance", (it) => {
         const service = yield* NativeMaintenance.NativeMaintenance;
         assert.equal(
           (yield* service.inspect(request)).backgroundAgents,
-          status === "active" ? 2 : 0,
+          status === "active" ? 3 : 0,
         );
         if (status === "active")
           assert.equal(
@@ -304,6 +304,63 @@ it.layer(NodeServices.layer)("NativeMaintenance", (it) => {
             (yield* service.verify({ ...request, operation: "verify" })).backgroundAgents,
             0,
           );
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect.each(
+    ["idle", "not_loaded"].flatMap((providerStatus) =>
+      ["active", "paused", "blocked", "usage_limited", "budget_limited", "complete"].map(
+        (goalStatus) => ({ providerStatus, goalStatus }),
+      ),
+    ),
+  )(
+    "counts a $goalStatus goal independently of $providerStatus provider state",
+    ({ providerStatus, goalStatus }) =>
+      Effect.gen(function* () {
+        const { request, insert } = yield* fixture;
+        yield* insert("orchestration_v2_projection_provider_sessions", "stopped", {
+          provider_session_id: "session:stopped",
+          thread_id: "thread:goal",
+        });
+        yield* insert("orchestration_v2_projection_provider_threads", providerStatus, {
+          provider_thread_id: "provider-thread:goal",
+          provider_session_id: "session:stopped",
+          thread_id: "thread:goal",
+          payload_json: JSON.stringify({
+            goal: { objective: "Finish the requested task", status: goalStatus },
+          }),
+        });
+        yield* insert("orchestration_v2_projection_runs", "completed", {
+          thread_id: "thread:goal",
+          provider_thread_id: "provider-thread:goal",
+        });
+        yield* insert("orchestration_v2_projection_provider_turns", "completed", {
+          thread_id: "thread:goal",
+          provider_thread_id: "provider-thread:goal",
+        });
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        const observed = yield* service.inspect(request);
+        assert.deepEqual(
+          [
+            observed.activeRuns,
+            observed.queuedRuns,
+            observed.pendingRequests,
+            observed.backgroundAgents,
+            observed.scheduledWork,
+            observed.restartContinuations,
+          ],
+          [0, 0, 0, goalStatus === "active" ? 1 : 0, 0, 0],
+        );
+        if (goalStatus === "active")
+          assert.equal(
+            (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+            "busy",
+          );
+        else {
+          const verified = yield* service.verify({ ...request, operation: "verify" });
+          assert.equal(verified.dataGeneration, observed.dataGeneration);
+          assert.equal(verified.workGeneration, observed.workGeneration);
+        }
       }).pipe(Effect.provide(testLayer)),
   );
 

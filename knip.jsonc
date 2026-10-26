@@ -33,6 +33,8 @@
         "lan/home-repair-native.ts",
         "lan/home-repair.fixture-builder.ts",
         "lan/home-repair.windows-smoke.ts",
+        "lan/home-repair-cancel.fixture-builder.ts",
+        "lan/home-repair-cancel.windows-smoke.ts",
       ],
       "ignoreDependencies": ["esbuild"],
       // The `t3` npm package's files: copied into the package, never imported.

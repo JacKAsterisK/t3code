@@ -53,6 +53,11 @@ jobs:
           scripts/lan/runtime-policy.test.ts
           scripts/lan/native-helper-output.test.ts
           scripts/lan/home-repair.test.ts
+          scripts/lan/home-repair-executor.test.ts
+          scripts/lan/home-repair-migrations.test.ts
+          scripts/lan/home-repair-cancel.test.ts
+          scripts/lan/home-repair-scheduled.test.ts
+          scripts/lan/home-repair-work-states.test.ts
           apps/desktop/src/backend/DesktopBackendManager.test.ts
           apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
           apps/server/src/launcherWatch.test.ts

@@ -61,7 +61,7 @@ const ignoredLocks = new Set([
   "userdata/state.sqlite-shm",
 ]);
 
-function treeDigest(directory: string) {
+export function treeDigest(directory: string, excludedFiles: readonly string[] = []) {
   const hash = NodeCrypto.createHash("sha256");
   let files = 0;
   const walk = (relative: string) => {
@@ -75,7 +75,7 @@ function treeDigest(directory: string) {
         walk(relative ? `${relative}/${name}` : name);
       return;
     }
-    if (ignoredLocks.has(relative)) return;
+    if (ignoredLocks.has(relative) || excludedFiles.includes(relative)) return;
     if (!stat.isFile() || stat.nlink !== 1)
       throw new Error("Repair refuses nonordinary backup files.");
     if (++files > 100_000)
@@ -97,7 +97,7 @@ function treeDigest(directory: string) {
   return { sha256: hash.digest("hex"), files };
 }
 
-function copySnapshot(source: string, backup: string): Snapshot {
+export function copySnapshot(source: string, backup: string): Snapshot {
   assertOrdinaryNativePath(source, true);
   const before = treeDigest(source);
   NodeFS.cpSync(source, backup, {
@@ -116,7 +116,7 @@ function copySnapshot(source: string, backup: string): Snapshot {
   return { source, backup, ...copied };
 }
 
-function atomicWrite(file: string, text: string, repairId: string) {
+export function atomicWrite(file: string, text: string, repairId: string) {
   assertOrdinaryNativePath(file, false);
   const temporary = `${file}.${repairId}.tmp`;
   const descriptor = NodeFS.openSync(temporary, "wx", 0o600);

@@ -164,6 +164,54 @@ it("restores independent bytes, relocates generated shims and metadata, and bind
   }
 });
 
+it("captures and restores long pnpm dependency paths with internal junctions", async () => {
+  const f = await fixture();
+  try {
+    const longPath =
+      "node_modules/.pnpm/react-native@0.88.0_@babel+_4bbd3f1473e0b719a3b6bb196a69f292/node_modules/react-native/ReactCommon/react/renderer/components/legacyviewmanagerinterop/platform/ios/react/renderer/components/legacyviewmanagerinterop/LegacyViewManagerInteropComponentDescriptor.mm";
+    const target = NodePath.posix.dirname(longPath) + "/captured-native-fixture";
+    const files = new Map([
+      [longPath, "retained native source"],
+      [target + "/index.js", "retained junction target"],
+    ]);
+    expect(longPath.length).toBe(279);
+    expect(target.length).toBeGreaterThan(240);
+    for (const [relative, content] of files) {
+      await NodeFSP.mkdir(NodePath.dirname(NodePath.join(f.source, relative)), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(f.source, relative), content);
+    }
+    await NodeFSP.symlink(
+      NodePath.join(f.source, target),
+      NodePath.join(f.source, "node_modules", "deep-fixture"),
+      "junction",
+    );
+    const cache = await captureNativeDependencyCache({
+      sourceRoot: f.source,
+      cacheRoot: NodePath.join(f.root, "long-dependency-cache"),
+      sourceCommit: "b".repeat(40),
+      inputs: f.key,
+    });
+    const output = await f.destination("long-dependency-restored");
+    expect(
+      await restoreNativeDependencyCache({ sourceRoot: output, cache, inputs: f.key }),
+    ).toMatchObject({ independentlyCopied: true, links: 3 });
+    for (const [relative, content] of files)
+      expect(await NodeFSP.readFile(NodePath.join(output, relative), "utf8")).toBe(content);
+    expect(
+      await NodeFSP.readFile(
+        NodePath.join(output, "node_modules", "deep-fixture", "index.js"),
+        "utf8",
+      ),
+    ).toBe("retained junction target");
+    await NodeFSP.writeFile(NodePath.join(output, longPath), "independent restored mutation");
+    expect(await NodeFSP.readFile(NodePath.join(f.source, longPath), "utf8")).toBe(
+      "retained native source",
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
 it("refuses changed approved manifests, tampered cache bytes and mismatched installation keys", async () => {
   const f = await fixture();
   try {
@@ -231,6 +279,89 @@ it("refuses a separately approved malformed receipt whose link leaves the curren
         inputs: f.key,
       }),
     ).rejects.toThrow();
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("refuses unsafe dependency entry paths and link targets before restoring any files", async () => {
+  const f = await fixture();
+  try {
+    const manifestPath = NodePath.join(f.cache.root, "manifest.json");
+    const original = await NodeFSP.readFile(manifestPath, "utf8");
+    const unsafePaths = [
+      "node_modules/../foreign",
+      "node_modules/./fixture",
+      "node_modules//fixture",
+      "/node_modules/fixture",
+      "node_modules\\fixture",
+      "node_modules/fixture:alternate-stream",
+      "node_modules/NUL.txt",
+      "node_modules/COM1",
+      "node_modules/fixture.",
+      "node_modules/fixture ",
+      "node_modules/control-\u001f",
+      "node_modules/control-\u007f",
+      "node_modules/surrogate-\ud800",
+      "node_modules/Unicode-é",
+      "node_modules/invalid<name>",
+      "node_modules/" + "x".repeat(241),
+      "node_modules/" + Array.from({ length: 22 }, () => "x".repeat(200)).join("/"),
+    ];
+    for (const field of ["path", "target"] as const) {
+      for (const [index, unsafePath] of unsafePaths.entries()) {
+        const manifest = JSON.parse(original);
+        const entry = manifest.entries.find(
+          (candidate: { kind: string }) => candidate.kind === (field === "path" ? "file" : "link"),
+        );
+        entry[field] = unsafePath;
+        const content = bytes(JSON.stringify(manifest));
+        await NodeFSP.writeFile(manifestPath, content);
+        const output = await f.destination(`unsafe-${field}-${index}`);
+        await expect(
+          restoreNativeDependencyCache({
+            sourceRoot: output,
+            cache: { ...f.cache, manifestSha256: sha256(content) },
+            inputs: f.key,
+          }),
+          `${field}: ${JSON.stringify(unsafePath)}`,
+        ).rejects.toThrow();
+        await expect(NodeFSP.lstat(NodePath.join(output, "node_modules"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it("refuses case-colliding dependency entries even with a separately approved receipt", async () => {
+  const f = await fixture();
+  try {
+    const manifestPath = NodePath.join(f.cache.root, "manifest.json");
+    const manifest = JSON.parse(await NodeFSP.readFile(manifestPath, "utf8"));
+    const original = manifest.entries.find((entry: { kind: string }) => entry.kind === "file");
+    const alias =
+      NodePath.posix.dirname(original.path) +
+      "/" +
+      NodePath.posix.basename(original.path).toUpperCase();
+    expect(alias).not.toBe(original.path);
+    expect(alias.toLowerCase()).toBe(original.path.toLowerCase());
+    manifest.entries.push({ ...original, path: alias });
+    const content = bytes(JSON.stringify(manifest));
+    await NodeFSP.writeFile(manifestPath, content);
+    const output = await f.destination("case-collision");
+    await expect(
+      restoreNativeDependencyCache({
+        sourceRoot: output,
+        cache: { ...f.cache, manifestSha256: sha256(content) },
+        inputs: f.key,
+      }),
+    ).rejects.toThrow(/duplicate entry/u);
+    await expect(NodeFSP.lstat(NodePath.join(output, "node_modules"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   } finally {
     await f.cleanup();
   }

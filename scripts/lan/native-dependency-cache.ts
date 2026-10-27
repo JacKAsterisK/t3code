@@ -40,6 +40,13 @@ const lifecycleNames = [
 const MAX_ENTRIES = 300000;
 const MAX_BYTES = 8 * 1024 ** 3;
 const MAX_FILE = 256 * 1024 ** 2;
+// Installed pnpm trees legitimately exceed shipping payload path limits. Keep
+// every component's existing Windows safeguards and bound the full cache path.
+function relativeDependencyCachePath(value: string) {
+  if (value.length > 4096) throw new Error("Dependency cache path exceeds its length bound.");
+  for (const component of value.split("/")) relativeWindowsPath(component);
+  return value;
+}
 const keyPaths = (relative: string) =>
   relative === "package.json" ||
   relative.endsWith("/package.json") ||
@@ -323,7 +330,7 @@ async function scanModules(sourceRoot: string, moduleRoots: readonly string[]) {
   const visit = async (relative: string, depth: number): Promise<void> => {
     if (depth > 64 || entries.length + pending.length >= MAX_ENTRIES)
       throw new Error("Dependency cache exceeds its bounded tree size.");
-    relativeWindowsPath(relative);
+    relativeDependencyCachePath(relative);
     const file = NodePath.join(sourceRoot, relative),
       stat = await NodeFSP.lstat(file);
     if (stat.isSymbolicLink()) {
@@ -331,7 +338,7 @@ async function scanModules(sourceRoot: string, moduleRoots: readonly string[]) {
       if (!inside(destination, sourceRoot))
         throw new Error("Dependency link escapes its source tree.");
       const target = NodePath.relative(sourceRoot, destination).split(NodePath.sep).join("/");
-      if (target) relativeWindowsPath(target);
+      if (target) relativeDependencyCachePath(target);
       entries.push({ path: relative, kind: "link", target });
     } else if (stat.isDirectory()) {
       entries.push({ path: relative, kind: "directory" });
@@ -379,6 +386,8 @@ export async function captureNativeDependencyCache(input: {
     moduleRoots,
     entries,
   };
+  // Capture and restore accept the same paths, link targets and case aliases.
+  decodeManifest(encode(manifest), input.inputs);
   await NodeFSP.mkdir(input.cacheRoot);
   const payload = NodePath.join(input.cacheRoot, "payload");
   await NodeFSP.mkdir(payload);
@@ -444,7 +453,7 @@ function decodeManifest(bytes: Uint8Array, expectedInputs: NativeDependencyInput
   const names = new Set<string>();
   let total = 0;
   for (const entry of value.entries) {
-    relativeWindowsPath(entry.path);
+    relativeDependencyCachePath(entry.path);
     if (!isWithinModules(entry.path, value.moduleRoots) || names.has(entry.path.toLowerCase()))
       throw new Error("Approved dependency cache has an escaping or duplicate entry.");
     names.add(entry.path.toLowerCase());
@@ -458,7 +467,7 @@ function decodeManifest(bytes: Uint8Array, expectedInputs: NativeDependencyInput
         throw new Error("Approved dependency cache has an invalid file pin.");
       total += entry.length;
     } else if (entry.kind === "link") {
-      if (entry.target) relativeWindowsPath(entry.target);
+      if (entry.target) relativeDependencyCachePath(entry.target);
       if (
         !isWithinModules(entry.target, value.moduleRoots) &&
         !expectedInputs.packageRoots.includes(entry.target)

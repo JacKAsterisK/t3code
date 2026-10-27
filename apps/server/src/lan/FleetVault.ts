@@ -31,7 +31,8 @@ const make = Effect.gen(function* () {
   const read = Effect.tryPromise({
     try: async () => {
       const raw = await entry().getPassword();
-      return raw === undefined ? undefined : decode(raw);
+      // Windows keyring returns null for an absent credential despite its TypeScript declaration.
+      return raw === undefined || raw === null ? undefined : decode(raw);
     },
     catch: () => new LanFleetError({ reason: "configuration" }),
   });

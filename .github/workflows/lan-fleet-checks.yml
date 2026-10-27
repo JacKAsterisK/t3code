@@ -103,6 +103,7 @@ jobs:
           apps/server/src/lan/FleetDelivery.test.ts
           apps/server/src/lan/FleetFiles.test.ts
           apps/server/src/lan/FleetEnrollment.test.ts
+          apps/server/src/lan/FleetVault.test.ts
           apps/server/src/lan/FleetTransport.test.ts
           apps/desktop/src/lan/DesktopFleetGateway.test.ts
           packages/shared/src/fleetTlsCertificate.test.ts

@@ -3,6 +3,24 @@ import * as NodePath from "node:path";
 
 export const FLEET_ROSTER_ENV = "T3CODE_LAN_FLEET_ROSTER_PATH";
 
+export const WINDOWS_FLEET_SHARE_ROOT = "\\\\BuildMachine\\BuildShare";
+
+/** This names the Windows share boundary; callers must also prove filesystem access. */
+export function trustedFleetShareRoot(rosterPath: string): string | undefined {
+  if (!rosterPath.toLowerCase().startsWith(`${WINDOWS_FLEET_SHARE_ROOT.toLowerCase()}\\`))
+    return undefined;
+  const relative = rosterPath.slice(WINDOWS_FLEET_SHARE_ROOT.length + 1);
+  if (
+    relative === "" ||
+    /[/:\u0000]/u.test(relative) ||
+    relative
+      .split("\\")
+      .some((part) => part === "" || part === "." || part === ".." || /[. ]$/u.test(part))
+  )
+    return undefined;
+  return WINDOWS_FLEET_SHARE_ROOT;
+}
+
 export function resolveFleetBootstrap(
   environment: Readonly<Record<string, string | undefined>>,
   configuredRoster?: string,

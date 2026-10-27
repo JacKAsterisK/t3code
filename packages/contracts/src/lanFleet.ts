@@ -88,7 +88,7 @@ export const LanFleetSetupInput = Schema.Union([
     operation: Schema.Literal("join"),
     confirmed: Schema.Boolean,
     origin: Schema.String,
-    ownerCode: VerificationCode,
+    ownerCode: Schema.optionalKey(VerificationCode),
     managedTls: Schema.optionalKey(Schema.Boolean),
     autoPickup: Schema.Boolean,
     access: FleetAccess,
@@ -126,6 +126,7 @@ export type LanFleetSetupInput = typeof LanFleetSetupInput.Type;
 
 export const LanFleetSetupState = Schema.Struct({
   available: Schema.Boolean,
+  sharedFolderTrust: Schema.optionalKey(Schema.Boolean),
   stage: Schema.Literals(["unconfigured", "join", "pending", "active", "paused"]),
   owner: Schema.Boolean,
   ownerCode: Schema.NullOr(VerificationCode),

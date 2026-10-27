@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  FleetRoster,
   AuthStandardClientScopes,
   AuthFilesystemWriteScope,
   type AuthEnvironmentScope,
@@ -25,21 +26,51 @@ import * as FleetEnrollment from "./FleetEnrollment.ts";
 import * as FleetVault from "./FleetVault.ts";
 import * as Authority from "./FleetAuthority.ts";
 import * as LanFleet from "./LanFleet.ts";
-import { FLEET_ROSTER_ENV } from "./FleetBootstrap.ts";
+import { FLEET_ROSTER_ENV, WINDOWS_FLEET_SHARE_ROOT } from "./FleetBootstrap.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 
 // Only this in-memory vault and temporary synthetic shares are used; the OS vault is never constructed.
-const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (managedTls = false) {
-  const fs = yield* FileSystem.FileSystem;
+const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
+  managedTls = false,
+  share: false | "accessible" | "inaccessible" = false,
+  platform: NodeJS.Platform = "win32",
+) {
+  const diskFs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const base = yield* Config.ServerConfig;
-  const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-fleet-enrollment-synthetic-" });
+  const diskRoot = yield* diskFs.makeTempDirectoryScoped({
+    prefix: "t3-fleet-enrollment-synthetic-",
+  });
+  const root = share ? WINDOWS_FLEET_SHARE_ROOT : diskRoot;
+  let sharedFolderAccessible = share === "accessible";
+  const localPath = (file: string) =>
+    share && (file === root || file.startsWith(root + "\\"))
+      ? path.join(diskRoot, file.slice(root.length))
+      : file;
+  // The virtual UNC share is mapped entirely to a fresh temp directory. No real SMB path is touched.
+  const fs = FileSystem.FileSystem.of({
+    ...diskFs,
+    exists: (file) => diskFs.exists(localPath(file)),
+    stat: (file) => diskFs.stat(localPath(file)),
+    readFileString: (file, options) => diskFs.readFileString(localPath(file), options),
+    makeDirectory: (file, options) => diskFs.makeDirectory(localPath(file), options),
+    open: (file, options) => diskFs.open(localPath(file), options),
+    rename: (from, to) => diskFs.rename(localPath(from), localPath(to)),
+    remove: (file, options) => diskFs.remove(localPath(file), options),
+    readDirectory: (file, options) =>
+      diskFs.readDirectory(
+        file === WINDOWS_FLEET_SHARE_ROOT && !sharedFolderAccessible
+          ? path.join(diskRoot, "denied-share-root")
+          : localPath(file),
+        options,
+      ),
+  });
   const rosterPath = path.join(root, "roster.json");
   const authorityFile = path.join(root, "fleet-authority.json");
   const issued: Array<{ issuer: string; scopes: ReadonlyArray<AuthEnvironmentScope> }> = [];
   const create = Effect.fn("FleetEnrollmentTest.create")(function* (name: string) {
     const environmentId = EnvironmentId.make(`environment:${name}`);
-    const stateDir = path.join(root, name);
+    const stateDir = path.join(diskRoot, name);
     yield* fs.makeDirectory(stateDir);
     let record: Authority.FleetVaultRecord | undefined;
     let saves = 0;
@@ -97,6 +128,8 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (managedTls =
       function* () {
         const enrollmentServices = yield* Layer.build(
           FleetEnrollment.layerServices.pipe(
+            Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)),
+            Layer.provide(Layer.succeed(HostProcess.Platform, platform)),
             Layer.provide(transportLayer),
             Layer.provide(Config.layer(config)),
             Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
@@ -113,6 +146,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (managedTls =
         const links = yield* LanFleet.LanFleet.pipe(
           Effect.provide(
             LanFleet.layerServices.pipe(
+              Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)),
               Layer.provide(Config.layer(config)),
               Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
               Layer.provide(Layer.succeed(FleetEnrollment.FleetEnrollment, enrollment)),
@@ -187,13 +221,130 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (managedTls =
     a.enrollment.configure({ operation: "approve", confirmed: true, machineId, verificationCode });
   const sync = (peer: typeof a, connectedEnvironmentIds: ReadonlyArray<EnvironmentId>) =>
     peer.links.sync({ mode: "automatic", connectedEnvironmentIds, sendMachineIds: [] });
-  return { a, b, root, rosterPath, authorityFile, start, join, approve, sync, fs, path, issued };
+  return {
+    a,
+    b,
+    root,
+    rosterPath,
+    authorityFile,
+    start,
+    join,
+    approve,
+    sync,
+    fs,
+    path,
+    issued,
+    setSharedFolderAccessible: (value: boolean) => {
+      sharedFolderAccessible = value;
+    },
+  };
 });
 const configLayer = Config.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-fleet-enrollment-config-",
 });
 
 it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
+  it.effect(
+    "joins through the accessible Windows share without codes or owner approval and uses existing encrypted delivery",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false, "accessible");
+        const owner = yield* f.start();
+        assert.equal(owner.sharedFolderTrust, true);
+        const joined = yield* f.b.enrollment.configure({
+          operation: "join",
+          confirmed: true,
+          origin: "https://beta.example.test",
+          autoPickup: true,
+          access: "standard",
+        });
+        assert.equal(joined.stage, "active");
+        assert.equal(joined.sharedFolderTrust, true);
+        // Joining reads only the already signed authority; its owner need not execute an approval turn.
+        const raw = yield* readFleetJson(f.authorityFile, Authority.FleetAuthority).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        assert.equal(raw.peers.length, 1);
+        assert.equal((yield* f.b.enrollment.resolve)?.peers.length, 2);
+        assert.equal(
+          (yield* f.a.enrollment.status).peers.find(
+            (peer) => peer.environmentId === f.b.environmentId,
+          )?.status,
+          "approved",
+        );
+        yield* f.sync(f.a, [f.a.environmentId]);
+        yield* f.sync(f.b, [f.b.environmentId]);
+        assert.equal((yield* f.sync(f.a, [f.a.environmentId])).incoming.length, 1);
+        assert.equal((yield* f.sync(f.b, [f.b.environmentId])).incoming.length, 1);
+        assert.equal(f.issued.length, 2);
+      }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect(
+    "automatically trusts an existing matching request and preserves explicit authority revocation",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false, "inaccessible");
+        const owner = yield* f.start();
+        const pending = yield* f.join(owner.ownerCode!);
+        assert.equal(pending.stage, "pending");
+        const before = f.b.record();
+        f.setSharedFolderAccessible(true);
+        const roster = yield* readFleetJson(f.rosterPath, FleetRoster).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        yield* writeFleetJson(f.rosterPath, {
+          ...roster,
+          machines: roster.machines.map((machine) =>
+            machine.environmentId === f.b.environmentId ? { ...machine, enabled: false } : machine,
+          ),
+        }).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+        assert.equal((yield* f.b.enrollment.status).stage, "pending");
+        assert.equal(yield* f.b.enrollment.resolve, null);
+        yield* writeFleetJson(f.rosterPath, roster).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        assert.equal((yield* f.b.enrollment.status).stage, "active");
+        assert.equal((yield* f.b.enrollment.resolve)?.peers.length, 2);
+        assert.equal(f.b.record()?.signingPrivateKey, before?.signingPrivateKey);
+        yield* f.a.enrollment.configure({
+          operation: "revoke",
+          confirmed: true,
+          machineId: before!.machineId,
+        });
+        assert.equal(yield* f.b.enrollment.resolve, null);
+        assert.equal(
+          (yield* f.b.enrollment.status).peers.find((peer) => peer.machineId === before!.machineId)
+            ?.status,
+          "revoked",
+        );
+      }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect(
+    "requires the legacy owner code outside the trusted share or when exact-share access fails",
+    () =>
+      Effect.gen(function* () {
+        for (const [share, platform] of [
+          [false, "win32"],
+          ["inaccessible", "win32"],
+          ["accessible", "linux"],
+        ] as const) {
+          const f = yield* fixture(false, share, platform);
+          yield* f.start();
+          assert.equal((yield* f.b.enrollment.status).sharedFolderTrust, false);
+          const failure = yield* f.b.enrollment
+            .configure({
+              operation: "join",
+              confirmed: true,
+              origin: "https://beta.example.test",
+              autoPickup: true,
+              access: "standard",
+            })
+            .pipe(Effect.flip);
+          assert.equal(failure.reason, "configuration");
+          assert.equal(f.b.record(), undefined);
+        }
+      }).pipe(Effect.provide(configLayer)),
+  );
   it.effect(
     "binds encrypted endpoints to explicit setup, approved peer codes and recipient-specific delivery",
     () =>

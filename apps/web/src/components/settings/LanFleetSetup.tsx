@@ -34,6 +34,7 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
   const [access, setAccess] = useState<"read-only" | "standard">(setup?.access ?? "standard");
   const [automatic, setAutomatic] = useState(setup?.deviceCode == null ? true : setup.autoPickup);
   const joining = setup?.stage === "join";
+  const sharedFolderTrust = setup?.sharedFolderTrust === true;
   return (
     <Dialog
       open
@@ -43,11 +44,19 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
     >
       <DialogPopup>
         <DialogHeader>
-          <DialogTitle>{joining ? "Join this fleet" : "Create a fleet"}</DialogTitle>
+          <DialogTitle>
+            {sharedFolderTrust
+              ? "Connect this machine"
+              : joining
+                ? "Join this fleet"
+                : "Create a fleet"}
+          </DialogTitle>
           <DialogDescription>
-            {joining
-              ? "Compare the owner code with the code displayed in the owner's T3 app. The owner will then verify this machine before it can link."
-              : "This machine will approve new fleet members. Keep its owner verification code available when joining your other machines."}
+            {sharedFolderTrust
+              ? "Windows access to BuildShare connects machines automatically."
+              : joining
+                ? "Compare the owner code with the code displayed in the owner's T3 app. The owner will then verify this machine before it can link."
+                : "This machine will approve new fleet members. Keep its owner verification code available when joining your other machines."}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -57,29 +66,31 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
               automatically. Private keys stay in the OS credential store; only public enrollment
               data is shared.
             </p>
-            <Select
-              items={[
-                { value: "managed", label: "Automatic LAN encryption" },
-                { value: "existing", label: "Existing HTTPS endpoint" },
-              ]}
-              value={managedTls ? "managed" : "existing"}
-              onValueChange={(value) => {
-                setManagedTls(value === "managed");
-                setOrigin(
-                  value === "managed" && setup?.suggestedTlsOrigins?.length === 1
-                    ? setup.suggestedTlsOrigins[0]!
-                    : "",
-                );
-              }}
-            >
-              <SelectTrigger aria-label="Fleet transport">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectPopup>
-                <SelectItem value="managed">Automatic LAN encryption</SelectItem>
-                <SelectItem value="existing">Existing HTTPS endpoint</SelectItem>
-              </SelectPopup>
-            </Select>
+            {!sharedFolderTrust ? (
+              <Select
+                items={[
+                  { value: "managed", label: "Automatic LAN encryption" },
+                  { value: "existing", label: "Existing HTTPS endpoint" },
+                ]}
+                value={managedTls ? "managed" : "existing"}
+                onValueChange={(value) => {
+                  setManagedTls(value === "managed");
+                  setOrigin(
+                    value === "managed" && setup?.suggestedTlsOrigins?.length === 1
+                      ? setup.suggestedTlsOrigins[0]!
+                      : "",
+                  );
+                }}
+              >
+                <SelectTrigger aria-label="Fleet transport">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectPopup>
+                  <SelectItem value="managed">Automatic LAN encryption</SelectItem>
+                  <SelectItem value="existing">Existing HTTPS endpoint</SelectItem>
+                </SelectPopup>
+              </Select>
+            ) : null}
             {managedTls && (setup?.suggestedTlsOrigins?.length ?? 0) > 1 ? (
               <Select
                 items={setup!.suggestedTlsOrigins!.map((address) => ({
@@ -114,7 +125,7 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
                 placeholder="https://machine.example.test"
               />
             </label>
-            {managedTls ? (
+            {managedTls && !sharedFolderTrust ? (
               <p className="text-xs text-muted-foreground">
                 Confirming creates a local encryption key in the OS credential store and opens the
                 shown additional port automatically whenever T3 starts, until you stop encrypted
@@ -123,7 +134,7 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
                 HTTP connections are preserved.
               </p>
             ) : null}
-            {joining ? (
+            {joining && !sharedFolderTrust ? (
               <label className="block space-y-1 text-sm">
                 <span>Owner verification code</span>
                 <Input
@@ -141,55 +152,62 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
                 />
               </label>
             ) : null}
-            <div className="space-y-1">
-              <p className="text-sm">Allow owner-approved machines to access this environment</p>
-              <Select
-                items={accessItems}
-                value={access}
-                onValueChange={(value) => {
-                  if (value === "read-only" || value === "standard") setAccess(value);
-                }}
-              >
-                <SelectTrigger aria-label="Fleet access scope">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectPopup>
-                  {accessItems.map((item) => (
-                    <SelectItem key={item.value} value={item.value}>
-                      {item.label}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {access === "standard"
-                  ? "Full access includes running agents and shell commands, reading and changing files, provider setup, settings, and client access."
-                  : "Read only allows reading threads, files, and diagnostics. It does not grant command execution or editing."}
-              </p>
-            </div>
-            <div className="space-y-1">
-              <p className="text-sm">Collect and share approved links</p>
-              <Select
-                items={pickupItems}
-                value={automatic ? "automatic" : "manual"}
-                onValueChange={(value) => setAutomatic(value === "automatic")}
-              >
-                <SelectTrigger aria-label="Fleet pickup schedule">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectPopup>
-                  {pickupItems.map((item) => (
-                    <SelectItem key={item.value} value={item.value}>
-                      {item.label}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                The fleet owner can request links between approved members. Each machine grants its
-                own selected access. Automatic checks run only while this desktop app is open.
-              </p>
-            </div>
+            {!sharedFolderTrust ? (
+              <>
+                <div className="space-y-1">
+                  <p className="text-sm">
+                    Allow owner-approved machines to access this environment
+                  </p>
+                  <Select
+                    items={accessItems}
+                    value={access}
+                    onValueChange={(value) => {
+                      if (value === "read-only" || value === "standard") setAccess(value);
+                    }}
+                  >
+                    <SelectTrigger aria-label="Fleet access scope">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectPopup>
+                      {accessItems.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {access === "standard"
+                      ? "Full access includes running agents and shell commands, reading and changing files, provider setup, settings, and client access."
+                      : "Read only allows reading threads, files, and diagnostics. It does not grant command execution or editing."}
+                  </p>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm">Collect and share approved links</p>
+                  <Select
+                    items={pickupItems}
+                    value={automatic ? "automatic" : "manual"}
+                    onValueChange={(value) => setAutomatic(value === "automatic")}
+                  >
+                    <SelectTrigger aria-label="Fleet pickup schedule">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectPopup>
+                      {pickupItems.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    The fleet owner can request links between approved members. Each machine grants
+                    its own selected access. Automatic checks run only while this desktop app is
+                    open.
+                  </p>
+                </div>
+              </>
+            ) : null}
             {fleet.error ? (
               <p role="status" className="text-xs text-muted-foreground">
                 {fleet.error}
@@ -202,7 +220,9 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
             Cancel
           </DialogClose>
           <Button
-            disabled={fleet.busy || !origin || (joining && code.length !== 12)}
+            disabled={
+              fleet.busy || !origin || (joining && !sharedFolderTrust && code.length !== 12)
+            }
             onClick={() => {
               void fleet
                 .configure(
@@ -211,7 +231,7 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
                         operation: "join",
                         confirmed: true,
                         origin,
-                        ownerCode: code,
+                        ...(sharedFolderTrust ? {} : { ownerCode: code }),
                         autoPickup: automatic,
                         access,
                         managedTls,
@@ -235,13 +255,15 @@ function EnrollmentDialog({ onClose }: { onClose: () => void }) {
           >
             {fleet.busy
               ? "Setting up…"
-              : joining
-                ? managedTls
-                  ? "Enable encryption and request to join"
-                  : "Generate keys and request to join"
-                : managedTls
-                  ? "Enable encryption and create fleet"
-                  : "Generate keys and create fleet"}
+              : sharedFolderTrust
+                ? "Connect this machine"
+                : joining
+                  ? managedTls
+                    ? "Enable encryption and request to join"
+                    : "Generate keys and request to join"
+                  : managedTls
+                    ? "Enable encryption and create fleet"
+                    : "Generate keys and create fleet"}
           </Button>
         </DialogFooter>
       </DialogPopup>
@@ -334,6 +356,7 @@ export function LanFleetSetup() {
   const [revoke, setRevoke] = useState<Peer | null>(null);
   const [scopeChange, setScopeChange] = useState<"read-only" | "standard" | null>(null);
   const [transportChange, setTransportChange] = useState<boolean | null>(null);
+  const sharedFolderTrust = setup?.sharedFolderTrust === true;
   if (setup === null)
     return (
       <Button
@@ -362,23 +385,56 @@ export function LanFleetSetup() {
         </p>
       ) : null}
       {setup.stage === "unconfigured" || setup.stage === "join" ? (
-        <Button
-          size="sm"
-          disabled={!fleet.allowed || fleet.busy}
-          onClick={() => setEnrolling(true)}
-        >
-          {setup.stage === "join" ? "Join fleet" : "Create fleet"}
-        </Button>
+        <>
+          {sharedFolderTrust ? (
+            <p className="text-sm">Windows access to BuildShare connects machines automatically.</p>
+          ) : null}
+          <Button
+            size="sm"
+            disabled={!fleet.allowed || fleet.busy}
+            onClick={() => {
+              const origin =
+                setup.origin ||
+                (setup.suggestedTlsOrigins?.length === 1 ? setup.suggestedTlsOrigins[0] : "");
+              if (!sharedFolderTrust || !origin) {
+                setEnrolling(true);
+                return;
+              }
+              void fleet
+                .configure({
+                  operation: setup.stage === "join" ? "join" : "start",
+                  confirmed: true,
+                  origin,
+                  managedTls: setup.managedTls === true,
+                  autoPickup: setup.deviceCode == null ? true : setup.autoPickup,
+                  access: setup.access,
+                })
+                .then((ok) => {
+                  if (ok) void fleet.run("manual");
+                });
+            }}
+          >
+            {sharedFolderTrust
+              ? "Connect this machine"
+              : setup.stage === "join"
+                ? "Join fleet"
+                : "Create fleet"}
+          </Button>
+        </>
       ) : (
         <>
-          {setup.owner ? (
+          {sharedFolderTrust ? (
+            <p className="text-sm">Windows access to BuildShare connects machines automatically.</p>
+          ) : setup.owner ? (
             <p className="text-sm">
               Owner verification code: <code>{setup.ownerCode}</code>
             </p>
           ) : null}
-          <p className="text-sm">
-            This machine's code: <code>{setup.deviceCode}</code>
-          </p>
+          {!sharedFolderTrust ? (
+            <p className="text-sm">
+              This machine's code: <code>{setup.deviceCode}</code>
+            </p>
+          ) : null}
           <Select
             items={accessItems}
             value={setup.access}
@@ -401,8 +457,9 @@ export function LanFleetSetup() {
           </Select>
           {setup.stage === "pending" ? (
             <p className="text-xs text-muted-foreground">
-              Waiting for the fleet owner to compare this code and approve this machine. No
-              connection access is granted while waiting.
+              {sharedFolderTrust
+                ? "Connecting this machine through shared storage."
+                : "Waiting for the fleet owner to compare this code and approve this machine. No connection access is granted while waiting."}
             </p>
           ) : null}
           <div className="flex flex-wrap gap-2">
@@ -483,12 +540,15 @@ export function LanFleetSetup() {
                     <span>
                       {peer.label} ·{" "}
                       {peer.status === "pending"
-                        ? "Needs verification"
+                        ? sharedFolderTrust
+                          ? "Connecting"
+                          : "Needs verification"
                         : peer.status === "revoked"
                           ? "Revoked"
                           : "Approved"}
                     </span>
-                    {peer.status === "pending" || peer.status === "revoked" ? (
+                    {!sharedFolderTrust &&
+                    (peer.status === "pending" || peer.status === "revoked") ? (
                       <Button
                         size="sm"
                         variant="outline"
@@ -526,7 +586,9 @@ export function LanFleetSetup() {
               <DialogTitle>Change access for new fleet links?</DialogTitle>
               <DialogDescription>
                 {scopeChange === "standard"
-                  ? "Owner-approved machines may receive full access to this environment, including agents, shells, files, provider setup, settings and client access."
+                  ? sharedFolderTrust
+                    ? "Machines connected through BuildShare may receive full access to this environment, including agents, shells, files, provider setup, settings and client access."
+                    : "Owner-approved machines may receive full access to this environment, including agents, shells, files, provider setup, settings and client access."
                   : "New links will allow reading threads, files and diagnostics without command execution or editing."}{" "}
                 Existing sessions and saved connections are not replaced or reset; manage existing
                 access separately in Authorized clients.

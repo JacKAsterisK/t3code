@@ -67,7 +67,9 @@ export function LanFleetSettings() {
               : fleet.summary.autoPickup
                 ? "Assigned links are checked every 5 minutes while this desktop app is open."
                 : "Automatic pickup is off. Sync now to collect assigned links."
-            : "Complete fleet setup to approve this machine before connecting."}
+            : fleet.setup?.sharedFolderTrust
+              ? "Connect this machine through BuildShare to enable LAN links."
+              : "Complete fleet setup to approve this machine before connecting."}
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <Select
@@ -120,7 +122,14 @@ export function LanFleetSettings() {
         {fleet.summary?.machines.map((machine) => (
           <div key={machine.machineId} className="flex items-center justify-between gap-3 text-xs">
             <span>{machine.label}</span>
-            <span className="text-muted-foreground">{labels[machine.status]}</span>
+            <span className="text-muted-foreground">
+              {fleet.setup?.sharedFolderTrust && machine.status === "untrusted"
+                ? "Not connected"
+                : fleet.setup?.sharedFolderTrust &&
+                    (machine.status === "expired" || machine.status === "uncertain")
+                  ? "Connection unavailable"
+                  : labels[machine.status]}
+            </span>
           </div>
         ))}
         {fleet.error ? (

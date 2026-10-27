@@ -21,7 +21,7 @@ import * as Config from "../config.ts";
 import * as Vault from "./FleetVault.ts";
 import * as Authority from "./FleetAuthority.ts";
 import type { FleetPrivateConfig } from "./FleetDelivery.ts";
-import { resolveFleetBootstrap } from "./FleetBootstrap.ts";
+import { resolveFleetBootstrap, trustedFleetShareRoot } from "./FleetBootstrap.ts";
 import { readFleetJson, validateRoster, writeFleetJson, writeFleetRoster } from "./FleetFiles.ts";
 import { secureOrigin } from "./GatewayT3OAuthClient.ts";
 import * as FleetTransport from "./FleetTransport.ts";
@@ -46,6 +46,7 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const processEnvironment = yield* HostProcess.Environment;
+  const platform = yield* HostProcess.Platform;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const endpoints = yield* DirectEndpoints.DirectEndpoints;
   const config = yield* Config.ServerConfig;
@@ -57,6 +58,14 @@ const make = Effect.gen(function* () {
   const load = Effect.fn("FleetEnrollment.load")(function* () {
     const paths = yield* bootstrap();
     if (paths === undefined) return undefined;
+    const shareRoot = platform === "win32" ? trustedFleetShareRoot(paths.rosterPath) : undefined;
+    const sharedFolderTrust =
+      shareRoot === undefined
+        ? false
+        : yield* fs.readDirectory(shareRoot).pipe(
+            Effect.as(true),
+            Effect.orElseSucceed(() => false),
+          );
     const root = path.dirname(paths.rosterPath);
     const authorityFile = path.join(root, "fleet-authority.json");
     const requestsDirectory = path.join(root, "fleet-enrollment");
@@ -76,7 +85,53 @@ const make = Effect.gen(function* () {
       ? yield* readFleetJson(paths.rosterPath, FleetRoster)
       : { version: 1 as const, machines: [] };
     yield* Effect.try({ try: () => validateRoster(roster), catch: configurationError });
-    return { ...paths, root, authorityFile, requestsDirectory, record, authority, roster };
+    // A request proves possession of the joining keys; Windows SMB access is the admission boundary.
+    // The signed authority remains untouched, and any explicit authority identity wins, including revocation.
+    const peers = [...(authority?.peers ?? [])];
+    if (sharedFolderTrust && authority !== undefined && (yield* fs.exists(requestsDirectory))) {
+      const names = yield* fs.readDirectory(requestsDirectory);
+      if (names.length > 100) return yield* configurationError();
+      for (const name of names.filter((file) => /^[a-z0-9][a-z0-9_-]{0,63}\.json$/u.test(file))) {
+        const request = yield* readFleetJson(
+          path.join(requestsDirectory, name),
+          Authority.FleetEnrollmentRequest,
+        );
+        yield* Effect.try({
+          try: () => Authority.verifyEnrollment(request, authority),
+          catch: configurationError,
+        });
+        const peer = request.peer;
+        if (
+          name === `${peer.machineId}.json` &&
+          peer.enabled &&
+          roster.machines.some(
+            (machine) =>
+              machine.machineId === peer.machineId &&
+              machine.environmentId === peer.environmentId &&
+              machine.origin === peer.origin &&
+              machine.enabled,
+          ) &&
+          !peers.some(
+            (existing) =>
+              existing.machineId === peer.machineId ||
+              existing.environmentId === peer.environmentId,
+          )
+        )
+          peers.push(peer);
+      }
+    }
+    if (peers.length > 100) return yield* configurationError();
+    return {
+      ...paths,
+      root,
+      authorityFile,
+      requestsDirectory,
+      record,
+      authority,
+      roster,
+      sharedFolderTrust,
+      peers,
+    };
   });
 
   const status = Effect.gen(function* () {
@@ -102,6 +157,7 @@ const make = Effect.gen(function* () {
       "";
     const base: LanFleetSetupState = {
       available: current !== undefined,
+      sharedFolderTrust: current?.sharedFolderTrust ?? false,
       stage: "unconfigured",
       owner: false,
       ownerCode: null,
@@ -138,7 +194,7 @@ const make = Effect.gen(function* () {
     const owner =
       record?.rootPrivateKey !== undefined &&
       authority.ownerEnvironmentId === descriptor.environmentId;
-    const ownPeer = authority.peers.find((peer) => peer.environmentId === descriptor.environmentId);
+    const ownPeer = current.peers.find((peer) => peer.environmentId === descriptor.environmentId);
     const ownCode =
       record === undefined || origin === ""
         ? null
@@ -147,7 +203,7 @@ const make = Effect.gen(function* () {
       record !== undefined &&
       ownPeer?.enabled === true &&
       ownCode === Authority.peerVerificationCode(ownPeer);
-    const peers: Array<LanFleetSetupState["peers"][number]> = authority.peers.map((peer) => ({
+    const peers: Array<LanFleetSetupState["peers"][number]> = current.peers.map((peer) => ({
       machineId: peer.machineId,
       environmentId: peer.environmentId,
       label: peer.label,
@@ -155,7 +211,7 @@ const make = Effect.gen(function* () {
       verificationCode: Authority.peerVerificationCode(peer),
       status: peer.enabled ? "approved" : "revoked",
     }));
-    if (owner && (yield* fs.exists(current.requestsDirectory))) {
+    if (owner && !current.sharedFolderTrust && (yield* fs.exists(current.requestsDirectory))) {
       const names = yield* fs.readDirectory(current.requestsDirectory);
       if (names.length > 100) return yield* configurationError();
       for (const name of names.filter((file) => /^[a-z0-9][a-z0-9_-]{0,63}\.json$/u.test(file))) {
@@ -254,7 +310,8 @@ const make = Effect.gen(function* () {
                     if (
                       input.operation === "join" &&
                       (fresh.authority === undefined ||
-                        Authority.ownerVerificationCode(fresh.authority) !== input.ownerCode)
+                        (!fresh.sharedFolderTrust &&
+                          Authority.ownerVerificationCode(fresh.authority) !== input.ownerCode))
                     )
                       return yield* configurationError();
                     const original =
@@ -389,16 +446,18 @@ const make = Effect.gen(function* () {
                       ],
                     };
                   } else if (input.operation === "revoke") {
-                    if (
-                      input.machineId === record.machineId ||
-                      !authority.peers.some((peer) => peer.machineId === input.machineId)
-                    )
+                    const revokedPeer = fresh.peers.find(
+                      (peer) => peer.machineId === input.machineId,
+                    );
+                    if (input.machineId === record.machineId || revokedPeer === undefined)
                       return yield* configurationError();
                     updated = {
                       ...authority,
-                      peers: authority.peers.map((peer) =>
-                        peer.machineId === input.machineId ? { ...peer, enabled: false } : peer,
-                      ),
+                      peers: authority.peers.some((peer) => peer.machineId === input.machineId)
+                        ? authority.peers.map((peer) =>
+                            peer.machineId === input.machineId ? { ...peer, enabled: false } : peer,
+                          )
+                        : [...authority.peers, { ...revokedPeer, enabled: false }],
                       campaign: null,
                     };
                   } else {
@@ -450,7 +509,7 @@ const make = Effect.gen(function* () {
     )
       return yield* new LanFleetError({ reason: "transport" });
     const { record, authority } = current;
-    const self = authority.peers.find(
+    const self = current.peers.find(
       (peer) =>
         peer.environmentId === record.environmentId &&
         peer.machineId === record.machineId &&
@@ -471,10 +530,16 @@ const make = Effect.gen(function* () {
       autoPickup: record.autoPickup,
       encryptionPrivateKey: record.encryptionPrivateKey,
       signingPrivateKey: record.signingPrivateKey,
-      peers: authority.peers,
+      peers: current.peers,
       managed: true,
       access: record.access,
-      campaign: authority.campaign,
+      campaign: current.sharedFolderTrust
+        ? {
+            id: `shared-folder:${authority.fleetId}`,
+            expiresAt: DateTime.toEpochMillis(yield* DateTime.now) + 24 * 60 * 60 * 1000,
+            machineIds: current.peers.filter((peer) => peer.enabled).map((peer) => peer.machineId),
+          }
+        : authority.campaign,
     } satisfies FleetPrivateConfig;
   }).pipe(Effect.mapError(translate), Effect.provideService(FileSystem.FileSystem, fs));
   return FleetEnrollment.of({ status, configure, resolve });

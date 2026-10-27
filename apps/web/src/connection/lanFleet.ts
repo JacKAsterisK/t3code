@@ -99,7 +99,9 @@ export function useLanFleet() {
       if (result._tag !== "Success") {
         appAtomRegistry.set(
           errorAtom,
-          "Fleet setup was not confirmed. Check the verification code and shared storage; existing keys and trust were kept.",
+          appAtomRegistry.get(setupAtom)?.sharedFolderTrust === true
+            ? "Fleet setup failed. Check Windows access to BuildShare and the local LAN address."
+            : "Fleet setup was not confirmed. Check the verification code and shared storage; existing keys and trust were kept.",
         );
         return false;
       }
@@ -158,7 +160,9 @@ export function useLanFleet() {
           if (connected._tag !== "Success") {
             appAtomRegistry.set(
               errorAtom,
-              "Pickup is unconfirmed. This delivery is paused for review; sync will not replace or retry its credential.",
+              appAtomRegistry.get(setupAtom)?.sharedFolderTrust === true
+                ? "The connection could not be confirmed. Check that the other machine is online."
+                : "Pickup is unconfirmed. This delivery is paused for review; sync will not replace or retry its credential.",
             );
             return false;
           }

@@ -124,3 +124,46 @@ it("requires an owner code and explicit interface choice before joining a multi-
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   expect(configure).not.toHaveBeenCalled();
 });
+
+it("connects a shared-folder machine without asking for a code", async () => {
+  const { configure } = setup({ stage: "join", sharedFolderTrust: true, access: "standard" });
+  await using screen = await render(<LanFleetSetup />);
+  await screen.getByRole("button", { name: "Connect this machine", exact: true }).click();
+  expect(configure).toHaveBeenCalledExactlyOnceWith({
+    operation: "join",
+    confirmed: true,
+    origin: "https://192.168.40.10:4443",
+    managedTls: true,
+    autoPickup: true,
+    access: "standard",
+  });
+  await expect.element(page.getByText("Owner verification code")).not.toBeInTheDocument();
+  await expect.element(page.getByText("Machine verification code")).not.toBeInTheDocument();
+});
+
+it("hides codes and approval controls for shared-folder members", async () => {
+  setup({
+    stage: "active",
+    sharedFolderTrust: true,
+    owner: true,
+    ownerCode: "abcdef123456",
+    deviceCode: "123456abcdef",
+    peers: [
+      {
+        machineId: "other",
+        environmentId: EnvironmentId.make("environment-other"),
+        label: "Other machine",
+        origin: "https://192.168.40.11:4443",
+        verificationCode: "abcdef123456",
+        status: "pending",
+      },
+    ],
+  });
+  await using screen = await render(<LanFleetSetup />);
+  await expect
+    .element(screen.getByText("Windows access to BuildShare connects machines automatically."))
+    .toBeVisible();
+  await expect.element(page.getByText(/verification code/i)).not.toBeInTheDocument();
+  await expect.element(page.getByText(/Needs verification/i)).not.toBeInTheDocument();
+  await expect.element(page.getByRole("button", { name: "Review" })).not.toBeInTheDocument();
+});

@@ -1,8 +1,6 @@
 name: LAN fleet checks
 
 on:
-  push:
-    branches: [lan/fleet-links, lan/fleet-transport-compat, lan/fleet-persistent-startup]
   workflow_dispatch:
 
 permissions:
@@ -14,7 +12,9 @@ concurrency:
 
 jobs:
   check:
-    runs-on: windows-latest
+    # Routine LAN releases build locally. This inherited CI job is not a release gate.
+    if: ${{ false }}
+    runs-on: [self-hosted, windows, x64, t3-lan-anvil]
     timeout-minutes: 30
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.t3/test-browsers

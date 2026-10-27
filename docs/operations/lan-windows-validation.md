@@ -1,5 +1,7 @@
 # Validating supplied Windows artifacts
 
+Routine LAN delivery is a local AnvilToad build and one ZIP, followed by a copy of the ZIP, metadata and activation policy to `\\BuildMachine\BuildShare\T3CodeLAN` and the existing Portal publishing hook. Keep focused updater/data-preservation checks. Do not create GitHub releases, upload caches/artifacts to GitHub, use cloud runners, or require per-version Hub/Portal source-pin edits. T3 Actions is disabled; optional orchestration must use self-hosted machines. Full qualification is for changes that need it, not an ordinary release checklist.
+
 [`validate-windows-artifact.ts`](../../scripts/lan/validate-windows-artifact.ts)
 inspects existing local build inputs and portable ZIPs. It never provisions tools,
 builds or executes the application, signs code, installs, publishes, changes a
@@ -176,30 +178,18 @@ overwritten. Final output identity and hashes are checked again; publication
 authorization remains false. Deterministic sealing cannot make different input
 binaries or signatures reproducible, or prove independent build execution.
 
-## Prepare the fork update descriptor
+## Prepare Portal update metadata
 
-The LAN application's update check reads public metadata only from
-`JacKAsterisK/t3code`. It requires `t3code-lan-channel.json` and its matching ZIP
-in a stable release tagged `lan-v<distributionVersion>`. A copied upstream
-release or a release without this descriptor is unavailable to the LAN updater;
-it never falls back to the main T3 channel. The descriptor carries the independent
-native identity, application/distribution versions, source commit, ZIP size and
-SHA-256. GitHub's ZIP asset metadata must agree with it.
+Hub discovers T3 LAN versions through the configured Portal stable channel.
+A release consists of the validated ZIP, its Portal metadata and its activation
+policy. Copy those files to `\\BuildMachine\BuildShare\T3CodeLAN\<artifact SHA-256>`
+and invoke the staged publication hook. The hook verifies the supplied hashes,
+publishes through the existing Portal publisher, and verifies the download.
+It does not deploy Portal or compile a new Hub approval for each T3 version.
 
-Generate the descriptor from the already validated archive or archives:
-
-```powershell
-node scripts/lan/prepare-update-channel.ts --request C:\Approved\validation-request.json --approved-policy-sha256 <approved-policy-file-sha256> --output-directory C:\Approved\release-metadata
-```
-
-This reruns local artifact validation and creates the descriptor,
-`t3code-lan-portal-metadata.json`, and `t3code-lan-activation-policy.json` without
-overwriting existing outputs. The Portal metadata pins the policy's exact SHA-256;
-the policy approves only that artifact and carries the validated trust mode.
-Pass both generated files to the Portal publisher (`--metadata` and
-`--activation-policy`) alongside the exact ZIP. The generator publishes nothing.
-After publication approval, the
-descriptor and exact ZIP belong to the same fork release. Desktop Settings and
-`t3 update --check` report that candidate and link to its exact release tag.
-Hub still verifies the downloaded package and handles stopped-state activation,
-snapshots and rollback; discovery metadata never grants installation authority.
+Use the existing sealing result when preparing metadata so the routine path does
+not repeat validation or build a second candidate. The legacy descriptor generator
+remains available for explicit offline validation, but a GitHub release or asset
+is not part of LAN delivery. Hub owns update discovery, stopped-state admission,
+snapshots, data preservation and rollback; the native application updater stays
+disabled.

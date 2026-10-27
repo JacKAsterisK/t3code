@@ -1,5 +1,7 @@
 # Preparing T3 Code LAN for Hub distribution
 
+Routine LAN delivery is a local AnvilToad build and one ZIP, followed by a copy of the ZIP, metadata and activation policy to `\\BuildMachine\BuildShare\T3CodeLAN` and the existing Portal publishing hook. Keep focused updater/data-preservation checks. Do not create GitHub releases, upload caches/artifacts to GitHub, use cloud runners, or require per-version Hub/Portal source-pin edits. T3 Actions is disabled; optional orchestration must use self-hosted machines. Full qualification is for changes that need it, not an ordinary release checklist.
+
 The LAN fork has an offline preparation contract in
 [`scripts/lan/hub-distribution.ts`](../../scripts/lan/hub-distribution.ts).
 It validates build inputs, artifact bytes, independent installation paths,

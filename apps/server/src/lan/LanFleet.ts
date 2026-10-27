@@ -2,6 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import {
   FleetRoster,
+  FleetConnectHost,
   LanFleetError,
   type LanFleetSyncInput,
   type LanFleetSyncResult,
@@ -33,10 +34,13 @@ const Record = Schema.Struct({
   deliveryId: Schema.String,
   expiresAt: Schema.Number,
   status: Schema.Literals(["publishing", "pending", "connecting", "connected"]),
+  pairingLinkId: Schema.optionalKey(Schema.String),
+  senderCatalogCreatedAt: Schema.optionalKey(Schema.Number),
 });
 const Journal = Schema.Record(Schema.String, Record);
 type Journal = typeof Journal.Type;
 const isFleetError = Schema.is(LanFleetError);
+const isConnectHost = Schema.is(FleetConnectHost);
 
 export class LanFleet extends Context.Service<
   LanFleet,
@@ -56,6 +60,9 @@ const make = Effect.gen(function* () {
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const auth = yield* EnvironmentAuth.EnvironmentAuth;
   const launchEnvironment = yield* HostProcess.Environment;
+  const hostname = yield* HostProcess.Hostname;
+  const platform = yield* HostProcess.Platform;
+  const connectHost = platform === "win32" && isConnectHost(hostname) ? hostname : undefined;
   const enrollment = yield* FleetEnrollment.FleetEnrollment;
   const privateFile = path.join(serverConfig.stateDir, "lan-fleet-private.json");
   const journalFile = path.join(serverConfig.stateDir, "lan-fleet-state.json");
@@ -88,6 +95,8 @@ const make = Effect.gen(function* () {
       ).pipe(Effect.mapError(() => new LanFleetError({ reason: "configuration" })));
       if (bootstrap === undefined) return disabled;
       const config = { ...privateConfig, ...bootstrap };
+      const sharedFolder =
+        config.managed === true && (yield* enrollment.status).sharedFolderTrust === true;
       const roster = yield* readFleetJson(config.rosterPath, FleetRoster);
       const localId = yield* environment.getEnvironmentId;
       const self = config.peers.find((peer) => peer.machineId === config.machineId && peer.enabled);
@@ -139,6 +148,22 @@ const make = Effect.gen(function* () {
             const journal: { -readonly [K in keyof Journal]: Journal[K] } = { ...saved };
             const machines: Array<LanFleetSyncResult["machines"][number]> = [];
             const incoming: Array<LanFleetSyncResult["incoming"][number]> = [];
+            const activeLinks = sharedFolder ? [...(yield* auth.listPairingLinks())] : [];
+            const availableDeliveryIds = new Set<string>();
+            const activeGrant = (
+              outgoingKey: string,
+              expiresAt: number,
+              pairingLinkId?: string,
+            ) => {
+              const matches = activeLinks.filter(
+                (link) =>
+                  link.subject === `lan-fleet:${outgoingKey}` &&
+                  (pairingLinkId === undefined || link.id === pairingLinkId) &&
+                  DateTime.toEpochMillis(link.expiresAt) > now &&
+                  Math.abs(DateTime.toEpochMillis(link.expiresAt) - expiresAt) <= 60_000,
+              );
+              return matches.length === 1 ? matches[0] : undefined;
+            };
             yield* fs.makeDirectory(config.deliveryDirectory, { recursive: true });
             const campaign = config.campaign;
             const campaignIds =
@@ -153,14 +178,6 @@ const make = Effect.gen(function* () {
               ...(input.mode === "status" ? [] : input.sendMachineIds),
               ...campaignIds,
             ]);
-            if (config.managed)
-              yield* writeFleetJson(
-                path.join(
-                  config.deliveryDirectory,
-                  `${Delivery.deliveryFileName(self.machineId, self.machineId)}.catalog.json`,
-                ),
-                Delivery.makeFleetCatalog(config, self, input.connectedEnvironmentIds, now),
-              );
             for (const machine of roster.machines.filter((item) => item.enabled)) {
               const peer = trusted(machine);
               let status: LanFleetSyncResult["machines"][number]["status"] =
@@ -176,6 +193,7 @@ const make = Effect.gen(function* () {
                 let recipientReady = !config.managed;
                 let recipientConnected =
                   !config.managed && input.connectedEnvironmentIds.includes(peer.environmentId);
+                let peerCatalog: typeof Delivery.FleetCatalog.Type | undefined;
                 if (config.managed) {
                   const catalogFile = path.join(
                     config.deliveryDirectory,
@@ -184,9 +202,39 @@ const make = Effect.gen(function* () {
                   if (yield* fs.exists(catalogFile)) {
                     const catalog = yield* readFleetJson(catalogFile, Delivery.FleetCatalog);
                     recipientReady = Delivery.verifyFleetCatalog(catalog, peer, now);
+                    if (recipientReady) peerCatalog = catalog;
                     recipientConnected =
                       recipientReady &&
                       catalog.connectedEnvironmentIds.includes(self.environmentId);
+                  }
+                }
+                const outgoingExists = yield* fs.exists(outFile);
+                if (sharedFolder && outgoingExists && !recipientConnected) {
+                  const existing = yield* readFleetJson(outFile, Delivery.Delivery);
+                  const valid = yield* Effect.try(() =>
+                    Delivery.verifyDelivery(existing, self, peer, now),
+                  );
+                  const grant = activeGrant(
+                    outgoingKey,
+                    existing.header.expiresAt,
+                    sent?.pairingLinkId,
+                  );
+                  if (
+                    valid &&
+                    grant !== undefined &&
+                    (sent === undefined || sent.deliveryId === existing.header.deliveryId)
+                  ) {
+                    if (sent === undefined || sent.status === "publishing") {
+                      sent = {
+                        deliveryId: existing.header.deliveryId,
+                        expiresAt: existing.header.expiresAt,
+                        pairingLinkId: grant.id,
+                        status: "pending",
+                      };
+                      journal[`sent:${outgoingKey}`] = sent;
+                    }
+                    if (sent.status === "pending")
+                      availableDeliveryIds.add(existing.header.deliveryId);
                   }
                 }
                 if (recipientConnected) {
@@ -197,7 +245,7 @@ const make = Effect.gen(function* () {
                   };
                   journal[`sent:${outgoingKey}`] = sent;
                 }
-                if (sent === undefined && (yield* fs.exists(outFile))) {
+                if (sent === undefined && outgoingExists) {
                   // A lost local journal must never rotate a delivery still present on the share.
                   status = "uncertain";
                 } else if (sent === undefined && recipientConnected) {
@@ -225,6 +273,12 @@ const make = Effect.gen(function* () {
                           ]
                         : AuthStandardClientScopes,
                   });
+                  if (sharedFolder) {
+                    sent = { ...sent, pairingLinkId: issued.id };
+                    journal[`sent:${outgoingKey}`] = sent;
+                    yield* writeFleetJson(journalFile, journal);
+                    activeLinks.push(issued);
+                  }
                   const delivery = yield* Effect.try(() =>
                     Delivery.sealDelivery({
                       config,
@@ -239,6 +293,7 @@ const make = Effect.gen(function* () {
                   sent = { ...sent, status: "pending" };
                   journal[`sent:${outgoingKey}`] = sent;
                   yield* writeFleetJson(journalFile, journal);
+                  if (sharedFolder) availableDeliveryIds.add(sent.deliveryId);
                 }
                 if (sent !== undefined) {
                   status =
@@ -282,7 +337,17 @@ const make = Effect.gen(function* () {
                         status: "connected",
                       };
                     } else if (
-                      received === undefined &&
+                      (!sharedFolder ||
+                        peerCatalog?.availableDeliveryIds?.includes(delivery.header.deliveryId) ===
+                          true) &&
+                      (received === undefined ||
+                        (sharedFolder &&
+                          received.status === "connecting" &&
+                          peerCatalog?.availableDeliveryIds?.includes(
+                            delivery.header.deliveryId,
+                          ) === true &&
+                          (received.senderCatalogCreatedAt === undefined ||
+                            peerCatalog.createdAt > received.senderCatalogCreatedAt))) &&
                       incoming.length < 1 &&
                       (input.mode === "manual" || (input.mode === "automatic" && config.autoPickup))
                     ) {
@@ -290,14 +355,28 @@ const make = Effect.gen(function* () {
                         deliveryId: delivery.header.deliveryId,
                         expiresAt: delivery.header.expiresAt,
                         status: "connecting",
+                        ...(sharedFolder && peerCatalog !== undefined
+                          ? { senderCatalogCreatedAt: peerCatalog.createdAt }
+                          : {}),
                       };
                       yield* writeFleetJson(journalFile, journal);
+                      const tls =
+                        peer.tls === undefined
+                          ? undefined
+                          : {
+                              origin: peer.tls.origin,
+                              certificate: peer.tls.certificate,
+                              publicKeySha256: peer.tls.publicKeySha256,
+                              ...(peerCatalog?.connectHost === undefined
+                                ? {}
+                                : { connectHost: peerCatalog.connectHost }),
+                            };
                       incoming.push({
                         deliveryId: delivery.header.deliveryId,
                         environmentId: peer.environmentId,
                         host: payload.origin,
                         pairingCode: payload.credential,
-                        ...(peer.tls === undefined ? {} : { tls: peer.tls }),
+                        ...(tls === undefined ? {} : { tls }),
                       });
                     }
                     if (
@@ -316,6 +395,21 @@ const make = Effect.gen(function* () {
               });
             }
             yield* writeFleetJson(journalFile, journal);
+            if (config.managed)
+              yield* writeFleetJson(
+                path.join(
+                  config.deliveryDirectory,
+                  `${Delivery.deliveryFileName(self.machineId, self.machineId)}.catalog.json`,
+                ),
+                Delivery.makeFleetCatalog(
+                  config,
+                  self,
+                  input.connectedEnvironmentIds,
+                  now,
+                  sharedFolder ? [...availableDeliveryIds] : undefined,
+                  sharedFolder ? connectHost : undefined,
+                ),
+              );
             return {
               enabled: true,
               autoPickup: config.autoPickup,

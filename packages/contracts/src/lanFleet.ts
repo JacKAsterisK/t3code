@@ -18,10 +18,17 @@ export const FleetRoster = Schema.Struct({
 });
 export type FleetRoster = typeof FleetRoster.Type;
 
+export const FleetConnectHost = Schema.String.check(
+  Schema.isMaxLength(253),
+  Schema.isPattern(
+    /^(?![\d.]+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/iu,
+  ),
+);
 export const FleetTlsIdentity = Schema.Struct({
   origin: Schema.String.check(Schema.isMaxLength(2048)),
   certificate: Schema.String.check(Schema.isMaxLength(8192)),
   publicKeySha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+  connectHost: Schema.optionalKey(FleetConnectHost),
 });
 export type FleetTlsIdentity = typeof FleetTlsIdentity.Type;
 export const FleetTlsGatewayInput = Schema.Struct({

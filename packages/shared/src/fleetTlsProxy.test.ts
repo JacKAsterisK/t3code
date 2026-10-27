@@ -3,10 +3,13 @@ import * as NodeHttp from "node:http";
 import * as NodeHttps from "node:https";
 import * as NodeCrypto from "node:crypto";
 import { expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import { createFleetTlsCertificate } from "./fleetTlsCertificate.ts";
 import { fleetTlsRequestOptions, startFleetProxy } from "./fleetTlsProxy.ts";
+
+vi.mock("./distribution.ts", () => ({ desktopProtocolSchemes: ["t3code-lan"] }));
 
 const listen = (server: NodeHttp.Server | NodeHttps.Server) =>
   new Promise<number>((resolve, reject) => {
@@ -51,6 +54,52 @@ const get = (
     );
     request.on("error", reject);
   });
+
+it.live("reaches the pinned IPv4 identity over a DNS IPv6 route without changing its Host", () =>
+  Effect.gen(function* () {
+    const now = DateTime.toEpochMillis(yield* DateTime.now);
+    yield* Effect.promise(async () => {
+      const backend = NodeHttp.createServer((request, response) => {
+        response.end(request.headers.authorization);
+      });
+      const port = await listen(backend);
+      const key = createFleetTlsCertificate({ address: "127.0.0.1", now });
+      let endpoint: Awaited<ReturnType<typeof startFleetProxy>> | undefined;
+      let gateway: Awaited<ReturnType<typeof startFleetProxy>> | undefined;
+      try {
+        endpoint = await startFleetProxy({
+          listen: { address: "::1", port: 0 },
+          target: `http://127.0.0.1:${port}/`,
+          serverTls: { ...key, origin: "https://127.0.0.1:0" },
+        });
+        const identity = {
+          origin: new URL(endpoint.httpBaseUrl).origin,
+          certificate: key.certificate,
+          publicKeySha256: key.publicKeySha256,
+          connectHost: "localhost",
+        };
+        gateway = await startFleetProxy({
+          listen: { address: "127.0.0.1", port: 0 },
+          target: endpoint.httpBaseUrl,
+          peerTls: { identity, now },
+        });
+        expect(
+          await get(gateway.httpBaseUrl, "Bearer synthetic-only", { origin: "t3code-lan://app" }),
+        ).toEqual({
+          status: 200,
+          body: "Bearer synthetic-only",
+        });
+        expect(() =>
+          fleetTlsRequestOptions({ ...identity, connectHost: "untrusted.test/path" }, now),
+        ).toThrow();
+      } finally {
+        await gateway?.close();
+        await endpoint?.close();
+        await close(backend);
+      }
+    });
+  }),
+);
 
 it.live("streams an authenticated request through the encrypted endpoint and local gateway", () =>
   Effect.gen(function* () {
@@ -132,14 +181,15 @@ it.live("forwards WebSocket upgrade bytes through the verified TLS gateway", () 
       const port = await listen(backend);
       const key = createFleetTlsCertificate({ address: "127.0.0.1", now });
       const endpoint = await startFleetProxy({
-        listen: { address: "127.0.0.1", port: 0 },
+        listen: { address: "::1", port: 0 },
         target: `http://127.0.0.1:${port}/`,
-        serverTls: key,
+        serverTls: { ...key, origin: "https://127.0.0.1:0" },
       });
       const identity = {
         origin: new URL(endpoint.httpBaseUrl).origin,
         certificate: key.certificate,
         publicKeySha256: key.publicKeySha256,
+        connectHost: "localhost",
       };
       const gateway = await startFleetProxy({
         listen: { address: "127.0.0.1", port: 0 },
@@ -152,6 +202,7 @@ it.live("forwards WebSocket upgrade bytes through the verified TLS gateway", () 
             headers: {
               connection: "Upgrade",
               upgrade: "websocket",
+              origin: "t3code-lan://app",
               "sec-websocket-version": "13",
               "sec-websocket-key": Buffer.from("synthetic-key-16").toString("base64"),
             },

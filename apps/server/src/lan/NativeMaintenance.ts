@@ -1128,6 +1128,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
       ) {
         const before = yield* inspect(request);
         if (
+          request.manualActivation !== true &&
           [
             before.activeRuns,
             before.queuedRuns,
@@ -1151,7 +1152,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
         const after = yield* inspect(request);
         if (after.workGeneration !== before.workGeneration)
           return yield* new NativeMaintenanceError({ reason: "changed" });
-        return after;
+        return request.manualActivation === true ? { ...after, manualActivation: true } : after;
       });
       const bootstrap = Effect.fn("NativeMaintenance.bootstrap")(function* (
         request: NativeMaintenanceRequest,

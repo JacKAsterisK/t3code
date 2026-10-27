@@ -74,6 +74,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     yield* fs.makeDirectory(stateDir);
     let record: Authority.FleetVaultRecord | undefined;
     let saves = 0;
+    const activeLinks: Array<EnvironmentAuth.IssuedPairingLink> = [];
     const vault = FleetVault.FleetVault.of({
       read: Effect.sync(() => record),
       save: (next) =>
@@ -161,15 +162,18 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
                         issuer: name,
                         scopes: input?.scopes ?? AuthStandardClientScopes,
                       });
-                      return {
+                      const link = {
                         id: `synthetic-${issued.length}`,
                         credential: `synthetic-${name}-credential`,
-                        subject: "synthetic",
+                        subject: input?.subject ?? "synthetic",
                         scopes: input?.scopes ?? AuthStandardClientScopes,
                         createdAt: DateTime.makeUnsafe(0),
                         expiresAt: DateTime.makeUnsafe(86_400_000),
                       };
+                      activeLinks.push(link);
+                      return link;
                     }),
+                  listPairingLinks: () => Effect.succeed(activeLinks),
                 }),
               ),
             ),

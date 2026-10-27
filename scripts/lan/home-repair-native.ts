@@ -5,7 +5,12 @@ import * as NodeOS from "node:os";
 import * as NodeURL from "node:url";
 import * as Effect from "effect/Effect";
 import * as HostProcess from "../../packages/shared/src/HostProcess.ts";
-import { homeRepairMain, supportedMigrationIds, type PreviewOptions } from "./home-repair.ts";
+import {
+  homeRepairMain,
+  previewHomeRepair,
+  supportedMigrationIds,
+  type PreviewOptions,
+} from "./home-repair.ts";
 import {
   executeHomeRepair,
   rollbackHomeRepair,
@@ -15,7 +20,10 @@ import {
   type HomeRepairExecutionPorts,
 } from "./home-repair-executor.ts";
 import { migrateRepairStagedHome, validateRepairStagedHome } from "./home-repair-migrations.ts";
-import { assertOrdinaryNativePath } from "../../packages/shared/src/nativeHomeSelection.ts";
+import {
+  assertOrdinaryNativePath,
+  nativeHomePaths,
+} from "../../packages/shared/src/nativeHomeSelection.ts";
 import { inspectStoppedRepairWork } from "../../apps/server/src/lan/NativeMaintenance.ts";
 import {
   cancelOriginalWork,
@@ -46,6 +54,7 @@ function heldByHost(file: string) {
 export function verifyHostAdmission(
   resources: RepairAdmissionResources,
   cancellationOriginal?: string,
+  preserveWorkHomes?: ReadonlySet<string>,
 ) {
   if (Effect.runSync(HostProcess.Platform) !== "win32")
     throw new Error("Native home repair requires Windows admission.");
@@ -55,6 +64,7 @@ export function verifyHostAdmission(
     if (home === cancellationOriginal) continue;
     const work = inspectStoppedRepairWork(NodePath.join(home, "userdata", "statev2.sqlite"));
     if (
+      !preserveWorkHomes?.has(home) &&
       [
         work.activeRuns,
         work.queuedRuns,
@@ -106,18 +116,36 @@ function decodeRequest(raw: unknown, operation: string): Record<string, unknown>
   const allowed =
     operation === "apply"
       ? ["schemaVersion", "expectedPlanId", "choice", "opaqueBackupApproved", "repairId"]
-      : operation === "cancel-original-work"
+      : operation === "retain-selected-lan"
         ? [
             "schemaVersion",
             "expectedPlanId",
-            "cancelUnfinishedWorkApproved",
+            "choice",
             "opaqueBackupApproved",
             "repairId",
+            "expectedLanEnvironmentId",
             "admissionOwnerPid",
           ]
-        : operation.endsWith("work-cancellation")
-          ? ["schemaVersion", "repairId", "admissionOwnerPid"]
-          : ["schemaVersion", "repairId"];
+        : operation === "recover-retain-selected-lan"
+          ? [
+              "schemaVersion",
+              "repairId",
+              "expectedLanEnvironmentId",
+              "admissionOwnerPid",
+              "recoveryOperation",
+            ]
+          : operation === "cancel-original-work"
+            ? [
+                "schemaVersion",
+                "expectedPlanId",
+                "cancelUnfinishedWorkApproved",
+                "opaqueBackupApproved",
+                "repairId",
+                "admissionOwnerPid",
+              ]
+            : operation.endsWith("work-cancellation")
+              ? ["schemaVersion", "repairId", "admissionOwnerPid"]
+              : ["schemaVersion", "repairId"];
   if (
     request.schemaVersion !== 1 ||
     typeof request.repairId !== "string" ||
@@ -127,7 +155,10 @@ function decodeRequest(raw: unknown, operation: string): Record<string, unknown>
   )
     throw new Error("Invalid or incomplete repair request.");
   if (
-    (operation === "cancel-original-work" || operation.endsWith("work-cancellation")) &&
+    (operation === "retain-selected-lan" ||
+      operation === "recover-retain-selected-lan" ||
+      operation === "cancel-original-work" ||
+      operation.endsWith("work-cancellation")) &&
     (!Number.isSafeInteger(request.admissionOwnerPid) || request.admissionOwnerPid !== process.ppid)
   )
     throw new Error("Cancellation admission owner is not this native child parent.");
@@ -144,6 +175,8 @@ export async function runNativeHomeRepair(
   if (
     ![
       "apply",
+      "retain-selected-lan",
+      "recover-retain-selected-lan",
       "rollback",
       "recover",
       "cancel-original-work",
@@ -153,6 +186,120 @@ export async function runNativeHomeRepair(
   )
     throw new Error("Unknown repair operation.");
   const request = decodeRequest(raw, operation);
+  if (operation === "retain-selected-lan" || operation === "recover-retain-selected-lan") {
+    if (process.ppid <= 0) throw new Error("LAN retention requires a live owning Hub parent.");
+    process.kill(process.ppid, 0);
+    const lan = NodePath.join(options.localAppData, "T3CodeLAN", "data");
+    const original =
+      options.originalHomeDirectory ?? NodePath.join(options.userHomeDirectory, ".t3");
+    if (operation === "retain-selected-lan") {
+      const preview = previewHomeRepair(options);
+      const selectionPath = NodePath.join(options.localAppData, "T3CodeLAN", "home-selection.json");
+      if (
+        request.choice !== "side-by-side-retain-original" ||
+        request.opaqueBackupApproved !== true ||
+        preview.planId !== request.expectedPlanId ||
+        preview.state === "blocked" ||
+        preview.lan.state !== "initialized" ||
+        preview.lan.homeDirectory !== lan ||
+        preview.lan.environmentId !== request.expectedLanEnvironmentId ||
+        preview.lan.activeWork === null ||
+        (preview.original.state === "initialized" && preview.original.activeWork === null) ||
+        NodeFS.existsSync(selectionPath) ||
+        !NodeFS.existsSync(
+          NodePath.join(options.localAppData, "T3CodeLAN", "electron-profile", "Local State"),
+        )
+      )
+        throw new Error(
+          "Retaining selected LAN work requires the exact known LAN home and profile.",
+        );
+    } else {
+      const identityFile = NodePath.join(lan, "userdata", "environment-id");
+      assertOrdinaryNativePath(identityFile, false);
+      if (
+        NodeFS.statSync(identityFile).size > 256 ||
+        NodeFS.readFileSync(identityFile, "utf8").trim() !== request.expectedLanEnvironmentId ||
+        !["recover", "rollback"].includes(String(request.recoveryOperation))
+      )
+        throw new Error("Retention recovery requires the matching selected LAN identity.");
+      const paths = nativeHomePaths(options.userHomeDirectory, options.localAppData);
+      const receiptPath = NodePath.join(
+        NodePath.dirname(paths.selectionPath),
+        "recovery",
+        String(request.repairId),
+        "receipt.json",
+      );
+      const readMetadata = (file: string): Record<string, unknown> | null => {
+        if (!NodeFS.existsSync(file)) return null;
+        assertOrdinaryNativePath(file, false);
+        if (NodeFS.statSync(file).size > 16_384)
+          throw new Error("Retention recovery metadata is oversized.");
+        const value = strictJson(NodeFS.readFileSync(file));
+        if (!value || typeof value !== "object" || Array.isArray(value))
+          throw new Error("Invalid retention recovery metadata.");
+        return value as Record<string, unknown>;
+      };
+      const journal = readMetadata(paths.journalPath);
+      const receipt = readMetadata(receiptPath);
+      const matching = (value: Record<string, unknown>) =>
+        value.schemaVersion === 1 &&
+        value.repairId === request.repairId &&
+        value.operation === "retain-selected-lan" &&
+        value.expectedLanEnvironmentId === request.expectedLanEnvironmentId &&
+        value.previousSelection === null;
+      if (
+        (request.recoveryOperation === "recover" && !journal) ||
+        (request.recoveryOperation === "rollback" && !receipt) ||
+        (journal && (!matching(journal) || journal.receiptPath !== receiptPath)) ||
+        (receipt &&
+          (!matching(receipt) ||
+            receipt.selectionPath !== paths.selectionPath ||
+            receipt.selectedHomeDirectory !== lan ||
+            receipt.retainedHomeDirectory !== original ||
+            receipt.electronProfileDirectory !==
+              NodePath.join(options.localAppData, "T3CodeLAN", "electron-profile")))
+      )
+        throw new Error("Recovery does not match the retained LAN transaction.");
+    }
+    const generations = new Map<string, string>();
+    const homes = new Set([lan, original]);
+    const check = (resources: RepairAdmissionResources) => {
+      verifyHostAdmission(resources, undefined, homes);
+      for (const home of resources.homes) {
+        if (!homes.has(home)) throw new Error("Unexpected home in retention admission.");
+        const work = inspectStoppedRepairWork(NodePath.join(home, "userdata", "statev2.sqlite"));
+        const previous = generations.get(home);
+        if (previous !== undefined && previous !== work.workGeneration)
+          throw new Error("Work changed while retaining the selected LAN home.");
+        generations.set(home, work.workGeneration);
+      }
+    };
+    const retainPorts: HomeRepairExecutionPorts =
+      ports === nativePorts
+        ? {
+            ...nativePorts,
+            withExclusiveAdmission: async (resources, run) => {
+              check(resources);
+              return run();
+            },
+            verifyStoppedAndIdle: async (resources) => {
+              check(resources);
+            },
+          }
+        : ports;
+    if (operation === "retain-selected-lan")
+      return executeHomeRepair(
+        options,
+        {
+          ...request,
+          retainedLanEnvironmentId: String(request.expectedLanEnvironmentId),
+        } as unknown as HomeRepairApplyRequest,
+        retainPorts,
+      );
+    return request.recoveryOperation === "rollback"
+      ? rollbackHomeRepair(options, String(request.repairId), retainPorts)
+      : recoverHomeRepair(options, String(request.repairId), retainPorts);
+  }
   if (operation === "cancel-original-work")
     return cancelOriginalWork(options, request as unknown as WorkCancellationRequest, cancellation);
   if (operation === "rollback-work-cancellation" || operation === "recover-work-cancellation")

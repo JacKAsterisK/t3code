@@ -1,6 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- Node owns the key formats; canonical JSON contains only schema-validated envelope fields.
 import * as NodeCrypto from "node:crypto";
-import { FleetMachine, FleetMachineId, FleetTlsIdentity } from "@t3tools/contracts";
+import {
+  FleetMachine,
+  FleetMachineId,
+  FleetTlsIdentity,
+  FleetConnectHost,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 const Pem = Schema.String.check(Schema.isMaxLength(8192));
@@ -55,6 +60,7 @@ const Payload = Schema.Struct({
   credential: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
 });
 const decodePayload = Schema.decodeSync(Schema.fromJsonString(Payload));
+const isConnectHost = Schema.is(FleetConnectHost);
 export const Receipt = Schema.Struct({
   deliveryId: Schema.String,
   recipientId: FleetMachineId,
@@ -73,6 +79,10 @@ export const FleetCatalog = Schema.Struct({
   connectedEnvironmentIds: Schema.Array(FleetMachine.fields.environmentId).check(
     Schema.isMaxLength(1000),
   ),
+  availableDeliveryIds: Schema.optionalKey(
+    Schema.Array(Header.fields.deliveryId).check(Schema.isMaxLength(100)),
+  ),
+  connectHost: Schema.optionalKey(FleetConnectHost),
   signature: Text,
 });
 type FleetCatalog = typeof FleetCatalog.Type;
@@ -84,6 +94,8 @@ const catalogData = (value: FleetCatalog) =>
     value.createdAt,
     value.expiresAt,
     value.connectedEnvironmentIds,
+    ...(value.availableDeliveryIds === undefined ? [] : [value.availableDeliveryIds]),
+    ...(value.connectHost === undefined ? [] : [["connectHost", value.connectHost]]),
   ]);
 
 export function makeFleetCatalog(
@@ -91,7 +103,11 @@ export function makeFleetCatalog(
   self: FleetPeer,
   connectedEnvironmentIds: FleetCatalog["connectedEnvironmentIds"],
   now: number,
+  availableDeliveryIds?: FleetCatalog["availableDeliveryIds"],
+  connectHost?: FleetCatalog["connectHost"],
 ): FleetCatalog {
+  if (connectHost !== undefined && !isConnectHost(connectHost))
+    throw new Error("Invalid fleet connection hostname");
   const catalog: FleetCatalog = {
     version: 1,
     machineId: self.machineId,
@@ -99,6 +115,8 @@ export function makeFleetCatalog(
     createdAt: now,
     expiresAt: now + 10 * 60 * 1000,
     connectedEnvironmentIds,
+    ...(availableDeliveryIds === undefined ? {} : { availableDeliveryIds }),
+    ...(connectHost === undefined ? {} : { connectHost }),
     signature: "",
   };
   return {
@@ -118,6 +136,9 @@ export function verifyFleetCatalog(value: FleetCatalog, peer: FleetPeer, now: nu
     value.createdAt <= now + 60_000 &&
     value.expiresAt > now &&
     value.expiresAt <= value.createdAt + 10 * 60 * 1000 &&
+    (value.connectHost === undefined || isConnectHost(value.connectHost)) &&
+    (value.availableDeliveryIds === undefined ||
+      new Set(value.availableDeliveryIds).size === value.availableDeliveryIds.length) &&
     NodeCrypto.verify(
       null,
       Buffer.from(catalogData(value)),
@@ -216,6 +237,26 @@ export function sealDelivery(input: {
   };
 }
 
+export function verifyDelivery(
+  delivery: Delivery,
+  sender: FleetPeer,
+  recipient: FleetPeer,
+  now: number,
+): boolean {
+  return (
+    delivery.header.recipientId === recipient.machineId &&
+    delivery.header.senderId === sender.machineId &&
+    delivery.header.expiresAt > now &&
+    delivery.header.expiresAt <= now + 24 * 60 * 60 * 1000 &&
+    NodeCrypto.verify(
+      null,
+      Buffer.from(unsigned(delivery)),
+      publicKey(sender.signingPublicKey, "ed25519"),
+      Buffer.from(delivery.signature, "base64"),
+    )
+  );
+}
+
 export function openDelivery(
   delivery: Delivery,
   config: FleetPrivateConfig,
@@ -223,22 +264,8 @@ export function openDelivery(
   self: FleetPeer,
   now: number,
 ) {
-  if (
-    delivery.header.recipientId !== self.machineId ||
-    delivery.header.senderId !== sender.machineId ||
-    delivery.header.expiresAt <= now ||
-    delivery.header.expiresAt > now + 24 * 60 * 60 * 1000
-  )
-    throw new Error("Fleet delivery assignment or expiry mismatch");
-  if (
-    !NodeCrypto.verify(
-      null,
-      Buffer.from(unsigned(delivery)),
-      publicKey(sender.signingPublicKey, "ed25519"),
-      Buffer.from(delivery.signature, "base64"),
-    )
-  )
-    throw new Error("Fleet delivery signature mismatch");
+  if (!verifyDelivery(delivery, sender, self, now))
+    throw new Error("Fleet delivery assignment, expiry or signature mismatch");
   const shared = NodeCrypto.diffieHellman({
     privateKey: NodeCrypto.createPrivateKey(config.encryptionPrivateKey),
     publicKey: publicKey(delivery.header.ephemeralPublicKey, "x25519"),

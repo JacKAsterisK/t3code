@@ -23,6 +23,7 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
     addresses?: readonly string[];
     beforeListen?: Effect.Effect<void>;
     events?: string[];
+    ipv6Unavailable?: boolean;
   } = {},
 ) {
   const config = yield* Config.ServerConfig;
@@ -33,6 +34,7 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
   let conflict = options.conflict ?? false;
   let vaultUnavailable = options.vaultUnavailable ?? false;
   let reads = 0;
+  const listenAddresses: string[] = [];
   const services = yield* Layer.build(
     FleetTransport.layerServices.pipe(
       Layer.provide(
@@ -65,7 +67,10 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
           addresses: Effect.succeed(options.addresses ?? ["192.168.40.10", "192.168.50.10"]),
           listen: (input) =>
             Effect.gen(function* () {
+              listenAddresses.push(input.listen.address);
               yield* options.beforeListen ?? Effect.void;
+              if (options.ipv6Unavailable && input.listen.address === "::")
+                return yield* new LanFleetError({ reason: "transport" });
               if (conflict) return yield* new LanFleetError({ reason: "transport" });
               starts++;
               options.events?.push("start");
@@ -96,6 +101,7 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
     transport,
     identity,
     origin: `https://192.168.40.10:${port}`,
+    listenAddresses,
     stats: () => ({ record, starts, closes, saves, reads }),
     conflict: (value: boolean) => {
       conflict = value;
@@ -110,6 +116,27 @@ const configLayer = Config.ServerConfig.layerTest(process.cwd(), {
 });
 
 it.layer(NodeServices.layer)("confirmed fleet transport", (it) => {
+  it.effect("listens on IPv6 and IPv4 while retaining the saved endpoint identity", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const tls = yield* f.transport.prepare(f.origin);
+      const record = { ...f.identity, tls };
+      yield* f.transport.persist(record);
+      expect(f.listenAddresses).toEqual(["::"]);
+      expect(f.stats().record?.tls).toEqual(tls);
+      expect(yield* f.transport.ready(record)).toBe(true);
+    }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect("retains IPv4 access when the system cannot open a dual-stack listener", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(undefined, { ipv6Unavailable: true });
+      const tls = yield* f.transport.prepare(f.origin);
+      const record = { ...f.identity, tls };
+      yield* f.transport.persist(record);
+      expect(f.listenAddresses).toEqual(["::", "192.168.40.10"]);
+      expect(yield* f.transport.ready(record)).toBe(true);
+    }).pipe(Effect.provide(configLayer)),
+  );
   it.effect("restores an enabled saved listener at startup without rewriting keys or access", () =>
     Effect.gen(function* () {
       const first = yield* fixture();

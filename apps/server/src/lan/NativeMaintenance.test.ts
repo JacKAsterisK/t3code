@@ -315,6 +315,118 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
       }).pipe(Effect.provide(testLayer)),
   );
 
+  it.effect("manual activation preserves unfinished work while applying migrations", () =>
+    Effect.gen(function* () {
+      const { request, insert, dbPath } = yield* fixtureAtMigration(71);
+      yield* insert("orchestration_v2_projection_runs", "running", {
+        run_id: "run:manual-preserved",
+        thread_id: "thread:manual-preserved",
+        payload_json: '{"status":"running","note":"retained"}',
+      });
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const inspected = yield* service.inspect({ ...request, manualActivation: true });
+      assert.isAbove(inspected.activeRuns, 0);
+      assert.isFalse(Object.hasOwn(inspected, "manualActivation"));
+      assert.equal(
+        (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+        "busy",
+      );
+      assert.equal(
+        (yield* service
+          .verify({ ...request, operation: "verify", manualActivation: false })
+          .pipe(Effect.flip)).reason,
+        "busy",
+      );
+      const verified = yield* service.verify({
+        ...request,
+        operation: "verify",
+        manualActivation: true,
+      });
+      assert.isTrue(verified.manualActivation);
+      assert.equal(verified.workGeneration, inspected.workGeneration);
+      assert.equal(verified.activeRuns, inspected.activeRuns);
+      const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+      try {
+        assert.equal(
+          db.prepare("SELECT MAX(migration_id) n FROM effect_sql_migrations").get()!.n,
+          73,
+        );
+        const row = db
+          .prepare(
+            "SELECT status,payload_json FROM orchestration_v2_projection_runs WHERE run_id='run:manual-preserved'",
+          )
+          .get()!;
+        assert.equal(row.status, "running");
+        assert.equal(row.payload_json, '{"status":"running","note":"retained"}');
+      } finally {
+        db.close();
+      }
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("manual activation still requires the stopped lease and a current projection", () =>
+    Effect.gen(function* () {
+      const { request, mutate } = yield* fixture;
+      const denied = NativeMaintenance.layer(identity).pipe(
+        Layer.provide(
+          Layer.succeed(NativeMaintenance.NativeMaintenanceLease, {
+            verify: () =>
+              Effect.fail(new NativeMaintenance.NativeMaintenanceError({ reason: "lease" })),
+          }),
+        ),
+      );
+      const refusal = yield* Effect.gen(function* () {
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        return yield* service
+          .verify({ ...request, operation: "verify", manualActivation: true })
+          .pipe(Effect.flip);
+      }).pipe(Effect.provide(denied));
+      assert.equal(refusal.reason, "lease");
+      yield* mutate(
+        "UPDATE orchestration_v2_projection_metadata SET last_sequence=1 WHERE projection_name='thread-projections'",
+      );
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      assert.equal(
+        (yield* service
+          .verify({ ...request, operation: "verify", manualActivation: true })
+          .pipe(Effect.flip)).reason,
+        "projection",
+      );
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("manual activation still refuses a concurrent SQLite write", () =>
+    Effect.gen(function* () {
+      const { request, mutate, dbPath } = yield* fixture;
+      yield* mutate("PRAGMA journal_mode=WAL; PRAGMA wal_checkpoint(TRUNCATE)");
+      const close = NodeSqlite.DatabaseSync.prototype.close;
+      let written = false;
+      using _close = vi
+        .spyOn(NodeSqlite.DatabaseSync.prototype, "close")
+        .mockImplementation(function (this: NodeSqlite.DatabaseSync) {
+          close.call(this);
+          if (written) return;
+          written = true;
+          const writer = new NodeSqlite.DatabaseSync(dbPath);
+          try {
+            writer.exec(
+              "INSERT INTO orchestration_command_receipts (command_id,aggregate_kind,aggregate_id,accepted_at,result_sequence,status,error,command_type) VALUES ('manual-concurrent-write','thread','thread:fixture','2026-10-25T00:00:00Z',0,'accepted',NULL,'thread.send')",
+            );
+          } finally {
+            writer.close();
+          }
+        });
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      assert.equal(
+        (yield* service
+          .verify({ ...request, operation: "verify", manualActivation: true })
+          .pipe(Effect.flip)).reason,
+        "changed",
+      );
+      assert.isTrue(written);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect(
     "keeps two absent-WAL inspections stable across actual empty-WAL read connection closure",
     () =>

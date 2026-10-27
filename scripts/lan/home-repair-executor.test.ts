@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeSqlite from "node:sqlite";
 import { previewHomeRepair, supportedMigrationIds, type PreviewOptions } from "./home-repair.ts";
+import { runNativeHomeRepair } from "./home-repair-native.ts";
 import {
   executeHomeRepair,
   rollbackHomeRepair,
@@ -112,6 +113,208 @@ async function fixture(
       NodeFS.rmSync(root, { recursive: true, force: true });
   }
 }
+
+NodeTest.test(
+  "manual retention binds only the existing LAN identity and preserves unfinished work",
+  () =>
+    fixture(async ({ options, original, lan, ports }) => {
+      const database = NodePath.join(lan, "userdata", "statev2.sqlite");
+      const db = new NodeSqlite.DatabaseSync(database);
+      try {
+        db.exec(
+          "CREATE TABLE orchestration_v2_projection_runs(status TEXT); INSERT INTO orchestration_v2_projection_runs VALUES('running')",
+        );
+      } finally {
+        db.close();
+      }
+      const originalDatabase = NodePath.join(original, "userdata", "statev2.sqlite");
+      const originalDb = new NodeSqlite.DatabaseSync(originalDatabase);
+      try {
+        originalDb.exec(
+          "CREATE TABLE orchestration_v2_projection_runs(status TEXT); INSERT INTO orchestration_v2_projection_runs VALUES('running')",
+        );
+      } finally {
+        originalDb.close();
+      }
+      const before = NodeFS.readFileSync(database);
+      const beforeOriginal = NodeFS.readFileSync(originalDatabase);
+      const preview = previewHomeRepair(options);
+      NodeAssert.equal(preview.lan.activeWork, 1);
+      NodeAssert.equal(preview.original.activeWork, 1);
+      const request = {
+        schemaVersion: 1,
+        expectedPlanId: preview.planId,
+        choice: "side-by-side-retain-original",
+        opaqueBackupApproved: true,
+        repairId: "d".repeat(32),
+        expectedLanEnvironmentId: preview.lan.environmentId,
+        admissionOwnerPid: process.ppid,
+      };
+      await NodeAssert.rejects(
+        runNativeHomeRepair(
+          "retain-selected-lan",
+          { ...request, expectedLanEnvironmentId: "wrong" },
+          options,
+          ports,
+        ),
+      );
+      await NodeAssert.rejects(
+        runNativeHomeRepair(
+          "retain-selected-lan",
+          { ...request, admissionOwnerPid: process.ppid + 1 },
+          options,
+          ports,
+        ),
+      );
+      await NodeAssert.rejects(
+        runNativeHomeRepair(
+          "retain-selected-lan",
+          { ...request, expectedPlanId: "f".repeat(64) },
+          options,
+          ports,
+        ),
+      );
+      await NodeAssert.rejects(
+        runNativeHomeRepair(
+          "retain-selected-lan",
+          { ...request, choice: "adopt-original-retain-lan" },
+          options,
+          ports,
+        ),
+      );
+      const result = await runNativeHomeRepair("retain-selected-lan", request, options, ports);
+      if (result.status !== "selected-pending-verification")
+        throw new Error("Unexpected retention result");
+      NodeAssert.equal(result.homeDirectory, lan);
+      NodeAssert.equal(result.environmentId, preview.lan.environmentId);
+      NodeAssert.deepEqual(NodeFS.readFileSync(database), before);
+      NodeAssert.deepEqual(NodeFS.readFileSync(originalDatabase), beforeOriginal);
+      const selected = resolveNativeHomeSelection(options);
+      NodeAssert.equal(selected.homeDirectory, lan);
+      NodeAssert.equal(
+        selected.electronProfileDirectory,
+        NodePath.join(options.localAppData, "T3CodeLAN", "electron-profile"),
+      );
+      const receipt = JSON.parse(NodeFS.readFileSync(result.receiptPath, "utf8"));
+      const paths = nativeHomePaths(options.userHomeDirectory, options.localAppData);
+      NodeFS.writeFileSync(
+        paths.journalPath,
+        JSON.stringify({
+          schemaVersion: 1,
+          repairId: request.repairId,
+          receiptPath: result.receiptPath,
+          previousSelection: receipt.previousSelection,
+          operation: "retain-selected-lan",
+          expectedLanEnvironmentId: request.expectedLanEnvironmentId,
+          snapshots: receipt.snapshots,
+        }),
+      );
+      const recover = {
+        schemaVersion: 1,
+        repairId: request.repairId,
+        expectedLanEnvironmentId: request.expectedLanEnvironmentId,
+        admissionOwnerPid: process.ppid,
+        recoveryOperation: "recover",
+      };
+      await NodeAssert.rejects(
+        runNativeHomeRepair(
+          "recover-retain-selected-lan",
+          { ...recover, expectedLanEnvironmentId: "wrong" },
+          options,
+          ports,
+        ),
+      );
+      const rolledBack = await runNativeHomeRepair(
+        "recover-retain-selected-lan",
+        recover,
+        options,
+        ports,
+      );
+      NodeAssert.equal(rolledBack.status, "rolled-back");
+      NodeAssert.deepEqual(NodeFS.readFileSync(database), before);
+      NodeAssert.deepEqual(NodeFS.readFileSync(originalDatabase), beforeOriginal);
+      NodeAssert.throws(() => resolveNativeHomeSelection(options), /Both original and LAN/);
+    }),
+);
+
+NodeTest.test("manual retention refuses recovery of an adopt-original transaction", () =>
+  fixture(async ({ options, original, ports }) => {
+    const preview = previewHomeRepair(options);
+    const repairId = "f".repeat(32);
+    const result = await executeHomeRepair(
+      options,
+      {
+        schemaVersion: 1,
+        expectedPlanId: preview.planId,
+        choice: "adopt-original-retain-lan",
+        opaqueBackupApproved: true,
+        repairId,
+      },
+      ports,
+    );
+    const receipt = JSON.parse(NodeFS.readFileSync(result.receiptPath, "utf8"));
+    const paths = nativeHomePaths(options.userHomeDirectory, options.localAppData);
+    const selectionBefore = NodeFS.readFileSync(paths.selectionPath);
+    NodeFS.writeFileSync(
+      paths.journalPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        repairId,
+        receiptPath: result.receiptPath,
+        previousSelection: receipt.previousSelection,
+        snapshots: receipt.snapshots,
+      }),
+    );
+    await NodeAssert.rejects(
+      runNativeHomeRepair(
+        "recover-retain-selected-lan",
+        {
+          schemaVersion: 1,
+          repairId,
+          expectedLanEnvironmentId: preview.lan.environmentId,
+          admissionOwnerPid: process.ppid,
+          recoveryOperation: "recover",
+        },
+        options,
+        ports,
+      ),
+      /retained LAN transaction/,
+    );
+    NodeAssert.deepEqual(NodeFS.readFileSync(paths.selectionPath), selectionBefore);
+    NodeAssert.equal(result.homeDirectory, original);
+  }),
+);
+
+NodeTest.test("manual retention refuses unknown unfinished work", () =>
+  fixture(async ({ options, lan, ports }) => {
+    const db = new NodeSqlite.DatabaseSync(NodePath.join(lan, "userdata", "statev2.sqlite"));
+    try {
+      db.exec(
+        "CREATE TABLE orchestration_v2_projection_runs(status TEXT); INSERT INTO orchestration_v2_projection_runs VALUES('unknown')",
+      );
+    } finally {
+      db.close();
+    }
+    const preview = previewHomeRepair(options);
+    NodeAssert.equal(preview.lan.activeWork, null);
+    await NodeAssert.rejects(
+      runNativeHomeRepair(
+        "retain-selected-lan",
+        {
+          schemaVersion: 1,
+          expectedPlanId: preview.planId,
+          choice: "side-by-side-retain-original",
+          opaqueBackupApproved: true,
+          repairId: "e".repeat(32),
+          expectedLanEnvironmentId: preview.lan.environmentId,
+          admissionOwnerPid: process.ppid,
+        },
+        options,
+        ports,
+      ),
+    );
+  }),
+);
 
 NodeTest.test(
   "split startup refuses automatic selection; apply selects complete original state and retains LAN",

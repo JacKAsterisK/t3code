@@ -31,6 +31,7 @@ export interface HomeRepairApplyRequest {
   readonly choice: "adopt-original-retain-lan" | "side-by-side-retain-original";
   readonly opaqueBackupApproved: true;
   readonly repairId: string;
+  readonly retainedLanEnvironmentId?: string;
 }
 
 interface Snapshot {
@@ -51,6 +52,8 @@ interface RepairReceipt {
   readonly retainedHomeDirectory: string;
   readonly electronProfileDirectory: string;
   readonly snapshots: readonly Snapshot[];
+  readonly operation?: "retain-selected-lan";
+  readonly expectedLanEnvironmentId?: string;
 }
 
 const ignoredLocks = new Set([
@@ -158,7 +161,10 @@ export async function executeHomeRepair(
   if (
     preview.planId !== request.expectedPlanId ||
     preview.state === "blocked" ||
-    (request.choice === "adopt-original-retain-lan" && preview.original.state !== "initialized")
+    (request.choice === "adopt-original-retain-lan" && preview.original.state !== "initialized") ||
+    (request.retainedLanEnvironmentId !== undefined &&
+      (request.choice !== "side-by-side-retain-original" ||
+        preview.lan.environmentId !== request.retainedLanEnvironmentId))
   )
     throw new Error("Repair preview is stale or the requested original home is unavailable.");
   const profile =
@@ -199,6 +205,15 @@ export async function executeHomeRepair(
     if (previousSelection !== null && Buffer.byteLength(previousSelection) > 4096)
       throw new Error("Previous home selection is oversized.");
     const receiptPath = NodePath.join(recovery, "receipt.json");
+    const retention =
+      request.retainedLanEnvironmentId === undefined
+        ? {}
+        : {
+            operation: "retain-selected-lan" as const,
+            expectedLanEnvironmentId: request.retainedLanEnvironmentId,
+          };
+    if (request.retainedLanEnvironmentId !== undefined && previousSelection !== null)
+      throw new Error("LAN retention requires an unselected home.");
     atomicWrite(
       paths.journalPath,
       JSON.stringify({
@@ -206,6 +221,7 @@ export async function executeHomeRepair(
         repairId: request.repairId,
         receiptPath,
         previousSelection,
+        ...retention,
       }) + "\n",
       request.repairId,
     );
@@ -221,6 +237,7 @@ export async function executeHomeRepair(
           repairId: request.repairId,
           receiptPath,
           previousSelection,
+          ...retention,
           snapshots,
         }) + "\n",
         request.repairId,
@@ -285,6 +302,7 @@ export async function executeHomeRepair(
             ? selection.lanHomeDirectory
             : selection.originalHomeDirectory,
         electronProfileDirectory: profile,
+        ...retention,
         snapshots,
       };
       if (Buffer.byteLength(JSON.stringify(receipt)) > 16_384)
@@ -442,6 +460,12 @@ export async function rollbackHomeRepair(
           repairId,
           receiptPath,
           previousSelection: receipt.previousSelection,
+          ...(receipt.operation === "retain-selected-lan"
+            ? {
+                operation: receipt.operation,
+                expectedLanEnvironmentId: receipt.expectedLanEnvironmentId,
+              }
+            : {}),
           snapshots: receipt.snapshots,
         }) + "\n",
         repairId,

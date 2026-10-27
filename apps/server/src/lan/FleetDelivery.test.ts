@@ -35,6 +35,39 @@ const fixture = () => {
 };
 
 describe("recipient-protected fleet deliveries", () => {
+  it("binds available delivery IDs to the existing signed catalog while accepting legacy catalogs", () => {
+    const f = fixture(),
+      id = f.envelope.header.deliveryId;
+    const legacy = Delivery.makeFleetCatalog(f.senderConfig, f.a.peer, [], now);
+    expect(Delivery.verifyFleetCatalog(legacy, f.a.peer, now)).toBe(true);
+    const available = Delivery.makeFleetCatalog(f.senderConfig, f.a.peer, [], now, [id]);
+    expect(Delivery.verifyFleetCatalog(available, f.a.peer, now)).toBe(true);
+    const routed = Delivery.makeFleetCatalog(f.senderConfig, f.a.peer, [], now, [id], "Panda");
+    expect(Delivery.verifyFleetCatalog(routed, f.a.peer, now)).toBe(true);
+    expect(
+      Delivery.verifyFleetCatalog({ ...routed, connectHost: "another-machine" }, f.a.peer, now),
+    ).toBe(false);
+    expect(Delivery.verifyFleetCatalog({ ...available, connectHost: "Panda" }, f.a.peer, now)).toBe(
+      false,
+    );
+    expect(
+      Delivery.makeFleetCatalog(f.senderConfig, f.a.peer, [], now, [id], undefined).signature,
+    ).toBe(available.signature);
+    for (const host of ["https://Panda", "192.168.1.200", "fe80::1234", "Panda/path", "bad..name"])
+      expect(() =>
+        Delivery.makeFleetCatalog(f.senderConfig, f.a.peer, [], now, [id], host),
+      ).toThrow();
+    expect(
+      Delivery.verifyFleetCatalog({ ...legacy, availableDeliveryIds: [id] }, f.a.peer, now),
+    ).toBe(false);
+    expect(
+      Delivery.verifyFleetCatalog({ ...available, availableDeliveryIds: [] }, f.a.peer, now),
+    ).toBe(false);
+    expect(Delivery.verifyDelivery(f.envelope, f.a.peer, f.b.peer, now)).toBe(true);
+    expect(
+      Delivery.verifyDelivery({ ...f.envelope, tag: "tampered" }, f.a.peer, f.b.peer, now),
+    ).toBe(false);
+  });
   it("keeps the code and private keys off shared storage and opens only for the assigned peer", () => {
     const f = fixture();
     const wire = JSON.stringify(f.envelope);

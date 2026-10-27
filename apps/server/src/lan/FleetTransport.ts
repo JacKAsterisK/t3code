@@ -100,11 +100,21 @@ const make = Effect.gen(function* () {
     }
     const identity = yield* prepare(record.tls.origin, record.tls);
     const url = new URL(identity.origin);
-    const proxy = yield* network.listen({
-      listen: { address: url.hostname, port: Number(url.port || 443) },
+    const endpoint = {
       target: `http://${config.host === "::1" ? "[::1]" : config.host === undefined || ["0.0.0.0", "::", "localhost"].includes(config.host) ? "127.0.0.1" : config.host}:${config.port}/`,
       serverTls: identity,
-    });
+    };
+    const proxy = yield* network
+      .listen({ ...endpoint, listen: { address: "::", port: Number(url.port || 443) } })
+      .pipe(
+        Effect.catchTags({
+          LanFleetError: () =>
+            network.listen({
+              ...endpoint,
+              listen: { address: url.hostname, port: Number(url.port || 443) },
+            }),
+        }),
+      );
     running = { origin: identity.origin, proxy };
   });
   const persist = Effect.fn("FleetTransport.persist")(

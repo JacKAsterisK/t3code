@@ -6,11 +6,16 @@ import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import { fleetTlsPublicKeySha256, verifyFleetTlsCertificate } from "./fleetTlsCertificate.ts";
 import * as NodeCrypto from "node:crypto";
+import { FleetConnectHost } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+import { desktopProtocolSchemes } from "./distribution.ts";
+const isConnectHost = Schema.is(FleetConnectHost);
 
 export interface FleetTlsTrust {
   readonly origin: string;
   readonly certificate: string;
   readonly publicKeySha256: string;
+  readonly connectHost?: string;
 }
 export interface FleetProxy {
   readonly httpBaseUrl: string;
@@ -27,6 +32,7 @@ export function fleetTlsRequestOptions(
     target.protocol !== "https:" ||
     target.origin !== trust.origin ||
     !NodeNet.isIPv4(target.hostname) ||
+    (trust.connectHost !== undefined && !isConnectHost(trust.connectHost)) ||
     !verifyFleetTlsCertificate(trust.certificate, target.hostname, trust.publicKeySha256, now)
   )
     throw new Error("The approved fleet NodeTls identity is invalid.");
@@ -34,8 +40,10 @@ export function fleetTlsRequestOptions(
     ca: trust.certificate,
     rejectUnauthorized: true,
     minVersion: "TLSv1.2",
-    checkServerIdentity: (hostname, certificate) => {
-      const mismatch = NodeTls.checkServerIdentity(hostname, certificate);
+    servername: "",
+    checkServerIdentity: (_hostname, certificate) => {
+      // DNS selects the transport route; the signed origin and pinned key still name the peer.
+      const mismatch = NodeTls.checkServerIdentity(target.hostname, certificate);
       if (mismatch !== undefined) return mismatch;
       const actual = new NodeCrypto.X509Certificate(certificate.raw);
       return fleetTlsPublicKeySha256(actual.publicKey) === trust.publicKeySha256
@@ -49,10 +57,24 @@ export function fleetTlsRequestOptions(
 export async function startFleetProxy(input: {
   readonly listen: { readonly address: string; readonly port: number };
   readonly target: string;
-  readonly serverTls?: { readonly certificate: string; readonly privateKey: string };
+  readonly serverTls?: {
+    readonly certificate: string;
+    readonly privateKey: string;
+    readonly origin?: string;
+  };
   readonly peerTls?: { readonly identity: FleetTlsTrust; readonly now: number };
 }): Promise<FleetProxy> {
   const target = new URL(input.target);
+  const advertised =
+    input.serverTls?.origin === undefined ? undefined : new URL(input.serverTls.origin);
+  if (
+    advertised !== undefined &&
+    (advertised.protocol !== "https:" ||
+      advertised.origin !== input.serverTls!.origin ||
+      !NodeNet.isIPv4(advertised.hostname) ||
+      (input.listen.port !== 0 && Number(advertised.port || 443) !== input.listen.port))
+  )
+    throw new Error("Invalid advertised fleet endpoint.");
   const peerOptions =
     input.peerTls === undefined
       ? {}
@@ -105,7 +127,7 @@ export async function startFleetProxy(input: {
   };
   const options = (incoming: NodeHttp.IncomingMessage): NodeHttps.RequestOptions => ({
     ...peerOptions,
-    hostname: target.hostname.replace(/^\[|\]$/gu, ""),
+    hostname: input.peerTls?.identity.connectHost ?? target.hostname.replace(/^\[|\]$/gu, ""),
     port: target.port,
     method: incoming.method,
     path: incoming.url,
@@ -126,20 +148,28 @@ export async function startFleetProxy(input: {
         });
   server.maxConnections = 64;
   server.headersTimeout = 20_000;
+  const endpointHost = (port: number) => {
+    if (advertised !== undefined) {
+      const endpoint = new URL(advertised);
+      endpoint.port = String(port);
+      return endpoint.host;
+    }
+    const host = NodeNet.isIPv6(input.listen.address)
+      ? `[${input.listen.address}]`
+      : input.listen.address;
+    return `${host}:${port}`;
+  };
   const validHost = (incoming: NodeHttp.IncomingMessage) => {
     const address = server.address();
     return (
       address !== null &&
       typeof address !== "string" &&
-      incoming.headers.host === `${input.listen.address}:${address.port}`
+      incoming.headers.host === endpointHost(address.port)
     );
   };
   const validOrigin = (incoming: NodeHttp.IncomingMessage) => {
     if (input.peerTls === undefined || incoming.headers.origin === undefined) return true;
-    if (
-      incoming.headers.origin === "t3code://app" ||
-      incoming.headers.origin === "t3code-dev://app"
-    )
+    if (desktopProtocolSchemes.some((scheme) => incoming.headers.origin === `${scheme}://app`))
       return true;
     try {
       const origin = new URL(incoming.headers.origin);
@@ -241,8 +271,8 @@ export async function startFleetProxy(input: {
     throw new Error("Fleet listener address unavailable.");
   const scheme = input.serverTls === undefined ? "http" : "https";
   return {
-    httpBaseUrl: `${scheme}://${input.listen.address}:${address.port}/`,
-    wsBaseUrl: `${scheme === "http" ? "ws" : "wss"}://${input.listen.address}:${address.port}/`,
+    httpBaseUrl: `${scheme}://${endpointHost(address.port)}/`,
+    wsBaseUrl: `${scheme === "http" ? "ws" : "wss"}://${endpointHost(address.port)}/`,
     close: () =>
       new Promise((resolve) => {
         for (const socket of sockets) socket.destroy();

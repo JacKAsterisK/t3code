@@ -29,6 +29,32 @@
         "restoredHistoryVerified": false
       }
     },
+    "retain-selected-lan": {
+      "arguments": ["retain-selected-lan", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "expectedPlanId": "<64 lowercase hex from the exact current preview>",
+        "choice": "side-by-side-retain-original",
+        "opaqueBackupApproved": true,
+        "repairId": "<32 new lowercase hex, never reused>",
+        "expectedLanEnvironmentId": "<already selected LAN environment ID>",
+        "admissionOwnerPid": "<integer: the actual owning Hub process ID, equal to native child process.ppid>"
+      },
+      "stdout": "same selected-pending-verification result as apply",
+      "scope": "Preserve the already selected LAN home/profile with known unfinished work under both-home and profile admission; no original-home selection, merge or work cancellation."
+    },
+    "recover-retain-selected-lan": {
+      "arguments": ["recover-retain-selected-lan", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "repairId": "<original retention repair ID>",
+        "expectedLanEnvironmentId": "<same selected LAN environment ID>",
+        "admissionOwnerPid": "<integer: the owning Hub process ID>",
+        "recoveryOperation": "recover | rollback"
+      },
+      "stdout": { "schemaVersion": 1, "status": "rolled-back" },
+      "scope": "Recover only the matching retained-LAN transaction with held admission and unchanged home/profile and backup state."
+    },
     "rollback": {
       "arguments": ["rollback", "--json"],
       "stdin": {

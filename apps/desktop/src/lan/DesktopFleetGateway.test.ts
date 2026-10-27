@@ -46,7 +46,24 @@ it.live(
               })
               .pipe(Effect.flip),
           ).toMatchObject({ reason: "configuration" });
+          const routed = yield* gateway.prepare({
+            ...input,
+            identity: { ...input.identity, connectHost: "localhost" },
+          });
+          expect(routed.httpBaseUrl).not.toBe(first.httpBaseUrl);
+          yield* Effect.promise(() =>
+            expect(request(first.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
+          );
+          expect(
+            yield* gateway.prepare({
+              ...input,
+              identity: { ...input.identity, connectHost: "localhost" },
+            }),
+          ).toEqual(routed);
           yield* gateway.disconnect(input.environmentId);
+          yield* Effect.promise(() =>
+            expect(request(routed.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
+          );
           yield* Effect.promise(() =>
             expect(request(first.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
           );

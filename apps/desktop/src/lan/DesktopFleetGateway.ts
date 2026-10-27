@@ -17,7 +17,10 @@ export class DesktopFleetGateway extends Context.Service<
 >()("@t3tools/desktop/lan/DesktopFleetGateway") {}
 
 const make = Effect.gen(function* () {
-  const gateways = new Map<string, { identity: string; proxy: FleetProxy }>();
+  const gateways = new Map<
+    string,
+    { identity: string; connectHost: string | undefined; proxy: FleetProxy }
+  >();
   const mutex = yield* Semaphore.make(1);
   yield* Effect.addFinalizer(() =>
     Effect.promise(async () => {
@@ -32,9 +35,11 @@ const make = Effect.gen(function* () {
       if (existing !== undefined) {
         if (existing.identity !== identity)
           return yield* new LanFleetError({ reason: "configuration" });
-        return { httpBaseUrl: existing.proxy.httpBaseUrl, wsBaseUrl: existing.proxy.wsBaseUrl };
+        if (existing.connectHost === input.identity.connectHost)
+          return { httpBaseUrl: existing.proxy.httpBaseUrl, wsBaseUrl: existing.proxy.wsBaseUrl };
       }
-      if (gateways.size >= 100) return yield* new LanFleetError({ reason: "unavailable" });
+      if (existing === undefined && gateways.size >= 100)
+        return yield* new LanFleetError({ reason: "unavailable" });
       const now = DateTime.toEpochMillis(yield* DateTime.now);
       const proxy = yield* Effect.tryPromise({
         try: () =>
@@ -45,7 +50,12 @@ const make = Effect.gen(function* () {
           }),
         catch: () => new LanFleetError({ reason: "configuration" }),
       });
-      gateways.set(input.environmentId, { identity, proxy });
+      if (existing !== undefined) yield* Effect.promise(() => existing.proxy.close());
+      gateways.set(input.environmentId, {
+        identity,
+        connectHost: input.identity.connectHost,
+        proxy,
+      });
       return { httpBaseUrl: proxy.httpBaseUrl, wsBaseUrl: proxy.wsBaseUrl };
     },
     Effect.uninterruptible,

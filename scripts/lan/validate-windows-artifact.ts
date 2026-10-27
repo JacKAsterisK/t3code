@@ -11,6 +11,7 @@ import { BUILD_INPUT_FILES, BuildLock, sha256 } from "./hub-distribution.ts";
 import {
   WindowsArtifactPolicy,
   TOOLCHAIN_LIMITS,
+  PORTABLE_ZIP_MAX_BYTES,
   strictJson,
   relativeWindowsPath,
   validateWindowsArtifact,
@@ -292,7 +293,7 @@ export async function validateRequest(
     const materialized =
       options.artifactForRun === undefined
         ? {
-            artifact: await safeFile(run.artifactPath, 512 * 1024 ** 2),
+            artifact: await safeFile(run.artifactPath, PORTABLE_ZIP_MAX_BYTES),
             extractedFiles: rawExtracted,
           }
         : await options.artifactForRun(run, rawExtracted);

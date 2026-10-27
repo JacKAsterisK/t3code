@@ -6,9 +6,29 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeModule from "node:module";
 import { createPackageWithOptions } from "@electron/asar";
-import { readPortableZip, strictJson, validateWindowsArtifact } from "./windows-artifact.ts";
+import {
+  assertPortableZipLength,
+  PORTABLE_ZIP_MAX_BYTES,
+  readPortableZip,
+  strictJson,
+  validateWindowsArtifact,
+} from "./windows-artifact.ts";
 import { fixture, zip, asar, pe, json, commit } from "./windows-artifact.fixtures.ts";
 import { sha256 } from "./hub-distribution.ts";
+it("admits finite ZIP lengths through 768 MiB and refuses both byte boundaries without giant fixtures", () => {
+  NodeAssert.equal(PORTABLE_ZIP_MAX_BYTES, 768 * 1024 ** 2);
+  for (const length of [22, 512 * 1024 ** 2 + 1, 590_032_152, PORTABLE_ZIP_MAX_BYTES])
+    NodeAssert.doesNotThrow(() => assertPortableZipLength(length));
+  for (const length of [21, PORTABLE_ZIP_MAX_BYTES + 1, Infinity, NaN])
+    NodeAssert.throws(() => assertPortableZipLength(length), /768 MiB bound/u);
+  NodeAssert.throws(() => readPortableZip(new Uint8Array(21)), /768 MiB bound/u);
+  const files = new Map([
+    ["one", Buffer.from("a")],
+    ["two", Buffer.from("b")],
+    ["three", Buffer.from("c")],
+  ]);
+  NodeAssert.deepEqual(readPortableZip(zip(files)), files);
+});
 function patchHeader(
   bytes: Uint8Array,
   edit: (header: { files: Record<string, Record<string, unknown>> }) => void,

@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import { BuildLock, sha256 } from "./hub-distribution.ts";
 import {
   crc32,
+  PORTABLE_ZIP_MAX_BYTES,
   relativeWindowsPath,
   strictJson,
   WindowsArtifactPolicy,
@@ -82,7 +83,7 @@ export async function writeNewValidatedArtifacts(
       }
       // Validate the path that will be handed to the owner, including its parent
       // chain, rather than reporting only the bytes written through our handle.
-      const bytes = await port.read(output.path, 512 * 1024 ** 2);
+      const bytes = await port.read(output.path, PORTABLE_ZIP_MAX_BYTES);
       const current = await port.stat(output.path);
       if (
         !current.isFile() ||
@@ -156,7 +157,7 @@ export function deterministicPortableZip(files: ReadonlyMap<string, Uint8Array>)
     local.push(header, name, Buffer.from(bytes));
     central.push(directory, name);
     offset += 30 + name.length + bytes.length;
-    if (offset > 512 * 1024 ** 2)
+    if (offset > PORTABLE_ZIP_MAX_BYTES)
       throw new Error("Portable ZIP exceeds the validator's local bound.");
   }
   const end = Buffer.alloc(22),
@@ -167,7 +168,7 @@ export function deterministicPortableZip(files: ReadonlyMap<string, Uint8Array>)
   end.writeUInt32LE(directory.length, 12);
   end.writeUInt32LE(offset, 16);
   const result = Buffer.concat([...local, directory, end]);
-  if (result.length > 512 * 1024 ** 2)
+  if (result.length > PORTABLE_ZIP_MAX_BYTES)
     throw new Error("Portable ZIP exceeds the validator's local bound.");
   return result;
 }

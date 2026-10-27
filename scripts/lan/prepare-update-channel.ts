@@ -4,7 +4,12 @@ import * as Schema from "effect/Schema";
 import { LAN_UPDATE_REPOSITORY } from "@t3tools/shared/distribution";
 import { FORK_UPDATE_CHANNEL_ASSET, parseLanUpdateChannel } from "@t3tools/shared/lanUpdateChannel";
 import { sha256 } from "./hub-distribution.ts";
-import { readPortableZip, strictJson, type validateWindowsArtifact } from "./windows-artifact.ts";
+import {
+  PORTABLE_ZIP_MAX_BYTES,
+  readPortableZip,
+  strictJson,
+  type validateWindowsArtifact,
+} from "./windows-artifact.ts";
 import {
   readValidationFile,
   validateRequest,
@@ -144,7 +149,7 @@ export async function prepareForkUpdateChannel(
   const request = decodeRequest(strictJson(requestBytes), { onExcessProperty: "error" });
   const validation = await validateRequest(requestPath, approvedPolicySha256, { requestBytes });
   const artifactPath = request.runs[0].artifactPath;
-  const artifact = await readValidationFile(artifactPath, 512 * 1024 ** 2);
+  const artifact = await readValidationFile(artifactPath, PORTABLE_ZIP_MAX_BYTES);
   const input = {
     artifact,
     artifactName: NodePath.basename(artifactPath),

@@ -197,12 +197,18 @@ export function crc32(bytes: Uint8Array): number {
   return (value ^ 0xffffffff) >>> 0;
 }
 
+export const PORTABLE_ZIP_MAX_BYTES = 768 * 1024 ** 2;
+
+export function assertPortableZipLength(length: number): void {
+  if (!Number.isSafeInteger(length) || length < 22 || length > PORTABLE_ZIP_MAX_BYTES)
+    fail(`ZIP exceeds the local validator's ${PORTABLE_ZIP_MAX_BYTES / 1024 ** 2} MiB bound.`);
+}
+
 // This intentionally supports bounded, single-disk ZIP32 portable packages only.
 // Unsupported archive variants refuse instead of delegating to a shell extractor.
 export function readPortableZip(input: Uint8Array): ReadonlyMap<string, Uint8Array> {
+  assertPortableZipLength(input.byteLength);
   const bytes = Buffer.from(input);
-  if (bytes.length < 22 || bytes.length > 512 * 1024 ** 2)
-    fail("ZIP exceeds the local validator's 512 MiB bound.");
   let end = bytes.length - 22;
   while (end >= Math.max(0, bytes.length - 65557) && bytes.readUInt32LE(end) !== 0x06054b50) end--;
   if (

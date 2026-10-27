@@ -8,7 +8,11 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { fixture } from "./windows-artifact.fixtures.ts";
 import { sha256 } from "./hub-distribution.ts";
-import { readPortableZip, validateWindowsArtifact } from "./windows-artifact.ts";
+import {
+  PORTABLE_ZIP_MAX_BYTES,
+  readPortableZip,
+  validateWindowsArtifact,
+} from "./windows-artifact.ts";
 import { materializeWindowsCandidate, writeNewValidatedArtifacts } from "./seal-windows-payload.ts";
 import { assertValidationRoot, readValidationFile } from "./validate-windows-artifact.ts";
 
@@ -124,7 +128,19 @@ it.effect("verifies new output bytes on disk and preserves existing outputs", ()
       const file = path.join(root, "fixture.zip");
       const bytes = Buffer.from("synthetic validated fixture bytes");
       yield* Effect.promise(async () => {
-        NodeAssert.equal(await writeNewValidatedArtifacts([{ path: file, bytes }]), 1);
+        NodeAssert.equal(
+          await writeNewValidatedArtifacts([{ path: file, bytes }], {
+            assertRoot: assertValidationRoot,
+            stat: (file) => NodeFSP.lstat(file),
+            create: (file) => NodeFSP.open(file, "wx", 0o600),
+            read: async (file, maximum) => {
+              NodeAssert.equal(maximum, PORTABLE_ZIP_MAX_BYTES);
+              return readValidationFile(file, maximum);
+            },
+            remove: (file) => NodeFSP.unlink(file),
+          }),
+          1,
+        );
         NodeAssert.deepEqual(await NodeFSP.readFile(file), bytes);
         await NodeAssert.rejects(() => writeNewValidatedArtifacts([{ path: file, bytes }]));
         NodeAssert.deepEqual(await NodeFSP.readFile(file), bytes);

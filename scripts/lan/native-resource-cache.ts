@@ -74,6 +74,10 @@ export function resourceMonitorRecipeSha256(
 }
 
 async function captureSourceFiles(sourceRoot: string) {
+  // Desktop RepoRoot comes from a directory file URL and retains one final separator.
+  // Accept only that spelling of an otherwise canonical absolute source directory.
+  const resolved = NodePath.resolve(sourceRoot);
+  if (sourceRoot === resolved + NodePath.sep) sourceRoot = resolved;
   await assertValidationRoot(sourceRoot);
   for (let parent = NodePath.dirname(sourceRoot); ; parent = NodePath.dirname(parent)) {
     for (const name of ["config", "config.toml"])

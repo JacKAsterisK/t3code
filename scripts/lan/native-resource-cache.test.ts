@@ -186,3 +186,49 @@ it("refuses unpinned Cargo configuration above the isolated source", async () =>
     await NodeFSP.rm(f.root, { recursive: true, force: true });
   }
 });
+
+it("captures file-URL source directories before an artifacts parent exists", async () => {
+  const f = await fixture();
+  try {
+    const outputRoot = NodePath.join(f.root, "build");
+    await NodeFSP.mkdir(outputRoot);
+    const input = {
+      // The desktop builder derives RepoRoot from a directory file URL, retaining this separator.
+      sourceRoot: f.sourceRoot + NodePath.sep,
+      outputRoot,
+      binaryPath: f.binaryPath,
+      recipeSha256: recipe(),
+      toolchainManifestSha256: "a".repeat(64),
+    };
+    await expect(NodeFSP.lstat(NodePath.join(outputRoot, "artifacts"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const descriptor = await writeResourceMonitorCache(input);
+    expect(await readResourceMonitorCache({ ...input, descriptor })).toEqual(f.bytes);
+    expect(
+      await readResourceMonitorCache({ ...input, sourceRoot: f.sourceRoot, descriptor }),
+    ).toEqual(f.bytes);
+  } finally {
+    await NodeFSP.rm(f.root, { recursive: true, force: true });
+  }
+});
+it("keeps rejecting relative and dot-segment source roots", async () => {
+  const f = await fixture();
+  try {
+    for (const sourceRoot of [
+      "relative-source",
+      f.sourceRoot + NodePath.sep + ".." + NodePath.sep + "source",
+    ]) {
+      await expect(
+        captureResourceMonitorCacheManifest({
+          sourceRoot,
+          binaryPath: f.binaryPath,
+          recipeSha256: recipe(),
+          toolchainManifestSha256: "a".repeat(64),
+        }),
+      ).rejects.toThrow(/canonical absolute/u);
+    }
+  } finally {
+    await NodeFSP.rm(f.root, { recursive: true, force: true });
+  }
+});

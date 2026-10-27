@@ -21,10 +21,16 @@ import {
   partitionTrackedSourceEntries,
   readCommittedSourceBlobs,
 } from "./source-git.ts";
-import { relativeWindowsPath, strictJson, TOOLCHAIN_LIMITS } from "./windows-artifact.ts";
+import {
+  relativeWindowsPath,
+  strictJson,
+  TOOLCHAIN_LIMITS,
+  NativeBuildValidationReceipt,
+} from "./windows-artifact.ts";
 import {
   assertValidationRoot,
   inspectValidationTree,
+  nativeInputSnapshotSha256,
   readValidationFile,
 } from "./validate-windows-artifact.ts";
 import {
@@ -59,6 +65,7 @@ export const WindowsNativeBuildRequest = Schema.Struct({
   executionRequestSha256: Hash,
   runnerSha256: Hash,
   inputsRoot: Schema.String,
+  validationMode: Schema.optional(Schema.Literals(["candidate", "independent-rebuild"])),
   workspaceDependencyCache: Schema.optional(
     Schema.Struct({ root: Schema.String, manifestSha256: Hash }),
   ),
@@ -79,6 +86,9 @@ const decodeExecution = Schema.decodeUnknownSync(WindowsBuildExecutionRequest, {
 });
 const decodeLock = Schema.decodeUnknownSync(BuildLock, { onExcessProperty: "error" });
 const decodeSnapshot = Schema.decodeUnknownSync(SourceSnapshot, { onExcessProperty: "error" });
+const decodeValidationReceipt = Schema.decodeSync(NativeBuildValidationReceipt, {
+  onExcessProperty: "error",
+});
 const encode = (value: unknown) => Buffer.from(JSON.stringify(value, null, 2) + "\n");
 
 export function requireNativeBuildInput(bytes: Uint8Array, digest: string, label: string) {
@@ -615,23 +625,27 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
       )
         throw new Error("Native input snapshot changed before a build subprocess.");
     };
-    // Ordinary processes do not make DLL/dependency closures immutable. Full inventories
-    // bracket lifecycle installation and the build; selected tools are hashed per child.
+    // Candidate releases bracket the complete install/build execution once.
+    // Per-child tool pins and input/source guards still apply at each boundary.
+    // Qualification keeps the additional intermediate full inventories.
     const verifyInventories = async (boundary: string) => {
       await verifyUnchanged();
-      await measureBuildStage(
-        `native.toolchain-inventory.${boundary}`,
-        async () => {
-          const actualTools = await inspectValidationTree(context.toolchainRoot, true);
-          if (
-            actualTools.size !== toolchainFiles.size ||
-            [...toolchainFiles].some(([name, pin]) => actualTools.get(name)?.sha256 !== pin.sha256)
-          )
-            throw new Error("Native toolchain changed at a build boundary.");
-          return actualTools;
-        },
-        (files) => buildInventoryCounts(files.values()),
-      );
+      if (request.validationMode !== "candidate" || boundary === "after-build")
+        await measureBuildStage(
+          `native.toolchain-inventory.${boundary}`,
+          async () => {
+            const actualTools = await inspectValidationTree(context.toolchainRoot, true);
+            if (
+              actualTools.size !== toolchainFiles.size ||
+              [...toolchainFiles].some(
+                ([name, pin]) => actualTools.get(name)?.sha256 !== pin.sha256,
+              )
+            )
+              throw new Error("Native toolchain changed at a build boundary.");
+            return actualTools;
+          },
+          (files) => buildInventoryCounts(files.values()),
+        );
       await measureBuildStage(
         `native.source-inventory.${boundary}`,
         () => verifyNativeSnapshotFiles(context.sourceRoot, snapshot.files),
@@ -756,6 +770,40 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     );
     console.log("[native-build] Verifying unchanged inventories after the application build.");
     await verifyInventories("after-build");
+    const validationReceipt = await measureBuildStage("native.validation-receipt", async () => {
+      const artifacts = await inspectValidationTree(
+        NodePath.join(context.outputRoot, "artifacts"),
+        true,
+      );
+      const archives = [...artifacts].filter(
+        ([name]) => !name.includes("/") && name.endsWith(".zip"),
+      );
+      if (archives.length !== 1) throw new Error("Native validation requires exactly one raw ZIP.");
+      const raw = archives[0]![1];
+      const value = decodeValidationReceipt({
+        schemaVersion: 1,
+        kind: "windows-native-build-receipt",
+        sourceCommit: snapshot.sourceCommit,
+        buildLockSha256: preparation.buildLockSha256,
+        toolchainManifestSha256: preparation.toolchainManifestSha256,
+        runnerSha256: request.runnerSha256,
+        nativeRequestSha256: approvedRequestSha256,
+        preparationRequestSha256: request.preparationRequestSha256,
+        executionRequestSha256: request.executionRequestSha256,
+        sourceSnapshotSha256: binding.snapshotSha256,
+        inputsSnapshotSha256: nativeInputSnapshotSha256(inputFiles),
+        identitySha256: preparation.identitySha256,
+        rawArtifactSha256: raw.sha256,
+        rawArtifactByteLength: raw.length,
+        toolchainFileCount: toolchainFiles.size,
+        toolchainByteLength: buildInventoryCounts(toolchainFiles.values()).bytes,
+        verifiedBoundaries: ["before-execution", "after-execution"],
+      });
+      const bytes = encode(value),
+        receiptPath = NodePath.join(context.outputRoot, "native-build-receipt.json");
+      await NodeFSP.writeFile(receiptPath, bytes, { flag: "wx", mode: 0o600 });
+      return { path: receiptPath, sha256: sha256(bytes) };
+    });
     return {
       schemaVersion: 1,
       backend: "windows-native-directory",
@@ -764,6 +812,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
       sourceCommit: snapshot.sourceCommit,
       snapshotSha256: binding.snapshotSha256,
       result,
+      validationReceipt,
       artifactValidationRequired: true,
       published: false,
       installed: false,

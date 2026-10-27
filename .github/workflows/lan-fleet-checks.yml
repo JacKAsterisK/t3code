@@ -20,29 +20,54 @@ jobs:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.t3/test-browsers
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 64
       - uses: ./.github/actions/setup-ci-deps
+      - name: Select release validation profile
+        id: profile
+        shell: bash
+        env:
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          node scripts/lan/release-profile.ts scripts/lan/qualification-baseline.json "$RUNNER_TEMP/lan-release-profile.json"
+          node --input-type=module -e 'import fs from "node:fs"; import path from "node:path"; const r=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,"lan-release-profile.json"),"utf8")); fs.appendFileSync(process.env.GITHUB_OUTPUT,"profile="+r.profile+"\nneeds_browser="+r.needsBrowser+"\n"); fs.writeFileSync(path.join(process.env.RUNNER_TEMP,"lan-release-tests.txt"),r.tests.join("\n")+(r.tests.length?"\n":""));'
       - name: Typecheck affected applications and contracts
         shell: bash
         run: vp run --filter ./apps/server --filter @t3tools/web --filter @t3tools/desktop --filter @t3tools/contracts --filter @t3tools/client-runtime --filter @t3tools/scripts typecheck
       - name: Install workspace-local Chromium test runtime
+        if: steps.profile.outputs.needs_browser == 'true'
         shell: bash
         run: node apps/web/node_modules/playwright/cli.js install chromium --only-shell
+      - name: Verify mandatory and changed release tests
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/lan-release-tests"
+          mapfile -t tests < "$RUNNER_TEMP/lan-release-tests.txt"
+          vp test run "${tests[@]}" --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/lan-release-tests/vitest.json"
+          node --input-type=module -e 'import fs from "node:fs"; import path from "node:path"; import {execFileSync} from "node:child_process"; import {releaseTestMetadata} from "./scripts/lan/release-profile.ts"; const dir=path.join(process.env.RUNNER_TEMP,"lan-release-tests"); const files=fs.readFileSync(path.join(process.env.RUNNER_TEMP,"lan-release-tests.txt"),"utf8").split(/\r?\n/).filter(Boolean); const commit=execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim(); if(commit!==process.env.GITHUB_SHA) throw new Error("CI source does not match event commit"); const report=JSON.parse(fs.readFileSync(path.join(dir,"vitest.json"),"utf8")); fs.writeFileSync(path.join(dir,"metadata.json"),JSON.stringify(releaseTestMetadata(process.cwd(),commit,files,report),null,2)+"\n");'
+      - name: Upload release test evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: lan-release-tests
+          path: ${{ runner.temp }}/lan-release-tests/
+          if-no-files-found: error
       - name: Verify client version and encrypted setup UI
+        if: steps.profile.outputs.profile == 'qualification'
         shell: bash
         run: >-
           vp test run
-          apps/web/src/components/desktop/SnapShotCoordinator.browser.test.ts
-          apps/web/src/lib/nativePromptReadiness.browser.test.tsx
           apps/web/src/components/sidebar/SidebarBrandMark.browser.test.tsx
           apps/web/src/components/settings/LanFleetSetup.browser.test.tsx
           apps/web/src/components/settings/LanFleetPrimary.browser.test.tsx
           apps/web/src/connection/lanFleetEnvironment.test.ts
       - name: Verify native Windows packaging and manifest restoration
+        if: steps.profile.outputs.profile == 'qualification'
         shell: bash
         run: >-
           vp test run scripts/build-desktop-artifact.test.ts
           -t 'native raw staging|Cursor SDK|target Windows natives|overlapping builds|resolved version|restore failure'
       - name: Verify build reuse, native bootstrap and both MCP access paths
+        if: steps.profile.outputs.profile == 'qualification'
         shell: bash
         run: >-
           vp test run
@@ -61,41 +86,19 @@ jobs:
           scripts/lib/check-inputs.test.ts
           scripts/lib/changed-tests.test.ts
           scripts/lan/runtime-policy.test.ts
-          scripts/lan/native-helper-output.test.ts
-          scripts/lan/home-repair.test.ts
-          scripts/lan/home-repair-executor.test.ts
-          scripts/lan/home-repair-migrations.test.ts
-          scripts/lan/home-repair-cancel.test.ts
-          scripts/lan/home-repair-scheduled.test.ts
-          scripts/lan/home-repair-work-states.test.ts
-          apps/desktop/src/snapShot/DesktopSnapShot.test.ts
-          apps/desktop/src/updates/DesktopNativeUpdateClose.test.ts
           apps/desktop/src/backend/DesktopBackendManager.test.ts
           apps/desktop/src/backend/DesktopBackendConfiguration.test.ts
           apps/server/src/launcherWatch.test.ts
           apps/server/src/cli/config.test.ts
-          apps/server/src/orchestration-v2/ProjectionRecovery.test.ts
-          apps/server/src/lan/NativeMaintenance.test.ts
-          apps/server/src/lan/NativeUpdateGate.test.ts
-          apps/server/src/lan/NativeUpdateControl.test.ts
-          apps/server/src/lan/NativeUpdateReadiness.test.ts
-          apps/server/src/background/NativePromptReadiness.test.ts
-          apps/server/src/background/BackgroundPolicy.test.ts
-          apps/server/src/orchestration-v2/EffectWorker.test.ts
-          apps/server/src/orchestration-v2/ThreadLaunchService.test.ts
-          packages/shared/src/nativeUpdateControl.test.ts
-          apps/web/src/lib/nativePromptReadiness.test.ts
-          apps/web/src/lib/backgroundActivityReporter.test.ts
           apps/server/src/mcp/McpToolAccess.test.ts
           apps/server/src/lan/EnvironmentRouting.test.ts
           apps/server/src/lan/NativeTaskService.test.ts
           apps/server/src/lan/RemoteTaskTransport.test.ts
-          apps/server/src/persistence/reconcileV2PreviewMigration.test.ts
-          apps/server/src/persistence/Migrations/073_ThreadMessageSearch.test.ts
       - name: Verify execution intake is fenced before persistence
         shell: bash
         run: vp test run apps/server/src/orchestration-v2/runtimeLayer.test.ts apps/server/src/scheduledTasks/ScheduledTaskService.webhook.test.ts -t 'native update admission'
       - name: Verify synthetic enrollment, delivery, polling, and retained-home behavior
+        if: steps.profile.outputs.profile == 'qualification'
         shell: bash
         run: >-
           vp test run

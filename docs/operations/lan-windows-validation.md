@@ -25,11 +25,13 @@ version and binary hash to the approved Node pin before inspecting a build.
 
 ## Required local inputs
 
-The request is schema 1 with absolute `policyPath`, `buildLockPath`,
-`toolchainManifestPath` and exactly two `runs`. Each run has a distinct `sourceId`,
-`sourceRoot`, `buildRoot`, `artifactPath`, `extractedRoot` and `toolchainRoot`.
-Provide two separate clean checkouts and build workspaces with their existing
-artifacts and extracted files. The validator reads Git metadata without fetching
+The request is schema 1 with absolute `policyPath`, `buildLockPath` and
+`toolchainManifestPath`. Qualification uses two independent `runs`; a routine
+release may use one candidate only after its reviewed qualification baseline,
+source changes, actual build lock and toolchain inventory establish eligibility.
+Each run has `sourceId`, `sourceRoot`, `buildRoot`, `artifactPath`,
+`extractedRoot` and `toolchainRoot`. Provide clean source and build workspaces
+with their existing artifacts and extracted files. The validator reads Git metadata without fetching
 or changing either checkout. It requires the approved fork commit, upstream
 ancestry, no dirty/untracked state, all required build input hashes and no
 unaccounted submodules. It rejects symlinks, reparse traversal and hardlinked input
@@ -125,7 +127,7 @@ Missing offline trust/revocation information refuses validation. No online trust
 fetch or security-policy change is performed. Unsigned addons block
 `authenticode` mode. `portal-pinned` mode retains the actual native trust result
 without claiming Windows signature trust; all provenance, identity, compiled
-policy, reproducibility and file integrity checks still apply. Hub refuses this
+policy, applicable qualification and file integrity checks still apply. Hub refuses this
 mode on an HTTP route. The operating system may block an unsigned application;
 installation does not bypass that decision.
 Synthetic tests use a mock signature port. The local native smoke verified the
@@ -133,14 +135,15 @@ existing signed Node binary against cached Windows trust, refused a deliberately
 wrong signer pin, and refused an unsigned nonexecuted PE fixture. No signer pin
 was stored or printed. This validates the trust adapter, not a T3 release signature.
 
-The two archives must have identical length and SHA-256, including signatures,
+For qualification, the two archives must have identical length and SHA-256, including signatures,
 timestamps, manifests and receipts. Different bytes fail, even when extracted
 payload files match. This establishes equality of the supplied outputs. Separate
 workspace IDs and matching bytes cannot prove two independent build executions
 occurred; reviewed build provenance is still needed. Signing timestamps or
 uncontrolled package timestamps may prevent exact reproducibility and must be
 resolved in the approved build process. The validator neither normalizes away
-differences nor claims an actual reproducible build from fixture data.
+differences nor claims an actual reproducible build from fixture data. A routine
+single-candidate release does not claim independent rebuild reproducibility.
 
 Hub continues to validate its existing schema-1 build/test evidence and package
 hashes. Its minimum schema checks do not rerun this validator. Preserve the
@@ -153,12 +156,12 @@ boundaries. No real approved pins or release identity are invented here.
 ## Seal supplied payloads
 
 [`seal-windows-payload.ts`](../../scripts/lan/seal-windows-payload.ts) prepares a
-Hub portable ZIP from two existing raw extracted payloads and separately supplied
+Hub portable ZIP from the requested existing raw extracted payloads and separately supplied
 evidence. It does not build, sign or manufacture passed test receipts. A schema-1
 seal request contains absolute `validationRequestPath`, `testReceiptPath` and
 `runtimePolicyEvidencePath`, plus `builtUtc` and the payload-relative
 `executablePath`. The referenced validation request supplies the same policy,
-lock, toolchain and two independent runs described above; each run's
+lock, toolchain and profile-specific runs described above; each run's
 `artifactPath` must name a new output ZIP.
 
 ```powershell
@@ -168,7 +171,7 @@ node scripts/lan/seal-windows-payload.ts --request C:\Approved\seal-request.json
 The sealer adds the exact supplied build lock, test and runtime evidence and a
 complete Hub package manifest. It creates deterministic ZIP32 bytes with fixed
 archive timestamps, then applies the full artifact and native signature checks
-to both candidates before exclusive output creation. Existing outputs are never
+to each candidate before exclusive output creation. Existing outputs are never
 overwritten. Final output identity and hashes are checked again; publication
 authorization remains false. Deterministic sealing cannot make different input
 binaries or signatures reproducible, or prove independent build execution.
@@ -183,7 +186,7 @@ it never falls back to the main T3 channel. The descriptor carries the independe
 native identity, application/distribution versions, source commit, ZIP size and
 SHA-256. GitHub's ZIP asset metadata must agree with it.
 
-Generate the descriptor from the two already validated archives:
+Generate the descriptor from the already validated archive or archives:
 
 ```powershell
 node scripts/lan/prepare-update-channel.ts --request C:\Approved\validation-request.json --approved-policy-sha256 <approved-policy-file-sha256> --output-directory C:\Approved\release-metadata

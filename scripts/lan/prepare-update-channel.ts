@@ -47,15 +47,17 @@ export function createForkUpdateChannel(input: {
   readonly validation: Awaited<ReturnType<typeof validateWindowsArtifact>>;
 }) {
   const digest = sha256(input.artifact);
+  const mode = input.validation.validationMode;
   if (
     input.validation.passed !== true ||
-    input.validation.byteReproducibilityVerified !== true ||
+    (mode !== "candidate" && mode !== "independent-rebuild") ||
+    input.validation.byteReproducibilityVerified !== (mode === "independent-rebuild") ||
     input.validation.reviewedCompiledBindingsVerified !== true ||
-    input.validation.runs.length !== 2 ||
+    input.validation.runs.length !== (mode === "candidate" ? 1 : 2) ||
     input.validation.runs.some((run) => run.artifactSha256 !== digest)
   )
     throw new Error(
-      "Fork channel requires the exact artifact accepted by both local validation runs.",
+      "Fork channel requires the exact artifact accepted by the approved candidate or both local validation runs.",
     );
   const bytes = readPortableZip(input.artifact).get("t3code-lan-package.json");
   if (!bytes) throw new Error("The validated artifact has no LAN package manifest.");

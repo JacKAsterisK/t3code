@@ -14,6 +14,42 @@ async function accepted() {
 }
 
 describe("fork update channel preparation", () => {
+  it("publishes exactly one accepted candidate without manufacturing reproducibility", async () => {
+    const input = fixture();
+    const validation = await validateWindowsArtifact({
+      ...input,
+      policy: { ...input.policy, validationMode: "candidate" },
+      runs: [input.runs[0]],
+    });
+    const candidate = {
+      artifact: input.runs[0].artifact,
+      artifactName: "t3code-lan-1.0.0-windows-x64.zip",
+      validation,
+    };
+    expect(validation.byteReproducibilityVerified).toBe(false);
+    expect(createHubDelivery(candidate).metadata.sha256).toBe(sha256(candidate.artifact));
+    validation.byteReproducibilityVerified = true;
+    expect(() => createForkUpdateChannel(candidate)).toThrow(/exact artifact/u);
+    validation.byteReproducibilityVerified = false;
+    validation.validationMode = "independent-rebuild";
+    expect(() => createForkUpdateChannel(candidate)).toThrow(/exact artifact/u);
+  });
+
+  it("refuses candidate bytes replaced after their single accepted validation", async () => {
+    const input = fixture();
+    const validation = await validateWindowsArtifact({
+      ...input,
+      policy: { ...input.policy, validationMode: "candidate" },
+      runs: [input.runs[0]],
+    });
+    expect(() =>
+      createForkUpdateChannel({
+        artifact: Buffer.from("replaced"),
+        artifactName: "t3code-lan-1.0.0-windows-x64.zip",
+        validation,
+      }),
+    ).toThrow(/exact artifact/u);
+  });
   it("binds a separately delivered activation policy to the exact Portal artifact", async () => {
     const input = await accepted();
     const result = createHubDelivery(input);

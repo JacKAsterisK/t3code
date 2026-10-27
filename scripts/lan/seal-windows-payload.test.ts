@@ -60,6 +60,24 @@ it("seals supplied evidence deterministically and passes actual ZIP/ASAR validat
   NodeAssert.equal(one.validationRequired, true);
 });
 
+it("materializes and validates a single routine candidate with all supplied evidence", async () => {
+  const { input, options } = setup();
+  const policy = { ...input.policy, validationMode: "candidate" as const };
+  const sealed = materializeWindowsCandidate({ ...options, policy });
+  const report = await validateWindowsArtifact({
+    ...input,
+    policy,
+    runs: [{ ...input.runs[0], ...sealed }],
+  });
+  NodeAssert.equal(report.passed, true);
+  NodeAssert.equal(report.byteReproducibilityVerified, false);
+  NodeAssert.equal(report.runs.length, 1);
+  NodeAssert.deepEqual(
+    readPortableZip(sealed.artifact).get("t3code-lan-test-receipt.json"),
+    options.testReceiptBytes,
+  );
+});
+
 it("cannot turn a failed supplied test receipt or unreviewed runtime evidence into a passed candidate", async () => {
   const { input, options } = setup();
   const receipt = JSON.parse(Buffer.from(options.testReceiptBytes).toString("utf8"));

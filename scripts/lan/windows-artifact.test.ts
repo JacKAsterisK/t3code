@@ -383,6 +383,77 @@ it("checks actual ZIP, ASAR, toolchain, compiled component and signature bytes f
   NodeAssert.equal(report.runs[0]?.native.length, 3);
 });
 
+it("validates one explicitly approved candidate without claiming an independent rebuild", async () => {
+  const input = fixture();
+  const report = await validateWindowsArtifact({
+    ...input,
+    policy: { ...input.policy, validationMode: "candidate" },
+    runs: [input.runs[0]],
+  });
+  NodeAssert.equal(report.passed, true);
+  NodeAssert.equal(report.validationMode, "candidate");
+  NodeAssert.equal(report.byteReproducibilityVerified, false);
+  NodeAssert.equal(report.reviewedCompiledBindingsVerified, true);
+  NodeAssert.equal(report.runs.length, 1);
+  NodeAssert.equal(input.calls.length, 3);
+});
+
+it("requires the exact build count selected by the separately approved validation mode", async () => {
+  const input = fixture();
+  for (const validationMode of [undefined, "candidate", "independent-rebuild"] as const)
+    for (const count of [0, 1, 2, 3]) {
+      if (count === (validationMode === "candidate" ? 1 : 2)) continue;
+      await NodeAssert.rejects(
+        () =>
+          validateWindowsArtifact({
+            ...input,
+            policy: { ...input.policy, ...(validationMode ? { validationMode } : {}) },
+            runs: Array.from({ length: count }, (_, index) => input.runs[index % 2]!),
+          }),
+        /exactly one candidate or two independent/u,
+      );
+    }
+  NodeAssert.equal(input.calls.length, 0);
+});
+
+it("keeps source, compiled-helper and native-trust checks for a single candidate", async () => {
+  const changed = fixture((files) =>
+    files.set("resources/native-maintenance.mjs", Buffer.from("unreviewed helper")),
+  );
+  await NodeAssert.rejects(
+    () =>
+      validateWindowsArtifact({
+        ...changed,
+        policy: { ...changed.policy, validationMode: "candidate" },
+        runs: [changed.runs[0]],
+      }),
+    /compiled policy component/u,
+  );
+  const input = fixture();
+  await NodeAssert.rejects(
+    () =>
+      validateWindowsArtifact({
+        ...input,
+        policy: { ...input.policy, validationMode: "candidate" },
+        runs: [{ ...input.runs[0], source: { ...input.runs[0].source, clean: false } }],
+      }),
+    /Source must be clean/u,
+  );
+  await NodeAssert.rejects(
+    () =>
+      validateWindowsArtifact({
+        ...input,
+        policy: { ...input.policy, validationMode: "candidate" },
+        runs: [input.runs[0]],
+        inspectNative: async (run, name) => ({
+          ...(await input.inspectNative(run, name)),
+          trustStatus: -1,
+        }),
+      }),
+    /signature is untrusted/u,
+  );
+});
+
 it("validates deflated artifact bytes without relying on an external extractor", async () => {
   const input = fixture();
   input.runs = [

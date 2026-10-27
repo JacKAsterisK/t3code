@@ -15,6 +15,9 @@ import {
   strictJson,
   relativeWindowsPath,
   validateWindowsArtifact,
+  parseToolchainManifest,
+  NativeBuildValidationReceipt,
+  readPortableZip,
   type ArtifactRun,
   type NativeEvidence,
 } from "./windows-artifact.ts";
@@ -27,18 +30,29 @@ const Run = Schema.Struct({
   artifactPath: Schema.String,
   extractedRoot: Schema.String,
   toolchainRoot: Schema.String,
+  nativeBuildEvidence: Schema.optional(
+    Schema.Struct({
+      receiptPath: Schema.String,
+      runnerPath: Schema.String,
+      rawArtifactPath: Schema.String,
+      inputsRoot: Schema.String,
+    }),
+  ),
 });
 export const WindowsValidationRequest = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   policyPath: Schema.String,
   buildLockPath: Schema.String,
   toolchainManifestPath: Schema.String,
-  runs: Schema.Tuple([Run, Run]),
+  runs: Schema.Union([Schema.Tuple([Run]), Schema.Tuple([Run, Run])]),
 });
 export type WindowsValidationRun = typeof Run.Type;
 const decodeRequest = Schema.decodeUnknownSync(WindowsValidationRequest);
 const decodePolicy = Schema.decodeUnknownSync(WindowsArtifactPolicy);
 const decodeBuildLock = Schema.decodeUnknownSync(BuildLock);
+const decodeBuildReceipt = Schema.decodeUnknownSync(NativeBuildValidationReceipt, {
+  onExcessProperty: "error",
+});
 const decodeNative = Schema.decodeUnknownSync(
   Schema.Struct({
     sha256: Schema.String,
@@ -213,6 +227,163 @@ export async function inspectWindowsSignature(file: string): Promise<NativeEvide
   return evidence;
 }
 
+const nativeInputNames = [
+  "build-lock.json",
+  "execution-request.json",
+  "identity.json",
+  "native-request.json",
+  "preparation-request.json",
+  "snapshot.json",
+  "toolchain-manifest.json",
+] as const;
+const toolNames = ["node", "pnpm", "rust", "msvc", "windowsSdk", "nsis"] as const;
+
+export function nativeInputSnapshotSha256(files: ReadonlyMap<string, Uint8Array>) {
+  const pins = [...files]
+    .map(([path, bytes]) => ({
+      path: relativeWindowsPath(path),
+      length: bytes.length,
+      sha256: sha256(bytes),
+    }))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return sha256(`${JSON.stringify(pins, null, 2)}\n`);
+}
+
+// This receipt is external owner-approved producer evidence, never a claim read
+// from the candidate package. It permits reusing the producer's completed full
+// inventory while rehashing its immutable inputs, runner, ZIP and selected tools.
+export function verifyNativeBuildReceipt(input: {
+  readonly policy: WindowsArtifactPolicy;
+  readonly receiptBytes: Uint8Array;
+  readonly runnerBytes: Uint8Array;
+  readonly rawArtifactBytes: Uint8Array;
+  readonly rawExtractedFiles: ReadonlyMap<string, Uint8Array>;
+  readonly inputs: ReadonlyMap<string, Uint8Array>;
+  readonly selectedTools: ReadonlyMap<string, Uint8Array>;
+  readonly buildLockBytes: Uint8Array;
+  readonly toolchainManifestBytes: Uint8Array;
+  readonly sourceCommit: string;
+}) {
+  const approval = input.policy.nativeBuildEvidence;
+  if (input.policy.validationMode !== "candidate" || approval === undefined)
+    throw new Error("A candidate policy must separately approve native build evidence.");
+  if (sha256(input.receiptBytes) !== approval.receiptSha256)
+    throw new Error("Native build receipt differs from the separately approved bytes.");
+  const receipt = decodeBuildReceipt(strictJson(input.receiptBytes));
+  const lock = decodeBuildLock(strictJson(input.buildLockBytes), { onExcessProperty: "error" });
+  const getInput = (name: string) => {
+    const bytes = input.inputs.get(name);
+    if (!bytes) throw new Error(`Native input snapshot is incomplete: ${name}.`);
+    return bytes;
+  };
+  if (
+    input.inputs.size !== nativeInputNames.length ||
+    nativeInputNames.some((name) => !input.inputs.has(name)) ||
+    nativeInputSnapshotSha256(input.inputs) !== receipt.inputsSnapshotSha256
+  )
+    throw new Error("Native input snapshot differs from the approved producer receipt.");
+  for (const [name, expected] of [
+    ["native-request.json", receipt.nativeRequestSha256],
+    ["preparation-request.json", receipt.preparationRequestSha256],
+    ["execution-request.json", receipt.executionRequestSha256],
+    ["snapshot.json", receipt.sourceSnapshotSha256],
+    ["identity.json", receipt.identitySha256],
+    ["build-lock.json", receipt.buildLockSha256],
+    ["toolchain-manifest.json", receipt.toolchainManifestSha256],
+  ] as const)
+    if (sha256(getInput(name)) !== expected)
+      throw new Error(`Native input snapshot hash differs: ${name}.`);
+  const documents = [
+    "native-request.json",
+    "preparation-request.json",
+    "execution-request.json",
+    "snapshot.json",
+  ].map((name) => {
+    const value = strictJson(getInput(name));
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      Array.isArray(value) ||
+      !("schemaVersion" in value) ||
+      value.schemaVersion !== 1
+    )
+      throw new Error("Native producer input document is invalid.");
+    return value as Record<string, unknown>;
+  });
+  const [native, preparation, execution, snapshot] = documents;
+  if (
+    native!.runnerSha256 !== receipt.runnerSha256 ||
+    native!.preparationRequestSha256 !== receipt.preparationRequestSha256 ||
+    native!.executionRequestSha256 !== receipt.executionRequestSha256 ||
+    [preparation!, execution!].some(
+      (value) =>
+        value.buildLockSha256 !== receipt.buildLockSha256 ||
+        value.identitySha256 !== receipt.identitySha256 ||
+        value.toolchainManifestSha256 !== receipt.toolchainManifestSha256,
+    ) ||
+    snapshot!.sourceCommit !== receipt.sourceCommit ||
+    receipt.sourceCommit !== input.sourceCommit ||
+    receipt.sourceCommit !== lock.forkCommit ||
+    receipt.buildLockSha256 !== input.policy.buildLockSha256 ||
+    receipt.buildLockSha256 !== sha256(input.buildLockBytes) ||
+    receipt.toolchainManifestSha256 !== input.policy.toolchainManifestSha256 ||
+    receipt.toolchainManifestSha256 !== sha256(input.toolchainManifestBytes) ||
+    receipt.runnerSha256 !== approval.runnerSha256 ||
+    receipt.runnerSha256 !== sha256(input.runnerBytes)
+  )
+    throw new Error("Native producer source, runner or request bindings differ.");
+  if (
+    receipt.rawArtifactByteLength !== input.rawArtifactBytes.length ||
+    receipt.rawArtifactSha256 !== sha256(input.rawArtifactBytes)
+  )
+    throw new Error("Native producer artifact differs from the approved receipt.");
+  const raw = readPortableZip(input.rawArtifactBytes);
+  if (
+    raw.size !== input.rawExtractedFiles.size ||
+    [...raw].some(([name, bytes]) => {
+      const actual = input.rawExtractedFiles.get(name);
+      return (
+        actual === undefined || actual.length !== bytes.length || sha256(actual) !== sha256(bytes)
+      );
+    })
+  )
+    throw new Error(
+      "Extracted candidate payload differs from the approved native producer artifact.",
+    );
+  const manifest = parseToolchainManifest(input.toolchainManifestBytes);
+  const files = new Map<string, { readonly length: number; readonly sha256: string }>();
+  const paths = new Set<string>();
+  let byteLength = 0;
+  for (const pin of manifest.files) {
+    relativeWindowsPath(pin.path);
+    if (pin.length < 0 || paths.has(pin.path.toLowerCase()))
+      throw new Error("Approved native toolchain inventory is invalid.");
+    paths.add(pin.path.toLowerCase());
+    byteLength += pin.length;
+    files.set(pin.path, { length: pin.length, sha256: pin.sha256 });
+  }
+  if (
+    byteLength > TOOLCHAIN_LIMITS.bytes ||
+    receipt.toolchainByteLength !== byteLength ||
+    receipt.toolchainFileCount !== files.size
+  )
+    throw new Error("Native receipt toolchain inventory counts differ.");
+  for (const name of toolNames) {
+    const path = relativeWindowsPath(input.policy.toolFiles[name]),
+      bytes = input.selectedTools.get(path),
+      pin = files.get(path);
+    if (
+      !bytes ||
+      !pin ||
+      bytes.length !== pin.length ||
+      sha256(bytes) !== pin.sha256 ||
+      pin.sha256 !== lock.tools[name].sha256
+    )
+      throw new Error(`Native selected tool bytes differ: ${name}.`);
+  }
+  return files;
+}
+
 export async function validateRequest(
   requestPath: string,
   approvalSha256: string,
@@ -241,6 +412,13 @@ export async function validateRequest(
   const policy = decodePolicy(strictJson(policyBytes), {
     onExcessProperty: "error",
   });
+  const validationMode = policy.validationMode ?? "independent-rebuild";
+  if (request.runs.length !== (validationMode === "candidate" ? 1 : 2))
+    throw new Error(
+      "Validation mode requires exactly one candidate or two independent rebuild runs.",
+    );
+  if (policy.nativeBuildEvidence !== undefined && validationMode !== "candidate")
+    throw new Error("Approved native build receipts are available only for candidate validation.");
   const buildLockBytes = await safeFile(request.buildLockPath, 1024 * 1024);
   if (sha256(buildLockBytes) !== policy.buildLockSha256)
     throw new Error("Build lock differs from the approved policy.");
@@ -287,9 +465,41 @@ export async function validateRequest(
           32 * 1024 * 1024,
         ),
       );
-    const extracted = await tree(run.extractedRoot),
-      tools = await tree(run.toolchainRoot, true);
+    const extracted = await tree(run.extractedRoot);
     const rawExtracted = new Map([...extracted].map(([name, value]) => [name, value.bytes]));
+    const sourceCommit = await git("rev-parse", "HEAD");
+    let tools: ArtifactRun["toolchainFiles"];
+    if (policy.nativeBuildEvidence !== undefined) {
+      const evidence = run.nativeBuildEvidence;
+      if (!evidence) throw new Error("Approved native build evidence paths are missing.");
+      const selectedTools = new Map<string, Uint8Array>();
+      for (const name of toolNames) {
+        const path = relativeWindowsPath(policy.toolFiles[name]);
+        selectedTools.set(
+          path,
+          await safeFile(NodePath.join(run.toolchainRoot, path), 256 * 1024 ** 2),
+        );
+      }
+      const inputs = new Map(
+        [...(await tree(evidence.inputsRoot))].map(([name, value]) => [name, value.bytes]),
+      );
+      tools = verifyNativeBuildReceipt({
+        policy,
+        receiptBytes: await safeFile(evidence.receiptPath, 1024 * 1024),
+        runnerBytes: await safeFile(evidence.runnerPath, 256 * 1024 ** 2),
+        rawArtifactBytes: await safeFile(evidence.rawArtifactPath, PORTABLE_ZIP_MAX_BYTES),
+        rawExtractedFiles: rawExtracted,
+        inputs,
+        selectedTools,
+        buildLockBytes,
+        toolchainManifestBytes,
+        sourceCommit,
+      });
+    } else {
+      if (run.nativeBuildEvidence !== undefined)
+        throw new Error("Native build evidence is not approved by the validation policy.");
+      tools = await tree(run.toolchainRoot, true);
+    }
     const materialized =
       options.artifactForRun === undefined
         ? {
@@ -301,7 +511,7 @@ export async function validateRequest(
       sourceId: run.sourceId,
       buildRoot: run.buildRoot,
       source: {
-        commit: await git("rev-parse", "HEAD"),
+        commit: sourceCommit,
         clean: status.length === 0,
         upstreamAncestor: ancestor,
         files,
@@ -314,16 +524,16 @@ export async function validateRequest(
     second = runs[1];
   if (
     !first ||
-    !second ||
-    request.runs[0].sourceRoot.toLowerCase() === request.runs[1].sourceRoot.toLowerCase() ||
-    request.runs[0].artifactPath.toLowerCase() === request.runs[1].artifactPath.toLowerCase()
+    (second !== undefined &&
+      (request.runs[0].sourceRoot.toLowerCase() === request.runs[1]!.sourceRoot.toLowerCase() ||
+        request.runs[0].artifactPath.toLowerCase() === request.runs[1]!.artifactPath.toLowerCase()))
   )
     throw new Error("Two distinct source checkouts and artifact paths are required.");
   const result = await validateWindowsArtifact({
     policy,
     buildLockBytes,
     toolchainManifestBytes,
-    runs: [first, second],
+    runs,
     inspectNative: async (run, file) => {
       const selected = request.runs.find((item) => item.sourceId === run.sourceId);
       if (!selected) throw new Error("Native evidence lost its supplied build binding.");
@@ -334,6 +544,10 @@ export async function validateRequest(
     ...result,
     validatorNodeVersion: process.versions.node,
     validatorNodeSha256: sha256(runnerBytes),
+    toolchainEvidence:
+      policy.nativeBuildEvidence === undefined
+        ? ("fresh-full-inventory" as const)
+        : ("approved-native-build-receipt" as const),
   };
 }
 

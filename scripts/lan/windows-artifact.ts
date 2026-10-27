@@ -28,6 +28,8 @@ const Identity = Schema.Struct({
 // Hashes cannot establish the semantics of an unaudited policy implementation.
 export const WindowsArtifactPolicy = Schema.Struct({
   schemaVersion: Schema.Literal(1),
+  validationMode: Schema.optional(Schema.Literals(["candidate", "independent-rebuild"])),
+  nativeBuildEvidence: Schema.optional(Schema.Struct({ receiptSha256: Hash, runnerSha256: Hash })),
   buildLockSha256: Hash,
   toolchainManifestSha256: Hash,
   identity: Identity,
@@ -66,6 +68,30 @@ export const WindowsArtifactPolicy = Schema.Struct({
   runtimePolicyEvidenceSha256: Hash,
 });
 export type WindowsArtifactPolicy = typeof WindowsArtifactPolicy.Type;
+
+export const NativeBuildValidationReceipt = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  kind: Schema.Literal("windows-native-build-receipt"),
+  sourceCommit: Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/u)),
+  buildLockSha256: Hash,
+  toolchainManifestSha256: Hash,
+  runnerSha256: Hash,
+  nativeRequestSha256: Hash,
+  preparationRequestSha256: Hash,
+  executionRequestSha256: Hash,
+  sourceSnapshotSha256: Hash,
+  inputsSnapshotSha256: Hash,
+  identitySha256: Hash,
+  rawArtifactSha256: Hash,
+  rawArtifactByteLength: Schema.Int,
+  toolchainFileCount: Schema.Int,
+  toolchainByteLength: Schema.Int,
+  verifiedBoundaries: Schema.Tuple([
+    Schema.Literal("before-execution"),
+    Schema.Literal("after-execution"),
+  ]),
+});
+export type NativeBuildValidationReceipt = typeof NativeBuildValidationReceipt.Type;
 
 // The pinned workspace store alone contains over 200,000 public package files.
 // Keep tool inventories bounded separately from the much smaller shipped payload.
@@ -488,10 +514,18 @@ export async function validateWindowsArtifact(input: {
   readonly policy: WindowsArtifactPolicy;
   readonly buildLockBytes: Uint8Array;
   readonly toolchainManifestBytes: Uint8Array;
-  readonly runs: readonly [ArtifactRun, ArtifactRun];
+  readonly runs: readonly ArtifactRun[];
   readonly inspectNative: (run: ArtifactRun, path: string) => Promise<NativeEvidence>;
 }) {
   const { policy } = input;
+  const validationMode = policy.validationMode ?? "independent-rebuild";
+  if (
+    (validationMode !== "candidate" && validationMode !== "independent-rebuild") ||
+    input.runs.length !== (validationMode === "candidate" ? 1 : 2)
+  )
+    fail("Validation mode requires exactly one candidate or two independent rebuild runs.");
+  if (policy.nativeBuildEvidence !== undefined && validationMode !== "candidate")
+    fail("Approved native build receipts are available only for candidate validation.");
   const nativeTrust = policy.nativeTrust ?? "authenticode";
   if (
     !["authenticode", "portal-pinned"].includes(nativeTrust) ||
@@ -529,10 +563,12 @@ export async function validateWindowsArtifact(input: {
     )
   )
     fail("Version exceeds the Hub's native version range.");
-  const [first, second] = input.runs;
+  const first = input.runs[0]!,
+    second = input.runs[1];
   if (
-    first.sourceId === second.sourceId ||
-    first.buildRoot.toLowerCase() === second.buildRoot.toLowerCase()
+    second !== undefined &&
+    (first.sourceId === second.sourceId ||
+      first.buildRoot.toLowerCase() === second.buildRoot.toLowerCase())
   )
     fail("Two distinct supplied build provenance/workspace bindings are required.");
   const results = [];
@@ -788,8 +824,9 @@ export async function validateWindowsArtifact(input: {
     });
   }
   if (
-    sha256(first.artifact) !== sha256(second.artifact) ||
-    first.artifact.length !== second.artifact.length
+    second !== undefined &&
+    (sha256(first.artifact) !== sha256(second.artifact) ||
+      first.artifact.length !== second.artifact.length)
   )
     fail("Independent supplied artifact bytes are not reproducible.");
   return {
@@ -799,7 +836,8 @@ export async function validateWindowsArtifact(input: {
     distributionAuthorized: false as const,
     approvedBuildLockSha256: policy.buildLockSha256,
     nativeTrust,
-    byteReproducibilityVerified: true as const,
+    validationMode,
+    byteReproducibilityVerified: validationMode === "independent-rebuild",
     reviewedCompiledBindingsVerified: true as const,
     policySemanticsRequireIndependentAudit: true as const,
     buildProcessIndependenceNotEstablishedByByteComparison: true as const,

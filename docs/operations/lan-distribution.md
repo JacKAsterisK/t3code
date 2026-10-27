@@ -58,6 +58,18 @@ Network isolation is available with the optional Windows Sandbox runner; the
 native-directory runner makes no OS or network isolation claim. All required
 tools and caches must still match their reviewed inventory.
 
+Routine releases may build one candidate when the last qualified baseline has
+the same upstream and actual compiler/toolchain pins and the source diff does not
+change dependencies, build transforms or policy enforcement. Use
+`scripts/lan/release-profile.ts` and the reviewed `qualification-baseline.json`
+to select the CI checks; absent or inconsistent baseline evidence requires full
+qualification. CI compares declared pins, and the native release gate must check
+the actual build lock and toolchain inventory before accepting a routine profile.
+Updater, stopped-state, projection and home-preservation tests remain required.
+Requalify with two independently built candidates after upstream, dependency,
+compiler or build-transform changes; update the baseline only after that reviewed
+qualification succeeds. A single candidate is not a reproducibility proof.
+
 The LAN profile supports native Windows x64 portable ZIPs with no WSL runtime.
 The resource monitor, Electron-hosted `server.asar`, native maintenance bundle
 and native addons belong to the verified payload. Preserve third-party notices.
@@ -289,7 +301,7 @@ changed input, unsupported tool layout or failed child command refuses the
 build. Partial output is preserved for inspection and never automatically reused
 or cleaned. The Windows base image and native dependency behavior still require
 real acceptance; source fixtures cannot establish them. Final payloads remain
-unsigned candidates requiring the separate signing, sealing and two-run
+unsigned candidates requiring the separate signing, sealing and profile-specific
 [artifact validation](lan-windows-validation.md) procedure.
 
 ## Candidate and installation contract

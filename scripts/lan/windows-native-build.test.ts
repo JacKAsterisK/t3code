@@ -7,9 +7,11 @@ import * as NodeURL from "node:url";
 import { build } from "vite-plus/pack";
 import { expect, it, vi } from "vite-plus/test";
 import type { BuildLock } from "./hub-distribution.ts";
+import * as Schema from "effect/Schema";
 import { sha256 } from "./hub-distribution.ts";
 import { sourceGitEnvironment } from "./source-git.ts";
 import {
+  WindowsNativeBuildRequest,
   captureNativeBuildSource,
   copyNativePinnedCache,
   prepareNativePnpmMetadata,
@@ -537,4 +539,21 @@ it("materializes a fresh independently verified source tree and refuses traversa
   } finally {
     await fixture.cleanup();
   }
+});
+
+it("accepts only explicit candidate or independent-rebuild native verification modes", () => {
+  const request = {
+    schemaVersion: 1,
+    preparationRequestPath: "fixture-preparation.json",
+    preparationRequestSha256: "a".repeat(64),
+    executionRequestPath: "fixture-execution.json",
+    executionRequestSha256: "b".repeat(64),
+    runnerSha256: "c".repeat(64),
+    inputsRoot: "fixture-inputs",
+  };
+  const decode = Schema.decodeUnknownSync(WindowsNativeBuildRequest, { onExcessProperty: "error" });
+  expect(decode(request).validationMode).toBeUndefined();
+  for (const validationMode of ["candidate", "independent-rebuild"])
+    expect(decode({ ...request, validationMode }).validationMode).toBe(validationMode);
+  expect(() => decode({ ...request, validationMode: "skip-validation" })).toThrow();
 });

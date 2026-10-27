@@ -22,6 +22,8 @@ import {
   type NativeEvidence,
 } from "./windows-artifact.ts";
 
+import { captureQualifiedToolchain } from "./native-toolchain-qualification.ts";
+
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 const Run = Schema.Struct({
   sourceId: Schema.String,
@@ -30,6 +32,7 @@ const Run = Schema.Struct({
   artifactPath: Schema.String,
   extractedRoot: Schema.String,
   toolchainRoot: Schema.String,
+  toolchainQualificationPath: Schema.optional(Schema.String),
   nativeBuildEvidence: Schema.optional(
     Schema.Struct({
       receiptPath: Schema.String,
@@ -250,8 +253,8 @@ export function nativeInputSnapshotSha256(files: ReadonlyMap<string, Uint8Array>
 }
 
 // This receipt is external owner-approved producer evidence, never a claim read
-// from the candidate package. It permits reusing the producer's completed full
-// inventory while rehashing its immutable inputs, runner, ZIP and selected tools.
+// from the candidate package. It permits reusing the producer's completed toolchain
+// evidence while rehashing its immutable inputs, runner, ZIP and selected tools.
 export function verifyNativeBuildReceipt(input: {
   readonly policy: WindowsArtifactPolicy;
   readonly receiptBytes: Uint8Array;
@@ -417,7 +420,11 @@ export async function validateRequest(
     throw new Error(
       "Validation mode requires exactly one candidate or two independent rebuild runs.",
     );
-  if (policy.nativeBuildEvidence !== undefined && validationMode !== "candidate")
+  if (
+    (policy.nativeBuildEvidence !== undefined ||
+      policy.toolchainQualificationSha256 !== undefined) &&
+    validationMode !== "candidate"
+  )
     throw new Error("Approved native build receipts are available only for candidate validation.");
   const buildLockBytes = await safeFile(request.buildLockPath, 1024 * 1024);
   if (sha256(buildLockBytes) !== policy.buildLockSha256)
@@ -469,7 +476,29 @@ export async function validateRequest(
     const rawExtracted = new Map([...extracted].map(([name, value]) => [name, value.bytes]));
     const sourceCommit = await git("rev-parse", "HEAD");
     let tools: ArtifactRun["toolchainFiles"];
-    if (policy.nativeBuildEvidence !== undefined) {
+    if (policy.toolchainQualificationSha256 !== undefined) {
+      if (
+        !run.toolchainQualificationPath ||
+        run.nativeBuildEvidence !== undefined ||
+        policy.nativeBuildEvidence !== undefined
+      )
+        throw new Error(
+          "Qualified toolchain evidence must be supplied without another toolchain proof mode.",
+        );
+      tools = (
+        await captureQualifiedToolchain({
+          root: run.toolchainRoot,
+          manifestBytes: toolchainManifestBytes,
+          manifestSha256: policy.toolchainManifestSha256,
+          primaryFiles: toolNames.map((name) => ({
+            path: policy.toolFiles[name],
+            ...lock.tools[name],
+          })),
+          qualification: { path: run.toolchainQualificationPath },
+          expectedQualificationSha256: policy.toolchainQualificationSha256,
+        })
+      ).files;
+    } else if (policy.nativeBuildEvidence !== undefined) {
       const evidence = run.nativeBuildEvidence;
       if (!evidence) throw new Error("Approved native build evidence paths are missing.");
       const selectedTools = new Map<string, Uint8Array>();
@@ -496,8 +525,8 @@ export async function validateRequest(
         sourceCommit,
       });
     } else {
-      if (run.nativeBuildEvidence !== undefined)
-        throw new Error("Native build evidence is not approved by the validation policy.");
+      if (run.nativeBuildEvidence !== undefined || run.toolchainQualificationPath !== undefined)
+        throw new Error("Native toolchain evidence is not approved by the validation policy.");
       tools = await tree(run.toolchainRoot, true);
     }
     const materialized =
@@ -545,9 +574,11 @@ export async function validateRequest(
     validatorNodeVersion: process.versions.node,
     validatorNodeSha256: sha256(runnerBytes),
     toolchainEvidence:
-      policy.nativeBuildEvidence === undefined
-        ? ("fresh-full-inventory" as const)
-        : ("approved-native-build-receipt" as const),
+      policy.toolchainQualificationSha256 !== undefined
+        ? ("approved-local-toolchain-qualification" as const)
+        : policy.nativeBuildEvidence === undefined
+          ? ("fresh-full-inventory" as const)
+          : ("approved-native-build-receipt" as const),
   };
 }
 

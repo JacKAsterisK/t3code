@@ -30,6 +30,7 @@ export const WindowsArtifactPolicy = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   validationMode: Schema.optional(Schema.Literals(["candidate", "independent-rebuild"])),
   nativeBuildEvidence: Schema.optional(Schema.Struct({ receiptSha256: Hash, runnerSha256: Hash })),
+  toolchainQualificationSha256: Schema.optional(Hash),
   buildLockSha256: Hash,
   toolchainManifestSha256: Hash,
   identity: Identity,
@@ -84,6 +85,14 @@ export const NativeBuildValidationReceipt = Schema.Struct({
   identitySha256: Hash,
   rawArtifactSha256: Hash,
   rawArtifactByteLength: Schema.Int,
+  toolchainVerification: Schema.optional(
+    Schema.Struct({
+      mode: Schema.Literals(["full-inventory", "qualified-primary-pins"]),
+      qualificationSha256: Schema.NullOr(Hash),
+      primaryFileCount: Schema.Int,
+      fullInventoryVerifiedDuringBuild: Schema.Boolean,
+    }),
+  ),
   toolchainFileCount: Schema.Int,
   toolchainByteLength: Schema.Int,
   verifiedBoundaries: Schema.Tuple([
@@ -524,8 +533,14 @@ export async function validateWindowsArtifact(input: {
     input.runs.length !== (validationMode === "candidate" ? 1 : 2)
   )
     fail("Validation mode requires exactly one candidate or two independent rebuild runs.");
-  if (policy.nativeBuildEvidence !== undefined && validationMode !== "candidate")
+  if (
+    (policy.nativeBuildEvidence !== undefined ||
+      policy.toolchainQualificationSha256 !== undefined) &&
+    validationMode !== "candidate"
+  )
     fail("Approved native build receipts are available only for candidate validation.");
+  if (policy.nativeBuildEvidence !== undefined && policy.toolchainQualificationSha256 !== undefined)
+    fail("Choose one approved toolchain evidence mode.");
   const nativeTrust = policy.nativeTrust ?? "authenticode";
   if (
     !["authenticode", "portal-pinned"].includes(nativeTrust) ||

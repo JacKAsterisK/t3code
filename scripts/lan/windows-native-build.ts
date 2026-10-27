@@ -56,6 +56,8 @@ import {
   type WindowsNativeBinding,
 } from "./windows-native-context.ts";
 
+import { NativeToolchainQualificationRequest } from "./native-toolchain-qualification.ts";
+
 const Hash = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 export const WindowsNativeBuildRequest = Schema.Struct({
   schemaVersion: Schema.Literal(1),
@@ -70,6 +72,7 @@ export const WindowsNativeBuildRequest = Schema.Struct({
     Schema.Struct({ root: Schema.String, manifestSha256: Hash }),
   ),
   workspaceDependencyCacheOutputRoot: Schema.optional(Schema.String),
+  toolchainQualification: Schema.optional(NativeToolchainQualificationRequest),
   resourceMonitorCache: Schema.optional(
     Schema.Struct({ root: Schema.String, manifestSha256: Hash }),
   ),
@@ -425,6 +428,8 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     "request",
   );
   const request = decodeNative(strictJson(requestBytes));
+  if (request.toolchainQualification !== undefined && request.validationMode !== "candidate")
+    throw new Error("Qualified toolchain reuse is only available to candidate releases.");
   if (!NodeURL.fileURLToPath(import.meta.url).endsWith(".mjs"))
     throw new Error(
       "Execute the separately reviewed self-contained native runner bundle, not a dependency-loading source entry.",
@@ -434,19 +439,26 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     request.runnerSha256,
     "runner",
   );
-  console.log("[native-build] Verifying frozen source and full pinned toolchain inventory.");
-  // Reuse the evidence just verified in this invocation; all source, ancestry,
-  // path and pin checks remain in preparation, with full inventories still
-  // checked again around lifecycle installation and the application build.
-  const { toolchainFiles } = await measureBuildStage(
+  console.log(
+    request.toolchainQualification === undefined
+      ? "[native-build] Verifying frozen source and full pinned toolchain inventory."
+      : "[native-build] Verifying frozen source and locally qualified toolchain pins.",
+  );
+  // Routine releases reuse local toolchain qualification while rechecking selected
+  // tools. Source, ancestry and input guards still apply at every build boundary.
+  const prepared = await measureBuildStage(
     "native.preparation",
     () =>
       capturePinnedWindowsBuildPreparation(
         request.preparationRequestPath,
         request.preparationRequestSha256,
+        request.toolchainQualification === undefined
+          ? {}
+          : { toolchainQualification: request.toolchainQualification },
       ),
     ({ toolchainFiles }) => buildInventoryCounts(toolchainFiles.values()),
   );
+  const { toolchainFiles, toolchainQualification } = prepared;
   const preparationBytes = requireNativeBuildInput(
     await readValidationFile(request.preparationRequestPath, 1024 * 1024),
     request.preparationRequestSha256,
@@ -492,7 +504,9 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     () => captureNativeBuildSource(preparation.sourceRoot, lock, execution.sourceDateEpoch),
     ({ snapshot }) => buildInventoryCounts(snapshot.files),
   );
-  console.log("[native-build] Verified toolchain files: " + toolchainFiles.size);
+  console.log(
+    "[native-build] Toolchain evidence: " + JSON.stringify(toolchainQualification.verification),
+  );
   verifyWindowsPreparationEvidence({
     request: preparation,
     lockBytes,
@@ -547,6 +561,12 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
       ["toolchain-manifest.json", toolchainManifestBytes],
       ["snapshot.json", snapshotBytes],
     ]);
+    if (toolchainQualification.qualificationBytes !== undefined)
+      await NodeFSP.writeFile(
+        NodePath.join(context.outputRoot, "toolchain-qualification-evidence.json"),
+        toolchainQualification.qualificationBytes,
+        { flag: "wx", mode: 0o600 },
+      );
     await measureBuildStage(
       "native.input-snapshot",
       () => writeNewSnapshotTree(context.inputsRoot, inputFiles),
@@ -630,7 +650,18 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
     // Qualification keeps the additional intermediate full inventories.
     const verifyInventories = async (boundary: string) => {
       await verifyUnchanged();
-      if (request.validationMode !== "candidate" || boundary === "after-build")
+      if (request.toolchainQualification !== undefined)
+        await measureBuildStage(
+          `native.toolchain-primary-pins.${boundary}`,
+          toolchainQualification.recheck,
+          () =>
+            buildInventoryCounts(
+              Object.values(preparation.toolFiles).map((name) =>
+                toolchainFiles.get(relativeWindowsPath(name))!,
+              ),
+            ),
+        );
+      else if (request.validationMode !== "candidate" || boundary === "after-build")
         await measureBuildStage(
           `native.toolchain-inventory.${boundary}`,
           async () => {
@@ -795,6 +826,7 @@ export async function runWindowsNativeBuild(requestPath: string, approvedRequest
         identitySha256: preparation.identitySha256,
         rawArtifactSha256: raw.sha256,
         rawArtifactByteLength: raw.length,
+        toolchainVerification: toolchainQualification.verification,
         toolchainFileCount: toolchainFiles.size,
         toolchainByteLength: buildInventoryCounts(toolchainFiles.values()).bytes,
         verifiedBoundaries: ["before-execution", "after-execution"],

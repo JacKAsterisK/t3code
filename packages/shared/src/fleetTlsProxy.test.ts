@@ -2,6 +2,7 @@
 import * as NodeHttp from "node:http";
 import * as NodeHttps from "node:https";
 import * as NodeCrypto from "node:crypto";
+import * as NodeChildProcess from "node:child_process";
 import { expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
@@ -54,6 +55,118 @@ const get = (
     );
     request.on("error", reject);
   });
+
+it.live(
+  "uses the configured native runtime to trust the exact saved leaf and reject replacements",
+  () =>
+    Effect.gen(function* () {
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      yield* Effect.promise(async () => {
+        const code = `
+        import assert from "node:assert/strict";
+        import http from "node:http";
+        import https from "node:https";
+        import { startFleetProxy, fleetTlsRequestOptions } from ${JSON.stringify(new URL("./fleetTlsProxy.ts", import.meta.url).href)};
+        import { createFleetTlsCertificate } from ${JSON.stringify(new URL("./fleetTlsCertificate.ts", import.meta.url).href)};
+        const now = ${now};
+        const listen = server => new Promise((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+        });
+        const close = server => new Promise(resolve => server.close(resolve));
+        const get = url => new Promise((resolve, reject) => {
+          const request = http.get(url, { headers: { authorization: "Bearer synthetic-only" }, agent: false }, response => {
+            let body = "";
+            response.setEncoding("utf8");
+            response.on("data", data => body += data);
+            response.once("end", () => resolve({ status: response.statusCode, body }));
+            response.once("error", reject);
+          });
+          request.once("error", reject);
+        });
+        let requests = 0, impostorRequests = 0;
+        const backend = http.createServer((request, response) => {
+          requests++;
+          assert.equal(request.headers.authorization, "Bearer synthetic-only");
+          response.end("saved identity reached");
+        });
+        const backendPort = await listen(backend);
+        const approved = createFleetTlsCertificate({ address: "127.0.0.1", now });
+        const impostor = createFleetTlsCertificate({ address: "127.0.0.1", now });
+        const impostorServer = https.createServer({ key: impostor.privateKey, cert: impostor.certificate }, (_request, response) => {
+          impostorRequests++;
+          response.end("wrong peer");
+        });
+        const impostorPort = await listen(impostorServer);
+        let endpoint, gateway, wrongGateway;
+        try {
+          endpoint = await startFleetProxy({
+            listen: { address: "127.0.0.1", port: 0 },
+            target: "http://127.0.0.1:" + backendPort + "/",
+            serverTls: approved,
+          });
+          const identity = {
+            origin: new URL(endpoint.httpBaseUrl).origin,
+            certificate: approved.certificate,
+            publicKeySha256: approved.publicKeySha256,
+            connectHost: "localhost",
+          };
+          gateway = await startFleetProxy({
+            listen: { address: "127.0.0.1", port: 0 },
+            target: endpoint.httpBaseUrl, peerTls: { identity, now },
+          });
+          assert.deepEqual(await get(gateway.httpBaseUrl), { status: 200, body: "saved identity reached" });
+          assert.throws(() => fleetTlsRequestOptions({ ...identity, origin: "https://127.0.0.2:4443" }, now));
+          assert.throws(() => fleetTlsRequestOptions({ ...identity, publicKeySha256: impostor.publicKeySha256 }, now));
+          const wrongIdentity = { ...identity, origin: "https://127.0.0.1:" + impostorPort };
+          wrongGateway = await startFleetProxy({
+            listen: { address: "127.0.0.1", port: 0 },
+            target: wrongIdentity.origin + "/", peerTls: { identity: wrongIdentity, now },
+          });
+          assert.equal((await get(wrongGateway.httpBaseUrl)).status, 502);
+          assert.equal(impostorRequests, 0);
+          assert.equal(requests, 1);
+        } finally {
+          await wrongGateway?.close(); await gateway?.close(); await endpoint?.close();
+          await close(impostorServer); await close(backend);
+        }
+        console.log(JSON.stringify({ passed: true, node: process.versions.node, requests, impostorRequests }));
+      `;
+        const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>(
+          (resolve, reject) => {
+            const child = NodeChildProcess.spawn(
+              process.env.T3_LAN_TEST_NODE ?? process.execPath,
+              ["--input-type=module", "--eval", code],
+              {
+                env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+                windowsHide: true,
+                stdio: ["ignore", "pipe", "pipe"],
+              },
+            );
+            let stdout = "",
+              stderr = "";
+            child.stdout.setEncoding("utf8");
+            child.stderr.setEncoding("utf8");
+            child.stdout.on("data", (data) => {
+              stdout += data;
+            });
+            child.stderr.on("data", (data) => {
+              stderr += data;
+            });
+            child.once("error", reject);
+            child.once("close", (code) => resolve({ code, stdout, stderr }));
+          },
+        );
+        expect(result.stderr).toBe("");
+        expect(result.code).toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          passed: true,
+          requests: 1,
+          impostorRequests: 0,
+        });
+      });
+    }),
+);
 
 it.live("reaches the pinned IPv4 identity over a DNS IPv6 route without changing its Host", () =>
   Effect.gen(function* () {

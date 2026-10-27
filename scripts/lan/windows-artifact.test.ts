@@ -749,3 +749,36 @@ it("binds the repair helper, interface and drop-in evidence to explicit approval
     /explicit matching approved repair policy/,
   );
 });
+
+it("limits local toolchain qualification evidence to one candidate and one proof mode", async () => {
+  const input = fixture();
+  await NodeAssert.rejects(
+    () =>
+      validateWindowsArtifact({
+        ...input,
+        policy: { ...input.policy, toolchainQualificationSha256: "a".repeat(64) },
+      }),
+    /only for candidate/u,
+  );
+  const candidate = {
+    ...input,
+    runs: [input.runs[0]!],
+    policy: {
+      ...input.policy,
+      validationMode: "candidate" as const,
+      toolchainQualificationSha256: "a".repeat(64),
+    },
+  };
+  NodeAssert.equal((await validateWindowsArtifact(candidate)).passed, true);
+  await NodeAssert.rejects(
+    () =>
+      validateWindowsArtifact({
+        ...candidate,
+        policy: {
+          ...candidate.policy,
+          nativeBuildEvidence: { receiptSha256: "a".repeat(64), runnerSha256: "b".repeat(64) },
+        },
+      }),
+    /one approved toolchain evidence mode/u,
+  );
+});

@@ -2,7 +2,7 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
-import { buildInventoryCounts, measureBuildStage } from "./build-metrics.ts";
+import { captureQualifiedToolchain } from "./native-toolchain-qualification.ts";
 import { parseLanBuildIdentity } from "@t3tools/shared/distribution";
 import { BUILD_INPUT_FILES, BuildLock, sha256 } from "./hub-distribution.ts";
 import { LAN_STAGE_LOCK_FILES, readLanPackagingInputs } from "./lan-packaging.ts";
@@ -13,11 +13,7 @@ import {
   TOOLCHAIN_LIMITS,
 } from "./windows-artifact.ts";
 import { inspectSourceGit, partitionTrackedSourceEntries } from "./source-git.ts";
-import {
-  assertValidationRoot,
-  inspectValidationTree,
-  readValidationFile,
-} from "./validate-windows-artifact.ts";
+import { assertValidationRoot, readValidationFile } from "./validate-windows-artifact.ts";
 
 const Hash = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const toolNames = ["node", "pnpm", "rust", "msvc", "windowsSdk", "nsis"] as const;
@@ -242,6 +238,9 @@ export function verifyWindowsPreparationEvidence(input: {
 export async function capturePinnedWindowsBuildPreparation(
   requestPath: string,
   approvedRequestSha256: string,
+  options: {
+    readonly toolchainQualification?: { readonly path: string; readonly refresh?: boolean };
+  } = {},
 ) {
   // eslint-disable-next-line t3code/no-global-process-runtime -- This read-only CLI boundary requires native Windows path and filesystem semantics.
   if (process.platform !== "win32") throw new Error("Preparation requires native Windows.");
@@ -290,11 +289,16 @@ export async function capturePinnedWindowsBuildPreparation(
   } catch {
     upstreamAncestor = false;
   }
-  const toolchainFiles = await measureBuildStage(
-    "preparation.toolchain-scan",
-    () => inspectValidationTree(request.toolchainRoot, true),
-    (files) => buildInventoryCounts(files.values()),
-  );
+  const qualification = await captureQualifiedToolchain({
+    root: request.toolchainRoot,
+    manifestBytes: toolchainManifestBytes,
+    manifestSha256: request.toolchainManifestSha256,
+    primaryFiles: toolNames.map((name) => ({ path: request.toolFiles[name], ...lock.tools[name] })),
+    ...(options.toolchainQualification === undefined
+      ? {}
+      : { qualification: options.toolchainQualification }),
+  });
+  const toolchainFiles = qualification.files;
   const result = verifyWindowsPreparationEvidence({
     request,
     lockBytes,
@@ -312,12 +316,18 @@ export async function capturePinnedWindowsBuildPreparation(
   return {
     report: {
       ...result,
+      mode:
+        options.toolchainQualification === undefined
+          ? result.mode
+          : ("qualified-local-inputs" as const),
+      toolchainVerification: qualification.verification,
       preparationRequestSha256: approvedRequestSha256,
       preparationNodeMatches:
         process.versions.node === lock.tools.node.version &&
         sha256(currentNode) === lock.tools.node.sha256,
     },
     toolchainFiles,
+    toolchainQualification: qualification,
   };
 }
 

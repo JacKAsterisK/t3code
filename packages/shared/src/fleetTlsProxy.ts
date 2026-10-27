@@ -38,6 +38,8 @@ export function fleetTlsRequestOptions(
     throw new Error("The approved fleet NodeTls identity is invalid.");
   return {
     ca: trust.certificate,
+    // Electron's Node 24 requires partial-chain trust for the exact pinned, non-CA leaf.
+    allowPartialTrustChain: true,
     rejectUnauthorized: true,
     minVersion: "TLSv1.2",
     servername: "",

@@ -171,10 +171,12 @@ already exist and be empty; the CLI never cleans it.
 
 The request hash must come from separate review. Verification checks the full
 40-character commit, clean source, upstream ancestry, aligned versions, every
-required source/stage input and exact toolchain inventory/primary hashes. Git
-inspection discards ambient repository/index/config redirection, disables
-replacement refs and refuses grafts. It preserves normal repository access checks.
-Unlisted, linked or changed files refuse. Version labels require prior toolchain
+required source/stage input and exact toolchain inventory/primary hashes. The
+standalone preparation command performs full inventory verification; routine native
+builds may use the local toolchain qualification described below. Git inspection
+discards ambient repository/index/config redirection, disables replacement refs
+and refuses grafts. It preserves normal repository access checks. Full inventory
+verification refuses unlisted, linked or changed files. Version labels require prior toolchain
 provenance review; no tool version command is executed to establish them.
 
 `inputsVerified` concerns the supplied snapshot. `preparationNodeMatches`
@@ -219,8 +221,22 @@ node scripts/lan/windows-native-build.pack.ts --build-lock C:\ApprovedBuildInput
 The native request uses schema 1 with absolute `preparationRequestPath` and
 `executionRequestPath`, their SHA-256 hashes, the reviewed `runnerSha256`, and a
 new `inputsRoot` directory. The preparation request selects the clean source,
-verified toolchain and existing empty build directory. Run the self-contained
-bundle with the reviewed request hash:
+verified toolchain and existing empty build directory.
+
+For routine releases, set `validationMode: "candidate"` and
+`toolchainQualification: { path: "C:\\LANBuildCache\\toolchain-qualified.json" }`
+in the native request. The absolute receipt path must be outside the toolchain.
+The first use, an explicit `refresh: true`, or changed manifest, physical root or
+primary tool/version pins performs full qualification once. Subsequent releases
+check the six primary files and the existing per-use archive/native input pins;
+they do not enumerate or hash the complete toolchain tree. Retain this local
+cache between releases, and refresh it after intentionally changing ancillary
+toolchain files. A reused receipt records `qualified-primary-pins`, rather than
+claiming a fresh full-tree check. Independent qualification still verifies the
+full inventory. Keep the frozen `toolchain-qualification-evidence.json` beside the
+native build receipt for final artifact validation.
+
+Run the self-contained bundle with the reviewed request hash:
 
 ```powershell
 node C:\LANBuild\new-native-runner\native-runner.mjs --request C:\ApprovedBuildInputs\native-request.json --approved-request-sha256 <reviewed-request-sha256>

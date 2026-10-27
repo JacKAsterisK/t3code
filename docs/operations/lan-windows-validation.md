@@ -5,11 +5,9 @@ Routine LAN delivery is a local AnvilToad build and one ZIP, followed by a copy 
 [`validate-windows-artifact.ts`](../../scripts/lan/validate-windows-artifact.ts)
 inspects existing local build inputs and portable ZIPs. It never provisions tools,
 builds or executes the application, signs code, installs, publishes, changes a
-channel, starts a provider or reads provider credentials. No approved real lock,
-toolchain closure, audited compiled policy or independent LAN artifact is supplied
-by this checkout. The explicit LAN build profile and runtime guards are implemented
-in source; they have not produced an approved Windows candidate. Running
-without arguments returns a failing readiness report.
+channel, starts a provider or reads provider credentials. This checkout contains
+source and policy definitions; approved toolchains, receipts and release ZIPs live
+outside it. Running without arguments returns a failing readiness report.
 
 ```powershell
 node scripts/lan/validate-windows-artifact.ts
@@ -48,8 +46,14 @@ must match actual bytes. The separate schema-1 toolchain manifest contains
 `files: [{path,length,sha256}]`, relative to each supplied toolchain root. Its
 approved SHA-256 and exact inventory bind the rest of the supplied compiler,
 SDK/header/library, Rust/Cargo, Python, package-manager and packaging-tool closure.
-Extra or changed files refuse validation. Hashing streams toolchain files; it
-does not launch a tool's version command. Version labels are bound to approved
+Full inventory validation refuses extra or changed files and streams their
+hashes without launching version commands. Routine candidate validation may
+instead set the approved policy's `toolchainQualificationSha256` and each run's
+`toolchainQualificationPath` to the frozen qualification from its native build.
+The validator requires that exact existing receipt, manifest and physical root,
+then verifies the six primary tool files without a full-tree scan. Missing or
+changed evidence refuses; final validation never silently requalifies it.
+The report states which verification mode ran. Version labels are bound to approved
 binary hashes and require prior toolchain provenance review. The validator cannot
 prove an undeclared OS/ambient dependency was absent from an earlier build.
 

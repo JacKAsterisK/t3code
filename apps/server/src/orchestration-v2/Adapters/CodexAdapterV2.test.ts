@@ -1036,6 +1036,208 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       };
     });
 
+  it.effect.each(["completed", "interrupted", "failed"] as const)(
+    "finishes the latest todo-list display when its Codex turn is %s",
+    (terminalStatus) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = `todo-list-terminal-${terminalStatus}`;
+          const nativeThreadId = `native-${scenario}-thread`;
+          const nativeTurnId = `native-${scenario}-turn`;
+          const prompt = "Plan the requested work.";
+          const transcript = makeCodexReplayTranscript({
+            scenario,
+            entries: [
+              ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }),
+              ...["Initial plan", "Updated plan"].map((explanation) => ({
+                type: "emit_inbound" as const,
+                label: explanation,
+                frame: {
+                  method: "turn/plan/updated",
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    explanation,
+                    plan: [
+                      { step: "Inspect the request", status: "completed" },
+                      { step: explanation, status: "inProgress" },
+                    ],
+                  },
+                },
+              })),
+              {
+                type: "emit_inbound",
+                label: "turn/completed",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: terminalStatus }),
+                  },
+                },
+              },
+            ],
+          });
+          const harness = yield* makeCodexReplayHarness(transcript);
+          const turnInput = makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make(`attempt-${scenario}`),
+            text: prompt,
+          });
+          yield* harness.runtime.startTurn(turnInput);
+          yield* harness.firstTerminal;
+          const nodes = harness.events.flatMap((event) =>
+            event.type === "node.updated" && event.node.kind === "todo_list" ? [event.node] : [],
+          );
+          const items = harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "todo_list"
+              ? [event.turnItem]
+              : [],
+          );
+          const node = nodes.at(-1)!;
+          const item = items.at(-1)!;
+          assert.equal(node.status, "completed");
+          assert.equal(item.status, "completed");
+          assert.equal(node.countsForRun, false);
+          assert.equal(node.threadId, harness.threadId);
+          assert.equal(node.runId, turnInput.runId);
+          assert.equal(node.rootNodeId, turnInput.rootNodeId);
+          assert.equal(node.providerThreadId, harness.providerThread.id);
+          assert.deepEqual(node.nativeItemRef, {
+            driver: CodexAdapterV2.CODEX_DRIVER_KIND,
+            nativeId: `turn-plan:${nativeTurnId}`,
+            strength: "strong",
+          });
+          assert.equal(item.threadId, node.threadId);
+          assert.equal(item.runId, node.runId);
+          assert.equal(item.providerTurnId, node.providerTurnId);
+          assert.equal(item.nodeId, node.id);
+          assert.equal(item.ordinal, items[0]!.ordinal);
+          assert.equal(item.explanation, "Updated plan");
+          assert.deepEqual(
+            item.steps.map((step) => step.status),
+            ["completed", "running"],
+          );
+          const plan = harness.events.findLast(
+            (event) => event.type === "plan.updated" && event.plan.id === item.planId,
+          );
+          assert.equal(plan?.type === "plan.updated" && plan.plan.status, "active");
+          assert.isNotNull(node.completedAt);
+          assert.isNotNull(item.completedAt);
+          assert.isTrue(DateTime.Equivalence(node.startedAt!, nodes[0]!.startedAt!));
+          assert.isTrue(DateTime.Equivalence(item.startedAt!, items[0]!.startedAt!));
+          assert.equal(DateTime.toEpochMillis(item.completedAt!), 1782622450000);
+          const terminalIndex = harness.events.findIndex((event) => event.type === "turn.terminal");
+          const finalItemIndex = harness.events.findLastIndex(
+            (event) => event.type === "turn_item.updated" && event.turnItem.id === item.id,
+          );
+          assert.isBelow(finalItemIndex, terminalIndex);
+          assert.equal(harness.terminalEvents()[0]!.status, terminalStatus);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect.each(["completed", "interrupted", "failed"] as const)(
+    "settles a partial Codex proposal display when its turn is %s",
+    (terminalStatus) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = `proposed-plan-terminal-${terminalStatus}`;
+          const nativeThreadId = `native-${scenario}-thread`;
+          const nativeTurnId = `native-${scenario}-turn`;
+          const nativeItemId = "partial-proposal";
+          const prompt = "Propose a plan.";
+          const markdown = "## Plan\n1. Inspect the request\n2. Partial proposal";
+          const transcript = makeCodexReplayTranscript({
+            scenario,
+            entries: [
+              ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt }),
+              {
+                type: "emit_inbound",
+                label: "item/plan/delta",
+                frame: {
+                  method: "item/plan/delta",
+                  params: {
+                    threadId: nativeThreadId,
+                    turnId: nativeTurnId,
+                    itemId: nativeItemId,
+                    delta: markdown,
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "turn/completed",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: terminalStatus }),
+                  },
+                },
+              },
+            ],
+          });
+          const harness = yield* makeCodexReplayHarness(transcript);
+          const turnInput = makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make(`attempt-${scenario}`),
+            text: prompt,
+          });
+          yield* harness.runtime.startTurn(turnInput);
+          yield* harness.firstTerminal;
+          const nodeEvent = harness.events.findLast(
+            (event) => event.type === "node.updated" && event.node.kind === "plan",
+          );
+          assert.equal(nodeEvent?.type, "node.updated");
+          if (nodeEvent?.type !== "node.updated") return;
+          const itemEvent = harness.events.findLast(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "proposed_plan",
+          );
+          assert.equal(itemEvent?.type, "turn_item.updated");
+          if (
+            itemEvent?.type !== "turn_item.updated" ||
+            itemEvent.turnItem.type !== "proposed_plan"
+          )
+            return;
+          const node = nodeEvent.node;
+          const item = itemEvent.turnItem;
+          assert.equal(node.status, terminalStatus);
+          assert.equal(item.status, terminalStatus);
+          assert.equal(node.countsForRun, false);
+          assert.equal(node.runId, turnInput.runId);
+          assert.equal(node.rootNodeId, turnInput.rootNodeId);
+          assert.equal(item.providerTurnId, node.providerTurnId);
+          assert.equal(item.nodeId, node.id);
+          assert.equal(item.nativeItemRef?.nativeId, nativeItemId);
+          assert.equal(item.markdown, markdown);
+          assert.equal(item.streaming, false);
+          assert.isNotNull(node.completedAt);
+          assert.isNotNull(item.completedAt);
+          assert.equal(DateTime.toEpochMillis(item.completedAt!), 1782622450000);
+          const plan = harness.events.findLast(
+            (event) => event.type === "plan.updated" && event.plan.id === item.planId,
+          );
+          assert.equal(plan?.type === "plan.updated" && plan.plan.status, "active");
+          const terminalIndex = harness.events.findIndex((event) => event.type === "turn.terminal");
+          assert.isBelow(harness.events.indexOf(itemEvent), terminalIndex);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
   it.effect.each(["supported", "unsupported", "invalid"] as const)(
     "delivers native history with %s app-server protocol",
     (response) =>

@@ -334,6 +334,82 @@ const isWarmProviderState = (table: string, status: unknown) =>
   (table === "orchestration_v2_projection_provider_sessions" && status === "ready") ||
   (table === "orchestration_v2_projection_provider_threads" && status === "active");
 
+// Display-only plan snapshots cannot execute after their own run is terminal. Keep
+// malformed/mismatched rows busy, and retain every row in workGeneration below.
+const terminalDisplayClassifier = (db: NodeSqlite.DatabaseSync) => {
+  const readPayload = (row: WorkRow) => {
+    try {
+      return decodePayload(row.payload_json);
+    } catch (cause) {
+      throw new NativeMaintenanceError({ reason: "schema", cause });
+    }
+  };
+  const runs = new Map<string, boolean>();
+  const nodes = new Map<string, WorkRow | undefined>();
+  const terminalRun = (runId: unknown, threadId: unknown) => {
+    if (typeof runId !== "string" || typeof threadId !== "string") return false;
+    const key = JSON.stringify([runId, threadId]);
+    if (!runs.has(key)) {
+      const run = db
+        .prepare("SELECT * FROM orchestration_v2_projection_runs WHERE run_id=? AND thread_id=?")
+        .get(runId, threadId);
+      const value = run === undefined ? undefined : readPayload(run);
+      runs.set(
+        key,
+        run !== undefined &&
+          ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
+            String(run.status),
+          ) &&
+          value?.id === runId &&
+          value.threadId === threadId &&
+          value.status === run.status,
+      );
+    }
+    return runs.get(key)!;
+  };
+  const displayNode = (row: WorkRow, value: Record<string, unknown>) =>
+    ["todo_list", "plan"].includes(String(row.kind)) &&
+    value.kind === row.kind &&
+    value.id === row.node_id &&
+    value.threadId === row.thread_id &&
+    value.runId === row.run_id &&
+    value.status === row.status &&
+    value.countsForRun === false &&
+    row.runtime_request_id === null &&
+    value.runtimeRequestId === null &&
+    terminalRun(row.run_id, row.thread_id);
+  return (table: string, row: WorkRow, value: Record<string, unknown>) => {
+    if (table === "orchestration_v2_projection_nodes") return displayNode(row, value);
+    if (
+      table !== "orchestration_v2_projection_turn_items" ||
+      !["todo_list", "proposed_plan"].includes(String(row.type)) ||
+      value.type !== row.type ||
+      value.id !== row.turn_item_id ||
+      value.threadId !== row.thread_id ||
+      value.runId !== row.run_id ||
+      value.nodeId !== row.node_id ||
+      value.status !== row.status ||
+      typeof row.node_id !== "string"
+    )
+      return false;
+    if (!nodes.has(row.node_id))
+      nodes.set(
+        row.node_id,
+        db
+          .prepare("SELECT * FROM orchestration_v2_projection_nodes WHERE node_id=?")
+          .get(row.node_id),
+      );
+    const node = nodes.get(row.node_id);
+    return (
+      node !== undefined &&
+      node.run_id === row.run_id &&
+      node.thread_id === row.thread_id &&
+      node.kind === (row.type === "todo_list" ? "todo_list" : "plan") &&
+      displayNode(node, readPayload(node))
+    );
+  };
+};
+
 // All identifiers below are fixed source constants, never request-derived SQL.
 const inspectWork = (databasePath: string, update: boolean) => {
   const db = new NodeSqlite.DatabaseSync(databasePath, {
@@ -370,6 +446,7 @@ const inspectWork = (databasePath: string, update: boolean) => {
       .get();
     if (projection?.schema_version !== 2 || projection.last_sequence !== head.sequence)
       throw new NativeMaintenanceError({ reason: "projection" });
+    const isTerminalDisplay = terminalDisplayClassifier(db);
     const counts = new Map<string, number>();
     for (const [table, allowed, busy] of statuses) {
       let count = 0;
@@ -422,6 +499,13 @@ const inspectWork = (databasePath: string, update: boolean) => {
           payload = decodePayload(row.payload_json);
         } catch (cause) {
           throw new NativeMaintenanceError({ reason: "schema", cause });
+        }
+        if (
+          (busy as ReadonlyArray<unknown>).includes(row.status) &&
+          isTerminalDisplay(table, row, payload)
+        ) {
+          counts.set(table, counts.get(table)! - 1);
+          continue;
         }
         const beforeDelivery = deferredDelivery;
         if (table === "orchestration_v2_projection_provider_sessions") {
@@ -586,7 +670,7 @@ const inspectWork = (databasePath: string, update: boolean) => {
       deferredDelivery +
       unconsumedContext +
       childResults;
-    const updateWork = update ? classifyUpdateWork(db, childResults) : undefined;
+    const updateWork = update ? classifyUpdateWork(db, childResults, isTerminalDisplay) : undefined;
     const hash = NodeCrypto.createHash("sha256");
     for (const [table, key] of [
       ["orchestration_events", "sequence"],
@@ -668,7 +752,11 @@ export const inspectNativeUpdateWork = (databasePath: string) => {
 };
 
 type WorkRow = Record<string, NodeSqlite.SQLOutputValue>;
-const classifyUpdateWork = (db: NodeSqlite.DatabaseSync, childResults: number) => {
+const classifyUpdateWork = (
+  db: NodeSqlite.DatabaseSync,
+  childResults: number,
+  isTerminalDisplay: ReturnType<typeof terminalDisplayClassifier>,
+) => {
   const blocking = emptyNativeWork();
   const carriedWork = emptyNativeWork();
   const rows = (table: string) => db.prepare("SELECT * FROM " + table).all();
@@ -795,6 +883,7 @@ const classifyUpdateWork = (db: NodeSqlite.DatabaseSync, childResults: number) =
     for (const row of rows(table)) {
       if (!(busy as ReadonlyArray<unknown>).includes(row.status)) continue;
       const value = payload(row);
+      if (isTerminalDisplay(table, row, value)) continue;
       const preserved =
         row.status !== "running" &&
         ((table === "orchestration_v2_projection_run_attempts" && carriedRunIds.has(row.run_id)) ||

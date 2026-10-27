@@ -51,6 +51,7 @@ import {
   type OrchestrationV2AppThread,
   type OrchestrationV2Run,
   type OrchestrationV2DomainEvent,
+  PlanId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -1512,5 +1513,346 @@ it.effect("startup ends the provider turn of a native child root it cancels", ()
       { root: "cancelled", providerTurn: "cancelled" },
       "a root startup recovery cancelled left its provider turn running",
     );
+  }).pipe(Effect.provide(layerRecoveryTest)),
+);
+
+it.effect.each([
+  { trigger: "startup", type: "todo_list" },
+  { trigger: "shutdown", type: "todo_list" },
+  { trigger: "startup", type: "proposed_plan" },
+  { trigger: "shutdown", type: "proposed_plan" },
+] as const)(
+  "$trigger settles historical $type snapshots through projected events",
+  ({ trigger, type }) =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+      const sink = yield* EventSink.EventSinkV2;
+      const store = yield* EventStore.EventStoreV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const threadId = yield* createThread(`historical-${type}:${trigger}`);
+      const steps = [
+        { id: "finished", text: "Keep the recorded result", status: "completed" },
+        { id: "unfinished", text: "Keep the unfinished task", status: "running" },
+        { id: "later", text: "Keep the remaining task", status: "pending" },
+      ] as const;
+      const events: OrchestrationV2DomainEvent[] = [];
+      const terminalStatuses = [
+        ["completed", "completed"],
+        ["cancelled", "cancelled"],
+        ["failed", "failed"],
+        ["interrupted", "interrupted"],
+        ["rolled_back", "interrupted"],
+      ] as const;
+      const expectedStatuses = new Map<
+        NodeId,
+        "completed" | "interrupted" | "failed" | "cancelled"
+      >();
+      for (const [index, [status, proposedStatus]] of terminalStatuses.entries()) {
+        const runId = yield* createRun(threadId, status, { ordinal: index + 1, completedAt: now });
+        const nodeId = NodeId.make(`node:historical-todo:${trigger}:${status}`);
+        expectedStatuses.set(nodeId, type === "todo_list" ? "completed" : proposedStatus);
+        const planId = PlanId.make(`plan:historical-todo:${trigger}:${status}`);
+        const providerTurnId = ProviderTurnId.make(
+          `provider-turn:historical-todo:${trigger}:${status}`,
+        );
+        const nativeItemRef = {
+          driver,
+          nativeId:
+            type === "todo_list" ? `turn-plan:${providerTurnId}` : `proposal:${providerTurnId}`,
+          strength: "strong",
+        } as const;
+        const snapshotStatus = ["pending", "running", "waiting"] as const;
+        events.push(
+          {
+            id: EventId.make(`event:${nodeId}`),
+            type: "node.updated",
+            threadId,
+            runId,
+            nodeId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: {
+              id: nodeId,
+              threadId,
+              runId,
+              parentNodeId: null,
+              rootNodeId: nodeId,
+              kind: type === "todo_list" ? "todo_list" : "plan",
+              status: index === 0 ? "completed" : snapshotStatus[index % snapshotStatus.length]!,
+              countsForRun: false,
+              providerThreadId: null,
+              providerTurnId,
+              nativeItemRef,
+              runtimeRequestId: null,
+              checkpointScopeId: null,
+              startedAt: now,
+              completedAt: index === 0 ? now : null,
+            },
+          },
+          {
+            id: EventId.make(`event:${planId}`),
+            type: "plan.updated",
+            threadId,
+            runId,
+            nodeId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: {
+              id: planId,
+              threadId,
+              runId,
+              nodeId,
+              status: "active",
+              ...(type === "todo_list"
+                ? ({
+                    kind: "todo_list",
+                    steps,
+                    explanation: "Preserve the actual task progress",
+                  } as const)
+                : ({
+                    kind: "proposed_plan",
+                    markdown: "## Preserve the partial proposal",
+                  } as const)),
+            },
+          },
+          {
+            id: EventId.make(`event:item:${nodeId}`),
+            type: "turn-item.updated",
+            threadId,
+            runId,
+            nodeId,
+            providerInstanceId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make(`item:${nodeId}`),
+              threadId,
+              runId,
+              nodeId,
+              providerThreadId: null,
+              providerTurnId,
+              nativeItemRef,
+              parentItemId: null,
+              ordinal: index,
+              status: snapshotStatus[index % snapshotStatus.length]!,
+              title: "Recorded plan",
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+              planId,
+              ...(type === "todo_list"
+                ? ({
+                    type: "todo_list",
+                    steps,
+                    explanation: "Preserve the actual task progress",
+                  } as const)
+                : ({
+                    type: "proposed_plan",
+                    markdown: "## Preserve the partial proposal",
+                    streaming: true,
+                  } as const)),
+            },
+          },
+        );
+      }
+      const latestRunId = yield* createRun(threadId, "completed", { ordinal: 6 });
+      const heldRunId = yield* createRun(threadId, "queued", { ordinal: 7, queueHeld: true });
+      const heldNodeId = NodeId.make(`node:held-todo:${trigger}`);
+      events.push({
+        id: EventId.make(`event:${heldNodeId}`),
+        type: "node.updated",
+        threadId,
+        runId: heldRunId,
+        nodeId: heldNodeId,
+        providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: heldNodeId,
+          threadId,
+          runId: heldRunId,
+          parentNodeId: null,
+          rootNodeId: heldNodeId,
+          kind: "todo_list",
+          status: "running",
+          countsForRun: false,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: now,
+          completedAt: null,
+        },
+      });
+      const workNodeId = NodeId.make(`node:work:${trigger}`);
+      events.push({
+        id: EventId.make(`event:${workNodeId}`),
+        type: "node.updated",
+        threadId,
+        runId: latestRunId,
+        nodeId: workNodeId,
+        providerInstanceId,
+        occurredAt: now,
+        payload: {
+          id: workNodeId,
+          threadId,
+          runId: latestRunId,
+          parentNodeId: null,
+          rootNodeId: workNodeId,
+          kind: "todo_list",
+          status: "running",
+          countsForRun: true,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: now,
+          completedAt: null,
+        },
+      });
+      yield* sink.write({ events });
+      const before = yield* projections.getThreadProjection(threadId);
+      const beforeHead = yield* store.latestSequence();
+      assert.deepEqual(yield* projections.getRecoveryThreadIds("runtime"), [threadId]);
+      const bounded = yield* projections.getRuntimeRecoveryProjection(threadId);
+      assert.equal(
+        bounded.nodes.filter((node) => node.kind === "todo_list" || node.kind === "plan").length,
+        6,
+      );
+      assert.equal(bounded.turnItems.filter((item) => item.type === type).length, 5);
+      assert.equal(bounded.runs.length, 6);
+      const summary = yield* recovery.reconcile(trigger);
+      assert.equal(summary.terminalizedRuns, 0);
+      assert.equal(summary.stoppedSessions, 0);
+      assert.equal(summary.closedRequests, 0);
+      const after = yield* projections.getThreadProjection(threadId);
+      assert.deepEqual(after.runs, before.runs);
+      assert.deepEqual(after.plans, before.plans);
+      assert.deepEqual(
+        after.nodes.find((node) => node.id === heldNodeId),
+        before.nodes.find((node) => node.id === heldNodeId),
+      );
+      assert.deepEqual(
+        after.nodes.find((node) => node.id === workNodeId),
+        before.nodes.find((node) => node.id === workNodeId),
+      );
+      for (const node of after.nodes.filter(
+        (node) => node.id !== heldNodeId && node.id !== workNodeId,
+      )) {
+        const original = before.nodes.find((candidate) => candidate.id === node.id)!;
+        assert.deepEqual(node, {
+          ...original,
+          status: expectedStatuses.get(node.id)!,
+          completedAt: now,
+        });
+      }
+      for (const item of after.turnItems) {
+        const original = before.turnItems.find((candidate) => candidate.id === item.id)!;
+        assert.deepEqual(item, {
+          ...original,
+          status: expectedStatuses.get(item.nodeId!)!,
+          completedAt: now,
+          updatedAt: now,
+          ...(original.type === "proposed_plan" ? { streaming: false } : {}),
+        });
+      }
+      const stored = yield* store.read({ afterSequence: beforeHead }).pipe(Stream.runCollect);
+      assert.equal(stored.length, 9);
+      assert.equal(stored.filter(({ event }) => event.type === "node.updated").length, 4);
+      assert.equal(stored.filter(({ event }) => event.type === "turn-item.updated").length, 5);
+      const head = yield* store.latestSequence();
+      const metadata = yield* sql<{
+        readonly last_sequence: number;
+      }>`SELECT last_sequence FROM orchestration_v2_projection_metadata WHERE projection_name = 'thread-projections'`;
+      assert.equal(head, beforeHead + 9);
+      assert.deepEqual(metadata, [{ last_sequence: head }]);
+      assert.deepEqual(yield* projections.getRecoveryThreadIds("runtime"), []);
+      yield* recovery.reconcile(trigger);
+      assert.equal(yield* store.latestSequence(), head);
+    }).pipe(Effect.provide(layerRecoveryTest)),
+);
+
+it.effect("keeps request-linked, counting and mismatched historical plan items unchanged", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+    const sink = yield* EventSink.EventSinkV2;
+    const store = yield* EventStore.EventStoreV2;
+    const threadId = yield* createThread("historical-plan-guards");
+    const now = yield* DateTime.now;
+    const runId = yield* createRun(threadId, "completed");
+    const events: OrchestrationV2DomainEvent[] = [];
+    for (const [index, scenario] of ["request-linked", "counting", "mismatched"].entries()) {
+      const nodeId = NodeId.make(`node:historical-guard:${scenario}`);
+      events.push(
+        {
+          id: EventId.make(`event:${nodeId}`),
+          type: "node.updated",
+          threadId,
+          runId,
+          nodeId,
+          occurredAt: now,
+          payload: {
+            id: nodeId,
+            threadId,
+            runId,
+            parentNodeId: null,
+            rootNodeId: nodeId,
+            kind: scenario === "mismatched" ? "plan" : "todo_list",
+            status: scenario === "mismatched" ? "completed" : "running",
+            countsForRun: scenario === "counting",
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            runtimeRequestId:
+              scenario === "request-linked" ? RuntimeRequestId.make("request:retained") : null,
+            checkpointScopeId: null,
+            startedAt: now,
+            completedAt: scenario === "mismatched" ? now : null,
+          },
+        },
+        {
+          id: EventId.make(`event:item:${nodeId}`),
+          type: "turn-item.updated",
+          threadId,
+          runId,
+          nodeId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`item:${nodeId}`),
+            threadId,
+            runId,
+            nodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: index,
+            type: "todo_list",
+            status: "running",
+            title: "Preserve guarded plan",
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+            planId: PlanId.make(`plan:${nodeId}`),
+            steps: [{ id: "unfinished", text: "Still unfinished", status: "running" }],
+          },
+        },
+      );
+    }
+    yield* sink.write({ events });
+    const before = yield* projections.getThreadProjection(threadId);
+    const beforeHead = yield* store.latestSequence();
+    assert.deepEqual(yield* projections.getRecoveryThreadIds("runtime"), []);
+    const bounded = yield* projections.getRuntimeRecoveryProjection(threadId);
+    assert.deepEqual(bounded.nodes, []);
+    assert.deepEqual(bounded.turnItems, []);
+    yield* recovery.reconcile("startup");
+    const after = yield* projections.getThreadProjection(threadId);
+    assert.deepEqual(after.nodes, before.nodes);
+    assert.deepEqual(after.turnItems, before.turnItems);
+    assert.equal(yield* store.latestSequence(), beforeHead);
   }).pipe(Effect.provide(layerRecoveryTest)),
 );

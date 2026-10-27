@@ -100,6 +100,11 @@ function isNonterminalNodeStatus(status: string): boolean {
   return status === "pending" || status === "running" || status === "waiting";
 }
 
+function terminalPlanSnapshotStatus(status: string) {
+  if (status === "interrupted" || status === "failed" || status === "cancelled") return status;
+  return status === "rolled_back" ? "interrupted" : "completed";
+}
+
 function isAppOwnedDelegation(task: {
   readonly origin: OrchestrationV2Subagent["origin"];
   readonly childThreadId: ThreadId | null;
@@ -473,6 +478,83 @@ export const make = Effect.gen(function* () {
           providerInstanceId: task.providerInstanceId,
           occurredAt: now,
           payload: { ...task, completionWake: "always", updatedAt: now },
+        });
+      }
+      const terminalRuns = new Map(
+        projection.runs
+          .filter(
+            (run) =>
+              run.threadId === projection.thread.id &&
+              ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(
+                run.status,
+              ),
+          )
+          .map((run) => [run.id, run]),
+      );
+      const displayNodes = new Map(
+        (projection.nodes ?? [])
+          .filter(
+            (node) =>
+              node.threadId === projection.thread.id &&
+              (node.kind === "todo_list" || node.kind === "plan") &&
+              node.countsForRun === false &&
+              node.runtimeRequestId === null &&
+              node.runId !== null &&
+              terminalRuns.has(node.runId),
+          )
+          .map((node) => [node.id, node]),
+      );
+      // Plans record task progress; only their display snapshots stop with the parent turn.
+      for (const node of displayNodes.values()) {
+        const run = terminalRuns.get(node.runId!)!;
+        if (!isNonterminalNodeStatus(node.status)) continue;
+        events.push({
+          id: yield* allocateEventId(),
+          type: "node.updated",
+          threadId: projection.thread.id,
+          runId: run.id,
+          nodeId: node.id,
+          providerInstanceId: run.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            ...node,
+            status:
+              node.kind === "todo_list" ? "completed" : terminalPlanSnapshotStatus(run.status),
+            completedAt: run.completedAt ?? now,
+          },
+        });
+      }
+      for (const item of projection.turnItems ?? []) {
+        const run = item.runId === null ? undefined : terminalRuns.get(item.runId);
+        const node = item.nodeId === null ? undefined : displayNodes.get(item.nodeId);
+        if (
+          run === undefined ||
+          node === undefined ||
+          node.runId !== item.runId ||
+          item.threadId !== projection.thread.id ||
+          !(
+            (item.type === "todo_list" && node.kind === "todo_list") ||
+            (item.type === "proposed_plan" && node.kind === "plan")
+          ) ||
+          !isNonterminalTurnItemStatus(item.status)
+        )
+          continue;
+        events.push({
+          id: yield* allocateEventId(),
+          type: "turn-item.updated",
+          threadId: projection.thread.id,
+          runId: run.id,
+          ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+          providerInstanceId: run.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            ...item,
+            status:
+              item.type === "todo_list" ? "completed" : terminalPlanSnapshotStatus(run.status),
+            completedAt: run.completedAt ?? now,
+            updatedAt: now,
+            ...(item.type === "proposed_plan" ? { streaming: false } : {}),
+          },
         });
       }
       const recoveredNonterminalRunIds = new Set(runs.map((run) => run.id));

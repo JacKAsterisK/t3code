@@ -147,6 +147,111 @@ const fixtureAtMigration = (toMigrationInclusive?: number) =>
     return { request, mutate, insert, warm, dbPath, appendEvent };
   });
 const fixture = fixtureAtMigration();
+const stalePlanDisplayFixture = (status: string) =>
+  Effect.gen(function* () {
+    const base = yield* fixture;
+    const threadId = "thread:stale-plan";
+    const runId = "run:stale-plan";
+    const providerThreadId = "provider-thread:stale-plan";
+    const providerTurnId = "provider-turn:stale-plan";
+    const startedAt = "2026-10-25T00:00:00.000Z";
+    yield* base.insert("orchestration_v2_projection_runs", status, {
+      run_id: runId,
+      thread_id: threadId,
+      provider_thread_id: providerThreadId,
+      payload_json: JSON.stringify({
+        id: runId,
+        threadId,
+        status,
+        providerThreadId,
+        rootNodeId: "node:root",
+        ordinal: 1,
+        requestedAt: startedAt,
+        completedAt: "2026-10-25T00:01:00.000Z",
+      }),
+    });
+    for (const kind of ["todo_list", "plan"] as const) {
+      const nodeId = `node:${kind}`;
+      const itemId = `item:${kind}`;
+      const type = kind === "todo_list" ? "todo_list" : "proposed_plan";
+      const nativeItemRef = {
+        driver: "codex",
+        nativeId: kind === "todo_list" ? "turn-plan:native-turn" : "native-proposal",
+        strength: "strong",
+      };
+      yield* base.insert("orchestration_v2_projection_nodes", "running", {
+        node_id: nodeId,
+        thread_id: threadId,
+        run_id: runId,
+        kind,
+        runtime_request_id: null,
+        provider_thread_id: providerThreadId,
+        provider_turn_id: providerTurnId,
+        payload_json: JSON.stringify({
+          id: nodeId,
+          threadId,
+          runId,
+          parentNodeId: "node:root",
+          rootNodeId: "node:root",
+          kind,
+          status: "running",
+          countsForRun: false,
+          providerThreadId,
+          providerTurnId,
+          nativeItemRef,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt,
+          completedAt: null,
+        }),
+      });
+      yield* base.insert("orchestration_v2_projection_turn_items", "running", {
+        turn_item_id: itemId,
+        thread_id: threadId,
+        run_id: runId,
+        node_id: nodeId,
+        provider_thread_id: providerThreadId,
+        provider_turn_id: providerTurnId,
+        type,
+        payload_json: JSON.stringify({
+          id: itemId,
+          threadId,
+          runId,
+          nodeId,
+          providerThreadId,
+          providerTurnId,
+          nativeItemRef,
+          parentItemId: null,
+          ordinal: kind === "todo_list" ? 1 : 2,
+          status: "running",
+          title: null,
+          startedAt,
+          completedAt: null,
+          updatedAt: startedAt,
+          type,
+          planId: `plan:${kind}`,
+          ...(kind === "todo_list"
+            ? {
+                steps: [{ id: "step:one", text: "Keep unfinished work", status: "running" }],
+                explanation: "Retained plan",
+              }
+            : { markdown: "## Partial retained proposal", streaming: true }),
+        }),
+      });
+    }
+    const readDisplays = () => {
+      const db = new NodeSqlite.DatabaseSync(base.dbPath, { readOnly: true });
+      try {
+        return ["orchestration_v2_projection_nodes", "orchestration_v2_projection_turn_items"].map(
+          (table) =>
+            db.prepare(`SELECT status,payload_json FROM ${table} ORDER BY payload_json`).all(),
+        );
+      } finally {
+        db.close();
+      }
+    };
+    return { ...base, threadId, runId, providerThreadId, providerTurnId, readDisplays };
+  });
 const testLayer = NativeMaintenance.layer(identity).pipe(
   Layer.provide(
     Layer.succeed(NativeMaintenance.NativeMaintenanceLease, { verify: () => Effect.void }),
@@ -563,6 +668,141 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
         const verified = yield* service.verify({ ...request, operation: "verify" });
         assert.equal(verified.dataGeneration, observed.dataGeneration);
         assert.equal(verified.workGeneration, observed.workGeneration);
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect.each(["completed", "interrupted", "failed", "cancelled", "rolled_back"])(
+    "ignores stale plan displays under a $status run without rewriting retained rows",
+    (status) =>
+      Effect.gen(function* () {
+        const { request, dbPath, readDisplays } = yield* stalePlanDisplayFixture(status);
+        const retained = readDisplays();
+        assert.isTrue(retained.flat().every((row) => row.status === "running"));
+        const stopped = NativeMaintenance.inspectStoppedRepairWork(dbPath);
+        assert.equal(stopped.backgroundAgents, 0);
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        const inspected = yield* service.inspect(request);
+        const probed = yield* service.probe({ ...request, operation: "probe" });
+        const verified = yield* service.verify({ ...request, operation: "verify" });
+        for (const observed of [stopped, inspected, probed, verified])
+          assert.deepEqual(
+            [
+              observed.activeRuns,
+              observed.queuedRuns,
+              observed.pendingRequests,
+              observed.backgroundAgents,
+              observed.scheduledWork,
+              observed.restartContinuations,
+            ],
+            [0, 0, 0, 0, 0, 0],
+          );
+        assert.equal(probed.workGeneration, inspected.workGeneration);
+        assert.equal(verified.workGeneration, inspected.workGeneration);
+        assert.equal(verified.dataGeneration, inspected.dataGeneration);
+        assert.deepEqual(readDisplays(), retained);
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("binds ignored plan display content into the update work generation", () =>
+    Effect.gen(function* () {
+      const { request, mutate } = yield* stalePlanDisplayFixture("completed");
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const before = yield* service.inspect(request);
+      yield* mutate(
+        "UPDATE orchestration_v2_projection_turn_items SET payload_json=json_set(payload_json,'$.explanation','Changed retained plan') WHERE type='todo_list'",
+      );
+      const after = yield* service.inspect(request);
+      assert.equal(after.backgroundAgents, 0);
+      assert.notEqual(after.workGeneration, before.workGeneration);
+      assert.notEqual(after.dataGeneration, before.dataGeneration);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect.each([
+    {
+      name: "running parent",
+      sql: "UPDATE orchestration_v2_projection_runs SET status='running',payload_json=json_set(payload_json,'$.status','running')",
+    },
+    {
+      name: "waiting parent",
+      sql: "UPDATE orchestration_v2_projection_runs SET status='waiting',payload_json=json_set(payload_json,'$.status','waiting')",
+    },
+    {
+      name: "counting node",
+      sql: "UPDATE orchestration_v2_projection_nodes SET payload_json=json_set(payload_json,'$.countsForRun',json('true')) WHERE kind='todo_list'",
+    },
+    {
+      name: "tool node",
+      sql: "UPDATE orchestration_v2_projection_nodes SET kind='tool_call',payload_json=json_set(payload_json,'$.kind','tool_call') WHERE kind='todo_list'",
+    },
+    { name: "missing parent", sql: "DELETE FROM orchestration_v2_projection_runs" },
+    {
+      name: "wrong-thread parent",
+      sql: "UPDATE orchestration_v2_projection_runs SET thread_id='thread:other',payload_json=json_set(payload_json,'$.threadId','thread:other')",
+    },
+    {
+      name: "missing item node",
+      sql: "UPDATE orchestration_v2_projection_turn_items SET node_id='node:missing',payload_json=json_set(payload_json,'$.nodeId','node:missing') WHERE type='todo_list'",
+    },
+    {
+      name: "mismatched item node payload",
+      sql: "UPDATE orchestration_v2_projection_turn_items SET payload_json=json_set(payload_json,'$.nodeId','node:other') WHERE type='todo_list'",
+    },
+    {
+      name: "runtime-bound node",
+      sql: "UPDATE orchestration_v2_projection_nodes SET runtime_request_id='request:pending',payload_json=json_set(payload_json,'$.runtimeRequestId','request:pending') WHERE kind='todo_list'",
+    },
+  ])("keeps stale plan displays with a $name busy", ({ sql }) =>
+    Effect.gen(function* () {
+      const { request, mutate, dbPath } = yield* stalePlanDisplayFixture("completed");
+      yield* mutate(sql);
+      assert.isAbove(NativeMaintenance.inspectStoppedRepairWork(dbPath).backgroundAgents, 0);
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      assert.isAbove((yield* service.inspect(request)).backgroundAgents, 0);
+      assert.equal(
+        (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+        "busy",
+      );
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect.each([
+    {
+      table: "orchestration_v2_projection_provider_turns",
+      status: "running",
+      category: "backgroundAgents",
+    },
+    {
+      table: "orchestration_v2_projection_runtime_requests",
+      status: "pending",
+      category: "pendingRequests",
+    },
+  ] as const)(
+    "keeps real $status $table busy beside stale plan displays",
+    ({ table, status, category }) =>
+      Effect.gen(function* () {
+        const { request, insert, threadId, runId, providerThreadId, providerTurnId } =
+          yield* stalePlanDisplayFixture("completed");
+        yield* insert(table, status, {
+          provider_turn_id: providerTurnId,
+          runtime_request_id: "request:real",
+          thread_id: threadId,
+          run_id: runId,
+          provider_thread_id: providerThreadId,
+          payload_json: JSON.stringify({
+            id: "real-work",
+            threadId,
+            runId,
+            status,
+            providerThreadId,
+          }),
+        });
+        const service = yield* NativeMaintenance.NativeMaintenance;
+        assert.isAbove((yield* service.inspect(request))[category], 0);
+        assert.equal(
+          (yield* service.verify({ ...request, operation: "verify" }).pipe(Effect.flip)).reason,
+          "busy",
+        );
       }).pipe(Effect.provide(testLayer)),
   );
 

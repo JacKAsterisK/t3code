@@ -700,8 +700,42 @@ function needsRecovery(
             )))
       );
     }
-    case "runtime":
+    case "runtime": {
+      const terminalRunIds = new Set(
+        projection.runs
+          .filter((run) =>
+            ["completed", "interrupted", "failed", "cancelled", "rolled_back"].includes(run.status),
+          )
+          .map((run) => run.id),
+      );
+      const displayNodes = new Map(
+        projection.nodes
+          .filter(
+            (node) =>
+              node.threadId === projection.thread.id &&
+              (node.kind === "todo_list" || node.kind === "plan") &&
+              node.countsForRun === false &&
+              node.runtimeRequestId === null &&
+              node.runId !== null &&
+              terminalRunIds.has(node.runId),
+          )
+          .map((node) => [node.id, node]),
+      );
       return (
+        [...displayNodes.values()].some((node) =>
+          ["pending", "running", "waiting"].includes(node.status),
+        ) ||
+        projection.turnItems.some((item) => {
+          const node = item.nodeId === null ? undefined : displayNodes.get(item.nodeId);
+          return (
+            node !== undefined &&
+            node.runId === item.runId &&
+            item.threadId === projection.thread.id &&
+            ((item.type === "todo_list" && node.kind === "todo_list") ||
+              (item.type === "proposed_plan" && node.kind === "plan")) &&
+            ["pending", "running", "waiting"].includes(item.status)
+          );
+        }) ||
         projection.runs.some(
           (run) =>
             ["preparing", "starting", "running", "waiting"].includes(run.status) ||
@@ -727,6 +761,7 @@ function needsRecovery(
             !projection.runs.some((run) => run.id === item.runId && run.status === "rolled_back"),
         )
       );
+    }
   }
 }
 
@@ -4095,6 +4130,32 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND type IN ('command_execution', 'dynamic_tool', 'subagent')
                   AND status IN ('pending', 'running', 'waiting')
                 UNION
+                SELECT node.thread_id FROM orchestration_v2_projection_nodes AS node
+                JOIN orchestration_v2_projection_runs AS run
+                  ON run.run_id = node.run_id AND run.thread_id = node.thread_id
+                WHERE node.kind IN ('todo_list', 'plan')
+                  AND node.status IN ('pending', 'running', 'waiting')
+                  AND CASE WHEN json_valid(node.payload_json)
+                    THEN json_extract(node.payload_json, '$.countsForRun') IS 0
+                      AND json_type(node.payload_json, '$.runtimeRequestId') = 'null' ELSE 0 END
+                  AND node.runtime_request_id IS NULL
+                  AND run.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                UNION
+                SELECT item.thread_id FROM orchestration_v2_projection_turn_items AS item
+                JOIN orchestration_v2_projection_runs AS run
+                  ON run.run_id = item.run_id AND run.thread_id = item.thread_id
+                JOIN orchestration_v2_projection_nodes AS node
+                  ON node.node_id = item.node_id AND node.run_id = item.run_id
+                    AND node.thread_id = item.thread_id
+                WHERE item.type IN ('todo_list', 'proposed_plan')
+                  AND item.status IN ('pending', 'running', 'waiting')
+                  AND node.kind = CASE item.type WHEN 'todo_list' THEN 'todo_list' ELSE 'plan' END
+                  AND node.runtime_request_id IS NULL
+                  AND CASE WHEN json_valid(node.payload_json)
+                    THEN json_extract(node.payload_json, '$.countsForRun') IS 0
+                      AND json_type(node.payload_json, '$.runtimeRequestId') = 'null' ELSE 0 END
+                  AND run.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                UNION
                 SELECT thread_id FROM orchestration_v2_effect_outbox
                 WHERE status IN ('pending', 'running')
               `;
@@ -4430,6 +4491,32 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     WHERE latest.thread_id = ${threadId}
                     ORDER BY latest.ordinal DESC LIMIT 1
                   )
+                  OR (
+                    run.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                    AND run.run_id IN (
+                      SELECT node.run_id FROM orchestration_v2_projection_nodes AS node
+                      WHERE node.thread_id = ${threadId}
+                        AND node.kind IN ('todo_list', 'plan')
+                        AND node.status IN ('pending', 'running', 'waiting')
+                        AND CASE WHEN json_valid(node.payload_json)
+                          THEN json_extract(node.payload_json, '$.countsForRun') IS 0
+                      AND json_type(node.payload_json, '$.runtimeRequestId') = 'null' ELSE 0 END
+                  AND node.runtime_request_id IS NULL
+                      UNION
+                      SELECT item.run_id FROM orchestration_v2_projection_turn_items AS item
+                      JOIN orchestration_v2_projection_nodes AS node
+                        ON node.node_id = item.node_id AND node.run_id = item.run_id
+                          AND node.thread_id = item.thread_id
+                      WHERE item.thread_id = ${threadId}
+                        AND item.type IN ('todo_list', 'proposed_plan')
+                        AND item.status IN ('pending', 'running', 'waiting')
+                        AND node.kind = CASE item.type WHEN 'todo_list' THEN 'todo_list' ELSE 'plan' END
+                        AND node.runtime_request_id IS NULL
+                        AND CASE WHEN json_valid(node.payload_json)
+                          THEN json_extract(node.payload_json, '$.countsForRun') IS 0
+                            AND json_type(node.payload_json, '$.runtimeRequestId') = 'null' ELSE 0 END
+                    )
+                  )
                   -- Retain the latest run for each provider thread with lost
                   -- background work, including owners used before a handoff.
                   OR run.run_id IN (
@@ -4477,9 +4564,34 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             sql<PayloadRow>`
               SELECT node.payload_json FROM orchestration_v2_projection_nodes AS node
               WHERE node.thread_id = ${threadId}
-                AND node.status IN ('pending', 'starting', 'running', 'waiting')
+                AND (
+                  node.status IN ('pending', 'starting', 'running', 'waiting')
+                  OR EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_turn_items AS item
+                    JOIN orchestration_v2_projection_runs AS run
+                      ON run.run_id = item.run_id AND run.thread_id = item.thread_id
+                    WHERE item.node_id = node.node_id AND item.run_id = node.run_id
+                      AND item.thread_id = node.thread_id
+                      AND run.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                      AND item.type IN ('todo_list', 'proposed_plan')
+                      AND node.kind = CASE item.type WHEN 'todo_list' THEN 'todo_list' ELSE 'plan' END
+                      AND item.status IN ('pending', 'running', 'waiting')
+                  )
+                )
                 AND (
                   (node.run_id IS NULL AND node.kind = 'root_turn')
+                  OR (
+                    node.kind IN ('todo_list', 'plan')
+                    AND CASE WHEN json_valid(node.payload_json)
+                      THEN json_extract(node.payload_json, '$.countsForRun') IS 0
+                      AND json_type(node.payload_json, '$.runtimeRequestId') = 'null' ELSE 0 END
+                  AND node.runtime_request_id IS NULL
+                    AND EXISTS (
+                      SELECT 1 FROM orchestration_v2_projection_runs AS run
+                      WHERE run.thread_id = node.thread_id AND run.run_id = node.run_id
+                        AND run.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                    )
+                  )
                   OR node.run_id IN (
                     SELECT run_id FROM orchestration_v2_projection_runs
                     WHERE thread_id = ${threadId}
@@ -4658,6 +4770,22 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
                   )
                   OR item.type IN ('command_execution', 'dynamic_tool', 'subagent')
+                  OR (
+                    item.type IN ('todo_list', 'proposed_plan')
+                    AND EXISTS (
+                      SELECT 1 FROM orchestration_v2_projection_runs AS run
+                      JOIN orchestration_v2_projection_nodes AS node
+                        ON node.run_id = run.run_id AND node.thread_id = run.thread_id
+                          AND node.node_id = item.node_id
+                      WHERE run.thread_id = item.thread_id AND run.run_id = item.run_id
+                        AND node.kind = CASE item.type WHEN 'todo_list' THEN 'todo_list' ELSE 'plan' END
+                        AND node.runtime_request_id IS NULL
+                        AND CASE WHEN json_valid(node.payload_json)
+                          THEN json_extract(node.payload_json, '$.countsForRun') IS 0
+                            AND json_type(node.payload_json, '$.runtimeRequestId') = 'null' ELSE 0 END
+                        AND run.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                    )
+                  )
                   OR (
                     item.run_id IS NULL
                     AND item.node_id IN (

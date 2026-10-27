@@ -1108,8 +1108,18 @@ function withCodexManagedFailure(
     : { ...failure, message: managed.message, code: managed.code };
 }
 
+interface CodexPlanDisplayTerminal {
+  readonly status: ReturnType<typeof providerTurnStatusToTerminal>;
+  readonly completedAt: DateTime.Utc;
+}
+
 interface ActiveCodexTurnContext {
   closedCommandItemIds?: ReadonlySet<string>;
+  planDisplayTerminal?: CodexPlanDisplayTerminal;
+  latestTodoListArtifacts?: {
+    readonly node: OrchestrationV2ExecutionNode;
+    readonly turnItem: OrchestrationV2TurnItem;
+  };
   latestProviderFailure?: {
     readonly nativeMessage: string;
     readonly nativeCode: string | null;
@@ -3794,9 +3804,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           readonly status: OrchestrationV2PlanArtifact["status"];
           readonly markdown: string;
           readonly completed?: boolean;
+          readonly terminal?: CodexPlanDisplayTerminal;
         }) {
-          const updatedAt = yield* DateTime.now;
+          const updatedAt = input.terminal?.completedAt ?? (yield* DateTime.now);
           const completedAt = input.completed === true ? updatedAt : null;
+          const status =
+            input.terminal?.status ?? (input.completed === true ? "completed" : "running");
           const planId = yield* resolvePlanId(input.context, input.nativeItemId);
           const nodeId = idAllocator.derive.nodeFromProviderItem({
             driver: CODEX_PROVIDER,
@@ -3826,7 +3839,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             parentNodeId: input.context.itemParentNodeId,
             rootNodeId: input.context.rootNodeId,
             kind: "plan",
-            status: input.completed === true ? "completed" : "running",
+            status,
             countsForRun: false,
             providerThreadId: input.context.providerThread.id,
             providerTurnId: input.context.providerTurnId,
@@ -3846,7 +3859,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             nativeItemRef: codexNativeItemRef(input.nativeItemId),
             parentItemId: null,
             ordinal,
-            status: input.completed === true ? "completed" : "running",
+            status,
             title: null,
             startedAt,
             completedAt,
@@ -3866,16 +3879,15 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             Effect.fnUntraced(function* (update) {
               const resolved = yield* resolveItemEventContext(update.turnId);
               if (resolved === undefined) return;
-              const interrupted = (yield* Ref.get(terminalizedNonCompletedNativeTurns)).has(
-                update.turnId,
-              );
+              const terminal = update.completed ? resolved.context.planDisplayTerminal : undefined;
               const artifacts = yield* buildProposedPlanArtifacts({
                 context: resolved.context,
                 nativeItemId: update.itemId,
                 // A finished proposal stays active until Implement consumes it.
                 status: "active",
                 markdown: update.text,
-                completed: update.completed && !interrupted,
+                completed: update.completed,
+                ...(terminal === undefined ? {} : { terminal }),
               });
               yield* emitProviderEvent({
                 type: "node.updated",
@@ -4212,12 +4224,19 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (context === undefined) {
               return;
             }
-            yield* completeProviderRetry(context, yield* DateTime.now);
-            yield* planDeltas.append({
-              turnId: payload.turnId,
-              itemId: payload.itemId,
-              delta: payload.delta,
-            });
+            yield* turnTerminalizationPermit.withPermits(1)(
+              Effect.gen(function* () {
+                if ((yield* Ref.get(activeTurns)).get(payload.turnId) !== context) {
+                  return;
+                }
+                yield* completeProviderRetry(context, yield* DateTime.now);
+                yield* planDeltas.append({
+                  turnId: payload.turnId,
+                  itemId: payload.itemId,
+                  delta: payload.delta,
+                });
+              }),
+            );
           }).pipe(Effect.orDie),
         );
 
@@ -4227,35 +4246,43 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             if (context === undefined) {
               return;
             }
-            yield* completeProviderRetry(context, yield* DateTime.now);
-            const steps = payload.plan.map((step, index) => ({
-              id: `step-${index + 1}`,
-              text: nonEmptyText(step.step, `Step ${index + 1}`),
-              status: codexPlanStepStatus(step.status),
-            }));
-            const explanation = trimText(payload.explanation);
-            const artifacts = yield* buildTodoListArtifacts({
-              context,
-              nativeItemId: `turn-plan:${payload.turnId}`,
-              status: "active",
-              ...(explanation === undefined ? {} : { explanation }),
-              steps,
-            });
-            yield* emitProviderEvent({
-              type: "node.updated",
-              driver: CODEX_PROVIDER,
-              node: artifacts.node,
-            });
-            yield* emitProviderEvent({
-              type: "plan.updated",
-              driver: CODEX_PROVIDER,
-              plan: artifacts.plan,
-            });
-            yield* emitProviderEvent({
-              type: "turn_item.updated",
-              driver: CODEX_PROVIDER,
-              turnItem: artifacts.turnItem,
-            });
+            yield* turnTerminalizationPermit.withPermits(1)(
+              Effect.gen(function* () {
+                if ((yield* Ref.get(activeTurns)).get(payload.turnId) !== context) {
+                  return;
+                }
+                yield* completeProviderRetry(context, yield* DateTime.now);
+                const steps = payload.plan.map((step, index) => ({
+                  id: `step-${index + 1}`,
+                  text: nonEmptyText(step.step, `Step ${index + 1}`),
+                  status: codexPlanStepStatus(step.status),
+                }));
+                const explanation = trimText(payload.explanation);
+                const artifacts = yield* buildTodoListArtifacts({
+                  context,
+                  nativeItemId: `turn-plan:${payload.turnId}`,
+                  status: "active",
+                  ...(explanation === undefined ? {} : { explanation }),
+                  steps,
+                });
+                context.latestTodoListArtifacts = artifacts;
+                yield* emitProviderEvent({
+                  type: "node.updated",
+                  driver: CODEX_PROVIDER,
+                  node: artifacts.node,
+                });
+                yield* emitProviderEvent({
+                  type: "plan.updated",
+                  driver: CODEX_PROVIDER,
+                  plan: artifacts.plan,
+                });
+                yield* emitProviderEvent({
+                  type: "turn_item.updated",
+                  driver: CODEX_PROVIDER,
+                  turnItem: artifacts.turnItem,
+                });
+              }),
+            );
           }).pipe(Effect.orDie),
         );
 
@@ -5852,7 +5879,35 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               }
               yield* agentMessageDeltas.flushTurn(input.nativeTurnId);
               yield* reasoningDeltas.flushTurn(input.nativeTurnId);
+              input.context.planDisplayTerminal = {
+                status: providerTurnStatusToTerminal(input.status),
+                completedAt: input.completedAt,
+              };
               yield* planDeltas.flushTurn(input.nativeTurnId);
+              const todoListArtifacts = input.context.latestTodoListArtifacts;
+              if (todoListArtifacts !== undefined) {
+                delete input.context.latestTodoListArtifacts;
+                // The turn's display snapshot is finished; unfinished plan steps stay unchanged.
+                yield* emitProviderEvent({
+                  type: "node.updated",
+                  driver: CODEX_PROVIDER,
+                  node: {
+                    ...todoListArtifacts.node,
+                    status: "completed",
+                    completedAt: input.completedAt,
+                  },
+                });
+                yield* emitProviderEvent({
+                  type: "turn_item.updated",
+                  driver: CODEX_PROVIDER,
+                  turnItem: {
+                    ...todoListArtifacts.turnItem,
+                    status: "completed",
+                    completedAt: input.completedAt,
+                    updatedAt: input.completedAt,
+                  },
+                });
+              }
               for (const [key, part] of reasoningParts) {
                 if (part.turnId === input.nativeTurnId) reasoningParts.delete(key);
               }

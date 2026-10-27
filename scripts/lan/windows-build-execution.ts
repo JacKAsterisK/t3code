@@ -8,6 +8,8 @@ import * as Schema from "effect/Schema";
 import { ChildProcess } from "effect/process";
 import { BuildLock, sha256 } from "./hub-distribution.ts";
 import type { ResourceMonitorCacheDescriptor } from "./native-resource-cache.ts";
+import { preparePinnedElectronCache } from "./electron-cache.ts";
+import { measureBuildStage } from "./build-metrics.ts";
 import {
   relativeWindowsPath,
   strictJson,
@@ -132,6 +134,7 @@ export interface PinnedWindowsBuildExecution {
   readonly stageInstall: (cwd: string) => PinnedWindowsBuildCommand;
   readonly resourceMonitor: () => PinnedWindowsBuildCommand;
   readonly resourceMonitorCache?: ResourceMonitorCacheDescriptor;
+  readonly prepareElectronCache: (version: string) => Promise<void>;
   readonly builder: (stageAppDir: string) => PinnedWindowsBuildCommand;
   readonly registerPackagedElectronProbe: (command: ChildProcess.StandardCommand) => void;
   readonly prepare: (command: ChildProcess.Command) => ChildProcess.StandardCommand;
@@ -676,6 +679,19 @@ export function createWindowsBuildExecution(input: {
         // The identity-free monitor has a stable epoch so frontend releases reuse identical native bytes.
         { SOURCE_DATE_EPOCH: "0" },
       ),
+    prepareElectronCache: async (version) => {
+      const prefix = request.directories.electronCache + "/";
+      const pins = new Map(
+        [...toolchainFiles]
+          .filter(([name]) => name.startsWith(prefix))
+          .map(([name, pin]) => [name.slice(prefix.length), pin]),
+      );
+      await measureBuildStage(
+        "desktop.electron-cache",
+        () => preparePinnedElectronCache(cache("electronCache"), pins, version),
+        (value) => value,
+      );
+    },
     builder: (stageAppDir) =>
       command(
         tools.node,
@@ -683,6 +699,8 @@ export function createWindowsBuildExecution(input: {
           tools.builderCli,
           // The raw ZIP is unpacked and sealed separately; compression only wastes release time.
           "--config.compression=store",
+          `--config.electronDownload.cache=${cache("electronCache")}`,
+          "--config.electronDownload.isVerifyChecksum=true",
           "--projectDir",
           cwd(stageAppDir),
           "--win",

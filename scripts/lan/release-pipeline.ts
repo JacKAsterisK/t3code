@@ -12,6 +12,7 @@ interface Phase {
   inputs: { path: string; sha256: string }[];
   outputs: string[];
   retryInterrupted?: boolean;
+  idempotent?: boolean;
 }
 export interface ReleasePlan {
   schemaVersion: 1;
@@ -29,22 +30,32 @@ export interface ReleasePlan {
     artifactPinsPath: string;
   };
 }
-interface PhaseReceipt {
+interface FilePin {
+  path: string;
+  sha256: string;
+}
+export interface PhaseReceipt {
   status: "running" | "passed" | "failed";
   startedUtc: string;
   completedUtc?: string;
   exitCode?: number | null;
   outputs?: { path: string; sha256: string }[];
+  log?: FilePin;
+  failedOutputs?: { path: string; sha256: string | null }[];
+  history?: { receipt: FilePin; log: FilePin }[];
 }
 const digest = (bytes: Uint8Array) => NodeCrypto.createHash("sha256").update(bytes).digest("hex");
+export const releasePhaseReceiptSha256 = (receipt: PhaseReceipt) =>
+  digest(Buffer.from(JSON.stringify(receipt)));
+export interface ReleaseRecovery {
+  staleLockSha256?: string;
+  failedPhases?: readonly { id: string; receiptSha256: string }[];
+}
 async function hashFile(file: string) {
   if (!(await NodeFSP.lstat(file)).isFile()) throw new Error(`Expected regular file: ${file}`);
   return digest(await NodeFSP.readFile(file));
 }
-export async function runReleasePlan(
-  plan: ReleasePlan,
-  recovery: { staleLockSha256?: string } = {},
-) {
+export async function runReleasePlan(plan: ReleasePlan, recovery: ReleaseRecovery = {}) {
   if (plan.schemaVersion !== 1 || !/^[a-f0-9]{40}$/u.test(plan.sourceCommit))
     throw new Error("Invalid release identity");
   if (!Number.isInteger(plan.maxParallel) || plan.maxParallel < 1 || plan.maxParallel > 4)
@@ -67,6 +78,14 @@ export async function runReleasePlan(
     throw new Error("Invalid phase ids");
   if (!pending.get(plan.downloadProof.phase)!.outputs.includes(plan.downloadProof.path))
     throw new Error("Download proof must be a phase output");
+  const requested = new Map(recovery.failedPhases?.map((entry) => [entry.id, entry]) ?? []);
+  if (
+    requested.size !== (recovery.failedPhases?.length ?? 0) ||
+    [...requested.values()].some(
+      (entry) => !pending.has(entry.id) || !/^[a-f0-9]{64}$/u.test(entry.receiptSha256),
+    )
+  )
+    throw new Error("Invalid failed-phase recovery request");
   for (const phase of plan.phases) {
     if (
       !/^[a-z0-9-]+$/u.test(phase.id) ||
@@ -224,11 +243,33 @@ export async function runReleasePlan(
         if ((await hashFile(input.path)) !== input.sha256)
           throw new Error(`Release input changed: ${phase.id}`);
     };
+    const snapshotOutputs = async (phase: Phase) =>
+      Promise.all(
+        phase.outputs.map(async (path) => {
+          try {
+            return { path, sha256: await hashFile(path) };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return { path, sha256: null };
+            throw error;
+          }
+        }),
+      );
+    const histories = new Map<string, NonNullable<PhaseReceipt["history"]>>();
     for (const phase of plan.phases) {
       const previous = receipts[phase.id];
-      if (!previous) continue;
+      if (!previous) {
+        if (requested.has(phase.id)) throw new Error("No failed phase receipt to recover");
+        continue;
+      }
       await assertInputs(phase);
+      if (previous.log && (await hashFile(previous.log.path)) !== previous.log.sha256)
+        throw new Error("Phase log changed");
+      for (const attempt of previous.history ?? [])
+        for (const pin of [attempt.receipt, attempt.log])
+          if ((await hashFile(pin.path)) !== pin.sha256)
+            throw new Error("Archived phase evidence changed");
       if (previous.status === "passed") {
+        if (requested.has(phase.id)) throw new Error("Completed phases cannot be retried");
         const started = Date.parse(previous.startedUtc),
           completed = Date.parse(previous.completedUtc ?? "");
         if (
@@ -251,8 +292,56 @@ export async function runReleasePlan(
           )
             throw new Error(`Completed output changed: ${phase.id}`);
         pending.delete(phase.id);
-      } else if (!phase.retryInterrupted)
-        throw new Error(`Review interrupted phase before retry: ${phase.id}`);
+      } else {
+        const request = requested.get(phase.id);
+        if (!request) throw new Error(`Review interrupted phase before retry: ${phase.id}`);
+        if (phase.idempotent !== true || previous.status !== "failed")
+          throw new Error("Only opted-in idempotent failed phases may be recovered");
+        if (releasePhaseReceiptSha256(previous) !== request.receiptSha256)
+          throw new Error("Reviewed failed receipt differs");
+        if (!previous.log || !previous.failedOutputs || !previous.completedUtc)
+          throw new Error("Incomplete failed phase receipt");
+        const started = Date.parse(previous.startedUtc);
+        const completed = Date.parse(previous.completedUtc);
+        if (
+          !Number.isFinite(started) ||
+          !Number.isFinite(completed) ||
+          started < finished ||
+          completed < started ||
+          completed > Date.now()
+        )
+          throw new Error("Invalid failed phase timing");
+        if ((await hashFile(previous.log.path)) !== previous.log.sha256)
+          throw new Error("Failed phase log changed");
+        if (JSON.stringify(await snapshotOutputs(phase)) !== JSON.stringify(previous.failedOutputs))
+          throw new Error(`Failed phase output changed: ${phase.id}`);
+        const historyRoot = NodePath.join(plan.outputRoot, "attempts");
+        await NodeFSP.mkdir(historyRoot, { recursive: true });
+        const historyStat = await NodeFSP.lstat(historyRoot);
+        if (!historyStat.isDirectory() || historyStat.isSymbolicLink())
+          throw new Error("Invalid phase history directory");
+        const stem = NodePath.join(historyRoot, phase.id + "-" + request.receiptSha256);
+        const receiptPath = stem + ".json";
+        const logPath = stem + ".log";
+        const writeOnce = async (path: string, bytes: Uint8Array) => {
+          try {
+            await NodeFSP.writeFile(path, bytes, { flag: "wx" });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            if (!(await NodeFSP.readFile(path)).equals(bytes))
+              throw new Error("Archived phase evidence differs", { cause: error });
+          }
+        };
+        await writeOnce(receiptPath, Buffer.from(JSON.stringify(previous)));
+        await writeOnce(logPath, await NodeFSP.readFile(previous.log.path));
+        histories.set(phase.id, [
+          ...(previous.history ?? []),
+          {
+            receipt: { path: receiptPath, sha256: request.receiptSha256 },
+            log: { path: logPath, sha256: previous.log.sha256 },
+          },
+        ]);
+      }
     }
     const running = new Map<string, Promise<void>>();
     let failure: unknown;
@@ -267,11 +356,17 @@ export async function runReleasePlan(
             const receipt: PhaseReceipt = {
               status: "running",
               startedUtc: new Date().toISOString(),
+              ...(histories.has(phase.id) ? { history: histories.get(phase.id)! } : {}),
             };
             receipts[phase.id] = receipt;
             await save();
-            const log = await NodeFSP.open(NodePath.join(plan.outputRoot, phase.id + ".log"), "a");
+            const logPath = NodePath.join(
+              plan.outputRoot,
+              phase.id + (receipt.history ? `.attempt-${receipt.history.length + 1}` : "") + ".log",
+            );
+            let log: Awaited<ReturnType<typeof NodeFSP.open>> | undefined;
             try {
+              log = await NodeFSP.open(logPath, "wx");
               const child = NodeChildProcess.spawn(phase.command.executable, phase.command.args, {
                 cwd: phase.command.cwd,
                 env: { ...process.env, ...phase.command.env },
@@ -295,10 +390,14 @@ export async function runReleasePlan(
               receipt.status = "passed";
             } catch (error) {
               receipt.status = "failed";
+              receipt.failedOutputs = await snapshotOutputs(phase);
               throw error;
             } finally {
               receipt.completedUtc = new Date().toISOString();
-              await log.close();
+              if (log) {
+                await log.close();
+                receipt.log = { path: logPath, sha256: await hashFile(logPath) };
+              }
               await save();
             }
           })()
@@ -375,8 +474,15 @@ if (
 ) {
   const file = process.argv[2];
   if (!file) throw new Error("Supply an explicit release plan JSON file");
-  const recovery =
-    process.argv[3] === "--recover-stale-lock" ? { staleLockSha256: process.argv[4]! } : {};
+  const recovery: ReleaseRecovery = {};
+  for (let index = 3; index < process.argv.length; index++) {
+    if (process.argv[index] === "--recover-stale-lock")
+      recovery.staleLockSha256 = process.argv[++index]!;
+    else if (process.argv[index] === "--retry-failed") {
+      const entry = { id: process.argv[++index]!, receiptSha256: process.argv[++index]! };
+      recovery.failedPhases = [...(recovery.failedPhases ?? []), entry];
+    } else throw new Error("Unknown release recovery argument");
+  }
   console.log(
     JSON.stringify(
       await runReleasePlan(JSON.parse(await NodeFSP.readFile(file, "utf8")), recovery),

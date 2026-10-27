@@ -1,10 +1,12 @@
 // @effect-diagnostics nodeBuiltinImport:off - Synthetic subprocess and receipt tests use an isolated Git commit and local verifier.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeCrypto from "node:crypto";
+import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "vite-plus/test";
-import { runReleasePlan, type ReleasePlan } from "./release-pipeline.ts";
+import { releasePhaseReceiptSha256, runReleasePlan, type ReleasePlan } from "./release-pipeline.ts";
 
 async function fixture() {
   const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-release-pipeline-"));
@@ -185,4 +187,144 @@ it("rejects phase outputs that would overwrite another phase", async () => {
   await using f = await fixture();
   f.plan.phases[0]!.outputs.push(f.proof);
   await expect(runReleasePlan(f.plan)).rejects.toThrow("Phase outputs must be globally unique");
+});
+
+async function failedIdempotentSeal(f: Awaited<ReturnType<typeof fixture>>, idempotent = true) {
+  const marker = NodePath.join(f.root, "seal-started");
+  const count = NodePath.join(f.root, "seal-count");
+  const pins = f.plan.downloadProof.artifactPinsPath;
+  f.plan.phases[0]!.idempotent = idempotent;
+  f.plan.phases[0]!.command = f.command(
+    `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(count)},'x');
+     if(!fs.existsSync(${JSON.stringify(marker)})){fs.writeFileSync(${JSON.stringify(marker)},'intent');fs.writeFileSync(${JSON.stringify(pins)},'partial');process.exit(7);}
+     fs.writeFileSync(${JSON.stringify(pins)},${JSON.stringify(JSON.stringify({ sourceCommit: f.plan.sourceCommit, version: "1.2.3", zipSha256: "a".repeat(64) }))});`,
+  );
+  await expect(runReleasePlan(f.plan)).rejects.toThrow("Release phase failed: seal (7)");
+  const journal = NodePath.join(f.plan.outputRoot, "release-progress.json");
+  const previous = JSON.parse(await NodeFSP.readFile(journal, "utf8"));
+  return {
+    count,
+    journal,
+    previous: previous.phases.seal,
+    request: {
+      failedPhases: [
+        { id: "seal", receiptSha256: releasePhaseReceiptSha256(previous.phases.seal) },
+      ],
+    },
+  };
+}
+
+it("resumes an opted-in failed phase with exact receipt and partial-output guards while preserving failure evidence", async () => {
+  await using f = await fixture();
+  const failed = await failedIdempotentSeal(f);
+  const result = await runReleasePlan(f.plan, failed.request);
+  expect(await NodeFSP.readFile(failed.count, "utf8")).toBe("xx");
+  expect(result.codeFinishedUtc).toBe(f.plan.codeFinishedUtc);
+  const history = result.phases.seal!.history!;
+  expect(history).toHaveLength(1);
+  expect(JSON.parse(await NodeFSP.readFile(history[0]!.receipt.path, "utf8"))).toEqual(
+    failed.previous,
+  );
+  expect(await NodeFSP.readFile(history[0]!.log.path, "utf8")).toEqual(
+    await NodeFSP.readFile(failed.previous.log.path, "utf8"),
+  );
+  await runReleasePlan(f.plan);
+  expect(await NodeFSP.readFile(failed.count, "utf8")).toBe("xx");
+});
+
+it("refuses a changed failed receipt or changed partial output before repeating a command", async () => {
+  await using f = await fixture();
+  const failed = await failedIdempotentSeal(f);
+  await expect(
+    runReleasePlan(f.plan, { failedPhases: [{ id: "seal", receiptSha256: "0".repeat(64) }] }),
+  ).rejects.toThrow("Reviewed failed receipt differs");
+  await NodeFSP.writeFile(f.plan.downloadProof.artifactPinsPath, "foreign output");
+  await expect(runReleasePlan(f.plan, failed.request)).rejects.toThrow(
+    "Failed phase output changed",
+  );
+  expect(await NodeFSP.readFile(failed.count, "utf8")).toBe("x");
+});
+
+it("does not turn an ordinary failed command into an automatic retry", async () => {
+  await using f = await fixture();
+  const failed = await failedIdempotentSeal(f, false);
+  await expect(runReleasePlan(f.plan, failed.request)).rejects.toThrow("Only opted-in idempotent");
+  expect(await NodeFSP.readFile(failed.count, "utf8")).toBe("x");
+});
+
+it("still refuses changed inputs before recovering an idempotent failure", async () => {
+  await using f = await fixture();
+  const input = NodePath.join(f.root, "input");
+  await NodeFSP.writeFile(input, "reviewed");
+  f.plan.phases[0]!.inputs.push({
+    path: input,
+    sha256: NodeCrypto.createHash("sha256").update("reviewed").digest("hex"),
+  });
+  const failed = await failedIdempotentSeal(f);
+  await NodeFSP.writeFile(input, "changed");
+  await expect(runReleasePlan(f.plan, failed.request)).rejects.toThrow("Release input changed");
+  expect(await NodeFSP.readFile(failed.count, "utf8")).toBe("x");
+});
+
+it("refuses running or incomplete legacy receipts even for an idempotent command", async () => {
+  await using f = await fixture();
+  const failed = await failedIdempotentSeal(f);
+  const journal = JSON.parse(await NodeFSP.readFile(failed.journal, "utf8"));
+  delete journal.phases.seal.failedOutputs;
+  await NodeFSP.writeFile(failed.journal, JSON.stringify(journal));
+  await expect(
+    runReleasePlan(f.plan, {
+      failedPhases: [{ id: "seal", receiptSha256: releasePhaseReceiptSha256(journal.phases.seal) }],
+    }),
+  ).rejects.toThrow("Incomplete failed phase receipt");
+  journal.phases.seal.status = "running";
+  await NodeFSP.writeFile(failed.journal, JSON.stringify(journal));
+  await expect(
+    runReleasePlan(f.plan, {
+      failedPhases: [{ id: "seal", receiptSha256: releasePhaseReceiptSha256(journal.phases.seal) }],
+    }),
+  ).rejects.toThrow("Only opted-in idempotent failed");
+  expect(await NodeFSP.readFile(failed.count, "utf8")).toBe("x");
+});
+
+it("requires fresh remote verification when reconciling uncertain publication", async () => {
+  await using f = await fixture();
+  const marker = NodePath.join(f.root, "publication-intent");
+  const original = f.plan.phases[1]!.command.args[1]!;
+  f.plan.phases[1]!.idempotent = true;
+  f.plan.phases[1]!.command = f.command(
+    `if(!require('node:fs').existsSync(${JSON.stringify(marker)})){${original};require('node:fs').writeFileSync(${JSON.stringify(marker)},'published');process.exit(75);}`,
+  );
+  await expect(runReleasePlan(f.plan)).rejects.toThrow("Release phase failed: download (75)");
+  const journal = JSON.parse(
+    await NodeFSP.readFile(NodePath.join(f.plan.outputRoot, "release-progress.json"), "utf8"),
+  );
+  await expect(
+    runReleasePlan(f.plan, {
+      failedPhases: [
+        { id: "download", receiptSha256: releasePhaseReceiptSha256(journal.phases.download) },
+      ],
+    }),
+  ).rejects.toThrow("Remote download proof is incomplete");
+});
+
+it("does not recover a phase while another release owner is still active", async () => {
+  await using f = await fixture();
+  const server = NodeNet.createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as NodeNet.AddressInfo;
+  const connected = new Promise<NodeNet.Socket>((resolve) => server.once("connection", resolve));
+  const original = f.plan.phases[0]!.command.args[1]!;
+  f.plan.phases[0]!.command = f.command(
+    `const socket=require('node:net').connect(${address.port},'127.0.0.1');socket.once('data',()=>{${original};socket.end();});`,
+  );
+  const first = runReleasePlan(f.plan);
+  const socket = await connected;
+  try {
+    await expect(runReleasePlan(f.plan)).rejects.toMatchObject({ code: "EEXIST" });
+  } finally {
+    socket.end("continue");
+    await first;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

@@ -53,6 +53,9 @@ jobs:
           scripts/lan/native-dependency-cache.test.ts
           scripts/lan/native-resource-cache.test.ts
           scripts/lan/release-pipeline.test.ts
+          scripts/lan/release-runner.test.ts
+          scripts/lan/release-git-pins.test.ts
+          scripts/lan/electron-cache.test.ts
           scripts/lan/windows-build-execution.test.ts
           scripts/lan/windows-build-preparation.test.ts
           scripts/lib/check-inputs.test.ts

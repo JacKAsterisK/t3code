@@ -4554,22 +4554,37 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     "--publish",
     "never",
   ];
+  if (execution !== undefined)
+    yield* measureDesktopStage(
+      "desktop.electron-cache",
+      Effect.tryPromise({
+        try: () => execution.prepareElectronCache(electronVersion),
+        catch: () =>
+          new WindowsBuildExecutionError({
+            message:
+              "The approved Electron archive/checksum cache failed validation before packaging.",
+          }),
+      }),
+    );
   const builderCommand =
     execution === undefined
       ? yield* resolveSpawnCommand("vp", builderArgs, { env: buildEnv })
       : undefined;
-  yield* runCommand(
-    execution !== undefined
-      ? asChildProcess(execution.builder(stageAppDir))
-      : ChildProcess.make(builderCommand!.command, builderCommand!.args, {
-          cwd: repoRoot,
-          env: buildEnv,
-          shell: builderCommand!.shell,
-        }),
-    {
-      label: `vp exec --filter @t3tools/desktop -- electron-builder --projectDir ${stageAppDir} ${platformConfig.cliFlag} --${options.arch} --publish never`,
-      verbose: options.verbose,
-    },
+  yield* measureDesktopStage(
+    "desktop.packaging",
+    runCommand(
+      execution !== undefined
+        ? asChildProcess(execution.builder(stageAppDir))
+        : ChildProcess.make(builderCommand!.command, builderCommand!.args, {
+            cwd: repoRoot,
+            env: buildEnv,
+            shell: builderCommand!.shell,
+          }),
+      {
+        label: `vp exec --filter @t3tools/desktop -- electron-builder --projectDir ${stageAppDir} ${platformConfig.cliFlag} --${options.arch} --publish never`,
+        verbose: options.verbose,
+      },
+    ),
   );
 
   const stageDistDir = path.join(stageAppDir, "dist");

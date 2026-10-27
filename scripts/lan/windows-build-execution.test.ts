@@ -549,6 +549,11 @@ it("binds Cargo, Rust, MSVC, SDK, Python and builder to reviewed paths without a
   );
   assert.equal(builder.executable, execution.node);
   assert.equal(builder.args[0], "C:\\T3LAN\\Tools\\javascript\\builder\\cli.js");
+  assert.include(
+    builder.args,
+    "--config.electronDownload.cache=C:\\T3LAN\\Output\\caches\\electronCache",
+  );
+  assert.include(builder.args, "--config.electronDownload.isVerifyChecksum=true");
   assert.deepEqual(builder.args.slice(-2), ["--publish", "never"]);
 });
 

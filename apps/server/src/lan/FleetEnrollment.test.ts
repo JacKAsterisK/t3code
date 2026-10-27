@@ -174,6 +174,13 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
                       return link;
                     }),
                   listPairingLinks: () => Effect.succeed(activeLinks),
+                  revokePairingLink: (id) =>
+                    Effect.sync(() => {
+                      const index = activeLinks.findIndex((link) => link.id === id);
+                      if (index === -1) return false;
+                      activeLinks.splice(index, 1);
+                      return true;
+                    }),
                 }),
               ),
             ),
@@ -198,6 +205,9 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
         services = yield* build();
       }),
       record: () => record,
+      replaceRecord: (next: Authority.FleetVaultRecord | undefined) => {
+        record = next;
+      },
       saves: () => saves,
       network: () => ({ starts, closes }),
     };
@@ -248,6 +258,108 @@ const configLayer = Config.ServerConfig.layerTest(process.cwd(), {
 });
 
 it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
+  it.effect("does not replace an enrolled identity when its vault is temporarily missing", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(false, "accessible");
+      yield* f.start();
+      const originalAuthority = yield* f.fs.readFileString(f.authorityFile);
+      f.a.replaceRecord(undefined);
+      const failed = yield* f.a.enrollment
+        .configure({
+          operation: "join",
+          confirmed: true,
+          origin: "https://alpha.example.test",
+          autoPickup: true,
+          access: "standard",
+        })
+        .pipe(Effect.flip);
+      assert.equal(failed.reason, "configuration");
+      assert.equal(f.a.record(), undefined);
+      assert.equal(yield* f.fs.readFileString(f.authorityFile), originalAuthority);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect(
+    "recovers a saved replacement enrollment and missing TLS through the Windows share",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(true, "accessible");
+        const origin = "https://192.168.40.10:4001";
+        yield* f.a.enrollment.configure({
+          operation: "start",
+          confirmed: true,
+          origin,
+          managedTls: true,
+          autoPickup: true,
+          access: "read-only",
+        });
+        const original = f.a.record()!;
+        yield* f.b.enrollment.configure({
+          operation: "join",
+          confirmed: true,
+          origin: "https://192.168.40.11:4001",
+          managedTls: true,
+          autoPickup: true,
+          access: "standard",
+        });
+        yield* f.sync(f.a, [f.a.environmentId]);
+        yield* f.sync(f.b, [f.b.environmentId]);
+        assert.equal((yield* f.sync(f.a, [f.a.environmentId])).incoming.length, 1);
+        assert.equal(f.issued.length, 2);
+        const authorityBytes = yield* f.fs.readFileString(f.authorityFile);
+        const replacement = Authority.generateFleetIdentity(
+          f.a.environmentId,
+          original.fleetId,
+          original.rootPublicKey,
+          false,
+          { autoPickup: true, access: "read-only" },
+          original.machineId,
+        );
+        f.a.replaceRecord(replacement);
+        const peer = Authority.identityPeer(replacement, "Test alpha", origin);
+        yield* f.fs.makeDirectory(f.path.join(f.root, "fleet-enrollment"), { recursive: true });
+        yield* writeFleetJson(
+          f.path.join(f.root, "fleet-enrollment", `${peer.machineId}.json`),
+          Authority.enrollmentRequest(replacement, peer),
+        ).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+        yield* f.a.restart;
+        const pending = yield* f.a.enrollment.status;
+        assert.equal(pending.managedTls, true);
+        const resolved = yield* f.a.enrollment.resolve;
+        assert.equal(
+          resolved?.peers.find((p) => p.environmentId === f.a.environmentId)?.signingPublicKey,
+          peer.signingPublicKey,
+        );
+        assert.equal((yield* f.a.enrollment.status).stage, "active");
+        assert.equal((yield* f.a.enrollment.status).tlsReady, true);
+        assert.equal(f.a.record()!.encryptionPrivateKey, replacement.encryptionPrivateKey);
+        assert.equal(f.a.record()!.signingPrivateKey, replacement.signingPrivateKey);
+        assert.equal(f.a.record()!.access, "read-only");
+        assert.equal(yield* f.fs.readFileString(f.authorityFile), authorityBytes);
+        yield* f.sync(f.a, [f.a.environmentId]);
+        yield* f.sync(f.b, [f.b.environmentId]);
+        const receivedA = yield* f.sync(f.a, [f.a.environmentId]);
+        const receivedB = yield* f.sync(f.b, [f.b.environmentId]);
+        assert.equal(receivedA.incoming[0]?.environmentId, f.b.environmentId);
+        assert.equal(receivedB.incoming[0]?.environmentId, f.a.environmentId);
+        assert.equal(
+          receivedB.incoming[0]?.tls?.publicKeySha256,
+          f.a.record()!.tls!.publicKeySha256,
+        );
+        assert.equal(f.issued.length, 4);
+        const saved = f.a.record()!;
+        yield* writeFleetJson(
+          f.path.join(f.root, "fleet-enrollment", `${peer.machineId}.json`),
+          Authority.enrollmentRequest(replacement, peer),
+        ).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+        yield* f.a.restart;
+        yield* f.a.enrollment.resolve;
+        assert.equal((yield* f.a.enrollment.status).stage, "active");
+        assert.deepEqual(f.a.record()!.tls, saved.tls);
+        assert.equal(f.a.record()!.signingPrivateKey, saved.signingPrivateKey);
+      }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect(
     "links effective SMB peers from owner and non-owner without rewriting signed authority",
     () =>

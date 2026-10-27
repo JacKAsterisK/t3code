@@ -53,6 +53,7 @@ const setup = Effect.fn("FleetTest.setup")(function* (
   };
   yield* writeFleetRoster(rosterPath, roster);
   const issued: string[] = [];
+  const revoked: string[] = [];
   const active = new Map<string, AuthPairingLink[]>();
   const create = Effect.fn("FleetTest.create")(function* (identity: typeof a) {
     const stateDir = path.join(root, identity.peer.machineId);
@@ -125,6 +126,17 @@ const setup = Effect.fn("FleetTest.setup")(function* (
                   return link;
                 }),
               listPairingLinks: () => Effect.sync(() => active.get(identity.peer.machineId) ?? []),
+              revokePairingLink: (id) =>
+                Effect.sync(() => {
+                  const links = active.get(identity.peer.machineId) ?? [];
+                  if (!links.some((link) => link.id === id)) return false;
+                  active.set(
+                    identity.peer.machineId,
+                    links.filter((link) => link.id !== id),
+                  );
+                  revoked.push(id);
+                  return true;
+                }),
             }),
           ),
         ),
@@ -148,9 +160,27 @@ const setup = Effect.fn("FleetTest.setup")(function* (
     sender,
     recipient,
     issued,
+    revoked,
     sync,
     fs,
     path,
+    rotate: Effect.fn("FleetTest.rotate")(function* (machineId: string) {
+      const rotated = syntheticFleetPeer(machineId);
+      const peers = [a.peer, b.peer].map((peer) =>
+        peer.machineId === machineId ? rotated.peer : peer,
+      );
+      for (const local of [sender, recipient])
+        yield* writeFleetJson(local.privateFile, {
+          ...local.config,
+          ...(local.config.machineId === machineId
+            ? {
+                encryptionPrivateKey: rotated.encryptionPrivateKey,
+                signingPrivateKey: rotated.signingPrivateKey,
+              }
+            : {}),
+          peers,
+        });
+    }),
     consume: (machineId: string) => {
       active.set(machineId, []);
     },
@@ -159,6 +189,68 @@ const setup = Effect.fn("FleetTest.setup")(function* (
 const testConfig = Config.ServerConfig.layerTest(process.cwd(), { prefix: "t3-fleet-config-" });
 
 it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
+  it.effect.each(["alpha", "beta"])(
+    "replaces an obsolete %s identity delivery only after signed rejection and revoking its unused grant",
+    (machineId) =>
+      Effect.gen(function* () {
+        const f = yield* setup(true, false, true);
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        yield* f.sync(f.recipient.service);
+        const deliveryPath = f.path.join(
+          f.deliveryDirectory,
+          `${Delivery.deliveryFileName("alpha", "beta")}.json`,
+        );
+        const original = yield* f.fs.readFileString(deliveryPath);
+        yield* f.rotate(machineId);
+        yield* TestClock.adjust("1 second");
+        assert.equal((yield* f.sync(f.recipient.service)).incoming.length, 0);
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        const replacement = yield* f.sync(f.recipient.service);
+        assert.equal(replacement.incoming.length, 1);
+        assert.deepEqual(f.revoked, ["synthetic-1"]);
+        assert.deepEqual(f.issued, ["alpha", "alpha"]);
+        assert.notEqual(yield* f.fs.readFileString(deliveryPath), original);
+        const archived = (yield* f.fs.readDirectory(f.deliveryDirectory)).find((name) =>
+          name.includes(".obsolete-"),
+        );
+        assert.isDefined(archived);
+        assert.equal(
+          yield* f.fs.readFileString(f.path.join(f.deliveryDirectory, archived!)),
+          original,
+        );
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        assert.deepEqual(f.issued, ["alpha", "alpha"]);
+      }).pipe(Effect.provide(testConfig)),
+  );
+  it.effect.each(["consumed", "missing-journal", "tampered-rejection"])(
+    "keeps obsolete delivery %s uncertain without revoking or minting",
+    (failure) =>
+      Effect.gen(function* () {
+        const f = yield* setup(true, false, true);
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        yield* f.rotate("alpha");
+        yield* TestClock.adjust("1 second");
+        yield* f.sync(f.recipient.service);
+        if (failure === "consumed") f.consume("alpha");
+        if (failure === "missing-journal")
+          yield* f.fs.remove(f.path.join(f.sender.stateDir, "lan-fleet-state.json"));
+        if (failure === "tampered-rejection") {
+          const file = f.path.join(
+            f.deliveryDirectory,
+            `${Delivery.deliveryFileName("beta", "beta")}.catalog.json`,
+          );
+          const raw = yield* f.fs.readFileString(file);
+          yield* f.fs.writeFileString(file, raw.replace('"signature":"', '"signature":"tampered'));
+        }
+        const result = yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        if (failure !== "tampered-rejection") assert.equal(result.machines[1]?.status, "uncertain");
+        assert.equal((yield* f.sync(f.recipient.service)).incoming.length, 0);
+        assert.deepEqual(f.issued, ["alpha"]);
+        assert.deepEqual(f.revoked, []);
+      }).pipe(Effect.provide(testConfig)),
+  );
   it.effect(
     "uses only the verified sender catalog hostname while preserving the canonical TLS identity",
     () =>

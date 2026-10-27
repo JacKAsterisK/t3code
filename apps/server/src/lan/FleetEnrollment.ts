@@ -85,8 +85,8 @@ const make = Effect.gen(function* () {
       ? yield* readFleetJson(paths.rosterPath, FleetRoster)
       : { version: 1 as const, machines: [] };
     yield* Effect.try({ try: () => validateRoster(roster), catch: configurationError });
-    // A request proves possession of the joining keys; Windows SMB access is the admission boundary.
-    // The signed authority remains untouched, and any explicit authority identity wins, including revocation.
+    // Windows share access admits current signed enrollments; explicit revocations still win.
+    // Authority signatures and legacy owner approval remain unchanged outside this share.
     const peers = [...(authority?.peers ?? [])];
     if (sharedFolderTrust && authority !== undefined && (yield* fs.exists(requestsDirectory))) {
       const names = yield* fs.readDirectory(requestsDirectory);
@@ -110,14 +110,23 @@ const make = Effect.gen(function* () {
               machine.environmentId === peer.environmentId &&
               machine.origin === peer.origin &&
               machine.enabled,
-          ) &&
-          !peers.some(
+          )
+        ) {
+          const index = peers.findIndex(
             (existing) =>
               existing.machineId === peer.machineId ||
               existing.environmentId === peer.environmentId,
+          );
+          const existing = peers[index];
+          if (existing === undefined) peers.push(peer);
+          else if (
+            existing.enabled &&
+            existing.machineId === peer.machineId &&
+            existing.environmentId === peer.environmentId &&
+            existing.origin === peer.origin
           )
-        )
-          peers.push(peer);
+            peers[index] = peer;
+        }
       }
     }
     if (peers.length > 100) return yield* configurationError();
@@ -167,8 +176,7 @@ const make = Effect.gen(function* () {
       origin,
       managedTls:
         current?.record?.tls !== undefined ||
-        (local === undefined &&
-          !advertised.some((endpoint) => endpoint.httpBaseUrl.startsWith("https://")) &&
+        (!advertised.some((endpoint) => endpoint.httpBaseUrl.startsWith("https://")) &&
           suggestedTlsOrigins.length > 0),
       suggestedTlsOrigins,
       tlsEnabled: current?.record?.tls !== undefined && current.record.tlsEnabled !== false,
@@ -312,6 +320,14 @@ const make = Effect.gen(function* () {
                       (fresh.authority === undefined ||
                         (!fresh.sharedFolderTrust &&
                           Authority.ownerVerificationCode(fresh.authority) !== input.ownerCode))
+                    )
+                      return yield* configurationError();
+                    if (
+                      fresh.record === undefined &&
+                      (existing !== undefined ||
+                        fresh.authority?.peers.some(
+                          (peer) => peer.environmentId === descriptor.environmentId,
+                        ))
                     )
                       return yield* configurationError();
                     const original =
@@ -536,9 +552,47 @@ const make = Effect.gen(function* () {
   );
 
   const resolve = Effect.gen(function* () {
-    const current = yield* load();
+    let current = yield* load();
     if (current?.record === undefined) return undefined;
     if (!current.record.enabled || current.authority === undefined) return null;
+    const localId = current.record.environmentId;
+    const local = current.roster.machines.find(
+      (machine) => machine.environmentId === localId && machine.enabled,
+    );
+    const ownPeer = current.peers.find((peer) => peer.environmentId === localId && peer.enabled);
+    const ownIdentity =
+      local === undefined
+        ? undefined
+        : Authority.identityPeer(current.record, local.label, local.origin);
+    if (
+      current.sharedFolderTrust &&
+      current.record.tlsEnabled !== false &&
+      local !== undefined &&
+      ownPeer !== undefined &&
+      ownPeer.machineId === current.record.machineId &&
+      ownPeer.origin === local.origin &&
+      ownPeer.signingPublicKey === ownIdentity?.signingPublicKey &&
+      ownPeer.encryptionPublicKey === ownIdentity?.encryptionPublicKey &&
+      Option.isSome(transport) &&
+      (current.record.tls !== undefined ||
+        !(yield* endpoints.resolve()).some((endpoint) =>
+          endpoint.httpBaseUrl.startsWith("https://"),
+        )) &&
+      (current.record.tls === undefined ||
+        Authority.peerVerificationCode(ownPeer) !== Authority.peerVerificationCode(ownIdentity!))
+    ) {
+      const tls = current.record.tls ?? (yield* transport.value.prepare(local.origin));
+      const restored = { ...current.record, tls, tlsEnabled: true };
+      yield* transport.value.persist(restored);
+      const peer = Authority.identityPeer(restored, local.label, local.origin);
+      yield* fs.makeDirectory(current.requestsDirectory, { recursive: true });
+      yield* writeFleetJson(
+        path.join(current.requestsDirectory, `${peer.machineId}.json`),
+        Authority.enrollmentRequest(restored, peer),
+      );
+      current = yield* load();
+      if (current?.record === undefined || current.authority === undefined) return null;
+    }
     if (current.record.tls !== undefined && current.record.tlsEnabled === false) return null;
     if (
       current.record.tls !== undefined &&

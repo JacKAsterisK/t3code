@@ -83,6 +83,9 @@ export const FleetCatalog = Schema.Struct({
     Schema.Array(Header.fields.deliveryId).check(Schema.isMaxLength(100)),
   ),
   connectHost: Schema.optionalKey(FleetConnectHost),
+  rejectedDeliveryIds: Schema.optionalKey(
+    Schema.Array(Header.fields.deliveryId).check(Schema.isMaxLength(100)),
+  ),
   signature: Text,
 });
 type FleetCatalog = typeof FleetCatalog.Type;
@@ -96,6 +99,9 @@ const catalogData = (value: FleetCatalog) =>
     value.connectedEnvironmentIds,
     ...(value.availableDeliveryIds === undefined ? [] : [value.availableDeliveryIds]),
     ...(value.connectHost === undefined ? [] : [["connectHost", value.connectHost]]),
+    ...(value.rejectedDeliveryIds === undefined
+      ? []
+      : [["rejectedDeliveryIds", value.rejectedDeliveryIds]]),
   ]);
 
 export function makeFleetCatalog(
@@ -105,6 +111,7 @@ export function makeFleetCatalog(
   now: number,
   availableDeliveryIds?: FleetCatalog["availableDeliveryIds"],
   connectHost?: FleetCatalog["connectHost"],
+  rejectedDeliveryIds?: FleetCatalog["rejectedDeliveryIds"],
 ): FleetCatalog {
   if (connectHost !== undefined && !isConnectHost(connectHost))
     throw new Error("Invalid fleet connection hostname");
@@ -117,6 +124,7 @@ export function makeFleetCatalog(
     connectedEnvironmentIds,
     ...(availableDeliveryIds === undefined ? {} : { availableDeliveryIds }),
     ...(connectHost === undefined ? {} : { connectHost }),
+    ...(rejectedDeliveryIds === undefined ? {} : { rejectedDeliveryIds }),
     signature: "",
   };
   return {
@@ -139,6 +147,9 @@ export function verifyFleetCatalog(value: FleetCatalog, peer: FleetPeer, now: nu
     (value.connectHost === undefined || isConnectHost(value.connectHost)) &&
     (value.availableDeliveryIds === undefined ||
       new Set(value.availableDeliveryIds).size === value.availableDeliveryIds.length) &&
+    (value.rejectedDeliveryIds === undefined ||
+      (value.rejectedDeliveryIds.length <= 100 &&
+        new Set(value.rejectedDeliveryIds).size === value.rejectedDeliveryIds.length)) &&
     NodeCrypto.verify(
       null,
       Buffer.from(catalogData(value)),

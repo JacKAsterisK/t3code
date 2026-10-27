@@ -150,6 +150,7 @@ const make = Effect.gen(function* () {
             const incoming: Array<LanFleetSyncResult["incoming"][number]> = [];
             const activeLinks = sharedFolder ? [...(yield* auth.listPairingLinks())] : [];
             const availableDeliveryIds = new Set<string>();
+            const rejectedDeliveryIds = new Set<string>();
             const activeGrant = (
               outgoingKey: string,
               expiresAt: number,
@@ -208,7 +209,8 @@ const make = Effect.gen(function* () {
                       catalog.connectedEnvironmentIds.includes(self.environmentId);
                   }
                 }
-                const outgoingExists = yield* fs.exists(outFile);
+                let outgoingExists = yield* fs.exists(outFile);
+                let outgoingRejected = false;
                 if (sharedFolder && outgoingExists && !recipientConnected) {
                   const existing = yield* readFleetJson(outFile, Delivery.Delivery);
                   const valid = yield* Effect.try(() =>
@@ -219,7 +221,32 @@ const make = Effect.gen(function* () {
                     existing.header.expiresAt,
                     sent?.pairingLinkId,
                   );
+                  outgoingRejected =
+                    peerCatalog?.rejectedDeliveryIds?.includes(existing.header.deliveryId) === true;
                   if (
+                    requested.has(peer.machineId) &&
+                    recipientReady &&
+                    outgoingRejected &&
+                    existing.header.senderId === self.machineId &&
+                    existing.header.recipientId === peer.machineId &&
+                    sent !== undefined &&
+                    sent.status !== "connected" &&
+                    sent.deliveryId === existing.header.deliveryId &&
+                    sent.expiresAt === existing.header.expiresAt &&
+                    grant !== undefined &&
+                    (yield* auth.revokePairingLink(grant.id))
+                  ) {
+                    // Only the issuing server can retire the exact still-unused grant before replacement.
+                    yield* fs.rename(outFile, `${outFile}.obsolete-${existing.header.deliveryId}`);
+                    activeLinks.splice(activeLinks.indexOf(grant), 1);
+                    delete journal[`sent:${outgoingKey}`];
+                    yield* writeFleetJson(journalFile, journal);
+                    sent = undefined;
+                    outgoingExists = false;
+                    outgoingRejected = false;
+                  }
+                  if (
+                    outgoingExists &&
                     valid &&
                     grant !== undefined &&
                     (sent === undefined || sent.deliveryId === existing.header.deliveryId)
@@ -296,8 +323,9 @@ const make = Effect.gen(function* () {
                   if (sharedFolder) availableDeliveryIds.add(sent.deliveryId);
                 }
                 if (sent !== undefined) {
-                  status =
-                    sent.status === "connected"
+                  status = outgoingRejected
+                    ? "uncertain"
+                    : sent.status === "connected"
                       ? "connected"
                       : sent.status === "publishing"
                         ? "uncertain"
@@ -319,14 +347,26 @@ const make = Effect.gen(function* () {
                 if (yield* fs.exists(inFile)) {
                   const delivery = yield* readFleetJson(inFile, Delivery.Delivery);
                   const received = journal[`received:${incomingKey}`];
+                  const grantAvailable =
+                    sharedFolder &&
+                    peerCatalog?.availableDeliveryIds?.includes(delivery.header.deliveryId) ===
+                      true;
                   if (
                     delivery.header.expiresAt > now &&
-                    (received === undefined || received.deliveryId === delivery.header.deliveryId)
+                    (received === undefined ||
+                      received.deliveryId === delivery.header.deliveryId ||
+                      (grantAvailable && received.status !== "connected"))
                   ) {
-                    const payload = yield* Effect.try(() =>
+                    const open = Effect.try(() =>
                       Delivery.openDelivery(delivery, config, peer, self, now),
                     ).pipe(Effect.mapError(() => new LanFleetError({ reason: "configuration" })));
-                    if (input.connectedEnvironmentIds.includes(peer.environmentId)) {
+                    const payload = yield* sharedFolder
+                      ? open.pipe(Effect.orElseSucceed(() => undefined))
+                      : open;
+                    if (payload === undefined) {
+                      rejectedDeliveryIds.add(delivery.header.deliveryId);
+                      status = "uncertain";
+                    } else if (input.connectedEnvironmentIds.includes(peer.environmentId)) {
                       yield* writeFleetJson(
                         path.join(config.deliveryDirectory, `${incomingKey}.receipt.json`),
                         Delivery.makeReceipt(delivery, config),
@@ -346,7 +386,8 @@ const make = Effect.gen(function* () {
                           peerCatalog?.availableDeliveryIds?.includes(
                             delivery.header.deliveryId,
                           ) === true &&
-                          (received.senderCatalogCreatedAt === undefined ||
+                          (received.deliveryId !== delivery.header.deliveryId ||
+                            received.senderCatalogCreatedAt === undefined ||
                             peerCatalog.createdAt > received.senderCatalogCreatedAt))) &&
                       incoming.length < 1 &&
                       (input.mode === "manual" || (input.mode === "automatic" && config.autoPickup))
@@ -408,6 +449,9 @@ const make = Effect.gen(function* () {
                   now,
                   sharedFolder ? [...availableDeliveryIds] : undefined,
                   sharedFolder ? connectHost : undefined,
+                  sharedFolder && rejectedDeliveryIds.size > 0
+                    ? [...rejectedDeliveryIds]
+                    : undefined,
                 ),
               );
             return {

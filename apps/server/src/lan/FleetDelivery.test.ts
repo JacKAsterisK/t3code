@@ -35,6 +35,30 @@ const fixture = () => {
 };
 
 describe("recipient-protected fleet deliveries", () => {
+  it("signs bounded exact delivery rejections without changing legacy signatures", () => {
+    const f = fixture(),
+      id = f.envelope.header.deliveryId;
+    const legacy = Delivery.makeFleetCatalog(f.senderConfig, f.a.peer, [], now, [id]);
+    const rejected = Delivery.makeFleetCatalog(f.senderConfig, f.a.peer, [], now, [], undefined, [
+      id,
+    ]);
+    expect(Delivery.verifyFleetCatalog(rejected, f.a.peer, now)).toBe(true);
+    expect(
+      Delivery.verifyFleetCatalog({ ...rejected, rejectedDeliveryIds: [] }, f.a.peer, now),
+    ).toBe(false);
+    expect(
+      Delivery.verifyFleetCatalog({ ...legacy, rejectedDeliveryIds: [id] }, f.a.peer, now),
+    ).toBe(false);
+    expect(
+      Delivery.makeFleetCatalog(f.senderConfig, f.a.peer, [], now, [id], undefined, undefined)
+        .signature,
+    ).toBe(legacy.signature);
+    const duplicate = Delivery.makeFleetCatalog(f.senderConfig, f.a.peer, [], now, [], undefined, [
+      id,
+      id,
+    ]);
+    expect(Delivery.verifyFleetCatalog(duplicate, f.a.peer, now)).toBe(false);
+  });
   it("binds available delivery IDs to the existing signed catalog while accepting legacy catalogs", () => {
     const f = fixture(),
       id = f.envelope.header.deliveryId;

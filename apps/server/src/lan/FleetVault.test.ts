@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { EnvironmentId, FleetMachineId } from "@t3tools/contracts";
 import { createFleetTlsCertificate } from "@t3tools/shared/fleetTlsCertificate";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { vi } from "vite-plus/test";
@@ -16,39 +17,56 @@ const keyring = vi.hoisted(() => ({
   secret: undefined as Uint8Array | number[] | null | undefined,
   writeFailure: false,
   secretWriteAttempts: 0,
+  threadedReadFailure: false,
 }));
-vi.mock("@napi-rs/keyring", () => ({
-  AsyncEntry: class {
-    async getSecret() {
+vi.mock("@napi-rs/keyring", () => {
+  class Entry {
+    getSecret() {
       if (keyring.failure) throw new Error("synthetic keyring failure");
       return (
         keyring.secret ??
         (typeof keyring.value === "string" ? Buffer.from(keyring.value, "utf16le") : keyring.value)
       );
     }
-    async getPassword() {
+    getPassword() {
       if (keyring.failure) throw new Error("synthetic keyring failure");
       return keyring.value;
     }
-    async setPassword(value: string) {
+    setPassword(value: string) {
       if (Buffer.byteLength(value, "utf16le") > 2560)
         throw new Error("synthetic Windows credential size limit");
       keyring.value = value;
     }
-    async setSecret(value: Uint8Array) {
+    setSecret(value: Uint8Array) {
       keyring.secretWriteAttempts++;
       if (keyring.writeFailure || value.length > 2560)
         throw new Error("synthetic credential write failure");
-      // The native async keyring returns a plain array despite its typed-array declaration.
+      // Native keyring versions can return a plain array despite the async typed-array declaration.
       keyring.secret = Array.from(value);
       keyring.value = undefined;
     }
-  },
-}));
+  }
+  return {
+    Entry,
+    AsyncEntry: class {
+      readonly entry = new Entry();
+      async getSecret() {
+        return keyring.threadedReadFailure ? null : this.entry.getSecret();
+      }
+      async getPassword() {
+        return this.entry.getPassword();
+      }
+      async setSecret(value: Uint8Array) {
+        this.entry.setSecret(value);
+      }
+    },
+  };
+});
 
 const environmentId = EnvironmentId.make("environment:fleet-vault-synthetic");
 const vaultLayer = FleetVault.layer.pipe(
   Layer.provide(Config.ServerConfig.layerTest(process.cwd(), { prefix: "t3-fleet-vault-test-" })),
+  Layer.provide(Layer.succeed(HostProcess.Platform, "win32")),
   Layer.provide(
     Layer.mock(ServerEnvironment.ServerEnvironment)({
       getEnvironmentId: Effect.succeed(environmentId),
@@ -75,9 +93,63 @@ const reset = () => {
   keyring.failure = false;
   keyring.writeFailure = false;
   keyring.secretWriteAttempts = 0;
+  keyring.threadedReadFailure = false;
 };
 
 it.layer(NodeServices.layer)("fleet credential storage", (it) => {
+  it.effect(
+    "reads the existing Windows identity when a background-thread read would be absent",
+    () =>
+      Effect.gen(function* () {
+        reset();
+        const record = recordFixture();
+        keyring.value = JSON.stringify(record);
+        keyring.threadedReadFailure = true;
+        assert.deepEqual(yield* read, record);
+        assert.equal(keyring.secretWriteAttempts, 0);
+      }).pipe(Effect.provide(vaultLayer)),
+  );
+
+  it.effect(
+    "refuses a disappearing identity and its replacement without forgetting saved keys",
+    () =>
+      Effect.gen(function* () {
+        reset();
+        const record = recordFixture();
+        const encoded = JSON.stringify(record);
+        keyring.value = encoded;
+        const vault = yield* FleetVault.FleetVault;
+        assert.deepEqual(yield* vault.read, record);
+        keyring.value = null;
+        assert.equal((yield* vault.read.pipe(Effect.flip)).reason, "configuration");
+        assert.equal(
+          (yield* vault.save({ ...record, signingPrivateKey: "replacement-key" }).pipe(Effect.flip))
+            .reason,
+          "configuration",
+        );
+        assert.equal(keyring.secretWriteAttempts, 0);
+        keyring.value = encoded;
+        assert.deepEqual(yield* vault.read, record);
+      }).pipe(Effect.provide(vaultLayer)),
+  );
+
+  it.effect(
+    "serializes simultaneous settings and revision saves without losing either revision",
+    () =>
+      Effect.gen(function* () {
+        reset();
+        const record = recordFixture();
+        keyring.value = JSON.stringify(record);
+        const vault = yield* FleetVault.FleetVault;
+        yield* Effect.all(
+          [vault.save({ ...record, lastRevision: 7 }), vault.save({ ...record, lastRevision: 3 })],
+          { concurrency: "unbounded" },
+        );
+        assert.deepEqual(yield* vault.read, { ...record, lastRevision: 7 });
+        assert.equal(keyring.secretWriteAttempts, 2);
+      }).pipe(Effect.provide(vaultLayer)),
+  );
+
   it.effect.each([
     { label: "null", value: null },
     { label: "undefined", value: undefined },

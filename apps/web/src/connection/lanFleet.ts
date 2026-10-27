@@ -148,6 +148,9 @@ export function useLanFleet() {
         }
         const { incoming, ...summary } = result.value;
         appAtomRegistry.set(summaryAtom, summary);
+        const setup = appAtomRegistry.get(setupAtom);
+        if (summary.enabled && (setup?.stage !== "active" || setup.tlsReady === false))
+          await refreshSetup();
         if (incoming.length === 0) return true;
         for (const delivery of incoming) {
           const connected = await connect({

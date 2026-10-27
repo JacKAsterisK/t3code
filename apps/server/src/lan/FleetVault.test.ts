@@ -13,7 +13,7 @@ import { generateFleetIdentity } from "./FleetAuthority.ts";
 const keyring = vi.hoisted(() => ({
   value: null as string | null | undefined,
   failure: false,
-  secret: undefined as Uint8Array | null | undefined,
+  secret: undefined as Uint8Array | number[] | null | undefined,
   writeFailure: false,
   secretWriteAttempts: 0,
 }));
@@ -39,7 +39,8 @@ vi.mock("@napi-rs/keyring", () => ({
       keyring.secretWriteAttempts++;
       if (keyring.writeFailure || value.length > 2560)
         throw new Error("synthetic credential write failure");
-      keyring.secret = Uint8Array.from(value);
+      // The native async keyring returns a plain array despite its typed-array declaration.
+      keyring.secret = Array.from(value);
       keyring.value = undefined;
     }
   },

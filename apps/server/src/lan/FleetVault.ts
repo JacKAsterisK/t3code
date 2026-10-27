@@ -34,9 +34,11 @@ const make = Effect.gen(function* () {
   const lock = path.join(config.stateDir, "lan-fleet-vault.lock");
   const read = Effect.tryPromise({
     try: async () => {
-      const raw = await entry().getSecret();
+      const result = await entry().getSecret();
       // Windows keyring returns null for an absent credential despite its TypeScript declaration.
-      if (raw === undefined || raw === null) return undefined;
+      if (result === undefined || result === null) return undefined;
+      // Native keyring builds can return number[] despite declaring Uint8Array.
+      const raw = Uint8Array.from(result);
       if (
         raw.length >= secretPrefix.length &&
         secretPrefix.every((value, index) => raw[index] === value)

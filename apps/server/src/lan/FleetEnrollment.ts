@@ -389,6 +389,43 @@ const make = Effect.gen(function* () {
                     return;
                   }
                   const { record, authority } = fresh;
+                  if (input.operation === "link" && fresh.sharedFolderTrust) {
+                    if (
+                      record === undefined ||
+                      authority === undefined ||
+                      !record.enabled ||
+                      record.environmentId !== descriptor.environmentId
+                    )
+                      return yield* configurationError();
+                    const enabledPeer = (machineId: string) =>
+                      fresh.peers.find(
+                        (peer) =>
+                          peer.machineId === machineId &&
+                          peer.enabled &&
+                          fresh.roster.machines.some(
+                            (machine) =>
+                              machine.machineId === peer.machineId &&
+                              machine.environmentId === peer.environmentId &&
+                              machine.origin === peer.origin &&
+                              machine.enabled,
+                          ),
+                      );
+                    const self = enabledPeer(record.machineId);
+                    const selected = [...new Set([record.machineId, ...input.machineIds])];
+                    if (
+                      self === undefined ||
+                      selected.length < 2 ||
+                      selected.some((id) => enabledPeer(id) === undefined) ||
+                      Authority.peerVerificationCode(self) !==
+                        Authority.peerVerificationCode(
+                          Authority.identityPeer(record, self.label, self.origin),
+                        )
+                    )
+                      return yield* configurationError();
+                    // Shared-folder admission already supplies the effective automatic campaign.
+                    // Linking validates those peers without requiring the owner or rewriting authority.
+                    return;
+                  }
                   if (
                     record?.rootPrivateKey === undefined ||
                     authority === undefined ||

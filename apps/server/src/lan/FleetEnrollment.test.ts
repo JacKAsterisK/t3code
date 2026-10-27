@@ -245,6 +245,106 @@ const configLayer = Config.ServerConfig.layerTest(process.cwd(), {
 
 it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
   it.effect(
+    "links effective SMB peers from owner and non-owner without rewriting signed authority",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false, "accessible");
+        yield* f.start();
+        yield* f.b.enrollment.configure({
+          operation: "join",
+          confirmed: true,
+          origin: "https://beta.example.test",
+          autoPickup: true,
+          access: "standard",
+        });
+        const original = yield* f.fs.readFileString(f.authorityFile);
+        assert.equal(
+          (yield* f.a.enrollment.status).peers.find(
+            (peer) => peer.environmentId === f.b.environmentId,
+          )?.status,
+          "approved",
+        );
+        assert.equal(
+          (yield* f.a.enrollment.configure({
+            operation: "link",
+            confirmed: true,
+            machineIds: [f.b.record()!.machineId],
+          })).stage,
+          "active",
+        );
+        assert.equal(
+          (yield* f.b.enrollment.configure({
+            operation: "link",
+            confirmed: true,
+            machineIds: [f.a.record()!.machineId],
+          })).stage,
+          "active",
+        );
+        assert.equal(yield* f.fs.readFileString(f.authorityFile), original);
+        assert.equal((yield* f.b.enrollment.resolve)?.campaign?.machineIds.length, 2);
+      }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect(
+    "refuses shared-folder links for disabled roster peers, paused local machines and revoked peers",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false, "accessible");
+        yield* f.start();
+        yield* f.b.enrollment.configure({
+          operation: "join",
+          confirmed: true,
+          origin: "https://beta.example.test",
+          autoPickup: true,
+          access: "standard",
+        });
+        const aId = f.a.record()!.machineId,
+          bId = f.b.record()!.machineId;
+        const linkA = f.a.enrollment.configure({
+          operation: "link",
+          confirmed: true,
+          machineIds: [bId],
+        });
+        const linkB = f.b.enrollment.configure({
+          operation: "link",
+          confirmed: true,
+          machineIds: [aId],
+        });
+        const roster = yield* readFleetJson(f.rosterPath, FleetRoster).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        yield* writeFleetJson(f.rosterPath, {
+          ...roster,
+          machines: roster.machines.map((peer) =>
+            peer.machineId === bId ? { ...peer, enabled: false } : peer,
+          ),
+        }).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+        assert.equal((yield* linkA.pipe(Effect.flip)).reason, "configuration");
+        yield* writeFleetJson(f.rosterPath, roster).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        yield* f.b.enrollment.configure({
+          operation: "settings",
+          confirmed: true,
+          enabled: false,
+          autoPickup: true,
+          access: "standard",
+        });
+        assert.equal((yield* linkB.pipe(Effect.flip)).reason, "configuration");
+        yield* f.b.enrollment.configure({
+          operation: "settings",
+          confirmed: true,
+          enabled: true,
+          autoPickup: true,
+          access: "standard",
+        });
+        yield* f.a.enrollment.configure({ operation: "revoke", confirmed: true, machineId: bId });
+        const revoked = yield* f.fs.readFileString(f.authorityFile);
+        assert.equal((yield* linkA.pipe(Effect.flip)).reason, "configuration");
+        assert.equal((yield* linkB.pipe(Effect.flip)).reason, "configuration");
+        assert.equal(yield* f.fs.readFileString(f.authorityFile), revoked);
+      }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect(
     "joins through the accessible Windows share without codes or owner approval and uses existing encrypted delivery",
     () =>
       Effect.gen(function* () {

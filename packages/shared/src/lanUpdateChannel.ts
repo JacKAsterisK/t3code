@@ -4,7 +4,11 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
-import { LAN_UPDATE_REPOSITORY, parseLanBuildIdentity } from "./distribution.ts";
+import {
+  LAN_PORTABLE_ZIP_MAX_BYTES,
+  LAN_UPDATE_REPOSITORY,
+  parseLanBuildIdentity,
+} from "./distribution.ts";
 import { strictJson } from "./strictJson.ts";
 
 export const FORK_UPDATE_CHANNEL_ASSET = "t3code-lan-channel.json";
@@ -47,7 +51,7 @@ export function parseLanUpdateChannel(
     channel.releaseTag !== `lan-v${channel.distributionVersion}` ||
     channel.applicationVersion !== identity.applicationVersion ||
     channel.artifact.byteLength <= 0 ||
-    channel.artifact.byteLength > 512 * 1024 ** 2 ||
+    channel.artifact.byteLength > LAN_PORTABLE_ZIP_MAX_BYTES ||
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,180}\.zip$/u.test(channel.artifact.name) ||
     /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/iu.test(channel.artifact.name)
   )

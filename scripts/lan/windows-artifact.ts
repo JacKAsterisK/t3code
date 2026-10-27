@@ -3,7 +3,10 @@ import * as NodeZlib from "node:zlib";
 import * as NodeUtil from "node:util";
 import * as Schema from "effect/Schema";
 import * as DateTime from "effect/DateTime";
-import { isIndependentDistributionScheme } from "@t3tools/shared/distribution";
+import {
+  isIndependentDistributionScheme,
+  LAN_PORTABLE_ZIP_MAX_BYTES as PORTABLE_ZIP_MAX_BYTES,
+} from "@t3tools/shared/distribution";
 import { strictJson } from "../lib/strict-json.ts";
 export { strictJson };
 import { BUILD_INPUT_FILES, BuildLock, sha256 } from "./hub-distribution.ts";
@@ -197,7 +200,7 @@ export function crc32(bytes: Uint8Array): number {
   return (value ^ 0xffffffff) >>> 0;
 }
 
-export const PORTABLE_ZIP_MAX_BYTES = 768 * 1024 ** 2;
+export { PORTABLE_ZIP_MAX_BYTES };
 
 export function assertPortableZipLength(length: number): void {
   if (!Number.isSafeInteger(length) || length < 22 || length > PORTABLE_ZIP_MAX_BYTES)

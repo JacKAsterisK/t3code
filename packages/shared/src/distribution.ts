@@ -109,6 +109,7 @@ export const cloudEnabled = !isLanDistribution;
 export const telemetryEnabled = !isLanDistribution;
 export const nativeUpdatesEnabled = !isLanDistribution;
 export const LAN_UPDATE_REPOSITORY = "JacKAsterisK/t3code";
+export const LAN_PORTABLE_ZIP_MAX_BYTES = 768 * 1024 ** 2;
 export const distributionUpdateMode = isLanDistribution ? "hub" : "native";
 export const distributionUpdateGuidance = isLanDistribution
   ? "Updates come from JacKAsterisK/t3code. Use Reprint Hub to verify, stage and activate them while T3 Code is stopped."

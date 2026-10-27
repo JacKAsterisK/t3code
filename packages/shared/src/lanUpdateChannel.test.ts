@@ -83,6 +83,38 @@ function lanUpdateFixture(change?: (channel: LanUpdateChannel) => void) {
   return { identity, channel, bytes, release, requests, client };
 }
 
+it("accepts bounded LAN artifact metadata through 768 MiB", () => {
+  const { channel } = lanUpdateFixture();
+  for (const byteLength of [1, 512 * 1024 ** 2 + 1, 592_372_778, 768 * 1024 ** 2]) {
+    const parsed = parseLanUpdateChannel({
+      ...channel,
+      artifact: { ...channel.artifact, byteLength },
+    });
+    assert.equal(parsed.artifact.byteLength, byteLength);
+  }
+  for (const byteLength of [0, -1, 768 * 1024 ** 2 + 1, 1.5, Infinity, NaN])
+    assert.throws(() =>
+      parseLanUpdateChannel({ ...channel, artifact: { ...channel.artifact, byteLength } }),
+    );
+});
+
+it.effect("discovers the maximum LAN archive but refuses a larger descriptor", () =>
+  Effect.gen(function* () {
+    for (const byteLength of [768 * 1024 ** 2, 768 * 1024 ** 2 + 1]) {
+      const fixture = lanUpdateFixture((channel) => {
+        Object.assign(channel.artifact, { byteLength });
+      });
+      const result = yield* Effect.result(
+        discoverLanUpdateChannel(identity).pipe(
+          Effect.provideService(HttpClient.HttpClient, fixture.client()),
+        ),
+      );
+      assert.equal(result._tag, byteLength === 768 * 1024 ** 2 ? "Success" : "Failure");
+      assert.deepEqual(fixture.requests, [`${api}/releases/latest`, `${api}/releases/assets/1`]);
+    }
+  }),
+);
+
 it.effect(
   "discovers a fork-bound advisory candidate without downloading its ZIP or granting activation",
   () => {

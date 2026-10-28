@@ -57,6 +57,7 @@ import { threadListEnvironmentsAtom } from "../../state/server";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { useQueuedThreadKeys } from "../../state/use-thread-outbox";
 import {
+  ThreadListV2MachineHeader,
   ThreadListV2PendingRow,
   ThreadListV2Row,
   ThreadListV2SettledShelfHeader,
@@ -64,10 +65,12 @@ import {
   ThreadListV2SnoozedShelfHeader,
   ThreadListV2WorkingShelfHeader,
 } from "../threads/thread-list-v2-items";
+import { machineNewTaskAction } from "../threads/machine-new-task";
 import { useThreadRowProviderInstanceResolver } from "../threads/thread-provider-instance";
 import { useOpenThreadPullRequests } from "../threads/use-open-thread-pull-requests";
 import type { ThreadPrPresentation } from "../../state/thread-pr-presentation";
 import {
+  resolveThreadListV2MachineGrouping,
   threadListV2ListItemsAreEqual,
   THREAD_LIST_V2_SETTLED_INITIAL_COUNT,
   THREAD_LIST_V2_SETTLED_PAGE_COUNT,
@@ -421,10 +424,22 @@ export function HomeScreen(props: HomeScreenProps) {
     snoozedShelfExpanded,
     workingShelfEnabled,
     workingShelfExpanded,
+    threadGrouping,
+    collapsedMachines,
     toggleSettledShelf,
     toggleSnoozedShelf,
     toggleWorkingShelf,
+    toggleMachineCollapsed,
   } = useThreadListV2ShelfPreferences();
+  const machineGrouping = resolveThreadListV2MachineGrouping({
+    grouping: threadGrouping,
+    environments: props.environments,
+    projects: props.projects,
+    collapsedEnvironmentIds: collapsedMachines,
+    environmentFilter: props.selectedEnvironmentId,
+    projectFiltered: v2ScopedProjectGroup !== null,
+    searchQuery: props.searchQuery,
+  });
   const now = useThreadListNow(props.threads);
   const listEnvironments = useAtomValue(threadListEnvironmentsAtom);
   const {
@@ -467,6 +482,7 @@ export function HomeScreen(props: HomeScreenProps) {
     snoozedShelfExpanded,
     settledShelfExpanded,
     selectedThreadKey,
+    machineGrouping,
   });
   // Called as `props.onSelectThread(...)`, the compiler would cache this handler on the whole
   // props object, which is new on every render of Home's parent.
@@ -523,6 +539,27 @@ export function HomeScreen(props: HomeScreenProps) {
           onSwipeableWillOpen={handleSwipeableWillOpen}
           simultaneousSwipeGesture={homeScrollGesture}
           activationKey={item.key}
+        />
+      );
+    }
+    if (item.type === "v2-machine-header") {
+      return (
+        <ThreadListV2MachineHeader
+          pane={primaryColumn ? "sidebar" : "screen"}
+          label={item.label}
+          machineKind={machineByEnvironmentId.get(item.environmentId)}
+          connection={item.connection}
+          collapsed={item.collapsed}
+          hiddenCount={item.hiddenCount}
+          dot={item.dot}
+          disabled={item.disabled}
+          onToggle={() => toggleMachineCollapsed(item.environmentId)}
+          onNewTask={machineNewTaskAction({
+            environmentId: item.environmentId,
+            projects: props.projects,
+            threads: props.threads,
+            onNewThreadInProject: props.onNewThreadInProject,
+          })}
         />
       );
     }
@@ -607,9 +644,10 @@ export function HomeScreen(props: HomeScreenProps) {
         pinningSupported={pinningEnvironmentIds.has(thread.environmentId)}
         autoSettleOptOutSupported={autoSettleOptOutEnvironmentIds.has(thread.environmentId)}
         reorderSupported={
-          item.item.pinned
+          machineGrouping === null &&
+          (item.item.pinned
             ? pinReorderEnvironmentIds.has(thread.environmentId)
-            : !workingShelfEnabled && activeReorderEnvironmentIds.has(thread.environmentId)
+            : !workingShelfEnabled && activeReorderEnvironmentIds.has(thread.environmentId))
         }
         canMoveUp={item.canMoveUp}
         canMoveDown={item.canMoveDown}
@@ -640,6 +678,7 @@ export function HomeScreen(props: HomeScreenProps) {
     selectedThreadKey,
     threadSearchMatchByKey,
     workingShelfEnabled,
+    grouped: machineGrouping !== null,
   };
 
   const hasAnyThreads =

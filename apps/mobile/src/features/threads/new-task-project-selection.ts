@@ -1,4 +1,8 @@
-import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
+import type {
+  EnvironmentProject,
+  EnvironmentThreadShell,
+} from "@t3tools/client-runtime/state/shell";
+import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { repositoryGroupingKeyOf, type EnvironmentId } from "@t3tools/contracts";
 
 import { scopedProjectKey } from "../../lib/scopedEntities";
@@ -117,6 +121,43 @@ export function resolveDraftProjectSelection(
 }
 
 type ProjectRef = { readonly environmentId: string; readonly projectId: string };
+
+/**
+ * The project a machine group's new task opens on: the last project used, when it
+ * is on that machine, then the machine's most recently active project, then its first.
+ * Named projects win over the machine's scratch workspace.
+ */
+export function resolveMachineNewTaskProject(options: {
+  readonly environmentId: EnvironmentId;
+  readonly projects: ReadonlyArray<EnvironmentProject>;
+  readonly threads: ReadonlyArray<
+    Pick<EnvironmentThreadShell, "environmentId" | "projectId" | "updatedAt">
+  >;
+  readonly lastProject: ProjectRef | undefined;
+  readonly scratchWorkspaceRoot: string | null | undefined;
+}): EnvironmentProject | null {
+  const onMachine = options.projects.filter(
+    (project) => project.environmentId === options.environmentId,
+  );
+  const named = onMachine.filter(
+    (project) => !isScratchProject(project, options.scratchWorkspaceRoot),
+  );
+  const projects = named.length > 0 ? named : onMachine;
+  const last = projects.find(
+    (project) =>
+      project.environmentId === options.lastProject?.environmentId &&
+      project.id === options.lastProject.projectId,
+  );
+  if (last) return last;
+  let latest: { readonly project: EnvironmentProject; readonly at: string } | null = null;
+  for (const thread of options.threads) {
+    if (thread.environmentId !== options.environmentId) continue;
+    if (latest !== null && thread.updatedAt <= latest.at) continue;
+    const project = projects.find((candidate) => candidate.id === thread.projectId);
+    if (project) latest = { project, at: thread.updatedAt };
+  }
+  return latest?.project ?? projects[0] ?? null;
+}
 
 export function newTaskDestination(options: {
   readonly projects: ReadonlyArray<EnvironmentProject>;

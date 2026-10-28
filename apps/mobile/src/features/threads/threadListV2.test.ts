@@ -36,6 +36,7 @@ import {
   getThreadListV2OrderedSection,
   resolveThreadListV2SnoozeMenuSelection,
   resolveThreadListV2SnoozePresets,
+  resolveThreadListV2MachineGrouping,
   resolveThreadListV2Status,
   resolveThreadListV2WokeAt,
   sortThreadsForListV2,
@@ -1717,5 +1718,142 @@ describe("Working section beta", () => {
       "v2-settled-shelf",
       "settled",
     ]);
+  });
+});
+
+describe("machine grouping", () => {
+  const studio = EnvironmentId.make("studio");
+  const laptop = EnvironmentId.make("laptop");
+  const spare = EnvironmentId.make("spare");
+  const environments = [
+    { environmentId: studio, label: "Studio", connectionState: "connected" as const },
+    { environmentId: laptop, label: "Laptop", connectionState: "connected" as const },
+    { environmentId: spare, label: "Spare", connectionState: "offline" as const },
+  ];
+  const projects = [studio, laptop, spare].map((id) => ({ environmentId: id }));
+  const running = {
+    status: "running" as const,
+    activeRunId: null,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerName: "Codex",
+    lastError: null,
+    updatedAt: NOW,
+  };
+  const threads = [
+    makeThread({ id: ThreadId.make("studio-a"), title: "studio-a", environmentId: studio }),
+    makeThread({
+      id: ThreadId.make("studio-working"),
+      title: "studio-working",
+      environmentId: studio,
+      runtime: running,
+    }),
+    makeThread({
+      id: ThreadId.make("studio-pinned"),
+      title: "studio-pinned",
+      environmentId: studio,
+      pinnedAt: "2026-06-01T00:00:00.000Z",
+    }),
+    makeThread({
+      id: ThreadId.make("laptop-settled"),
+      title: "laptop-settled",
+      environmentId: laptop,
+      settledOverride: "settled",
+      settledAt: NOW,
+    }),
+  ];
+  const grouping = (
+    input: Partial<Parameters<typeof resolveThreadListV2MachineGrouping>[0]> = {},
+  ) =>
+    resolveThreadListV2MachineGrouping({
+      grouping: "machine",
+      environments,
+      projects,
+      collapsedEnvironmentIds: [],
+      environmentFilter: null,
+      projectFiltered: false,
+      searchQuery: "",
+      ...input,
+    });
+  const rows = (
+    machineGrouping: ReturnType<typeof resolveThreadListV2MachineGrouping>,
+    input: Partial<Parameters<typeof buildThreadListV2Items>[0]> = {},
+  ) => {
+    const layout = buildThreadListV2Items({
+      threads,
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+      workingShelfEnabled: true,
+      machineGrouping,
+      ...input,
+    });
+    return buildThreadListV2ListItems({
+      items: layout.items,
+      pendingTasks: [],
+      workingCount: layout.workingCount,
+      workingShelfHeaderIndex: layout.workingShelfHeaderIndex,
+      settledCount: layout.settledCount,
+      settledShelfHeaderIndex: layout.settledShelfHeaderIndex,
+      machineGroupHeaders: layout.machineGroupHeaders,
+    }).map((item) =>
+      item.type === "v2-thread"
+        ? item.item.thread.id
+        : item.type === "v2-machine-header"
+          ? `[${item.label}${item.collapsed ? ` +${item.hiddenCount} ${item.dot}` : ""}]`
+          : item.type,
+    );
+  };
+
+  it("keeps Pinned and Settled global and lists running threads under their machine", () => {
+    expect(rows(grouping())).toEqual([
+      "studio-pinned",
+      "[Laptop]",
+      "[Studio]",
+      "studio-a",
+      "studio-working",
+      "v2-settled-shelf",
+      "laptop-settled",
+    ]);
+    expect(rows(null)).toContain("v2-working-shelf");
+  });
+
+  it("collapses a machine to its hidden count and most urgent status", () => {
+    const collapsed = grouping({ collapsedEnvironmentIds: [studio] });
+    expect(rows(collapsed)).toEqual([
+      "studio-pinned",
+      "[Laptop]",
+      "[Studio +2 working]",
+      "v2-settled-shelf",
+      "laptop-settled",
+    ]);
+    expect(rows(collapsed, { selectedThreadKey: `${studio}:studio-a` })).toEqual([
+      "studio-pinned",
+      "[Laptop]",
+      "[Studio +1 working]",
+      "studio-a",
+      "v2-settled-shelf",
+      "laptop-settled",
+    ]);
+    const asksApproval = threads.map((thread) =>
+      thread.id === "studio-a"
+        ? { ...thread, hasPendingApprovals: true, runtime: running }
+        : thread,
+    );
+    expect(rows(collapsed, { threads: asksApproval })).toContain("[Studio +2 attention]");
+  });
+
+  it("lists an empty machine only while it is connected and the list is not project-filtered", () => {
+    expect(rows(grouping({ projectFiltered: true }))).not.toContain("[Laptop]");
+    expect(
+      rows(grouping({ projects: projects.filter((project) => project.environmentId !== laptop) })),
+    ).not.toContain("[Laptop]");
+    expect(rows(grouping())).not.toContain("[Spare]");
+  });
+
+  it("lists flat with fewer than two machines, one environment filtered to, or a search", () => {
+    expect(grouping({ environments: environments.slice(0, 1) })).toBeNull();
+    expect(grouping({ environmentFilter: studio })).toBeNull();
+    expect(grouping({ searchQuery: "studio" })).toBeNull();
+    expect(grouping({ grouping: "none" })).toBeNull();
   });
 });

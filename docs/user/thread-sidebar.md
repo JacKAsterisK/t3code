@@ -149,6 +149,22 @@ right-click it, to start a thread in that project. Pinned threads stay above the
 Snoozed and Settled stay below them. In this mode you cannot drag threads, and the Working section
 is off. Each device keeps its own choice.
 
+### Group threads by machine
+
+When more than one machine is connected, open the project filter in the sidebar and set
+**Group threads** to **Machine**, or turn on **Settings → General → Group threads by machine** on
+web and desktop. On iOS and Android, choose **Group by machine** from the thread list's filter menu,
+or turn on **Settings → General → Group by machine**.
+
+Active threads then sit under the machine they run on. On desktop, this computer comes first. Click a
+machine to open or close it. A closed machine shows how many threads it holds, and a dot when one of
+them needs you. Use the new-thread button on a machine to start a thread there. On web and desktop,
+if the machine has more than one project, you pick the project next; on iOS and Android, the draft
+opens in that machine's most recent project, and you can change it. Pinned threads stay above the
+machines for every machine, and Snoozed and Settled stay below them. In this mode you cannot drag or
+arrange threads, and the Working section is off, so running threads stay under their machine. The
+boring sidebar groups by project instead. Each device keeps its own choice.
+
 ## Settle finished work
 
 Choose **Settle thread** from its menu to move finished work out of the active list

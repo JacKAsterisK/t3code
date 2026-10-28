@@ -1,5 +1,6 @@
 import type { MenuAction } from "@react-native-menu/menu";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
+import { useThreadListV2ShelfPreferences } from "../threads/use-thread-list-v2-shelf-preferences";
 import { ThreadListToolbar } from "./ThreadListToolbar";
 import type { HomeHeaderProps } from "./HomeHeader.types";
 
@@ -10,6 +11,7 @@ function checkedMenuState(checked: boolean) {
 }
 
 export function HomeHeader(props: HomeHeaderProps) {
+  const { threadGrouping, setThreadGrouping } = useThreadListV2ShelfPreferences();
   const hasCustomListOptions =
     props.selectedEnvironmentId !== null || props.selectedProjectKey !== null;
   const menuActions: MenuAction[] = [
@@ -49,9 +51,22 @@ export function HomeHeader(props: HomeHeaderProps) {
             ],
           },
         ] satisfies MenuAction[])),
+    ...(props.environments.length < 2
+      ? []
+      : ([
+          {
+            id: "group-by-machine",
+            title: "Group by machine",
+            state: checkedMenuState(threadGrouping === "machine"),
+          },
+        ] satisfies MenuAction[])),
   ];
   const handleMenuAction = (event: { nativeEvent: { event: string } }) => {
     const id = event.nativeEvent.event;
+    if (id === "group-by-machine") {
+      setThreadGrouping(threadGrouping === "machine" ? "none" : "machine");
+      return;
+    }
     if (id === "environment:all") {
       props.onEnvironmentChange(null);
       return;

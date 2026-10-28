@@ -28,8 +28,13 @@ import {
   sortPinnedThreadsByOrderKey,
   sortSettledThreads,
 } from "@t3tools/client-runtime/state/thread-sort";
+import {
+  groupThreadsByMachine,
+  type SidebarMachine,
+} from "@t3tools/client-runtime/state/machine-groups";
+import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
-import type { SnoozePresetSetting } from "@t3tools/contracts/settings";
+import type { SidebarThreadGrouping, SnoozePresetSetting } from "@t3tools/contracts/settings";
 
 import type { ThreadListProvider } from "../../state/thread-list-environments";
 import type { ThreadMoveAvailability } from "./threadOrder";
@@ -254,6 +259,113 @@ export function sortThreadsForListV2<
   return sortActiveThreadsByOrderKey(threads);
 }
 
+/** A machine group's header state; one environment is one machine. */
+export interface ThreadListV2Machine extends SidebarMachine {
+  readonly connection: "connected" | "connecting" | "offline";
+}
+
+export type ThreadListV2MachineDot = "attention" | "failed" | "unread" | "working";
+
+export interface ThreadListV2MachineGrouping {
+  readonly machines: ReadonlyArray<ThreadListV2Machine>;
+  readonly collapsedEnvironmentIds: ReadonlySet<string>;
+  /** Machines listed without active threads, so a new task can still start there. */
+  readonly keepEmptyEnvironmentIds: ReadonlySet<EnvironmentId>;
+}
+
+export interface ThreadListV2MachineGroupHeader {
+  /** The item index the group's rows start at. */
+  readonly index: number;
+  readonly machine: ThreadListV2Machine;
+  readonly collapsed: boolean;
+  readonly hiddenCount: number;
+  readonly dot: ThreadListV2MachineDot | null;
+}
+
+/**
+ * The grouping a list applies, or null when it lists flat: grouping is off,
+ * fewer than two machines exist, one environment is filtered to, or a search
+ * ranks matches. A connected machine with a project stays listed while empty,
+ * unless a project filter narrows the list to matching threads.
+ */
+export function resolveThreadListV2MachineGrouping(input: {
+  readonly grouping: SidebarThreadGrouping;
+  readonly environments: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+    readonly connectionState: EnvironmentConnectionPhase;
+  }>;
+  readonly projects: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
+  readonly collapsedEnvironmentIds: ReadonlyArray<string>;
+  readonly environmentFilter: EnvironmentId | null;
+  readonly projectFiltered: boolean;
+  readonly searchQuery: string;
+}): ThreadListV2MachineGrouping | null {
+  if (
+    input.grouping !== "machine" ||
+    input.environments.length < 2 ||
+    input.environmentFilter !== null ||
+    input.searchQuery.trim().length > 0
+  ) {
+    return null;
+  }
+  const projectEnvironmentIds = new Set(
+    input.projectFiltered ? [] : input.projects.map((project) => project.environmentId),
+  );
+  return {
+    machines: input.environments.map((environment) => ({
+      environmentId: environment.environmentId,
+      label: environment.label,
+      // Mobile runs on no machine of its own, so machines sort by label alone.
+      isPrimary: false,
+      connection:
+        environment.connectionState === "connected"
+          ? "connected"
+          : environment.connectionState === "connecting" ||
+              environment.connectionState === "reconnecting"
+            ? "connecting"
+            : "offline",
+    })),
+    collapsedEnvironmentIds: new Set(input.collapsedEnvironmentIds),
+    keepEmptyEnvironmentIds: new Set(
+      input.environments.flatMap((environment) =>
+        environment.connectionState === "connected" &&
+        projectEnvironmentIds.has(environment.environmentId)
+          ? [environment.environmentId]
+          : [],
+      ),
+    ),
+  };
+}
+
+/**
+ * The dot on a collapsed machine group: the most urgent state among its hidden
+ * threads, by the web sidebar's folder rule. Waiting threads stay quiet.
+ */
+export function resolveThreadListV2MachineDot(
+  threads: ReadonlyArray<EnvironmentThreadShell>,
+): ThreadListV2MachineDot | null {
+  const statuses = new Set(threads.map(resolveThreadListV2Status));
+  if (
+    statuses.has("input") ||
+    statuses.has("approval") ||
+    statuses.has("request") ||
+    statuses.has("limited")
+  ) {
+    return "attention";
+  }
+  if (statuses.has("failed")) return "failed";
+  if (
+    threads.some(
+      (thread) =>
+        resolveThreadListV2Status(thread) === "ready" && threadHasUnseenCompletion(thread),
+    )
+  ) {
+    return "unread";
+  }
+  return statuses.has("working") ? "working" : null;
+}
+
 export function getThreadListV2OrderedSection(input: {
   readonly threads: readonly EnvironmentThreadShell[];
   readonly section: "pinned" | "active";
@@ -313,6 +425,8 @@ export interface ThreadListV2Layout {
   readonly snoozedShelfHeaderIndex: number | null;
   readonly settledCount: number;
   readonly settledShelfHeaderIndex: number | null;
+  /** Empty unless the list is grouped by machine. */
+  readonly machineGroupHeaders: ReadonlyArray<ThreadListV2MachineGroupHeader>;
   /** Arm a timeout here to repartition at snooze expiry rather than the next minute tick. */
   readonly nextSnoozeWakeAt: string | null;
   /** Threads listed only because their messages match the search. */
@@ -366,9 +480,22 @@ export interface ThreadListV2SettledShelfListItem {
   readonly disabled: boolean;
 }
 
+export interface ThreadListV2MachineHeaderListItem {
+  readonly type: "v2-machine-header";
+  readonly key: string;
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+  readonly connection: ThreadListV2Machine["connection"];
+  readonly collapsed: boolean;
+  readonly hiddenCount: number;
+  readonly dot: ThreadListV2MachineDot | null;
+  readonly disabled: boolean;
+}
+
 export type ThreadListV2ListItem =
   | ThreadListV2ThreadListItem
   | ThreadListV2PendingListItem
+  | ThreadListV2MachineHeaderListItem
   | ThreadListV2WorkingShelfListItem
   | ThreadListV2SnoozedShelfListItem
   | ThreadListV2SettledShelfListItem;
@@ -379,6 +506,7 @@ export function isThreadListV2ListItem(value: {
   return (
     value.type === "v2-thread" ||
     value.type === "v2-pending" ||
+    value.type === "v2-machine-header" ||
     value.type === "v2-working-shelf" ||
     value.type === "v2-snoozed-shelf" ||
     value.type === "v2-settled-shelf"
@@ -415,6 +543,17 @@ export function threadListV2ListItemsAreEqual(
         previous.pendingTask === item.pendingTask &&
         previous.showPendingDivider === item.showPendingDivider &&
         previous.showTrailingDivider === item.showTrailingDivider
+      );
+    case "v2-machine-header":
+      return (
+        previous.type === "v2-machine-header" &&
+        previous.key === item.key &&
+        previous.label === item.label &&
+        previous.connection === item.connection &&
+        previous.collapsed === item.collapsed &&
+        previous.hiddenCount === item.hiddenCount &&
+        previous.dot === item.dot &&
+        previous.disabled === item.disabled
       );
     case "v2-working-shelf":
       return (
@@ -472,6 +611,7 @@ export function buildThreadListV2ListItems(input: {
   readonly settledCount?: number;
   readonly settledShelfExpanded?: boolean;
   readonly settledShelfHeaderIndex?: number | null;
+  readonly machineGroupHeaders?: ReadonlyArray<ThreadListV2MachineGroupHeader>;
   readonly snoozeLabelNow?: string;
   readonly snoozeEnvironmentIds?: ReadonlySet<EnvironmentId>;
   readonly queuedThreadKeys?: ReadonlySet<string>;
@@ -526,8 +666,29 @@ export function buildThreadListV2ListItems(input: {
   const snoozedEnd = settledShelfHeaderIndex ?? threadItems.length;
   const workingEnd = snoozedShelfHeaderIndex ?? snoozedEnd;
   const activeEnd = workingShelfHeaderIndex ?? workingEnd;
-  const result: ThreadListV2ListItem[] = [...pendingItems, ...threadItems.slice(0, activeEnd)];
   const shelfDisabled = input.shelfPreferencesLoading === true;
+  const result: ThreadListV2ListItem[] = [...pendingItems];
+  const machineHeaders = input.machineGroupHeaders ?? [];
+  let nextHeader = 0;
+  for (let index = 0; index <= activeEnd; index += 1) {
+    // Headers sit before their group's first row; empty and collapsed groups share an index.
+    while (nextHeader < machineHeaders.length && machineHeaders[nextHeader]!.index <= index) {
+      const { machine, collapsed, hiddenCount, dot } = machineHeaders[nextHeader]!;
+      result.push({
+        type: "v2-machine-header",
+        key: `v2-machine:${machine.environmentId}`,
+        environmentId: machine.environmentId,
+        label: machine.label,
+        connection: machine.connection,
+        collapsed,
+        hiddenCount,
+        dot,
+        disabled: shelfDisabled,
+      });
+      nextHeader += 1;
+    }
+    if (index < activeEnd) result.push(threadItems[index]!);
+  }
   if (workingShelfHeaderIndex !== null && workingCount > 0) {
     result.push({
       type: "v2-working-shelf",
@@ -617,6 +778,8 @@ export function buildThreadListV2Items(input: {
   readonly isListedSettled?: (thread: EnvironmentThreadShell) => boolean;
   /** Settled threads in scope that are not local (older settled threads not loaded). */
   readonly unloadedSettledCount?: number;
+  /** Groups active threads under machine headers; Pinned, Snoozed and Settled stay global. */
+  readonly machineGrouping?: ThreadListV2MachineGrouping | null;
 }): ThreadListV2Layout {
   const now = input.now;
   const pending =
@@ -636,7 +799,9 @@ export function buildThreadListV2Items(input: {
     ? new Set(input.projectRefs.map((ref) => `${ref.environmentId}:${ref.projectId}`))
     : null;
 
-  const workingShelfEnabled = input.workingShelfEnabled === true;
+  const machineGrouping = input.machineGrouping ?? null;
+  // Working threads stay in their machine's group.
+  const workingShelfEnabled = machineGrouping === null && input.workingShelfEnabled === true;
   const pinned: EnvironmentThreadShell[] = [];
   const active: EnvironmentThreadShell[] = [];
   const working: EnvironmentThreadShell[] = [];
@@ -736,6 +901,7 @@ export function buildThreadListV2Items(input: {
       snoozedShelfHeaderIndex: null,
       settledCount: 0,
       settledShelfHeaderIndex: null,
+      machineGroupHeaders: [],
       nextSnoozeWakeAt,
       contentOnlyThreadKeys,
     };
@@ -802,7 +968,7 @@ export function buildThreadListV2Items(input: {
       isLast: false,
     });
   }
-  for (const thread of orderedActive) {
+  const pushActive = (thread: EnvironmentThreadShell) =>
     items.push({
       thread,
       variant: "card",
@@ -811,6 +977,30 @@ export function buildThreadListV2Items(input: {
       wokeAt: resolveThreadListV2WokeAt(thread, { now }),
       isLast: false,
     });
+  const machineGroupHeaders: ThreadListV2MachineGroupHeader[] = [];
+  if (machineGrouping === null) {
+    for (const thread of orderedActive) pushActive(thread);
+  } else {
+    const groups = groupThreadsByMachine(
+      withThreadMachines(machineGrouping.machines, orderedActive),
+      orderedActive,
+      (machine) => machineGrouping.keepEmptyEnvironmentIds.has(machine.environmentId),
+    );
+    for (const { machine, threads } of groups) {
+      const collapsed = machineGrouping.collapsedEnvironmentIds.has(machine.environmentId);
+      const visible = collapsed
+        ? threads.filter((thread) => `${thread.environmentId}:${thread.id}` === selectedThreadKey)
+        : threads;
+      const hidden = collapsed ? threads.filter((thread) => !visible.includes(thread)) : [];
+      machineGroupHeaders.push({
+        index: items.length,
+        machine,
+        collapsed,
+        hiddenCount: hidden.length,
+        dot: resolveThreadListV2MachineDot(hidden),
+      });
+      for (const thread of visible) pushActive(thread);
+    }
   }
   const workingShelfHeaderIndex = orderedWorking.length > 0 ? items.length : null;
   for (const thread of visibleWorking) {
@@ -859,7 +1049,27 @@ export function buildThreadListV2Items(input: {
     snoozedShelfHeaderIndex,
     settledCount: settledTotal,
     settledShelfHeaderIndex,
+    machineGroupHeaders,
     nextSnoozeWakeAt,
     contentOnlyThreadKeys,
   };
+}
+
+/** A thread on an environment the client has no machine entry for still needs a group. */
+function withThreadMachines(
+  machines: ReadonlyArray<ThreadListV2Machine>,
+  threads: ReadonlyArray<EnvironmentThreadShell>,
+): ReadonlyArray<ThreadListV2Machine> {
+  const known = new Set(machines.map((machine) => machine.environmentId));
+  const missing = new Map<EnvironmentId, ThreadListV2Machine>();
+  for (const thread of threads) {
+    if (known.has(thread.environmentId) || missing.has(thread.environmentId)) continue;
+    missing.set(thread.environmentId, {
+      environmentId: thread.environmentId,
+      label: thread.environmentId,
+      isPrimary: false,
+      connection: "offline",
+    });
+  }
+  return missing.size === 0 ? machines : [...machines, ...missing.values()];
 }

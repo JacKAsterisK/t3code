@@ -8,6 +8,7 @@ import {
   newTaskDestination,
   resolveDraftProjectSelection,
   resolveEnvironmentProjectMatch,
+  resolveMachineNewTaskProject,
 } from "./new-task-project-selection";
 
 function makeProject(
@@ -248,5 +249,41 @@ describe("newTaskDestination", () => {
         last: { environmentId: "environment", projectId: "only" },
       }),
     ).toEqual(picker);
+  });
+});
+
+describe("resolveMachineNewTaskProject", () => {
+  const projects = [
+    makeProject("scratch", "machine", { workspaceRoot: "/scratch" }),
+    makeProject("first", "machine"),
+    makeProject("recent", "machine"),
+    makeProject("remembered", "other-machine"),
+  ];
+  const thread = (projectId: string, updatedAt: string) => ({
+    environmentId: EnvironmentId.make("machine"),
+    projectId: ProjectId.make(projectId),
+    updatedAt,
+  });
+  const resolve = (options: Partial<Parameters<typeof resolveMachineNewTaskProject>[0]> = {}) =>
+    resolveMachineNewTaskProject({
+      environmentId: EnvironmentId.make("machine"),
+      projects,
+      threads: [
+        thread("recent", "2026-07-02T00:00:00.000Z"),
+        thread("scratch", "2026-07-03T00:00:00.000Z"),
+      ],
+      lastProject: { environmentId: "other-machine", projectId: "remembered" },
+      scratchWorkspaceRoot: "/scratch",
+      ...options,
+    })?.id;
+
+  it("starts in the machine's latest named project unless the remembered one is on it", () => {
+    expect(resolve()).toBe("recent");
+    expect(resolve({ lastProject: { environmentId: "machine", projectId: "first" } })).toBe(
+      "first",
+    );
+    expect(resolve({ threads: [] })).toBe("first");
+    expect(resolve({ projects: projects.slice(0, 1) })).toBe("scratch");
+    expect(resolve({ environmentId: EnvironmentId.make("empty") })).toBeUndefined();
   });
 });

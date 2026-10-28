@@ -10,6 +10,7 @@ import {
   buildThreadListV2ListItems,
   getThreadListV2OrderedSection,
   threadListInboxReturns,
+  type ThreadListV2MachineGrouping,
 } from "./threadListV2";
 import { computeThreadMoveAvailability } from "./threadOrder";
 
@@ -54,8 +55,12 @@ export function useThreadListV2(input: {
   readonly snoozedShelfExpanded: boolean;
   readonly settledShelfExpanded: boolean;
   readonly selectedThreadKey: string | null;
+  /** Null lists active threads ungrouped. */
+  readonly machineGrouping: ThreadListV2MachineGrouping | null;
 }) {
-  const { threads, workingShelfEnabled } = input;
+  const { threads, machineGrouping } = input;
+  // Grouped lists keep working threads in their machine's group.
+  const workingShelfEnabled = machineGrouping === null && input.workingShelfEnabled;
   // A thread can stop working when the threads change, or when its exit grace expires.
   const inboxVersion = useSyncExternalStore(
     threadListInboxReturns.subscribe,
@@ -86,10 +91,15 @@ export function useThreadListV2(input: {
         queuedThreadKeys: input.queuedThreadKeys,
       }),
     });
-  const moveAvailability = new Map([
-    ...sectionAvailability("pinned"),
-    ...(workingShelfEnabled ? [] : sectionAvailability("active")),
-  ]);
+  // Grouped lists do not reorder, as upstream's project folders do not.
+  const moveAvailability = new Map(
+    machineGrouping !== null
+      ? []
+      : [
+          ...sectionAvailability("pinned"),
+          ...(workingShelfEnabled ? [] : sectionAvailability("active")),
+        ],
+  );
   // Older settled threads load in pages; the shelf lists them only as far as they are loaded.
   const scopes = olderSettledScopes(input);
   const olderSettledShelf = useOlderSettledShelf({
@@ -117,6 +127,7 @@ export function useThreadListV2(input: {
     snoozedShelfExpanded: input.snoozedShelfExpanded,
     settledShelfExpanded: input.settledShelfExpanded,
     selectedThreadKey: input.selectedThreadKey,
+    machineGrouping,
     isListedSettled: olderSettledShelf.isListed,
     unloadedSettledCount: olderSettledShelf.unloadedCount(
       threads.filter(
@@ -158,6 +169,7 @@ export function useThreadListV2(input: {
     settledCount: layout.settledCount,
     settledShelfExpanded: input.settledShelfExpanded,
     settledShelfHeaderIndex: layout.settledShelfHeaderIndex,
+    machineGroupHeaders: layout.machineGroupHeaders,
     snoozeLabelNow: `${input.now.slice(0, 16)}:00.000Z`,
     snoozeEnvironmentIds: input.snoozeEnvironmentIds,
     queuedThreadKeys: input.queuedThreadKeys,

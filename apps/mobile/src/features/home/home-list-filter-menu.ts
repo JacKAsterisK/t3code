@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, SidebarThreadGrouping } from "@t3tools/contracts";
 
 export interface HomeListFilterMenuEnvironment {
   readonly environmentId: EnvironmentId;
@@ -36,6 +36,8 @@ export function buildHomeListFilterMenu(props: {
   readonly selectedProjectKey: string | null;
   readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
   readonly onProjectChange: (projectKey: string | null) => void;
+  readonly threadGrouping: SidebarThreadGrouping;
+  readonly onThreadGroupingChange: (grouping: SidebarThreadGrouping) => void;
 }): HomeListFilterMenu {
   const items: Array<HomeListFilterMenuAction | HomeListFilterMenuSubmenu> = [];
 
@@ -81,6 +83,16 @@ export function buildHomeListFilterMenu(props: {
           onPress: () => props.onProjectChange(project.key),
         })),
       ],
+    });
+  }
+
+  if (props.environments.length >= 2) {
+    items.push({
+      type: "action",
+      title: "Group by machine",
+      state: props.threadGrouping === "machine" ? "on" : "off",
+      onPress: () =>
+        props.onThreadGroupingChange(props.threadGrouping === "machine" ? "none" : "machine"),
     });
   }
 

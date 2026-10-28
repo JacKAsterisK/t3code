@@ -1,6 +1,7 @@
 import { Pressable, ScrollView } from "react-native";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { ListFilterMenu } from "../workspace/ListFilterMenu";
+import { useThreadListV2ShelfPreferences } from "../threads/use-thread-list-v2-shelf-preferences";
 import type { HomeHeaderProps } from "./HomeHeader.types";
 
 export function ThreadListFilters(
@@ -23,6 +24,7 @@ export function ThreadListFilters(
   const selectedProject = props.projects.find(
     (project) => project.key === props.selectedProjectKey,
   );
+  const { threadGrouping, setThreadGrouping } = useThreadListV2ShelfPreferences();
   return (
     <ScrollView
       horizontal
@@ -85,6 +87,22 @@ export function ThreadListFilters(
           }
         }}
       />
+      {props.environments.length >= 2 ? (
+        <ListFilterMenu
+          label={threadGrouping === "machine" ? "By machine" : "No grouping"}
+          accessibilityLabel="Group threads"
+          active={threadGrouping === "machine"}
+          actions={[
+            { id: "none", title: "No grouping", state: threadGrouping === "none" ? "on" : "off" },
+            {
+              id: "machine",
+              title: "Group by machine",
+              state: threadGrouping === "machine" ? "on" : "off",
+            },
+          ]}
+          onSelect={(id) => setThreadGrouping(id === "machine" ? "machine" : "none")}
+        />
+      ) : null}
       {props.selectedEnvironmentId !== null || props.selectedProjectKey !== null ? (
         <Pressable
           accessibilityRole="button"

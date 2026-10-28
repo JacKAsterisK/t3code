@@ -174,6 +174,9 @@ export function WorkingSectionSettings() {
   const preferences = useAtomValue(mobilePreferencesAtom);
   const workingShelfEnabled =
     AsyncResult.isSuccess(preferences) && preferences.value.workingShelfEnabled !== false;
+  const groupedByMachine =
+    AsyncResult.isSuccess(preferences) && preferences.value.threadListGrouping === "machine";
+  const { environments } = useEnvironments();
 
   return (
     <View className="gap-3">
@@ -184,11 +187,22 @@ export function WorkingSectionSettings() {
           value={workingShelfEnabled}
           onValueChange={(value) => savePreferences({ workingShelfEnabled: value })}
         />
+        {environments.length > 1 || groupedByMachine ? (
+          <SettingsSwitchRow
+            icon="desktopcomputer"
+            label="Group by machine"
+            subtitle="List active threads under the machine they run on."
+            value={groupedByMachine}
+            onValueChange={(value) =>
+              savePreferences({ threadListGrouping: value ? "machine" : "none" })
+            }
+          />
+        ) : null}
       </SettingsSection>
       <Text className="px-2 text-sm text-foreground-muted">
         Fold working and monitoring threads into a Working section. They return to the top of the
         list when they need you. While this is on, active threads are ordered by time and cannot be
-        moved.
+        moved. Threads grouped by machine have no Working section and cannot be moved.
       </Text>
     </View>
   );

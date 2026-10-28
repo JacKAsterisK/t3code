@@ -64,7 +64,9 @@ import { useFabScroll } from "../home/FabScrollContext";
 import { SidebarFilterButton } from "./sidebar-filter-button";
 import { createSidebarHeaderItems } from "./sidebar-native-header-items";
 import { SidebarNavigationShell } from "./sidebar-navigation-shell";
+import { machineNewTaskAction } from "./machine-new-task";
 import {
+  ThreadListV2MachineHeader,
   ThreadListV2PendingRow,
   ThreadListV2Row,
   ThreadListV2SettledShelfHeader,
@@ -76,6 +78,7 @@ import { useThreadRowProviderInstanceResolver } from "./thread-provider-instance
 import type { ThreadPrPresentation } from "../../state/thread-pr-presentation";
 import {
   isThreadListV2ListItem,
+  resolveThreadListV2MachineGrouping,
   threadListV2ListItemsAreEqual,
   THREAD_LIST_V2_SETTLED_INITIAL_COUNT,
   THREAD_LIST_V2_SETTLED_PAGE_COUNT,
@@ -270,10 +273,29 @@ function ThreadNavigationSidebarPane(
     snoozedShelfExpanded,
     workingShelfEnabled,
     workingShelfExpanded,
+    threadGrouping,
+    collapsedMachines,
     toggleSettledShelf,
     toggleSnoozedShelf,
     toggleWorkingShelf,
+    setThreadGrouping,
+    toggleMachineCollapsed,
   } = useThreadListV2ShelfPreferences();
+  const machineGrouping = resolveThreadListV2MachineGrouping({
+    grouping: threadGrouping,
+    environments: environments.map((environment) => ({
+      ...environment,
+      connectionState:
+        workspaceEnvironments.find(
+          (candidate) => candidate.environmentId === environment.environmentId,
+        )?.connectionState ?? "offline",
+    })),
+    projects,
+    collapsedEnvironmentIds: collapsedMachines,
+    environmentFilter: options.selectedEnvironmentId,
+    projectFiltered: selectedProjectScope !== null,
+    searchQuery: props.searchQuery,
+  });
   const now = useThreadListNow(threads);
   const listEnvironments = useAtomValue(threadListEnvironmentsAtom);
   const {
@@ -316,6 +338,7 @@ function ThreadNavigationSidebarPane(
     snoozedShelfExpanded,
     settledShelfExpanded,
     selectedThreadKey: props.selectedThreadKey ?? null,
+    machineGrouping,
   });
   const listItems: readonly SidebarListItem[] =
     settledShelfExpanded && threadListV2Layout.hiddenSettledCount > 0
@@ -375,6 +398,15 @@ function ThreadNavigationSidebarPane(
             ],
           },
         ] satisfies MenuAction[])),
+    ...(environments.length < 2
+      ? []
+      : ([
+          {
+            id: "group-by-machine",
+            title: "Group by machine",
+            state: threadGrouping === "machine" ? "on" : "off",
+          },
+        ] satisfies MenuAction[])),
   ] satisfies MenuAction[];
   const handleListMenuAction = ({
     nativeEvent,
@@ -382,6 +414,10 @@ function ThreadNavigationSidebarPane(
     readonly nativeEvent: { readonly event: string };
   }) => {
     const event = nativeEvent.event;
+    if (event === "group-by-machine") {
+      setThreadGrouping(threadGrouping === "machine" ? "none" : "machine");
+      return;
+    }
     if (event === "environment:all") {
       setSelectedEnvironmentId(null);
       return;
@@ -469,6 +505,7 @@ function ThreadNavigationSidebarPane(
     listEnvironments,
     threadSearchMatchByKey,
     workingShelfEnabled,
+    grouped: machineGrouping !== null,
   };
   useThreadJumpShortcuts(listItems, handleSelectThread);
   const sidebarItemsAreEqual = (previous: SidebarListItem, item: SidebarListItem): boolean => {
@@ -593,9 +630,10 @@ function ThreadNavigationSidebarPane(
             pinningSupported={pinningEnvironmentIds.has(thread.environmentId)}
             autoSettleOptOutSupported={autoSettleOptOutEnvironmentIds.has(thread.environmentId)}
             reorderSupported={
-              item.item.pinned
+              machineGrouping === null &&
+              (item.item.pinned
                 ? pinReorderEnvironmentIds.has(thread.environmentId)
-                : !workingShelfEnabled && activeReorderEnvironmentIds.has(thread.environmentId)
+                : !workingShelfEnabled && activeReorderEnvironmentIds.has(thread.environmentId))
             }
             canMoveUp={item.canMoveUp}
             canMoveDown={item.canMoveDown}
@@ -612,6 +650,26 @@ function ThreadNavigationSidebarPane(
           />
         );
       }
+      case "v2-machine-header":
+        return (
+          <ThreadListV2MachineHeader
+            pane="sidebar"
+            label={item.label}
+            machineKind={machineByEnvironmentId.get(item.environmentId)}
+            connection={item.connection}
+            collapsed={item.collapsed}
+            hiddenCount={item.hiddenCount}
+            dot={item.dot}
+            disabled={item.disabled}
+            onToggle={() => toggleMachineCollapsed(item.environmentId)}
+            onNewTask={machineNewTaskAction({
+              environmentId: item.environmentId,
+              projects,
+              threads,
+              onNewThreadInProject: props.onNewThreadInProject,
+            })}
+          />
+        );
       case "v2-working-shelf":
         return (
           <ThreadListV2WorkingShelfHeader
@@ -667,6 +725,8 @@ function ThreadNavigationSidebarPane(
     selectedProjectKey,
     onEnvironmentChange: setSelectedEnvironmentId,
     onProjectChange: setSelectedProjectKey,
+    threadGrouping,
+    onThreadGroupingChange: setThreadGrouping,
   });
   const nativeHeaderItems = createSidebarHeaderItems({
     filterIcon,

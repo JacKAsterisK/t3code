@@ -21,6 +21,7 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
+import type { SidebarMachineMove } from "@t3tools/client-runtime/state/machine-groups";
 import {
   formatWorkingDurationLabel,
   resolveThreadWorkingStartedAt,
@@ -323,7 +324,13 @@ export const ThreadListV2MachineHeader = memo(function ThreadListV2MachineHeader
   readonly onToggle: () => void;
   /** Absent when the machine has no project to start a task in. */
   readonly onNewTask?: () => void;
+  readonly canMoveUp: boolean;
+  readonly canMoveDown: boolean;
+  readonly onMove: (move: SidebarMachineMove) => void;
+  /** Present while this device keeps its own machine order. */
+  readonly onResetOrder?: () => void;
 }) {
+  const { onMove, onNewTask, onResetOrder } = props;
   const sidebarPane = props.pane === "sidebar";
   const mutedText = sidebarPane ? "text-drawer-foreground-muted" : "text-foreground-tertiary";
   const mutedTint = sidebarPane ? "accent-drawer-foreground-muted" : "accent-foreground-muted";
@@ -333,61 +340,108 @@ export const ThreadListV2MachineHeader = memo(function ThreadListV2MachineHeader
       : props.connection === "offline"
         ? "Offline"
         : null;
+  const handleMenuAction = ({
+    nativeEvent,
+  }: {
+    readonly nativeEvent: { readonly event: string };
+  }) => {
+    const event = nativeEvent.event;
+    if (event === "new-task") onNewTask?.();
+    if (event === "reset-order") onResetOrder?.();
+    if (event === "top" || event === "up" || event === "down" || event === "bottom") onMove(event);
+  };
   return (
     <View className={cn("mb-1.5 mt-4 flex-row items-center gap-2", sidebarPane ? "px-3" : "px-5")}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={[
-          props.label,
-          connectionLabel,
-          props.collapsed && props.hiddenCount > 0
-            ? `${props.hiddenCount} hidden ${props.hiddenCount === 1 ? "thread" : "threads"}`
-            : null,
-          props.collapsed && props.dot ? MACHINE_DOT_LABEL[props.dot] : null,
-        ]
-          .filter(Boolean)
-          .join(", ")}
-        accessibilityHint={`${props.collapsed ? "Expands" : "Collapses"} this machine's threads.`}
-        accessibilityState={{ disabled: props.disabled, expanded: !props.collapsed }}
-        className="min-h-[32px] flex-1 flex-row items-center gap-2"
-        disabled={props.disabled}
-        onPress={props.onToggle}
-        style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}
+      <Menu
+        actions={[
+          ...(onNewTask ? [{ id: "new-task", title: "New task", image: "plus" }] : []),
+          {
+            id: "top",
+            title: "Move to top",
+            image: "arrow.up.circle",
+            attributes: { disabled: !props.canMoveUp },
+          },
+          {
+            id: "up",
+            title: "Move up",
+            image: "arrow.up",
+            attributes: { disabled: !props.canMoveUp },
+          },
+          {
+            id: "down",
+            title: "Move down",
+            image: "arrow.down",
+            attributes: { disabled: !props.canMoveDown },
+          },
+          {
+            id: "bottom",
+            title: "Move to bottom",
+            image: "arrow.down.circle",
+            attributes: { disabled: !props.canMoveDown },
+          },
+          ...(onResetOrder
+            ? [{ id: "reset-order", title: "Reset machine order", image: "arrow.clockwise" }]
+            : []),
+        ]}
+        onPressAction={handleMenuAction}
+        shouldOpenOnLongPress
+        style={{ flex: 1 }}
+        title={props.label}
       >
-        {props.machineKind ? (
-          <EnvironmentMachineSymbol
-            kind={props.machineKind}
-            size={12}
-            tintColorClassName={mutedTint}
-          />
-        ) : null}
-        <Text
-          className={cn(
-            "shrink text-xs font-t3-semibold",
-            sidebarPane ? "text-drawer-foreground" : "text-foreground-secondary",
-          )}
-          numberOfLines={1}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={[
+            props.label,
+            connectionLabel,
+            props.collapsed && props.hiddenCount > 0
+              ? `${props.hiddenCount} hidden ${props.hiddenCount === 1 ? "thread" : "threads"}`
+              : null,
+            props.collapsed && props.dot ? MACHINE_DOT_LABEL[props.dot] : null,
+          ]
+            .filter(Boolean)
+            .join(", ")}
+          accessibilityHint={`${props.collapsed ? "Expands" : "Collapses"} this machine's threads. Long press to reorder machines.`}
+          accessibilityState={{ disabled: props.disabled, expanded: !props.collapsed }}
+          className="min-h-[32px] flex-row items-center gap-2"
+          disabled={props.disabled}
+          onPress={props.onToggle}
+          style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}
         >
-          {props.label}
-        </Text>
-        {connectionLabel ? (
-          <Text className={cn("text-xs", mutedText)}>{connectionLabel}</Text>
-        ) : null}
-        {props.collapsed && props.hiddenCount > 0 ? (
-          <Text className={cn("text-xs tabular-nums", mutedText)}>{props.hiddenCount}</Text>
-        ) : null}
-        {props.collapsed && props.dot ? (
-          <View className={cn("size-1.5 rounded-full", MACHINE_DOT_CLASS_NAME[props.dot])} />
-        ) : null}
-        <View className={cn("h-px flex-1", sidebarPane ? "bg-drawer-border" : "bg-border")} />
-        <SymbolView
-          name="chevron.down"
-          size={10}
-          tintColorClassName={mutedTint}
-          type="monochrome"
-          style={{ transform: [{ rotate: props.collapsed ? "0deg" : "180deg" }] }}
-        />
-      </Pressable>
+          {props.machineKind ? (
+            <EnvironmentMachineSymbol
+              kind={props.machineKind}
+              size={12}
+              tintColorClassName={mutedTint}
+            />
+          ) : null}
+          <Text
+            className={cn(
+              "shrink text-xs font-t3-semibold",
+              sidebarPane ? "text-drawer-foreground" : "text-foreground-secondary",
+            )}
+            numberOfLines={1}
+          >
+            {props.label}
+          </Text>
+          {connectionLabel ? (
+            <Text className={cn("text-xs", mutedText)}>{connectionLabel}</Text>
+          ) : null}
+          {props.collapsed && props.hiddenCount > 0 ? (
+            <Text className={cn("text-xs tabular-nums", mutedText)}>{props.hiddenCount}</Text>
+          ) : null}
+          {props.collapsed && props.dot ? (
+            <View className={cn("size-1.5 rounded-full", MACHINE_DOT_CLASS_NAME[props.dot])} />
+          ) : null}
+          <View className={cn("h-px flex-1", sidebarPane ? "bg-drawer-border" : "bg-border")} />
+          <SymbolView
+            name="chevron.down"
+            size={10}
+            tintColorClassName={mutedTint}
+            type="monochrome"
+            style={{ transform: [{ rotate: props.collapsed ? "0deg" : "180deg" }] }}
+          />
+        </Pressable>
+      </Menu>
       {props.onNewTask ? (
         <Pressable
           // Padding cancelled by negative margin grows the touch target without moving the icon.

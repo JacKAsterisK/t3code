@@ -118,11 +118,12 @@ describe("mobile connection storage", () => {
     });
   });
 
-  it("ignores invalid tab-order entries without dropping other saved preferences", async () => {
+  it("ignores invalid tab and machine order entries without dropping other saved preferences", async () => {
     mocks.setPreferencesJson(
       JSON.stringify({
         navigationTabOrder: ["usage", null, 4, "threads"],
         hiddenNavigationTabs: ["home", null],
+        threadListMachineOrder: ["laptop", null, 4, "studio"],
         baseFontSize: 18,
       }),
       1,
@@ -130,6 +131,7 @@ describe("mobile connection storage", () => {
     await expect(loadPreferences()).resolves.toEqual({
       navigationTabOrder: ["usage", "threads"],
       hiddenNavigationTabs: ["home"],
+      threadListMachineOrder: ["laptop", "studio"],
       baseFontSize: 18,
     });
   });

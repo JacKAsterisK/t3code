@@ -129,6 +129,8 @@ export interface Preferences {
   readonly threadListGrouping?: SidebarThreadGrouping;
   /** Environment ids whose machine group this device keeps collapsed. */
   readonly threadListCollapsedMachines?: readonly string[];
+  /** Environment ids in the order this device lists its machine groups. */
+  readonly threadListMachineOrder?: readonly string[];
   readonly threadListFilters?: ThreadListFilters;
   readonly pullRequestListFilters?: PullRequestListPreferences;
   readonly workspaceSelections?: WorkspaceSelections;
@@ -208,6 +210,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     threadListWorkingShelfExpanded?: boolean;
     threadListGrouping?: SidebarThreadGrouping;
     threadListCollapsedMachines?: readonly string[];
+    threadListMachineOrder?: readonly string[];
     threadListFilters?: ThreadListFilters;
     pullRequestListFilters?: PullRequestListPreferences;
     workspaceSelections?: WorkspaceSelections;
@@ -361,6 +364,11 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (Array.isArray(parsed.threadListCollapsedMachines)) {
     preferences.threadListCollapsedMachines = parsed.threadListCollapsedMachines.filter(
+      (key): key is string => typeof key === "string",
+    );
+  }
+  if (Array.isArray(parsed.threadListMachineOrder)) {
+    preferences.threadListMachineOrder = parsed.threadListMachineOrder.filter(
       (key): key is string => typeof key === "string",
     );
   }

@@ -1769,6 +1769,7 @@ describe("machine grouping", () => {
       environments,
       projects,
       collapsedEnvironmentIds: [],
+      machineOrder: [],
       environmentFilter: null,
       projectFiltered: false,
       searchQuery: "",
@@ -1840,6 +1841,45 @@ describe("machine grouping", () => {
         : thread,
     );
     expect(rows(collapsed, { threads: asksApproval })).toContain("[Studio +2 attention]");
+  });
+
+  it("lists machines in this device's saved order, then unsaved machines by label", () => {
+    const studioFirst = grouping({
+      environments: environments.map((environment) => ({
+        ...environment,
+        connectionState: "connected" as const,
+      })),
+      machineOrder: ["removed-machine", studio],
+    });
+    expect(rows(studioFirst)).toEqual([
+      "studio-pinned",
+      "[Studio]",
+      "studio-a",
+      "studio-working",
+      "[Laptop]",
+      "[Spare]",
+      "v2-settled-shelf",
+      "laptop-settled",
+    ]);
+    const layout = buildThreadListV2Items({
+      threads,
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+      machineGrouping: studioFirst,
+    });
+    const headers = buildThreadListV2ListItems({
+      items: layout.items,
+      pendingTasks: [],
+      machineGroupHeaders: layout.machineGroupHeaders,
+    }).flatMap((item) =>
+      item.type === "v2-machine-header" ? [[item.label, item.canMoveUp, item.canMoveDown]] : [],
+    );
+    expect(headers).toEqual([
+      ["Studio", false, true],
+      ["Laptop", true, true],
+      ["Spare", true, false],
+    ]);
   });
 
   it("lists an empty machine only while it is connected and the list is not project-filtered", () => {

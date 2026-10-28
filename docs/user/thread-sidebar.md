@@ -156,8 +156,11 @@ When more than one machine is connected, open the project filter in the sidebar 
 web and desktop. On iOS and Android, choose **Group by machine** from the thread list's filter menu,
 or turn on **Settings → General → Group by machine**.
 
-Active threads then sit under the machine they run on. On desktop, this computer comes first. Click a
-machine to open or close it. A closed machine shows how many threads it holds, and a dot when one of
+Active threads then sit under the machine they run on. On desktop, this computer comes first. To
+put the machines you care about most at the top, right-click a machine on web and desktop, or
+long-press it on iOS and Android, and move it up, down, to the top or to the bottom. Each device
+keeps its own machine order, so a machine can rank first on one computer and last on another.
+**Reset machine order** in the same menu returns to the default. Click a machine to open or close it. A closed machine shows how many threads it holds, and a dot when one of
 them needs you. Use the new-thread button on a machine to start a thread there. On web and desktop,
 if the machine has more than one project, you pick the project next; on iOS and Android, the draft
 opens in that machine's most recent project, and you can change it. Pinned threads stay above the

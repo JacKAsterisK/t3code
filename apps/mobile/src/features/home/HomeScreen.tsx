@@ -426,16 +426,20 @@ export function HomeScreen(props: HomeScreenProps) {
     workingShelfExpanded,
     threadGrouping,
     collapsedMachines,
+    machineOrder,
     toggleSettledShelf,
     toggleSnoozedShelf,
     toggleWorkingShelf,
     toggleMachineCollapsed,
+    moveMachine,
+    resetMachineOrder,
   } = useThreadListV2ShelfPreferences();
   const machineGrouping = resolveThreadListV2MachineGrouping({
     grouping: threadGrouping,
     environments: props.environments,
     projects: props.projects,
     collapsedEnvironmentIds: collapsedMachines,
+    machineOrder,
     environmentFilter: props.selectedEnvironmentId,
     projectFiltered: v2ScopedProjectGroup !== null,
     searchQuery: props.searchQuery,
@@ -484,6 +488,9 @@ export function HomeScreen(props: HomeScreenProps) {
     selectedThreadKey,
     machineGrouping,
   });
+  const visibleMachineIds = threadListV2Layout.machineGroupHeaders.map(
+    (header) => header.machine.environmentId,
+  );
   // Called as `props.onSelectThread(...)`, the compiler would cache this handler on the whole
   // props object, which is new on every render of Home's parent.
   const { onSelectThread } = props;
@@ -560,6 +567,17 @@ export function HomeScreen(props: HomeScreenProps) {
             threads: props.threads,
             onNewThreadInProject: props.onNewThreadInProject,
           })}
+          canMoveUp={item.canMoveUp}
+          canMoveDown={item.canMoveDown}
+          onMove={(move) =>
+            moveMachine({
+              environmentId: item.environmentId,
+              move,
+              machines: machineGrouping?.machines ?? [],
+              visibleEnvironmentIds: visibleMachineIds,
+            })
+          }
+          onResetOrder={machineOrder.length > 0 ? resetMachineOrder : undefined}
         />
       );
     }
@@ -679,6 +697,9 @@ export function HomeScreen(props: HomeScreenProps) {
     threadSearchMatchByKey,
     workingShelfEnabled,
     grouped: machineGrouping !== null,
+    // Machine header menus move among the groups on screen and offer a reset once saved.
+    visibleMachineIds: visibleMachineIds.join(" "),
+    machineOrder,
   };
 
   const hasAnyThreads =

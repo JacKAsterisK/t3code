@@ -271,6 +271,8 @@ export interface ThreadListV2MachineGrouping {
   readonly collapsedEnvironmentIds: ReadonlySet<string>;
   /** Machines listed without active threads, so a new task can still start there. */
   readonly keepEmptyEnvironmentIds: ReadonlySet<EnvironmentId>;
+  /** This device's machine order; machines it doesn't name follow by label. */
+  readonly savedOrder: ReadonlyArray<string>;
 }
 
 export interface ThreadListV2MachineGroupHeader {
@@ -297,6 +299,7 @@ export function resolveThreadListV2MachineGrouping(input: {
   }>;
   readonly projects: ReadonlyArray<{ readonly environmentId: EnvironmentId }>;
   readonly collapsedEnvironmentIds: ReadonlyArray<string>;
+  readonly machineOrder: ReadonlyArray<string>;
   readonly environmentFilter: EnvironmentId | null;
   readonly projectFiltered: boolean;
   readonly searchQuery: string;
@@ -335,6 +338,7 @@ export function resolveThreadListV2MachineGrouping(input: {
           : [],
       ),
     ),
+    savedOrder: input.machineOrder,
   };
 }
 
@@ -490,6 +494,9 @@ export interface ThreadListV2MachineHeaderListItem {
   readonly hiddenCount: number;
   readonly dot: ThreadListV2MachineDot | null;
   readonly disabled: boolean;
+  /** Whether another group is listed above or below, for the header's move menu. */
+  readonly canMoveUp: boolean;
+  readonly canMoveDown: boolean;
 }
 
 export type ThreadListV2ListItem =
@@ -553,7 +560,9 @@ export function threadListV2ListItemsAreEqual(
         previous.collapsed === item.collapsed &&
         previous.hiddenCount === item.hiddenCount &&
         previous.dot === item.dot &&
-        previous.disabled === item.disabled
+        previous.disabled === item.disabled &&
+        previous.canMoveUp === item.canMoveUp &&
+        previous.canMoveDown === item.canMoveDown
       );
     case "v2-working-shelf":
       return (
@@ -684,6 +693,8 @@ export function buildThreadListV2ListItems(input: {
         hiddenCount,
         dot,
         disabled: shelfDisabled,
+        canMoveUp: nextHeader > 0,
+        canMoveDown: nextHeader < machineHeaders.length - 1,
       });
       nextHeader += 1;
     }
@@ -985,6 +996,7 @@ export function buildThreadListV2Items(input: {
       withThreadMachines(machineGrouping.machines, orderedActive),
       orderedActive,
       (machine) => machineGrouping.keepEmptyEnvironmentIds.has(machine.environmentId),
+      machineGrouping.savedOrder,
     );
     for (const { machine, threads } of groups) {
       const collapsed = machineGrouping.collapsedEnvironmentIds.has(machine.environmentId);

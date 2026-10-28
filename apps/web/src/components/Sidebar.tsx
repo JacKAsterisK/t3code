@@ -164,7 +164,12 @@ import {
 } from "../threadRoutes";
 import type { SidebarThreadSummary } from "../types";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
-import { groupThreadsByMachine } from "@t3tools/client-runtime/state/machine-groups";
+import {
+  groupThreadsByMachine,
+  moveSidebarMachine,
+  sortSidebarMachines,
+  type SidebarMachineMove,
+} from "@t3tools/client-runtime/state/machine-groups";
 import { cn } from "~/lib/utils";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import {
@@ -329,8 +334,10 @@ const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar:snoozed-expanded";
 const WORKING_SHELF_EXPANDED_KEY = "t3code:sidebar:working-expanded";
 const COLLAPSED_MACHINES_KEY = "t3code:sidebar:collapsed-machines";
-const CollapsedMachineIds = Schema.Array(Schema.String);
-const NO_COLLAPSED_MACHINES: readonly string[] = [];
+// Each device keeps its own machine order: priorities differ by where you sit.
+const MACHINE_ORDER_KEY = "t3code:sidebar:machine-order";
+const MachineIdList = Schema.Array(Schema.String);
+const NO_MACHINE_IDS: readonly string[] = [];
 
 const inboxReturns = createInboxReturnTracker();
 
@@ -468,8 +475,13 @@ function useSidebarThreads(input: {
   );
   const [collapsedMachineIds, setCollapsedMachineIds] = useLocalStorage(
     COLLAPSED_MACHINES_KEY,
-    NO_COLLAPSED_MACHINES,
-    CollapsedMachineIds,
+    NO_MACHINE_IDS,
+    MachineIdList,
+  );
+  const [savedMachineOrder, setSavedMachineOrder] = useLocalStorage(
+    MACHINE_ORDER_KEY,
+    NO_MACHINE_IDS,
+    MachineIdList,
   );
   // Shared with the old per-project sidebar, so folders keep their open state.
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
@@ -552,22 +564,23 @@ function useSidebarThreads(input: {
   const machineFolders =
     machineGroups === null || projectFolders !== null
       ? null
-      : groupThreadsByMachine(machineGroups.machines, activeThreads, machineGroups.keepEmpty).map(
-          (group) => {
-            const collapsed = collapsedMachineIds.includes(group.machine.environmentId);
-            return {
-              machine: group.machine,
-              collapsed,
-              // A closed machine still shows the open thread, and hints at the rest.
-              threads: collapsed
-                ? routeThreadOnly(group.threads, routeRowThreadKey)
-                : group.threads,
-              hiddenThreads: collapsed
-                ? group.threads.filter((thread) => threadShellKey(thread) !== routeRowThreadKey)
-                : EMPTY_THREADS,
-            };
-          },
-        );
+      : groupThreadsByMachine(
+          machineGroups.machines,
+          activeThreads,
+          machineGroups.keepEmpty,
+          savedMachineOrder,
+        ).map((group) => {
+          const collapsed = collapsedMachineIds.includes(group.machine.environmentId);
+          return {
+            machine: group.machine,
+            collapsed,
+            // A closed machine still shows the open thread, and hints at the rest.
+            threads: collapsed ? routeThreadOnly(group.threads, routeRowThreadKey) : group.threads,
+            hiddenThreads: collapsed
+              ? group.threads.filter((thread) => threadShellKey(thread) !== routeRowThreadKey)
+              : EMPTY_THREADS,
+          };
+        });
   const orderedThreads = [
     ...pinnedThreads,
     ...(projectFolders !== null
@@ -627,6 +640,22 @@ function useSidebarThreads(input: {
           ? current.filter((id) => id !== environmentId)
           : [...current, environmentId],
       ),
+    hasSavedMachineOrder: savedMachineOrder.length > 0,
+    // Saves every known machine, so later moves and new machines keep a stable place.
+    moveMachine: (environmentId: EnvironmentId, move: SidebarMachineMove) => {
+      if (machineGroups === null || machineFolders === null) return;
+      setSavedMachineOrder(
+        moveSidebarMachine(
+          sortSidebarMachines(machineGroups.machines, savedMachineOrder).map(
+            (machine) => machine.environmentId,
+          ),
+          machineFolders.map((folder) => folder.machine.environmentId),
+          environmentId,
+          move,
+        ),
+      );
+    },
+    resetMachineOrder: () => setSavedMachineOrder(NO_MACHINE_IDS),
     renderedSettledThreads,
     visibleSnoozedThreads,
     visibleWorkingThreads,
@@ -1362,6 +1391,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     toggleProjectFolder,
     machineFolders,
     toggleMachineGroup,
+    hasSavedMachineOrder,
+    moveMachine,
+    resetMachineOrder,
     renderedSettledThreads,
     visibleSnoozedThreads,
     visibleWorkingThreads,
@@ -1400,6 +1432,53 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               machineThreadProjects(machine.environmentId).length > 0,
           },
   });
+  const handleMachineContextMenu = useStableCallback(
+    (environmentId: EnvironmentId, position: { x: number; y: number }) => {
+      const api = readLocalApi();
+      if (!api || machineFolders === null) return;
+      const index = machineFolders.findIndex(
+        (folder) => folder.machine.environmentId === environmentId,
+      );
+      const folder = machineFolders[index];
+      if (folder === undefined) return;
+      const first = index === 0;
+      const last = index === machineFolders.length - 1;
+      void (async () => {
+        const clicked = await settlePromise(() =>
+          api.contextMenu.show(
+            [
+              ...(machineThreadProjects(environmentId).length > 0
+                ? [{ id: "new-thread" as const, label: `New thread on ${folder.machine.label}` }]
+                : []),
+              { id: "top" as const, label: "Move to top", disabled: first, separatorBefore: true },
+              { id: "up" as const, label: "Move up", disabled: first },
+              { id: "down" as const, label: "Move down", disabled: last },
+              { id: "bottom" as const, label: "Move to bottom", disabled: last },
+              ...(hasSavedMachineOrder
+                ? [{ id: "reset" as const, label: "Reset machine order", separatorBefore: true }]
+                : []),
+            ],
+            position,
+          ),
+        );
+        if (clicked._tag === "Failure") return;
+        switch (clicked.value) {
+          case "new-thread":
+            startThreadOnMachine(environmentId);
+            return;
+          case "reset":
+            resetMachineOrder();
+            return;
+          case "top":
+          case "up":
+          case "down":
+          case "bottom":
+            moveMachine(environmentId, clicked.value);
+            return;
+        }
+      })();
+    },
+  );
 
   // Ranked across environments as the palette ranks them, so one
   // environment's list does not sit above another's better matches; rows
@@ -3460,6 +3539,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 }
                                 onToggle={toggleMachineGroup}
                                 onNewThread={startThreadOnMachine}
+                                onContextMenu={handleMachineContextMenu}
                               />,
                             );
                             for (const thread of folder.threads) {

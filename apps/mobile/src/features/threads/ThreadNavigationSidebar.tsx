@@ -275,11 +275,14 @@ function ThreadNavigationSidebarPane(
     workingShelfExpanded,
     threadGrouping,
     collapsedMachines,
+    machineOrder,
     toggleSettledShelf,
     toggleSnoozedShelf,
     toggleWorkingShelf,
     setThreadGrouping,
     toggleMachineCollapsed,
+    moveMachine,
+    resetMachineOrder,
   } = useThreadListV2ShelfPreferences();
   const machineGrouping = resolveThreadListV2MachineGrouping({
     grouping: threadGrouping,
@@ -292,6 +295,7 @@ function ThreadNavigationSidebarPane(
     })),
     projects,
     collapsedEnvironmentIds: collapsedMachines,
+    machineOrder,
     environmentFilter: options.selectedEnvironmentId,
     projectFiltered: selectedProjectScope !== null,
     searchQuery: props.searchQuery,
@@ -340,6 +344,9 @@ function ThreadNavigationSidebarPane(
     selectedThreadKey: props.selectedThreadKey ?? null,
     machineGrouping,
   });
+  const visibleMachineIds = threadListV2Layout.machineGroupHeaders.map(
+    (header) => header.machine.environmentId,
+  );
   const listItems: readonly SidebarListItem[] =
     settledShelfExpanded && threadListV2Layout.hiddenSettledCount > 0
       ? [
@@ -506,6 +513,9 @@ function ThreadNavigationSidebarPane(
     threadSearchMatchByKey,
     workingShelfEnabled,
     grouped: machineGrouping !== null,
+    // Machine header menus move among the groups on screen and offer a reset once saved.
+    visibleMachineIds: visibleMachineIds.join(" "),
+    machineOrder,
   };
   useThreadJumpShortcuts(listItems, handleSelectThread);
   const sidebarItemsAreEqual = (previous: SidebarListItem, item: SidebarListItem): boolean => {
@@ -668,6 +678,17 @@ function ThreadNavigationSidebarPane(
               threads,
               onNewThreadInProject: props.onNewThreadInProject,
             })}
+            canMoveUp={item.canMoveUp}
+            canMoveDown={item.canMoveDown}
+            onMove={(move) =>
+              moveMachine({
+                environmentId: item.environmentId,
+                move,
+                machines: machineGrouping?.machines ?? [],
+                visibleEnvironmentIds: visibleMachineIds,
+              })
+            }
+            onResetOrder={machineOrder.length > 0 ? resetMachineOrder : undefined}
           />
         );
       case "v2-working-shelf":

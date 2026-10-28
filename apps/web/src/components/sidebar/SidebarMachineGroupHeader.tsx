@@ -36,6 +36,8 @@ export const SidebarMachineGroupHeader = memo(function SidebarMachineGroupHeader
   canStartThread: boolean;
   onToggle: (environmentId: EnvironmentId) => void;
   onNewThread: (environmentId: EnvironmentId) => void;
+  // Holds the machine order moves, so each device can rank its own machines.
+  onContextMenu: (environmentId: EnvironmentId, position: { x: number; y: number }) => void;
 }) {
   const { machine, collapsed, hiddenThreads } = props;
   const rowId = sidebarMachineRowId(machine.environmentId);
@@ -65,6 +67,10 @@ export const SidebarMachineGroupHeader = memo(function SidebarMachineGroupHeader
         data-sidebar-row={rowId}
         aria-expanded={!collapsed}
         onClick={() => props.onToggle(machine.environmentId)}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          props.onContextMenu(machine.environmentId, { x: event.clientX, y: event.clientY });
+        }}
         className={cn(
           "flex h-8 w-full cursor-pointer items-center gap-2 rounded-(--control-radius) px-(--sidebar-row-content-inset) text-left outline-none hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
           machine.connection === "offline" && "opacity-60",

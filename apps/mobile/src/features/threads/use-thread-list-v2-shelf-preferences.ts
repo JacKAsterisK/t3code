@@ -1,4 +1,10 @@
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
+import {
+  moveSidebarMachine,
+  sortSidebarMachines,
+  type SidebarMachine,
+  type SidebarMachineMove,
+} from "@t3tools/client-runtime/state/machine-groups";
 import type { EnvironmentId, SidebarThreadGrouping } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 
@@ -21,6 +27,8 @@ export function useThreadListV2ShelfPreferences() {
     loaded && preferencesResult.value.threadListGrouping === "machine" ? "machine" : "none";
   const collapsedMachines: ReadonlyArray<string> =
     (loaded ? preferencesResult.value.threadListCollapsedMachines : undefined) ?? NO_MACHINES;
+  const machineOrder: ReadonlyArray<string> =
+    (loaded ? preferencesResult.value.threadListMachineOrder : undefined) ?? NO_MACHINES;
 
   // Transforms read optimistic state so same-frame presses toggle twice.
   const toggleSnoozedShelf = () => {
@@ -65,6 +73,34 @@ export function useThreadListV2ShelfPreferences() {
       },
     });
   };
+  /**
+   * Saves every known machine's place, so later moves and new machines keep a
+   * stable order. `visibleEnvironmentIds` are the groups on screen.
+   */
+  const moveMachine = (input: {
+    readonly environmentId: EnvironmentId;
+    readonly move: SidebarMachineMove;
+    readonly machines: ReadonlyArray<SidebarMachine>;
+    readonly visibleEnvironmentIds: ReadonlyArray<string>;
+  }) => {
+    if (!loaded) return;
+    savePreferences({
+      transform: (current) => ({
+        threadListMachineOrder: moveSidebarMachine(
+          sortSidebarMachines(input.machines, current.threadListMachineOrder).map(
+            (machine) => machine.environmentId,
+          ),
+          input.visibleEnvironmentIds,
+          input.environmentId,
+          input.move,
+        ),
+      }),
+    });
+  };
+  const resetMachineOrder = () => {
+    if (!loaded) return;
+    savePreferences({ threadListMachineOrder: [] });
+  };
 
   return {
     loaded,
@@ -74,10 +110,13 @@ export function useThreadListV2ShelfPreferences() {
     workingShelfExpanded,
     threadGrouping,
     collapsedMachines,
+    machineOrder,
     toggleSettledShelf,
     toggleSnoozedShelf,
     toggleWorkingShelf,
     setThreadGrouping,
     toggleMachineCollapsed,
+    moveMachine,
+    resetMachineOrder,
   } as const;
 }

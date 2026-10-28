@@ -11,6 +11,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSqliteClient from "../../packages/shared/src/nodeSqliteClient.ts";
 import { runMigrations } from "../../apps/server/src/persistence/Migrations.ts";
 import { treeDigest } from "./home-repair-executor.ts";
+import { supportedMigrationIds } from "./home-repair.ts";
 import { inspectNativeUpdateWork } from "../../apps/server/src/lan/NativeMaintenance.ts";
 
 const script = String.raw`
@@ -294,7 +295,7 @@ try {
     try {
       NodeAssert.equal(
         db.prepare("SELECT MAX(migration_id) AS n FROM effect_sql_migrations").get()!.n,
-        73,
+        Math.max(...supportedMigrationIds),
       );
     } finally {
       db.close();

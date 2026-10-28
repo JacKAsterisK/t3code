@@ -598,7 +598,10 @@ NodeTest.test(
       NodeAssert.equal(failed.canImportRetainedLanHistory, false);
       NodeAssert.ok(failed.historyImportBlockers.includes("retained-history-preview-failed"));
       NodeAssert.equal(JSON.stringify(failed).includes("credentials"), false);
-      mutate(source, "DELETE FROM effect_sql_migrations WHERE migration_id=73");
+      mutate(
+        source,
+        `DELETE FROM effect_sql_migrations WHERE migration_id=${Math.max(...supportedMigrationIds)}`,
+      );
       const preview = await previewRetainedLanHistory(options);
       NodeAssert.ok(
         preview.historyImportBlockers.includes("history-import-requires-current-schema"),

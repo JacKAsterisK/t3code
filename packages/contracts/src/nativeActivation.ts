@@ -23,5 +23,6 @@ export const NativeMaintenanceRequest = Schema.Struct({
   journalPath: Schema.NonEmptyString,
   bootstrapId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   manualActivation: Schema.optionalKey(Schema.Boolean),
+  generationVersion: Schema.optionalKey(Schema.Literal(2)),
 });
 export type NativeMaintenanceRequest = typeof NativeMaintenanceRequest.Type;

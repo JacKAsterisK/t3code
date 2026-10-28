@@ -147,6 +147,158 @@ const fixtureAtMigration = (toMigrationInclusive?: number) =>
     return { request, mutate, insert, warm, dbPath, appendEvent };
   });
 const fixture = fixtureAtMigration();
+const readinessWork = (databasePath: string) =>
+  NativeMaintenance.inspectNativeUpdateReadinessWork(databasePath);
+
+effectIt.effect("live readiness avoids historical payload reads and generation scans", () =>
+  Effect.gen(function* () {
+    const { dbPath, insert } = yield* fixture;
+    const largeHistory = JSON.stringify({ markdown: "Retained conversation. ".repeat(100_000) });
+    for (const [table, status] of [
+      ["orchestration_v2_projection_runs", "completed"],
+      ["orchestration_v2_projection_nodes", "completed"],
+      ["orchestration_v2_projection_turn_items", "completed"],
+      ["orchestration_v2_effect_outbox", "succeeded"],
+      ["orchestration_v2_projection_messages", "fixture"],
+    ])
+      yield* insert(table!, status!, { payload_json: largeHistory });
+    const prepare = NodeSqlite.DatabaseSync.prototype.prepare;
+    using statements = vi
+      .spyOn(NodeSqlite.DatabaseSync.prototype, "prepare")
+      .mockImplementation(function (this: NodeSqlite.DatabaseSync, sql: string) {
+        assert.notMatch(sql, /quick_check|ORDER BY (sequence|command_id|message_id)/i);
+        assert.notMatch(sql, /^SELECT \* FROM [a-z_]+\s*$/i);
+        const statement = prepare.call(this, sql);
+        const inspectRow = (row: Record<string, NodeSqlite.SQLOutputValue>) =>
+          assert.notEqual(
+            row.payload_json,
+            largeHistory,
+            "Readiness loaded a completed history body",
+          );
+        return new Proxy(statement, {
+          get(target, key) {
+            if (key === "all")
+              return (...parameters: NodeSqlite.SQLInputValue[]) => {
+                const rows = target.all(...parameters);
+                rows.forEach(inspectRow);
+                return rows;
+              };
+            if (key === "iterate")
+              return function* (...parameters: NodeSqlite.SQLInputValue[]) {
+                for (const row of target.iterate(...parameters)) {
+                  inspectRow(row);
+                  yield row;
+                }
+              };
+            const value: unknown = Reflect.get(target, key, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      });
+    const result = readinessWork(dbPath);
+    assert.deepEqual(result, {
+      activeRuns: 0,
+      queuedRuns: 0,
+      pendingRequests: 0,
+      backgroundAgents: 0,
+      scheduledWork: 0,
+      restartContinuations: 0,
+      carriedWork: {
+        activeRuns: 0,
+        queuedRuns: 0,
+        pendingRequests: 0,
+        backgroundAgents: 0,
+        scheduledWork: 0,
+        restartContinuations: 0,
+      },
+    });
+    assert.isAbove(statements.mock.calls.length, 0);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect.each([
+  { table: "orchestration_v2_projection_runs", status: "running", category: "activeRuns" },
+  { table: "orchestration_v2_projection_runs", status: "waiting", category: "activeRuns" },
+  { table: "orchestration_v2_projection_runs", status: "queued", category: "queuedRuns" },
+  {
+    table: "orchestration_v2_projection_runtime_requests",
+    status: "pending",
+    category: "pendingRequests",
+  },
+] as const)("live readiness blocks $status $table", ({ table, status, category }) =>
+  Effect.gen(function* () {
+    const { dbPath, insert } = yield* fixture;
+    yield* insert(table, status);
+    assert.isAbove(readinessWork(dbPath)[category], 0);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect("live readiness refuses unknown statuses and stale projections", () =>
+  Effect.gen(function* () {
+    const { dbPath, insert, mutate } = yield* fixture;
+    yield* insert("orchestration_v2_projection_runs", "future");
+    assert.throws(() => readinessWork(dbPath), NativeMaintenance.NativeMaintenanceError);
+    yield* mutate(
+      "DELETE FROM orchestration_v2_projection_runs; UPDATE orchestration_v2_projection_metadata SET last_sequence=1",
+    );
+    assert.throws(() => readinessWork(dbPath), NativeMaintenance.NativeMaintenanceError);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect.each([
+  {
+    table: "orchestration_v2_projection_runs",
+    status: "completed",
+    payload: {
+      delegatedCompletion: {
+        disposition: "open",
+        nextGeneration: 2,
+        delivery: { generation: 1, messageId: "message:delivery", taskIds: ["task:child"] },
+      },
+    },
+  },
+  {
+    table: "orchestration_v2_projection_subagents",
+    status: "completed",
+    payload: { completionDelivery: { state: "pending", observedByRunId: null } },
+  },
+  {
+    table: "orchestration_v2_projection_provider_threads",
+    status: "idle",
+    payload: { goal: { objective: "Continue native work", status: "active" } },
+  },
+  {
+    table: "orchestration_v2_projection_provider_threads",
+    status: "idle",
+    payload: { pendingBackgroundTasks: [{ id: "task:pending" }] },
+  },
+  {
+    table: "orchestration_v2_projection_provider_sessions",
+    status: "ready",
+    payload: {},
+  },
+])(
+  "live readiness preserves deferred classification in $status $table",
+  ({ table, status, payload }) =>
+    Effect.gen(function* () {
+      const { dbPath, insert } = yield* fixture;
+      yield* insert(table, status, { payload_json: JSON.stringify(payload) });
+      const { workGeneration: _generation, ...stopped } =
+        NativeMaintenance.inspectNativeUpdateWork(dbPath);
+      assert.deepEqual(readinessWork(dbPath), stopped);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect("live readiness refuses malformed deferred work behind a terminal label", () =>
+  Effect.gen(function* () {
+    const { dbPath, insert } = yield* fixture;
+    yield* insert("orchestration_v2_projection_provider_threads", "idle", {
+      payload_json: '{"pendingBackgroundTasks":null}',
+    });
+    assert.throws(() => readinessWork(dbPath), NativeMaintenance.NativeMaintenanceError);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 const stalePlanDisplayFixture = (status: string) =>
   Effect.gen(function* () {
     const base = yield* fixture;
@@ -1524,3 +1676,78 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
     }).pipe(Effect.provide(testLayer)),
   );
 });
+
+effectIt.effect(
+  "v2 inspect and verify keep an absent WAL stable without historical body scans",
+  () =>
+    Effect.gen(function* () {
+      const { request, dbPath, insert, appendEvent } = yield* fixtureAtMigration(55);
+      yield* appendEvent("project", 1);
+      const largeHistory = JSON.stringify({ markdown: "Retained history. ".repeat(100_000) });
+      yield* insert("orchestration_v2_projection_runs", "completed", {
+        payload_json: largeHistory,
+      });
+      yield* insert("orchestration_v2_projection_messages", "fixture", {
+        payload_json: largeHistory,
+      });
+      const prepare = NodeSqlite.DatabaseSync.prototype.prepare;
+      using _statements = vi
+        .spyOn(NodeSqlite.DatabaseSync.prototype, "prepare")
+        .mockImplementation(function (this: NodeSqlite.DatabaseSync, sql: string) {
+          assert.notMatch(
+            sql,
+            /quick_check|SELECT \* FROM orchestration_events|SELECT \* FROM orchestration_v2_projection_messages/i,
+          );
+          return prepare.call(this, sql);
+        });
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const first = yield* service.inspect({ ...request, generationVersion: 2 });
+      const second = yield* service.inspect({ ...request, generationVersion: 2 });
+      assert.equal(first.generationVersion, 2);
+      assert.equal(second.dataGeneration, first.dataGeneration);
+      assert.equal(second.workGeneration, first.workGeneration);
+      const verified = yield* service.verify({
+        ...request,
+        operation: "verify",
+        generationVersion: 2,
+      });
+      assert.equal(verified.generationVersion, 2);
+      assert.equal(verified.workGeneration, first.workGeneration);
+      assert.equal(
+        verified.activeRuns +
+          verified.queuedRuns +
+          verified.pendingRequests +
+          verified.backgroundAgents +
+          verified.scheduledWork +
+          verified.restartContinuations,
+        0,
+      );
+      assert.isTrue(NodeFS.existsSync(dbPath));
+    }).pipe(Effect.provide(Layer.mergeAll(testLayer, NodeServices.layer)), Effect.scoped),
+);
+
+effectIt.effect("v2 inspection still refuses a concurrent durable write", () =>
+  Effect.gen(function* () {
+    const { request, dbPath } = yield* fixture;
+    const close = NodeSqlite.DatabaseSync.prototype.close;
+    let changed = false;
+    using _statements = vi
+      .spyOn(NodeSqlite.DatabaseSync.prototype, "close")
+      .mockImplementation(function (this: NodeSqlite.DatabaseSync) {
+        close.call(this);
+        if (!changed) {
+          changed = true;
+          const writer = new NodeSqlite.DatabaseSync(dbPath);
+          try {
+            writer.exec("PRAGMA user_version=2468");
+          } finally {
+            writer.close();
+          }
+        }
+      });
+    const service = yield* NativeMaintenance.NativeMaintenance;
+    const failure = yield* service.inspect({ ...request, generationVersion: 2 }).pipe(Effect.flip);
+    assert.equal(failure.reason, "changed");
+    assert.isTrue(changed);
+  }).pipe(Effect.provide(Layer.mergeAll(testLayer, NodeServices.layer)), Effect.scoped),
+);

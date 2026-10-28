@@ -14,7 +14,7 @@ import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import type * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
-import { NativeMaintenanceError, inspectNativeUpdateWork } from "./NativeMaintenance.ts";
+import { NativeMaintenanceError, inspectNativeUpdateReadinessWork } from "./NativeMaintenance.ts";
 import { startNativeUpdateControl } from "./NativeUpdateControl.ts";
 
 export function supportsNativeUpdateControl(input: {
@@ -90,7 +90,7 @@ export const startNativeUpdateReadiness = Effect.fn("NativeUpdateReadiness.start
       if (!state.draftStateKnown || state.hasUnsentPrompt !== false) return false;
       return yield* Effect.try({
         try: () => {
-          const work = inspectNativeUpdateWork(config.dbPath);
+          const work = inspectNativeUpdateReadinessWork(config.dbPath);
           return blockingKeys.every((key) => work[key] === 0);
         },
         catch: () => new NativeMaintenanceError({ reason: "io" }),

@@ -335,6 +335,8 @@ explicitly chooses the original or separate LAN home. Both complete homes and
 matching profiles are preserved before selection; identities, credentials and
 databases are never merged.
 
+Existing two-home installations retain their selected history and matching profile until a coordinated single-home cutover. Canonical-only startup has not shipped; observation improvements do not move or archive homes or uninstall an application.
+
 The native repair interface is defined in
 [`home-repair.contract.json`](../../scripts/lan/home-repair.contract.json).
 Hub holds stopped-home/profile admission throughout Apply and reconciles its
@@ -396,6 +398,8 @@ offline inventory as stale rather than declaring installation failure.
 
 ## Activation and rollback
 
+Hub's **Update and restart T3** button uses the existing manual action: normal close, approved update and reopen, with supported unfinished-work preservation. It never force-kills T3. Automatic updates and **Update when idle** retain their existing work/draft admission rules.
+
 Download and stage candidates while work runs. The first activation policy
 requires a deliberate stopped boundary and an exclusive activation lock held
 through snapshot, activation and verification. Recheck the exact environment,
@@ -434,7 +438,7 @@ integrity continues to refuse admission.
 The helper adds a lease-free, read-only `probe` operation on its existing bounded
 stdin/stdout protocol. It reads one coherent WAL snapshot and returns the blocking
 counts, carried counts, work generation, process liveness and observation time.
-It does not start the server or providers. It is advisory: automatic close also
+The live close gate reads current/deferred work rather than terminal conversation bodies. It does not start the server or providers. It is advisory: automatic close also
 requires an application-owned execution reservation and fresh draft readiness;
 stopped inspect/verify and the native locks remain authoritative for activation.
 
@@ -451,13 +455,9 @@ only from a fresh owner-bound record advertising protocol 1 and the exact local
 pipe derived from that owner. Missing/legacy capability returns null/false and
 cannot authorize unattended close.
 
-The work-generation guard includes durable work projections, retained
-messages/thread lineage, session bindings and webhook queue/replay keys as well
-as events, command receipts, launch workflows and schedule configuration.
-Projection payloads and original linkage/status columns are guarded; added
-provider-instance/driver indexes derived from unchanged payloads do not cause a
-false migration refusal. Search indexes and empty newly introduced queue tables
-are not work. A migration changing carried work refuses with `changed`.
+Legacy work generations hash durable projections, retained messages/thread lineage, session bindings, webhook queue/replay keys, events, receipts, workflows and schedule configuration. With the matching 1.0.22-or-newer helper, Hub negotiates `generationVersion: 2`: repeated data observations use main/WAL sizes, last-write timestamps and bounded SQLite/WAL headers, while work observations bind current/deferred work plus event heads and table counts. They avoid repeated whole-history body hashing and are change observations under held admission, not full-content checksums. A migration changing carried work still refuses with `changed`.
+
+The pointer, activation journal and recovery snapshot retain the generation format used for that transaction. An absent version means legacy; old recovery continues with its original format, without silently reinterpreting its hashes as version 2.
 
 Hub holds Windows `FileShare.None` handles
 on the permanent `data/native-admission.lock` and existing
@@ -499,7 +499,7 @@ policy, signing credentials or approved release lock is configured by these test
 
 Windows desktop updates lack the service launcher's automatic data rollback.
 Before replacement, capture and verify a coherent stopped-state SQLite recovery
-set including any WAL/SHM files and required non-credential state. Keep recovery
+set including any WAL/SHM files and required non-credential state. Full backup SHA-256 verification and matching-snapshot rollback remain required; version-2 snapshots also retain timestamps for restored observations. Keep recovery
 copies separate from the live home and preserve the previous immutable binary.
 Do not copy provider/harness OAuth homes. Protect any required native recovery
 identity material under an explicitly reviewed policy.

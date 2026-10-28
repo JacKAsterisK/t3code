@@ -20,6 +20,7 @@ import {
   OrchestrationV2DelegatedCompletionTaskDelivery,
   OrchestrationV2ProviderGoal,
 } from "@t3tools/contracts";
+import { nativeDataGeneration, NativeDataGenerationChanged } from "./NativeDataGeneration.ts";
 import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
 import {
   emptyNativeWork,
@@ -67,7 +68,12 @@ const safeParents = (directory: string) => {
 };
 const isNativeMaintenanceError = Schema.is(NativeMaintenanceError);
 const ioError = (cause: unknown) =>
-  isNativeMaintenanceError(cause) ? cause : new NativeMaintenanceError({ reason: "io", cause });
+  isNativeMaintenanceError(cause)
+    ? cause
+    : new NativeMaintenanceError({
+        reason: cause instanceof NativeDataGenerationChanged ? "changed" : "io",
+        cause,
+      });
 
 const bootstrapJournal = Schema.decodeUnknownSync(
   Schema.Struct({
@@ -410,15 +416,58 @@ const terminalDisplayClassifier = (db: NodeSqlite.DatabaseSync) => {
   };
 };
 
+type WorkInspection = ReturnType<typeof emptyNativeWork> & {
+  readonly carriedWork?: ReturnType<typeof emptyNativeWork>;
+};
+const readinessFilter = (table: string): string => {
+  const busy = statuses.find(([name]) => name === table)?.[2] ?? [];
+  const current = `status IN (${[...busy, ...(table.endsWith("_runs") ? ["queued"] : [])].map((status) => `'${status}'`).join(",")})`;
+  switch (table) {
+    case "orchestration_v2_projection_runs":
+      return `${current} OR (json_type(payload_json,'$.delegatedCompletion') IS NOT NULL AND COALESCE(json_extract(payload_json,'$.delegatedCompletion.disposition'),'') NOT IN ('stopped','disposed'))`;
+    case "orchestration_v2_projection_subagents":
+      return `${current} OR (json_type(payload_json,'$.completionDelivery') IS NOT NULL AND COALESCE(json_extract(payload_json,'$.completionDelivery.state'),'') NOT IN ('acknowledged','delivered','disposed')) OR (json_extract(payload_json,'$.origin')='app_owned' AND json_extract(payload_json,'$.childThreadId') IS NOT NULL AND json_extract(payload_json,'$.result') IS NULL)`;
+    case "orchestration_v2_projection_provider_threads":
+      return `${current} OR json_extract(payload_json,'$.goal') IS NOT NULL OR (json_type(payload_json,'$.pendingBackgroundTasks') IS NOT NULL AND json_type(payload_json,'$.pendingBackgroundTasks')!='array') OR json_array_length(payload_json,'$.pendingBackgroundTasks')>0 OR provider_session_id IN (SELECT provider_session_id FROM orchestration_v2_projection_provider_sessions WHERE status='ready')`;
+    case "orchestration_v2_projection_provider_session_bindings":
+      return "provider_session_id IN (SELECT provider_session_id FROM orchestration_v2_projection_provider_sessions WHERE status='ready')";
+    case "orchestration_v2_thread_launch_workflows":
+      return "status NOT IN ('completed','failed') OR status IS NULL";
+    case "orchestration_v2_projection_context_transfers":
+      return "status NOT IN ('failed','consumed','superseded') OR status IS NULL";
+    case "scheduled_tasks":
+      return "enabled=1 OR last_run_status NOT IN ('never','succeeded','failed') OR last_run_status IS NULL";
+    case "scheduled_task_webhook_pending":
+      return "state NOT IN ('completed','failed') OR state IS NULL";
+    default:
+      return current;
+  }
+};
+const workRows = (db: NodeSqlite.DatabaseSync, table: string, readiness: boolean) =>
+  db.prepare(`SELECT * FROM ${table}${readiness ? ` WHERE ${readinessFilter(table)}` : ""}`);
+
 // All identifiers below are fixed source constants, never request-derived SQL.
-const inspectWork = (databasePath: string, update: boolean) => {
+function inspectWork(databasePath: string, update: boolean, readiness: true): WorkInspection;
+function inspectWork(
+  databasePath: string,
+  update: boolean,
+  readiness?: false,
+  generationVersion?: 2,
+): WorkInspection & { readonly workGeneration: string };
+function inspectWork(
+  databasePath: string,
+  update: boolean,
+  readiness = false,
+  generationVersion?: 2,
+) {
+  const lightweight = readiness || generationVersion === 2;
   const db = new NodeSqlite.DatabaseSync(databasePath, {
     readOnly: true,
     enableForeignKeyConstraints: true,
   });
   try {
     db.exec("PRAGMA query_only=ON; BEGIN;");
-    if (db.prepare("PRAGMA quick_check").get()?.quick_check !== "ok")
+    if (!lightweight && db.prepare("PRAGMA quick_check").get()?.quick_check !== "ok")
       throw new NativeMaintenanceError({ reason: "schema" });
     const recorded = db
       .prepare("SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id")
@@ -493,7 +542,7 @@ const inspectWork = (databasePath: string, update: boolean) => {
       throw new NativeMaintenanceError({ reason: "schema" });
     };
     for (const [table, , busy] of statuses) {
-      for (const row of db.prepare(`SELECT * FROM ${table}`).iterate()) {
+      for (const row of workRows(db, table, lightweight).iterate()) {
         let payload: Record<string, unknown>;
         try {
           payload = decodePayload(row.payload_json);
@@ -670,67 +719,10 @@ const inspectWork = (databasePath: string, update: boolean) => {
       deferredDelivery +
       unconsumedContext +
       childResults;
-    const updateWork = update ? classifyUpdateWork(db, childResults, isTerminalDisplay) : undefined;
-    const hash = NodeCrypto.createHash("sha256");
-    for (const [table, key] of [
-      ["orchestration_events", "sequence"],
-      ["orchestration_command_receipts", "command_id"],
-      ["orchestration_v2_thread_launch_workflows", "command_id"],
-      ["scheduled_tasks", "task_id"],
-    ]) {
-      hash.update(table!);
-      for (const row of db.prepare(`SELECT * FROM ${table} ORDER BY ${key}`).iterate())
-        hash.update(JSON.stringify(row));
-    }
-    if (update) {
-      for (const [table, key] of [
-        ["orchestration_v2_projection_runs", "run_id"],
-        ["orchestration_v2_projection_run_attempts", "attempt_id"],
-        ["orchestration_v2_projection_nodes", "node_id"],
-        ["orchestration_v2_projection_provider_sessions", "provider_session_id"],
-        ["orchestration_v2_projection_provider_threads", "provider_thread_id"],
-        ["orchestration_v2_projection_provider_turns", "provider_turn_id"],
-        ["orchestration_v2_projection_runtime_requests", "runtime_request_id"],
-        ["orchestration_v2_projection_subagents", "subagent_id"],
-        ["orchestration_v2_projection_turn_items", "turn_item_id"],
-        ["orchestration_v2_projection_context_transfers", "context_transfer_id"],
-        ["orchestration_v2_projection_messages", "message_id"],
-        ["orchestration_v2_projection_threads", "thread_id"],
-        ["orchestration_v2_effect_outbox", "effect_id"],
-      ]) {
-        for (const row of db.prepare("SELECT * FROM " + table + " ORDER BY " + key).iterate()) {
-          hash.update(table!);
-          const durable = { ...row };
-          for (const derived of [
-            "provider_instance_id",
-            "driver",
-            "source_provider_instance_id",
-            "target_provider_instance_id",
-          ])
-            delete durable[derived];
-          hash.update(JSON.stringify(durable));
-        }
-      }
-      for (const table of [
-        "orchestration_v2_projection_provider_session_bindings",
-        "scheduled_task_webhook_pending",
-        "scheduled_task_webhook_replay_keys",
-      ]) {
-        if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))
-          continue;
-        const rows = db
-          .prepare("SELECT * FROM " + table)
-          .all()
-          .map((row) => JSON.stringify(row))
-          .sort();
-        for (const row of rows) {
-          hash.update(table);
-          hash.update(row);
-        }
-      }
-    }
-    db.exec("COMMIT");
-    return {
+    const updateWork = update
+      ? classifyUpdateWork(db, childResults, isTerminalDisplay, lightweight)
+      : undefined;
+    const work = {
       activeRuns,
       queuedRuns,
       pendingRequests,
@@ -738,16 +730,144 @@ const inspectWork = (databasePath: string, update: boolean) => {
       scheduledWork,
       restartContinuations,
       ...updateWork,
+    };
+    // Live close admission needs current work only; stopped verification owns history integrity.
+    if (readiness) {
+      db.exec("COMMIT");
+      return work;
+    }
+    const hash = NodeCrypto.createHash("sha256");
+    if (generationVersion === 2) {
+      hash.update("t3-native-work-v2");
+      hash.update(
+        JSON.stringify({
+          count: db.prepare("SELECT COUNT(*) AS count FROM orchestration_events").get()!.count,
+          head: db
+            .prepare("SELECT COALESCE(MAX(sequence),0) AS head FROM orchestration_events")
+            .get()!.head,
+        }),
+      );
+      hash.update(JSON.stringify(work));
+      for (const table of [
+        "orchestration_command_receipts",
+        "orchestration_v2_projection_messages",
+        "orchestration_v2_projection_turn_items",
+        "orchestration_v2_projection_threads",
+      ]) {
+        hash.update(table);
+        hash.update(JSON.stringify(db.prepare("SELECT COUNT(*) AS count FROM " + table).get()));
+      }
+      for (const [table] of statuses) {
+        const rows = workRows(db, table, true)
+          .all()
+          .map((row) => {
+            const durable = { ...row };
+            for (const derived of [
+              "provider_instance_id",
+              "driver",
+              "source_provider_instance_id",
+              "target_provider_instance_id",
+            ])
+              delete durable[derived];
+            return JSON.stringify(durable);
+          })
+          .sort();
+        hash.update(table);
+        for (const row of rows) hash.update(row);
+      }
+      for (const table of [
+        "orchestration_v2_thread_launch_workflows",
+        "scheduled_tasks",
+        "orchestration_v2_projection_context_transfers",
+        "scheduled_task_webhook_pending",
+        "scheduled_task_webhook_replay_keys",
+      ]) {
+        hash.update(table);
+        if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))
+          continue;
+        for (const row of db
+          .prepare("SELECT * FROM " + table)
+          .all()
+          .map((row) => JSON.stringify(row))
+          .sort())
+          hash.update(row);
+      }
+    } else {
+      for (const [table, key] of [
+        ["orchestration_events", "sequence"],
+        ["orchestration_command_receipts", "command_id"],
+        ["orchestration_v2_thread_launch_workflows", "command_id"],
+        ["scheduled_tasks", "task_id"],
+      ]) {
+        hash.update(table!);
+        for (const row of db.prepare(`SELECT * FROM ${table} ORDER BY ${key}`).iterate())
+          hash.update(JSON.stringify(row));
+      }
+      if (update) {
+        for (const [table, key] of [
+          ["orchestration_v2_projection_runs", "run_id"],
+          ["orchestration_v2_projection_run_attempts", "attempt_id"],
+          ["orchestration_v2_projection_nodes", "node_id"],
+          ["orchestration_v2_projection_provider_sessions", "provider_session_id"],
+          ["orchestration_v2_projection_provider_threads", "provider_thread_id"],
+          ["orchestration_v2_projection_provider_turns", "provider_turn_id"],
+          ["orchestration_v2_projection_runtime_requests", "runtime_request_id"],
+          ["orchestration_v2_projection_subagents", "subagent_id"],
+          ["orchestration_v2_projection_turn_items", "turn_item_id"],
+          ["orchestration_v2_projection_context_transfers", "context_transfer_id"],
+          ["orchestration_v2_projection_messages", "message_id"],
+          ["orchestration_v2_projection_threads", "thread_id"],
+          ["orchestration_v2_effect_outbox", "effect_id"],
+        ]) {
+          for (const row of db.prepare("SELECT * FROM " + table + " ORDER BY " + key).iterate()) {
+            hash.update(table!);
+            const durable = { ...row };
+            for (const derived of [
+              "provider_instance_id",
+              "driver",
+              "source_provider_instance_id",
+              "target_provider_instance_id",
+            ])
+              delete durable[derived];
+            hash.update(JSON.stringify(durable));
+          }
+        }
+        for (const table of [
+          "orchestration_v2_projection_provider_session_bindings",
+          "scheduled_task_webhook_pending",
+          "scheduled_task_webhook_replay_keys",
+        ]) {
+          if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))
+            continue;
+          const rows = db
+            .prepare("SELECT * FROM " + table)
+            .all()
+            .map((row) => JSON.stringify(row))
+            .sort();
+          for (const row of rows) {
+            hash.update(table);
+            hash.update(row);
+          }
+        }
+      }
+    }
+    db.exec("COMMIT");
+    return {
+      ...work,
       workGeneration: hash.digest("hex"),
     };
   } finally {
     db.close();
   }
-};
+}
 
 export const inspectStoppedRepairWork = (databasePath: string) => inspectWork(databasePath, false);
-export const inspectNativeUpdateWork = (databasePath: string) => {
-  const work = inspectWork(databasePath, true);
+export const inspectNativeUpdateWork = (databasePath: string, generationVersion?: 2) => {
+  const work = inspectWork(databasePath, true, false, generationVersion);
+  return { ...work, carriedWork: work.carriedWork ?? emptyNativeWork() };
+};
+export const inspectNativeUpdateReadinessWork = (databasePath: string) => {
+  const work = inspectWork(databasePath, true, true);
   return { ...work, carriedWork: work.carriedWork ?? emptyNativeWork() };
 };
 
@@ -756,10 +876,11 @@ const classifyUpdateWork = (
   db: NodeSqlite.DatabaseSync,
   childResults: number,
   isTerminalDisplay: ReturnType<typeof terminalDisplayClassifier>,
+  readiness = false,
 ) => {
   const blocking = emptyNativeWork();
   const carriedWork = emptyNativeWork();
-  const rows = (table: string) => db.prepare("SELECT * FROM " + table).all();
+  const rows = (table: string) => workRows(db, table, readiness).all();
   const payload = (row: WorkRow) => {
     try {
       return decodePayload(row.payload_json);
@@ -821,6 +942,14 @@ const classifyUpdateWork = (
     );
   };
   const delegatedNodes = new Set(tasks.filter(appTask).map((row) => row.subagent_id));
+  const delegatedNode = (id: unknown) => {
+    if (delegatedNodes.has(id as NodeSqlite.SQLOutputValue)) return true;
+    if (!readiness || !text(id)) return false;
+    const task = db
+      .prepare("SELECT * FROM orchestration_v2_projection_subagents WHERE subagent_id=?")
+      .get(id);
+    return task !== undefined && appTask(task);
+  };
   const carriedRunIds = new Set<unknown>();
   const blockingThreads = new Set<unknown>();
   const blockingProviderThreads = new Set<unknown>();
@@ -889,7 +1018,7 @@ const classifyUpdateWork = (
         ((table === "orchestration_v2_projection_run_attempts" && carriedRunIds.has(row.run_id)) ||
           (table === "orchestration_v2_projection_nodes" &&
             (messageNodes.has(row.node_id) ||
-              delegatedNodes.has(row.node_id) ||
+              delegatedNode(row.node_id) ||
               carriedRunIds.has(row.run_id))) ||
           (table === "orchestration_v2_projection_subagents" && appTask(row)) ||
           (table === "orchestration_v2_projection_turn_items" &&
@@ -897,7 +1026,7 @@ const classifyUpdateWork = (
             value.origin === "app_owned" &&
             text(value.childThreadId) &&
             text(value.subagentId) &&
-            delegatedNodes.has(value.subagentId)));
+            delegatedNode(value.subagentId)));
       if (preserved) carriedWork.backgroundAgents++;
       else block(row, "backgroundAgents");
     }
@@ -1136,9 +1265,13 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
               throw new NativeMaintenanceError({ reason: "identity" });
             const dbPath = NodePath.join(state, "statev2.sqlite");
             safeFile(dbPath);
-            const before = await filesGeneration(dbPath);
-            const work = inspectNativeUpdateWork(dbPath);
-            const after = await filesGeneration(dbPath);
+            const generation = () =>
+              request.generationVersion === 2
+                ? nativeDataGeneration(dbPath, safeFile)
+                : filesGeneration(dbPath);
+            const before = await generation();
+            const work = inspectNativeUpdateWork(dbPath, request.generationVersion);
+            const after = await generation();
             if (before !== after) throw new NativeMaintenanceError({ reason: "changed" });
             return {
               schemaVersion: request.schemaVersion,
@@ -1147,6 +1280,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
               environmentId: request.environmentId,
               homeDirectory: request.homeDirectory,
               dataGeneration: after,
+              ...(request.generationVersion === 2 ? { generationVersion: 2 as const } : {}),
               ...work,
               processStopped: true as const,
               compiledIdentity,
@@ -1189,7 +1323,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
             }
             const runtimePath = NodePath.join(state, "server-runtime.json");
             const owner = boundedRecord(runtimePath);
-            const work = inspectNativeUpdateWork(dbPath);
+            const work = inspectNativeUpdateWork(dbPath, request.generationVersion);
             const readiness = readNativeUpdateReadiness(
               home,
               request.environmentId,
@@ -1205,6 +1339,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
               homeDirectory: request.homeDirectory,
               ...work,
               ...readiness,
+              ...(request.generationVersion === 2 ? { generationVersion: 2 as const } : {}),
               compiledIdentity,
               observedUtc: DateTime.formatIso(now),
             };

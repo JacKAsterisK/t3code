@@ -3,9 +3,11 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 import { previewHomeRepair, type PreviewOptions } from "./home-repair.ts";
+import { inspectNativeUpdateWork } from "../../apps/server/src/lan/NativeMaintenance.ts";
 import {
   assertOrdinaryNativePath,
   nativeHomePaths,
+  resolveNativeHomeSelection,
   type NativeHomeSelection,
 } from "../../packages/shared/src/nativeHomeSelection.ts";
 
@@ -32,6 +34,10 @@ export interface HomeRepairApplyRequest {
   readonly opaqueBackupApproved: true;
   readonly repairId: string;
   readonly retainedLanEnvironmentId?: string;
+  readonly originalWorkAdoption?: {
+    readonly originalEnvironmentId: string;
+    readonly lanEnvironmentId: string | null;
+  };
 }
 
 interface Snapshot {
@@ -52,8 +58,12 @@ interface RepairReceipt {
   readonly retainedHomeDirectory: string;
   readonly electronProfileDirectory: string;
   readonly snapshots: readonly Snapshot[];
-  readonly operation?: "retain-selected-lan";
-  readonly expectedLanEnvironmentId?: string;
+  readonly operation?: "retain-selected-lan" | "adopt-original-with-work";
+  readonly expectedLanEnvironmentId?: string | null;
+  readonly expectedOriginalEnvironmentId?: string;
+  readonly sourceWorkGenerations?: Readonly<Record<string, string>>;
+  readonly originalWorkGeneration?: string;
+  readonly stagedOriginalWorkGeneration?: string;
 }
 
 const ignoredLocks = new Set([
@@ -167,6 +177,18 @@ export async function executeHomeRepair(
         preview.lan.environmentId !== request.retainedLanEnvironmentId))
   )
     throw new Error("Repair preview is stale or the requested original home is unavailable.");
+  const adoption = request.originalWorkAdoption;
+  if (
+    adoption !== undefined &&
+    (request.retainedLanEnvironmentId !== undefined ||
+      request.choice !== "adopt-original-retain-lan" ||
+      preview.original.environmentId !== adoption.originalEnvironmentId ||
+      preview.lan.environmentId !== adoption.lanEnvironmentId ||
+      [preview.original, preview.lan].some(
+        (home) => home.state === "initialized" && home.activeWork === null,
+      ))
+  )
+    throw new Error("Original work adoption requires both exact known home identities.");
   const profile =
     request.choice === "adopt-original-retain-lan"
       ? originalProfile(options)
@@ -204,14 +226,34 @@ export async function executeHomeRepair(
       : null;
     if (previousSelection !== null && Buffer.byteLength(previousSelection) > 4096)
       throw new Error("Previous home selection is oversized.");
+    if (adoption !== undefined && previousSelection !== null) resolveNativeHomeSelection(options);
     const receiptPath = NodePath.join(recovery, "receipt.json");
+    const sourceWorkGenerations =
+      adoption === undefined
+        ? undefined
+        : Object.fromEntries(
+            homes.map((home) => [
+              home,
+              inspectNativeUpdateWork(NodePath.join(home, "userdata", "statev2.sqlite"))
+                .workGeneration,
+            ]),
+          );
+    const originalWorkGeneration = sourceWorkGenerations?.[preview.original.homeDirectory];
     const retention =
-      request.retainedLanEnvironmentId === undefined
-        ? {}
-        : {
-            operation: "retain-selected-lan" as const,
-            expectedLanEnvironmentId: request.retainedLanEnvironmentId,
-          };
+      adoption !== undefined
+        ? {
+            operation: "adopt-original-with-work" as const,
+            expectedOriginalEnvironmentId: adoption.originalEnvironmentId,
+            expectedLanEnvironmentId: adoption.lanEnvironmentId,
+            originalWorkGeneration: originalWorkGeneration!,
+            sourceWorkGenerations: sourceWorkGenerations!,
+          }
+        : request.retainedLanEnvironmentId === undefined
+          ? {}
+          : {
+              operation: "retain-selected-lan" as const,
+              expectedLanEnvironmentId: request.retainedLanEnvironmentId,
+            };
     if (request.retainedLanEnvironmentId !== undefined && previousSelection !== null)
       throw new Error("LAN retention requires an unselected home.");
     atomicWrite(
@@ -251,6 +293,20 @@ export async function executeHomeRepair(
       await ports.migrateStagedHome(staged);
       await ports.validateStagedHome(staged);
       const stagedPreview = previewHomeRepair({ ...options, originalHomeDirectory: staged });
+      const stagedOriginalWorkGeneration =
+        adoption === undefined
+          ? undefined
+          : inspectNativeUpdateWork(NodePath.join(staged, "userdata", "statev2.sqlite"))
+              .workGeneration;
+      if (
+        adoption !== undefined &&
+        (stagedOriginalWorkGeneration !== originalWorkGeneration ||
+          JSON.stringify(stagedPreview.original.migrationIds) !==
+            JSON.stringify(options.supportedMigrationIds))
+      )
+        throw new Error(
+          "Staged forward migrations did not preserve unfinished work at the current schema.",
+        );
       if (
         stagedPreview.original.state !== "initialized" ||
         stagedPreview.original.environmentId !== validationSource.environmentId ||
@@ -263,6 +319,8 @@ export async function executeHomeRepair(
           "Staged migrations did not preserve the original identity and readable history.",
         );
       await ports.verifyStoppedAndIdle(resources);
+      if (sourceWorkGenerations !== undefined)
+        verifyAdoptionWorkGenerations(resources.homes, sourceWorkGenerations);
       for (const snapshot of snapshots)
         if (treeDigest(snapshot.source).sha256 !== snapshot.sha256)
           throw new Error("Source state changed during staged verification.");
@@ -303,6 +361,9 @@ export async function executeHomeRepair(
             : selection.originalHomeDirectory,
         electronProfileDirectory: profile,
         ...retention,
+        ...(adoption === undefined
+          ? {}
+          : { stagedOriginalWorkGeneration: stagedOriginalWorkGeneration! }),
         snapshots,
       };
       if (Buffer.byteLength(JSON.stringify(receipt)) > 16_384)
@@ -323,6 +384,14 @@ export async function executeHomeRepair(
             : selection.lanEnvironmentId,
         electronProfileDirectory: profile,
         restoredHistoryVerified: false as const,
+        ...(adoption === undefined
+          ? {}
+          : {
+              operation: "adopt-original-with-work" as const,
+              unfinishedWorkPreserved: true as const,
+              originalWorkGeneration: originalWorkGeneration!,
+              stagedOriginalWorkGeneration: stagedOriginalWorkGeneration!,
+            }),
       };
     } catch (error) {
       if (selectionWritten) {
@@ -333,6 +402,24 @@ export async function executeHomeRepair(
       throw error;
     }
   });
+}
+
+function verifyAdoptionWorkGenerations(
+  homes: readonly string[],
+  generations: Readonly<Record<string, string>> | undefined,
+) {
+  if (
+    !generations ||
+    Object.keys(generations).length !== homes.length ||
+    homes.some((home) => !/^[a-f0-9]{64}$/.test(generations[home] ?? ""))
+  )
+    throw new Error("Original adoption work-generation inventory is incomplete.");
+  for (const home of homes)
+    if (
+      inspectNativeUpdateWork(NodePath.join(home, "userdata", "statev2.sqlite")).workGeneration !==
+      generations[home]
+    )
+      throw new Error("Unfinished work changed during original adoption or recovery.");
 }
 
 function validateSnapshots(
@@ -416,6 +503,8 @@ export async function rollbackHomeRepair(
   };
   return ports.withExclusiveAdmission(resources, async () => {
     await ports.verifyStoppedAndIdle(resources);
+    if (receipt.operation === "adopt-original-with-work")
+      verifyAdoptionWorkGenerations(resources.homes, receipt.sourceWorkGenerations);
     const selection = NodeFS.existsSync(paths.selectionPath)
       ? NodeFS.readFileSync(paths.selectionPath, "utf8")
       : null;
@@ -460,12 +549,21 @@ export async function rollbackHomeRepair(
           repairId,
           receiptPath,
           previousSelection: receipt.previousSelection,
-          ...(receipt.operation === "retain-selected-lan"
+          ...(receipt.operation === "adopt-original-with-work"
             ? {
                 operation: receipt.operation,
+                expectedOriginalEnvironmentId: receipt.expectedOriginalEnvironmentId,
                 expectedLanEnvironmentId: receipt.expectedLanEnvironmentId,
+                sourceWorkGenerations: receipt.sourceWorkGenerations,
+                originalWorkGeneration: receipt.originalWorkGeneration,
+                stagedOriginalWorkGeneration: receipt.stagedOriginalWorkGeneration,
               }
-            : {}),
+            : receipt.operation === "retain-selected-lan"
+              ? {
+                  operation: receipt.operation,
+                  expectedLanEnvironmentId: receipt.expectedLanEnvironmentId,
+                }
+              : {}),
           snapshots: receipt.snapshots,
         }) + "\n",
         repairId,
@@ -501,6 +599,8 @@ export async function recoverHomeRepair(
     receiptPath: string;
     previousSelection: string | null;
     snapshots?: readonly Snapshot[];
+    operation?: string;
+    sourceWorkGenerations?: Readonly<Record<string, string>>;
   };
   const expectedReceipt = NodePath.join(
     NodePath.dirname(paths.selectionPath),
@@ -533,6 +633,15 @@ export async function recoverHomeRepair(
   };
   return ports.withExclusiveAdmission(resources, async () => {
     await ports.verifyStoppedAndIdle(resources);
+    if (journal.operation === "adopt-original-with-work") {
+      verifyAdoptionWorkGenerations(resources.homes, journal.sourceWorkGenerations);
+      for (const snapshot of snapshots)
+        if (
+          treeDigest(snapshot.source).sha256 !== snapshot.sha256 ||
+          treeDigest(snapshot.backup).sha256 !== snapshot.sha256
+        )
+          throw new Error("State changed after interrupted adoption; manual recovery is required.");
+    }
     const selection = NodeFS.existsSync(paths.selectionPath)
       ? NodeFS.readFileSync(paths.selectionPath, "utf8")
       : null;

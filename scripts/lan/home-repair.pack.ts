@@ -108,6 +108,8 @@ export async function buildHomeRepair(outDir: string) {
         operations: [
           "preview",
           "apply",
+          "adopt-original-with-work",
+          "recover-adopt-original-with-work",
           "retain-selected-lan",
           "recover-retain-selected-lan",
           "rollback",

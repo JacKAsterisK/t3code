@@ -52,7 +52,10 @@
         "admissionOwnerPid": "<integer: the owning Hub process ID>",
         "recoveryOperation": "recover | rollback"
       },
-      "stdout": { "schemaVersion": 1, "status": "rolled-back" },
+      "stdout": {
+        "schemaVersion": 1,
+        "status": "rolled-back"
+      },
       "scope": "Recover only the matching retained-LAN transaction with held admission and unchanged home/profile and backup state."
     },
     "rollback": {
@@ -128,6 +131,50 @@
         "schemaVersion": 1,
         "status": "rolled-back"
       }
+    },
+    "adopt-original-with-work": {
+      "arguments": ["adopt-original-with-work", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "expectedPlanId": "<64 lowercase hex from exact current preview>",
+        "choice": "adopt-original-retain-lan",
+        "opaqueBackupApproved": true,
+        "repairId": "<new 32 lowercase hex>",
+        "expectedOriginalEnvironmentId": "<original existing environment ID>",
+        "expectedLanEnvironmentId": "<existing LAN environment ID or null when uninitialized>",
+        "admissionOwnerPid": "<integer: live owning Hub process ID equal to native child process.ppid>"
+      },
+      "stdout": {
+        "schemaVersion": 1,
+        "status": "selected-pending-verification",
+        "operation": "adopt-original-with-work",
+        "receiptPath": "<absolute recovery/repairId/receipt.json>",
+        "homeDirectory": "<original complete home>",
+        "retainedHomeDirectory": "<unchanged LAN home, possibly absent>",
+        "environmentId": "<original existing environment ID>",
+        "electronProfileDirectory": "<original matching existing profile>",
+        "restoredHistoryVerified": false,
+        "unfinishedWorkPreserved": true,
+        "originalWorkGeneration": "<64 lowercase hex: NativeMaintenance original workGeneration>",
+        "stagedOriginalWorkGeneration": "<same durable workGeneration after validated current-schema staged migration>"
+      },
+      "scope": "Explicit user-reviewed original-home selection with known stopped work in either home; never automatic on Launch. Both homes/profiles remain unchanged. Full opaque backups precede staged forward migration validation. No cancellation, resume, merge, downgrade or environment identity rewrite."
+    },
+    "recover-adopt-original-with-work": {
+      "arguments": ["recover-adopt-original-with-work", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "repairId": "<original adoption repair ID>",
+        "expectedOriginalEnvironmentId": "<same original environment ID>",
+        "expectedLanEnvironmentId": "<same LAN environment ID or null>",
+        "admissionOwnerPid": "<integer: live owning Hub process ID>",
+        "recoveryOperation": "recover | rollback"
+      },
+      "stdout": {
+        "schemaVersion": 1,
+        "status": "rolled-back"
+      },
+      "scope": "Only matching adoption operation markers under continuously held both-home/profile admission. Source work generations, source snapshots and opaque backups must remain unchanged. A launched or migrated source refuses automatic rollback."
     }
   },
   "input": {
@@ -175,7 +222,7 @@
       }
     ],
     "processes": "No original or LAN backend, Electron process, profile writer or repair/activation may run concurrently. Never kill by name or override a failed admission.",
-    "work": "Helper uses existing NativeMaintenance inspector to refuse active, queued, pending, scheduled, background and restart-continuation work. No model is launched.",
+    "work": "Ordinary Apply remains idle-only. Explicit retain-selected-lan and adopt-original-with-work require known stopped work, exact supported schema/projections and unchanged durable work generations. No provider, scheduler or worker is launched.",
     "userContext": "Run helper and selected app as the original interactive Windows user. Do not run as a service or another user: DPAPI/private profile compatibility has not been verified across users."
   },
   "selection": {
@@ -225,5 +272,16 @@
     "sequence": "After cancellation, obtain a fresh preview and ordinary Apply with a DIFFERENT new repair ID. Retain both receipts. Rollback ordinary selection before cancellation rollback; never overwrite newer work.",
     "journal": "home-repair.json operation=cancel-original-work, schemaVersion1, repairId and receiptPath; unresolved journal blocks startup until recover-work-cancellation restores original snapshot state.",
     "history": "Opaque complete original-home snapshot; domain lifecycle cancellation and command receipts append without deleting conversations/messages/attachments/session records. No provider, scheduler or worker runs."
+  },
+  "adoptionWithWork": {
+    "previewAdditions": {
+      "adoptOriginalWithWorkSupported": "boolean capability; absent means unsupported",
+      "canAdoptOriginalWithWork": "boolean offer requiring initialized original, matching original profile and known work in each initialized home"
+    },
+    "receipt": "schemaVersion1 distinct operation=adopt-original-with-work; expectedOriginalEnvironmentId, expectedLanEnvironmentId, sourceWorkGenerations keyed by initialized home, originalWorkGeneration and stagedOriginalWorkGeneration plus ordinary selection and opaque snapshot metadata.",
+    "journal": "home-repair.json retains the same distinct operation, identities and sourceWorkGenerations before backup/staging. Ordinary rollback/recover must not process an adoption marker.",
+    "generations": "originalWorkGeneration and stagedOriginalWorkGeneration use the exact NativeMaintenance update workGeneration algorithm and must match. Staged migrations may change staged database bytes/dataGeneration. Both source homes and profiles remain unchanged through adoption; Hub compares their pre/post native data/work generations. Later normal candidate verification may migrate the selected source and change dataGeneration, while durable workGeneration must remain equal.",
+    "recovery": "Interrupted adoption/pending-selection recovery requires pre-adoption source work generations and unchanged source/backups. Any later source migration or new work refuses automatic rollback, retaining backups for reviewed recovery.",
+    "originalOnly": "Supported with expectedLanEnvironmentId:null when LAN is absent/empty; do not create an empty LAN home."
   }
 }

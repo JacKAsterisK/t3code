@@ -156,5 +156,7 @@
     "record-authoritative-home-without-identity-or-credential-merge",
     "validate-old-history-and-trusted-client-continuity-before-retiring-any-state",
     "rollback-matching-binary-data-profile-and-selection-before-new-work"
-  ]
+  ],
+  "adoptOriginalWithWorkSupported": true,
+  "canAdoptOriginalWithWork": true
 }

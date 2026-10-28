@@ -27,8 +27,12 @@
         "resolve-blockers"
       ]
     },
-    "cancellationSupported": { "type": "boolean" },
-    "canCancelOriginalWork": { "type": "boolean" },
+    "cancellationSupported": {
+      "type": "boolean"
+    },
+    "canCancelOriginalWork": {
+      "type": "boolean"
+    },
     "canApply": {
       "type": "boolean"
     },
@@ -405,6 +409,12 @@
         "type": "string",
         "maxLength": 32768
       }
+    },
+    "adoptOriginalWithWorkSupported": {
+      "type": "boolean"
+    },
+    "canAdoptOriginalWithWork": {
+      "type": "boolean"
     }
   },
   "required": [

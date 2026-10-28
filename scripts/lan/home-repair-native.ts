@@ -116,36 +116,56 @@ function decodeRequest(raw: unknown, operation: string): Record<string, unknown>
   const allowed =
     operation === "apply"
       ? ["schemaVersion", "expectedPlanId", "choice", "opaqueBackupApproved", "repairId"]
-      : operation === "retain-selected-lan"
+      : operation === "adopt-original-with-work"
         ? [
             "schemaVersion",
             "expectedPlanId",
             "choice",
             "opaqueBackupApproved",
             "repairId",
+            "expectedOriginalEnvironmentId",
             "expectedLanEnvironmentId",
             "admissionOwnerPid",
           ]
-        : operation === "recover-retain-selected-lan"
+        : operation === "recover-adopt-original-with-work"
           ? [
               "schemaVersion",
               "repairId",
+              "expectedOriginalEnvironmentId",
               "expectedLanEnvironmentId",
               "admissionOwnerPid",
               "recoveryOperation",
             ]
-          : operation === "cancel-original-work"
+          : operation === "retain-selected-lan"
             ? [
                 "schemaVersion",
                 "expectedPlanId",
-                "cancelUnfinishedWorkApproved",
+                "choice",
                 "opaqueBackupApproved",
                 "repairId",
+                "expectedLanEnvironmentId",
                 "admissionOwnerPid",
               ]
-            : operation.endsWith("work-cancellation")
-              ? ["schemaVersion", "repairId", "admissionOwnerPid"]
-              : ["schemaVersion", "repairId"];
+            : operation === "recover-retain-selected-lan"
+              ? [
+                  "schemaVersion",
+                  "repairId",
+                  "expectedLanEnvironmentId",
+                  "admissionOwnerPid",
+                  "recoveryOperation",
+                ]
+              : operation === "cancel-original-work"
+                ? [
+                    "schemaVersion",
+                    "expectedPlanId",
+                    "cancelUnfinishedWorkApproved",
+                    "opaqueBackupApproved",
+                    "repairId",
+                    "admissionOwnerPid",
+                  ]
+                : operation.endsWith("work-cancellation")
+                  ? ["schemaVersion", "repairId", "admissionOwnerPid"]
+                  : ["schemaVersion", "repairId"];
   if (
     request.schemaVersion !== 1 ||
     typeof request.repairId !== "string" ||
@@ -155,7 +175,9 @@ function decodeRequest(raw: unknown, operation: string): Record<string, unknown>
   )
     throw new Error("Invalid or incomplete repair request.");
   if (
-    (operation === "retain-selected-lan" ||
+    (operation === "adopt-original-with-work" ||
+      operation === "recover-adopt-original-with-work" ||
+      operation === "retain-selected-lan" ||
       operation === "recover-retain-selected-lan" ||
       operation === "cancel-original-work" ||
       operation.endsWith("work-cancellation")) &&
@@ -175,6 +197,8 @@ export async function runNativeHomeRepair(
   if (
     ![
       "apply",
+      "adopt-original-with-work",
+      "recover-adopt-original-with-work",
       "retain-selected-lan",
       "recover-retain-selected-lan",
       "rollback",
@@ -186,6 +210,112 @@ export async function runNativeHomeRepair(
   )
     throw new Error("Unknown repair operation.");
   const request = decodeRequest(raw, operation);
+  if (
+    operation === "adopt-original-with-work" ||
+    operation === "recover-adopt-original-with-work"
+  ) {
+    if (process.ppid <= 0) throw new Error("Original adoption requires a live owning Hub parent.");
+    process.kill(process.ppid, 0);
+    const paths = nativeHomePaths(options.userHomeDirectory, options.localAppData);
+    const preview = previewHomeRepair(options);
+    const original = paths.originalHomeDirectory;
+    const lan = paths.lanHomeDirectory;
+    const profile = preview.electronProfiles.find(
+      (entry) =>
+        entry.localState.present &&
+        !entry.profileDirectory.endsWith(NodePath.sep + "electron-profile"),
+    )?.profileDirectory;
+    if (
+      (operation === "adopt-original-with-work"
+        ? preview.state === "blocked"
+        : preview.blockers.some((blocker) => blocker !== "incomplete-home-repair")) ||
+      preview.original.state !== "initialized" ||
+      preview.original.homeDirectory !== original ||
+      preview.lan.homeDirectory !== lan ||
+      preview.original.environmentId !== request.expectedOriginalEnvironmentId ||
+      preview.lan.environmentId !== request.expectedLanEnvironmentId ||
+      preview.original.activeWork === null ||
+      (preview.lan.state === "initialized" && preview.lan.activeWork === null) ||
+      profile === undefined
+    )
+      throw new Error("Adoption requires both exact known stopped homes and the original profile.");
+    const homes = new Set([original, lan]);
+    const adoptionPorts: HomeRepairExecutionPorts =
+      ports === nativePorts
+        ? {
+            ...nativePorts,
+            withExclusiveAdmission: async (resources, run) => {
+              verifyHostAdmission(resources, undefined, homes);
+              return run();
+            },
+            verifyStoppedAndIdle: async (resources) => {
+              verifyHostAdmission(resources, undefined, homes);
+            },
+          }
+        : ports;
+    if (operation === "adopt-original-with-work") {
+      if (
+        request.choice !== "adopt-original-retain-lan" ||
+        request.opaqueBackupApproved !== true ||
+        preview.planId !== request.expectedPlanId
+      )
+        throw new Error(
+          "Original adoption requires the exact reviewed preview and explicit backup approval.",
+        );
+      return executeHomeRepair(
+        options,
+        {
+          ...request,
+          originalWorkAdoption: {
+            originalEnvironmentId: String(request.expectedOriginalEnvironmentId),
+            lanEnvironmentId: request.expectedLanEnvironmentId as string | null,
+          },
+        } as unknown as HomeRepairApplyRequest,
+        adoptionPorts,
+      );
+    }
+    if (!["recover", "rollback"].includes(String(request.recoveryOperation)))
+      throw new Error("Unknown original adoption recovery operation.");
+    const receiptPath = NodePath.join(
+      NodePath.dirname(paths.selectionPath),
+      "recovery",
+      String(request.repairId),
+      "receipt.json",
+    );
+    const read = (file: string): Record<string, unknown> | null => {
+      if (!NodeFS.existsSync(file)) return null;
+      assertOrdinaryNativePath(file, false);
+      if (NodeFS.statSync(file).size > 16_384)
+        throw new Error("Adoption recovery metadata is oversized.");
+      const value = strictJson(NodeFS.readFileSync(file));
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new Error("Invalid adoption recovery metadata.");
+      return value as Record<string, unknown>;
+    };
+    const journal = read(paths.journalPath);
+    const receipt = read(receiptPath);
+    const matching = (value: Record<string, unknown>) =>
+      value.schemaVersion === 1 &&
+      value.repairId === request.repairId &&
+      value.operation === "adopt-original-with-work" &&
+      value.expectedOriginalEnvironmentId === request.expectedOriginalEnvironmentId &&
+      value.expectedLanEnvironmentId === request.expectedLanEnvironmentId;
+    if (
+      (request.recoveryOperation === "recover" && !journal) ||
+      (request.recoveryOperation === "rollback" && !receipt) ||
+      (journal && (!matching(journal) || journal.receiptPath !== receiptPath)) ||
+      (receipt &&
+        (!matching(receipt) ||
+          receipt.selectionPath !== paths.selectionPath ||
+          receipt.selectedHomeDirectory !== original ||
+          receipt.retainedHomeDirectory !== lan ||
+          receipt.electronProfileDirectory !== profile))
+    )
+      throw new Error("Recovery does not match this original-work adoption transaction.");
+    return request.recoveryOperation === "rollback"
+      ? rollbackHomeRepair(options, String(request.repairId), adoptionPorts)
+      : recoverHomeRepair(options, String(request.repairId), adoptionPorts);
+  }
   if (operation === "retain-selected-lan" || operation === "recover-retain-selected-lan") {
     if (process.ppid <= 0) throw new Error("LAN retention requires a live owning Hub parent.");
     process.kill(process.ppid, 0);
@@ -300,6 +430,32 @@ export async function runNativeHomeRepair(
       ? rollbackHomeRepair(options, String(request.repairId), retainPorts)
       : recoverHomeRepair(options, String(request.repairId), retainPorts);
   }
+  if (operation === "recover" || operation === "rollback") {
+    const paths = nativeHomePaths(options.userHomeDirectory, options.localAppData);
+    for (const file of [
+      paths.journalPath,
+      NodePath.join(
+        NodePath.dirname(paths.selectionPath),
+        "recovery",
+        String(request.repairId),
+        "receipt.json",
+      ),
+    ]) {
+      if (!NodeFS.existsSync(file)) continue;
+      assertOrdinaryNativePath(file, false);
+      if (NodeFS.statSync(file).size > 16_384)
+        throw new Error("Repair recovery metadata is oversized.");
+      const value = strictJson(NodeFS.readFileSync(file));
+      if (
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        "operation" in value &&
+        value.operation === "adopt-original-with-work"
+      )
+        throw new Error("Original adoption requires its matching held recovery operation.");
+    }
+  }
   if (operation === "cancel-original-work")
     return cancelOriginalWork(options, request as unknown as WorkCancellationRequest, cancellation);
   if (operation === "rollback-work-cancellation" || operation === "recover-work-cancellation")
@@ -350,6 +506,13 @@ if (
           applySupported: true,
           canApply: eligible,
           cancellationSupported: true,
+          adoptOriginalWithWorkSupported: true,
+          canAdoptOriginalWithWork:
+            report.state !== "blocked" &&
+            report.original.state === "initialized" &&
+            report.original.activeWork !== null &&
+            initialized.every((home) => home.activeWork !== null) &&
+            originalProfile,
           canCancelOriginalWork:
             report.state !== "blocked" &&
             report.original.state === "initialized" &&

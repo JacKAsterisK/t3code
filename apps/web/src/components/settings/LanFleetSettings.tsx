@@ -13,6 +13,7 @@ export function LanFleetCoordinator() {
   });
   const poll = useEffectEvent(async () => (await fleet.refreshSetup()) && fleet.run("automatic"));
   const pause = useEffectEvent(() => fleet.pause());
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads fleet setup and status from the server when this machine's environment becomes eligible
   useEffect(() => {
     if (fleet.environmentId !== null && fleet.allowed) initialize();
   }, [fleet.environmentId, fleet.allowed]);
@@ -22,6 +23,7 @@ export function LanFleetCoordinator() {
       (fleet.setup !== null &&
         fleet.setup.autoPickup &&
         (fleet.setup.stage === "pending" || fleet.setup.stage === "active")));
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- runs the fleet pickup polling timer while automatic pickup is enabled
   useEffect(() => {
     if (!enabled || !fleet.allowed || fleet.environmentId === null) return;
     return startFleetPolling(poll, pause);

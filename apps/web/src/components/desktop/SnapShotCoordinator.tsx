@@ -1,5 +1,6 @@
 import { beginNativePromptWork } from "../../lib/nativePromptReadiness";
 import {
+  type DesktopBridge,
   type DesktopPendingSnapShot,
   type DesktopSnapShotEvent,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -29,11 +30,7 @@ import {
 } from "../../lib/snapShotAnimation";
 import { resizeSnapShotSource } from "../../lib/snapShotSource";
 import { playSnapShotSound } from "../../lib/snapShotSound";
-import {
-  dispatchSnapShotComposerFocus,
-  getDesktopSnapShotBridge,
-  type DesktopSnapShotBridge,
-} from "../../lib/desktopSnapShot";
+import { dispatchSnapShotComposerFocus, getDesktopSnapShotBridge } from "../../lib/desktopSnapShot";
 import {
   countQuestionRequestAttachments,
   openQuestionAttachmentDraft,
@@ -166,7 +163,7 @@ async function afterNextPaint(): Promise<void> {
 }
 
 export async function deliverSnapShot(
-  bridge: DesktopSnapShotBridge,
+  bridge: DesktopBridge,
   item: DesktopPendingSnapShot,
   resolveTarget: () => CaptureTarget,
 ): Promise<void> {
@@ -423,7 +420,7 @@ export function SnapShotCoordinator() {
 
   const drainPending = useEffectEvent(() => drain());
   const handleSnapShotEvent = useEffectEvent(
-    (bridge: DesktopSnapShotBridge, event: DesktopSnapShotEvent) => {
+    (bridge: DesktopBridge, event: DesktopSnapShotEvent) => {
       if (event.type === "failed" && event.id) settleNativeSnapShotUpdate(event.id);
       if (!getClientSettings().snapShotEnabled) return;
       if (event.type === "requested" || event.type === "started" || event.type === "ready")
@@ -492,7 +489,8 @@ export function SnapShotCoordinator() {
       }
     },
   );
-  // Begin pending-queue enumeration before the parent root can acknowledge an empty renderer.
+  // A layout effect, so pending-queue enumeration begins before the parent root can acknowledge an empty renderer.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to SnapShot events from the desktop bridge and drains pending ones while enabled
   useLayoutEffect(() => {
     const bridge = getDesktopSnapShotBridge();
     if (!bridge || !enabled) return;
@@ -500,6 +498,7 @@ export function SnapShotCoordinator() {
     return bridge.onSnapShotEvent((event) => handleSnapShotEvent(bridge, event));
   }, [enabled]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- attaches window blur, focus and visibilitychange listeners to dismiss or drain SnapShot animations
   useEffect(() => {
     const dismissOnBlur = () => {
       pendingAnimationStartsRef.current.clear();

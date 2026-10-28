@@ -87,7 +87,7 @@ it.effect("disabled managed relay refuses without initializing HTTP or browser k
 );
 
 it("disabled telemetry never creates a web tracing delegate", async () => {
-  await configureClientTracing({ exportIntervalMs: 10 });
+  await configureClientTracing();
   expect(hasDelegate()).toBe(false);
 });
 

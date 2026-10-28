@@ -335,7 +335,7 @@ explicitly chooses the original or separate LAN home. Both complete homes and
 matching profiles are preserved before selection; identities, credentials and
 databases are never merged.
 
-Existing two-home installations retain their selected history and matching profile until a coordinated single-home cutover. Canonical-only startup has not shipped; observation improvements do not move or archive homes or uninstall an application.
+Existing PCs retain their currently selected data home and matching Electron profile. Fresh installations use `.t3`. No migration of existing homes is planned; observation improvements do not move or archive homes or uninstall an application.
 
 The native repair interface is defined in
 [`home-repair.contract.json`](../../scripts/lan/home-repair.contract.json).

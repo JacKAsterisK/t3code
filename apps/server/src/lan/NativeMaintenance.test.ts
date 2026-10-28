@@ -12,7 +12,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import { runMigrations } from "../persistence/Migrations.ts";
+import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
 import * as NativeMaintenance from "./NativeMaintenance.ts";
 import { nativeMaintenanceRefusalMessage } from "./nativeMaintenanceEntry.ts";
 import { nativeRestartSafeEffects } from "./nativeWorkStates.ts";
@@ -556,7 +556,7 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
         try {
           assert.equal(
             db.prepare("SELECT MAX(migration_id) n FROM effect_sql_migrations").get()!.n,
-            73,
+            migrationManifest.at(-1)![0],
           );
           assert.equal(
             db
@@ -606,7 +606,7 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
       try {
         assert.equal(
           db.prepare("SELECT MAX(migration_id) n FROM effect_sql_migrations").get()!.n,
-          73,
+          migrationManifest.at(-1)![0],
         );
         const row = db
           .prepare(

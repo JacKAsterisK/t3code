@@ -384,6 +384,7 @@ const LinkedProbeToolkit = Toolkit.make(
   Tool.make("writes_threads", linkedProbe),
   Tool.make("starts_threads", linkedProbe),
   Tool.make("writes_environment", linkedProbe),
+  Tool.make("t3_lan_task_list", linkedProbe),
 );
 /** Runs here, and tells whether `environmentId` reached the handler. */
 const ranHere = <P extends object>(params: P) =>
@@ -398,6 +399,7 @@ const linkedProbeServer = McpHttpServer.toolkitRegistration(
     writes_threads: McpToolAccess.writesThreads((input) => [input.threadId], ranHere),
     starts_threads: McpToolAccess.startsThreads((input) => input, ranHere, "stamped"),
     writes_environment: McpToolAccess.writesEnvironment(ranHere),
+    t3_lan_task_list: McpToolAccess.reads(ranHere),
   }),
 ).pipe(
   Layer.provideMerge(McpServer.McpServer.layer),
@@ -440,6 +442,13 @@ it.effect.each([
     "writes_environment in environment-box",
   ],
   ["writes_environment", fullAccess, { environmentId: here }, "here"],
+  ["reads", taskOnlyClient, { environmentId: box }, "capability_denied"],
+  [
+    "t3_lan_task_list",
+    taskOnlyClient,
+    { environmentId: box },
+    "t3_lan_task_list in environment-box",
+  ],
 
   // A thread id names a thread where the call runs, and is checked there.
   [

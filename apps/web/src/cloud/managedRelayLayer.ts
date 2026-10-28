@@ -120,6 +120,15 @@ export const layer = (relayUrl: string) =>
             getAgentActivitySnapshot: Effect.fn(
               "ManagedRelay.ManagedRelayClient.getAgentActivitySnapshot",
             )(() => Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" }))),
+            getT3ChatLink: Effect.fn("ManagedRelay.ManagedRelayClient.getT3ChatLink")(() =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            ),
+            createT3ChatLinkRequest: Effect.fn(
+              "ManagedRelay.ManagedRelayClient.createT3ChatLinkRequest",
+            )(() => Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" }))),
+            unlinkT3Chat: Effect.fn("ManagedRelay.ManagedRelayClient.unlinkT3Chat")(() =>
+              Effect.fail(new ManagedRelay.ManagedRelayUrlInvalidError({ relayUrl: "" })),
+            ),
             resetTokenCache: Effect.void,
           }),
         ),

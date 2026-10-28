@@ -1,7 +1,7 @@
 import { PRIMARY_LOCAL_ENVIRONMENT_ID, type DesktopBridge } from "@t3tools/contracts";
 import type { PrimaryEnvironmentTarget } from "../environments/primary/target";
 import type { ConnectionTarget } from "@t3tools/client-runtime/connection";
-import { isDesktopLocalConnectionTarget, isWslConnectionTarget } from "./desktopLocal";
+import { desktopLocalBackendId, isDesktopLocalConnectionTarget } from "./desktopLocal";
 
 export function resolveNativeWindowsPrimary(
   bridge: Pick<DesktopBridge, "getClientPlatform" | "getLocalEnvironmentBootstraps"> | undefined,
@@ -42,8 +42,11 @@ export function resolveFleetEnvironmentId(
     primary.wsBaseUrl === nativePrimary.wsBaseUrl
   )
     return primary.environmentId;
+  // A WSL backend is a separate Linux machine, not this Windows host.
   const local = targets.find(
-    (target) => isDesktopLocalConnectionTarget(target) && !isWslConnectionTarget(target),
+    (target) =>
+      isDesktopLocalConnectionTarget(target) &&
+      desktopLocalBackendId(target)?.startsWith("wsl:") !== true,
   );
   return local?.environmentId ?? null;
 }

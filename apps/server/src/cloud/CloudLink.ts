@@ -540,7 +540,6 @@ const make = Effect.gen(function* () {
       updatePreferences: refuse,
       answerHealthRequest: refuse,
       mintCredential: refuse,
-      reconcileDesiredLink: refuse,
       reconcileDesiredLinkIfStillDesired: refuse,
       registerManagedTunnelRecovery: refuse,
       recoverManagedTunnel: refuse,

@@ -4,6 +4,7 @@ import {
   AuthStandardClientScopes,
   type AuthCreatePairingCredentialInput,
   EnvironmentHttpApi,
+  MCP_PEER_LINK_SOFTWARE_ID,
   mcpClientScopes,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
@@ -50,7 +51,7 @@ const makeLayerRoutes = (capture: (auth: EnvironmentAuth.EnvironmentAuth["Servic
       Layer.provide(
         McpOAuthHttp.layer.pipe(
           Layer.provide(McpOAuth.layer),
-          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(ServerSettings.layerTest({ linkedEnvironmentsEnabled: true })),
         ),
       ),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),
@@ -593,6 +594,24 @@ it.live(
           Effect.flatMap(json<Record<string, unknown>>),
         );
         expect(details).toMatchObject({ taskOnly: true, renewable: true });
+        const peerLink = yield* handler(
+          at("/oauth/mcp/register", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: encodeJson({
+              client_name: "Linked environment",
+              redirect_uris: [REDIRECT],
+              software_id: MCP_PEER_LINK_SOFTWARE_ID,
+            }),
+          }),
+        ).pipe(Effect.flatMap(json<{ client_id: string }>));
+        const peerLinkParams = { ...authorizeParams(peerLink.client_id), task_only: "true" };
+        const peerLinkTask = yield* handler(postJson("/oauth/mcp/approval", peerLinkParams)).pipe(
+          Effect.flatMap(json<{ redirectTo?: string }>),
+        );
+        expect(new URL(peerLinkTask.redirectTo!).searchParams.get("error_description")).toBe(
+          "Linked environments cannot request task access.",
+        );
         const excessive = yield* auth.issuePairingCredential();
         expect(
           (yield* decide(handler, params, {

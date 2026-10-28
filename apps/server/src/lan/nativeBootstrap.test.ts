@@ -9,6 +9,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { migrationManifest } from "../persistence/Migrations.ts";
 import * as NativeMaintenance from "./NativeMaintenance.ts";
 
 const identity: NativeMaintenance.NativeBuildIdentity = {
@@ -245,7 +246,7 @@ it.effect(
         );
         assert.equal(
           db.prepare("SELECT max(migration_id) AS n FROM effect_sql_migrations").get()!.n,
-          73,
+          migrationManifest.at(-1)![0],
         );
       } finally {
         db.close();

@@ -1088,8 +1088,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         countPreparingComposerImages(key) > 0 ||
         pendingDraftWork.has(key) ||
         (useQuestionAttachmentPreparation.getState().counts[key] ?? 0) > 0;
-      pending ||= active;
-      if (!active && key !== attachmentTargetKey) nativePromptTargetKeys.current.delete(key);
+      if (active) pending = true;
+      else if (key !== attachmentTargetKey) nativePromptTargetKeys.current.delete(key);
     }
     return pending;
   };
@@ -2872,57 +2872,54 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const targetKey = attachmentTargetKey;
       const releaseNativePromptWork = beginNativePromptWork();
       pendingDraftWork.begin(targetKey);
-      try {
-        const loadingToast = toastManager.add({
-          type: "loading",
-          title: "Loading thread context…",
-          timeout: 0,
-          data: { threadRef: routeThreadRef, hideCopyButton: true },
+      const loadingToast = toastManager.add({
+        type: "loading",
+        title: "Loading thread context…",
+        timeout: 0,
+        data: { threadRef: routeThreadRef, hideCopyButton: true },
+      });
+      const importResult = await settlePromise(() =>
+        importComposerThreadAttachment({
+          targetKey,
+          pendingImports: pendingThreadImportsRef.current,
+          countReservedAttachments: countReservedAttachmentsStable,
+          load: async () => {
+            const result = await loadThreadTranscript({
+              environmentId: ref.environmentId,
+              input: { threadId: ref.threadId },
+            });
+            if (result._tag !== "Success") {
+              throw squashAtomCommandFailure(result);
+            }
+            return threadContextAttachment(ref.environmentId, result.value);
+          },
+          isActive,
+          attach: attachDroppedThreadFile,
+          onLimitReached: () => {
+            if (activeThreadId) {
+              setThreadError(
+                activeThreadId,
+                `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`,
+              );
+            }
+          },
+        }),
+      );
+      if (importResult._tag === "Failure" && isActive()) {
+        const error = squashAtomCommandFailure(importResult);
+        toastManager.add({
+          type: "error",
+          title: "Unable to read the dropped thread",
+          description:
+            isEnvironmentRequestInvalidError(error) &&
+            error.reason === "thread_transcript_too_large"
+              ? "This thread exceeds the attachment size limit. Try a shorter thread."
+              : "Check that its environment is connected and up to date, then try again.",
         });
-        const importResult = await settlePromise(() =>
-          importComposerThreadAttachment({
-            targetKey,
-            pendingImports: pendingThreadImportsRef.current,
-            countReservedAttachments: countReservedAttachmentsStable,
-            load: async () => {
-              const result = await loadThreadTranscript({
-                environmentId: ref.environmentId,
-                input: { threadId: ref.threadId },
-              });
-              if (result._tag !== "Success") {
-                throw squashAtomCommandFailure(result);
-              }
-              return threadContextAttachment(ref.environmentId, result.value);
-            },
-            isActive,
-            attach: attachDroppedThreadFile,
-            onLimitReached: () => {
-              if (activeThreadId) {
-                setThreadError(
-                  activeThreadId,
-                  `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`,
-                );
-              }
-            },
-          }),
-        );
-        if (importResult._tag === "Failure" && isActive()) {
-          const error = squashAtomCommandFailure(importResult);
-          toastManager.add({
-            type: "error",
-            title: "Unable to read the dropped thread",
-            description:
-              isEnvironmentRequestInvalidError(error) &&
-              error.reason === "thread_transcript_too_large"
-                ? "This thread exceeds the attachment size limit. Try a shorter thread."
-                : "Check that its environment is connected and up to date, then try again.",
-          });
-        }
-        toastManager.close(loadingToast);
-      } finally {
-        pendingDraftWork.end(targetKey);
-        releaseNativePromptWork();
       }
+      toastManager.close(loadingToast);
+      pendingDraftWork.end(targetKey);
+      releaseNativePromptWork();
     },
   );
 

@@ -29,7 +29,9 @@ import {
   BearerConnectionTarget,
   ConnectionBlockedError,
   PrimaryConnectionTarget,
+  type NetworkStatus,
 } from "./model.ts";
+import type { ConnectionCatalogEntry } from "./catalog.ts";
 import * as Onboarding from "./onboarding.ts";
 import {
   prepareBearerConnectionUpdate,
@@ -196,6 +198,19 @@ function layerPairingOnboarding(
   );
 }
 
+// Pairing with an expected environment never consults the registry: its
+// methods die if called, and its refs stay empty.
+const layerUnusedRegistry = Layer.unwrap(
+  Effect.gen(function* () {
+    return Layer.mock(EnvironmentRegistry.EnvironmentRegistry)({
+      entries: yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>>(
+        new Map(),
+      ),
+      networkStatus: yield* SubscriptionRef.make<NetworkStatus>("unknown"),
+    });
+  }),
+);
+
 const PAIRED_ENVIRONMENT_ID = EnvironmentId.make("environment-paired");
 const PAIRING_INPUT = { host: "remote.example.test", pairingCode: "pairing-token" };
 const PAIRED_PROFILE = new BearerConnectionProfile({
@@ -253,12 +268,7 @@ describe("connection onboarding", () => {
           tls,
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(
-              layerClientPresentation,
-              layerPairingHttp(calls),
-              // Pairing with an expected environment never consults the registry.
-              Layer.mock(EnvironmentRegistry.EnvironmentRegistry)({}),
-            ),
+            Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls), layerUnusedRegistry),
           ),
           Effect.provideService(ClientCapabilities.FleetTlsGateway, {
             prepare: (input) =>
@@ -297,12 +307,7 @@ describe("connection onboarding", () => {
           tls,
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(
-              layerClientPresentation,
-              layerPairingHttp(calls),
-              // Pairing with an expected environment never consults the registry.
-              Layer.mock(EnvironmentRegistry.EnvironmentRegistry)({}),
-            ),
+            Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls), layerUnusedRegistry),
           ),
           Effect.flip,
         );

@@ -170,49 +170,36 @@ it.effect("disabled telemetry ignores malformed ambient exporter settings", () =
   ),
 );
 
-it.effect(
-  "disabled native updates cannot prepare task continuations or acquire update dependencies",
-  () =>
-    Effect.gen(function* () {
-      let prepared = 0;
-      const updates = yield* SelfUpdate.make();
-      const wrapped = yield* SelfUpdate.withRunningThreadContinuation({
-        mode: "desktop",
-        selfUpdate: updates,
-        prepare: Effect.sync(() => {
-          prepared++;
-          return [];
-        }),
-        clear: () => Effect.void,
-      });
-      assert.equal(
-        (yield* Effect.flip(wrapped.commitDesktopUpdate("fixture")))._tag,
-        "ServerSelfUpdateError",
-      );
-      assert.equal(prepared, 0);
-      assert.isNull(
-        SelfUpdate.resolveServerSelfUpdateCapability({
-          desktopManaged: true,
-          launcherManaged: true,
-        }),
-      );
-      const desktop = yield* DesktopUpdate.make();
-      assert.isFalse(desktop.available);
-      assert.equal((yield* Effect.flip(desktop.commit("fixture")))._tag, "ServerSelfUpdateError");
-      const launcher = yield* LauncherClient.make();
-      assert.isFalse(launcher.managed);
-      assert.equal(
-        (yield* Effect.flip(launcher.requestUpdate({ targetVersion: "9.9.9", dbPath: "unused" })))
-          ._tag,
-        "ServiceLauncherRejectedError",
-      );
-      const service = yield* BootService.make({
-        baseDir: "unused",
-        logsDir: "unused",
-        cliVersion: "0.1.2",
-      });
-      assert.isFalse((yield* service.status).supported);
-      assert.equal((yield* Effect.flip(service.install()))._tag, "BootServiceCommandError");
-      assert.equal((yield* Effect.flip(service.uninstall))._tag, "BootServiceCommandError");
-    }).pipe(withoutRuntimeDependencies),
+it.effect("disabled native updates cannot commit or acquire update dependencies", () =>
+  Effect.gen(function* () {
+    const updates = yield* SelfUpdate.make();
+    assert.equal(
+      (yield* Effect.flip(updates.commitDesktopUpdate("fixture")))._tag,
+      "ServerSelfUpdateError",
+    );
+    assert.isNull(
+      SelfUpdate.resolveServerSelfUpdateCapability({
+        desktopManaged: true,
+        launcherManaged: true,
+      }),
+    );
+    const desktop = yield* DesktopUpdate.make();
+    assert.isFalse(desktop.available);
+    assert.equal((yield* Effect.flip(desktop.commit("fixture")))._tag, "ServerSelfUpdateError");
+    const launcher = yield* LauncherClient.make();
+    assert.isFalse(launcher.managed);
+    assert.equal(
+      (yield* Effect.flip(launcher.requestUpdate({ targetVersion: "9.9.9", dbPath: "unused" })))
+        ._tag,
+      "ServiceLauncherRejectedError",
+    );
+    const service = yield* BootService.make({
+      baseDir: "unused",
+      logsDir: "unused",
+      cliVersion: "0.1.2",
+    });
+    assert.isFalse((yield* service.status).supported);
+    assert.equal((yield* Effect.flip(service.install()))._tag, "BootServiceCommandError");
+    assert.equal((yield* Effect.flip(service.uninstall))._tag, "BootServiceCommandError");
+  }).pipe(withoutRuntimeDependencies),
 );

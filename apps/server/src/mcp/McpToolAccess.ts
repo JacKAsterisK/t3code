@@ -360,12 +360,15 @@ const taskOnlyTools = new Set([
   "t3_lan_events_ack",
 ]);
 
-const checkedHandlers = <Handlers>(declarations: Declarations<Handlers>): Handlers => {
-  const handles = Struct.map(declarations, checkedHandler);
+const checkedHandlers = <Handlers>(declarations: Declarations<Handlers>): Handlers =>
+  Struct.map(declarations, checkedHandler) as Handlers;
+
+const gateTaskOnly = <Handlers>(handlers: Handlers): Handlers =>
   // Every registration crosses this boundary, including native tools whose own
-  // declarations predate task grants. A newly added tool must be reviewed here.
-  return Object.fromEntries(
-    Object.entries(handles).map(([name, value]) => {
+  // declarations predate task grants and calls forwarded to a linked environment.
+  // A newly added tool must be reviewed here.
+  Object.fromEntries(
+    Object.entries(handlers as Record<string, unknown>).map(([name, value]) => {
       const handle = value as (params: unknown) => Effect.Effect<unknown, unknown, unknown>;
       return [
         name,
@@ -387,7 +390,6 @@ const checkedHandlers = <Handlers>(declarations: Declarations<Handlers>): Handle
       ];
     }),
   ) as Handlers;
-};
 
 /**
  * A tool runs in a linked environment when its parameters take this target
@@ -453,7 +455,7 @@ export const toLayer = <Tools extends Record<string, Tool.Any>, EX = never, RX =
 ): HandlersLayer<Tools, EX, Exclude<RX, Scope.Scope>> => {
   // Checked as soon as they are given, so a forged declaration fails here.
   const withDeclarations = (declarations: Handlers<Tools>) =>
-    routed(toolkit, declarations, checkedHandlers(declarations));
+    routed(toolkit, declarations, checkedHandlers(declarations)).pipe(Effect.map(gateTaskOnly));
   return handlersLayer(
     toolkit.toLayer(
       Effect.isEffect(build) ? Effect.flatMap(build, withDeclarations) : withDeclarations(build),

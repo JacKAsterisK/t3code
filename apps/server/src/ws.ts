@@ -3254,6 +3254,12 @@ export const layerWsRpc = (
               );
             }),
           ),
+        [WS_METHODS.subscribeBackgroundPolicy]: (_input) =>
+          Stream.unwrap(
+            Effect.map(backgroundPolicy.subscribe, ({ latest, changes }) =>
+              Stream.concat(Stream.make(latest), changes),
+            ),
+          ),
         [WS_METHODS.subscribeResourceTelemetry]: (_input) =>
           Stream.unwrap(
             Effect.map(resourceTelemetry.subscribe, ({ latest, changes }) =>

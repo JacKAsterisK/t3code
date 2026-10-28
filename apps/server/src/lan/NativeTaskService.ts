@@ -28,10 +28,12 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { delegatedTaskProgress } from "@t3tools/provider-core/server/subagentProjection";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as OrchestratorMcp from "../mcp/OrchestratorMcpService.ts";
+import { resolveInteractionMode, resolveRuntimeMode } from "../mcp/delegatedTaskModes.ts";
 import {
   assertLiveCaller,
   assertTargetWithinLimits,
   dispatchFailure,
+  isLiveCallerShell,
   readCaller,
   unavailable,
 } from "../mcp/threadAccess.ts";
@@ -242,8 +244,8 @@ const make = Effect.gen(function* () {
   const launch: NativeTaskService["Service"]["launch"] = Effect.fn("NativeTaskService.launch")(
     function* (scope, input) {
       const { limits } = yield* authorize(scope, true);
-      yield* OrchestratorMcp.resolveRuntimeMode(limits.runtimeMode, input.runtimeMode);
-      yield* OrchestratorMcp.resolveInteractionMode(limits.interactionMode, input.interactionMode);
+      yield* resolveRuntimeMode(limits.runtimeMode, input.runtimeMode);
+      yield* resolveInteractionMode(limits.interactionMode, input.interactionMode);
       const provider = (yield* providers.getProviders).find(
         (provider) => provider.instanceId === input.modelSelection.instanceId,
       );
@@ -330,7 +332,7 @@ const make = Effect.gen(function* () {
       scope.client?.access !== "read-only" &&
       exceededDispatchModeLimit(caller.limits, projection.thread) === undefined &&
       (caller.caller === undefined ||
-        OrchestratorMcp.isLiveCallerShell(caller.caller, scope.thread?.providerInstanceId));
+        isLiveCallerShell(caller.caller, scope.thread?.providerInstanceId));
     return {
       threadId: input.threadId,
       requests: projection.runtimeRequests.flatMap((request) => {

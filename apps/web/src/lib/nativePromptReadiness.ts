@@ -111,7 +111,7 @@ export function useNativePromptDraft(read: () => boolean, pending?: () => boolea
   const current = useRef({ read, pending });
   const previousDirty = useRef<boolean | undefined>(undefined);
   // Child layout effects commit before the root acknowledges that its inert DOM is committed.
-  // oxlint-disable-next-line t3code/react-effect-budget -- Publish committed child draft evidence before the parent layout effect can acknowledge its freeze.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Publish committed child draft evidence before the parent layout effect can acknowledge its freeze.
   useLayoutEffect(() => {
     current.current = { read, pending };
     let dirty = true;
@@ -123,7 +123,7 @@ export function useNativePromptDraft(read: () => boolean, pending?: () => boolea
       nativePromptReadiness.changed();
     }
   });
-  // oxlint-disable-next-line t3code/react-effect-budget -- Mounted prompt registration must be removed on unmount while retaining unfinished import claims.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Mounted prompt registration must be removed on unmount while retaining unfinished import claims.
   useLayoutEffect(
     () =>
       nativePromptReadiness.register(
@@ -193,7 +193,7 @@ export function NativePromptFreezeRoot({ children }: { readonly children: ReactN
     nativePromptReadiness.snapshot,
   );
   const frozen = state.frozen;
-  // oxlint-disable-next-line t3code/react-effect-budget -- Root lifetime owns native window capture listeners and marks readiness only after child layout effects commit.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Root lifetime owns native window capture listeners and marks readiness only after child layout effects commit.
   useLayoutEffect(() => {
     for (const event of BLOCKED_EVENTS)
       window.addEventListener(event, guardNativePromptInput, { capture: true, passive: false });
@@ -223,7 +223,7 @@ export function NativePromptFreezeRoot({ children }: { readonly children: ReactN
         window.removeEventListener(event, guardNativePromptInput, true);
     };
   }, []);
-  // oxlint-disable-next-line t3code/react-effect-budget -- Synchronize portal-inclusive inert DOM before acknowledging the current server reservation.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Synchronize portal-inclusive inert DOM before acknowledging the current server reservation.
   useLayoutEffect(() => {
     document.body.inert = frozen;
     nativePromptReadiness.commitFrozen(state);

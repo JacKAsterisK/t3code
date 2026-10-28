@@ -91,10 +91,15 @@ export function useLanFleet() {
     );
     return false;
   };
+  // Promise#finally rather than a `finally` block: React Compiler skips any hook
+  // that uses try/finally.
+  const whileBusy = (work: () => Promise<boolean>) => {
+    appAtomRegistry.set(busyAtom, true);
+    return work().finally(() => appAtomRegistry.set(busyAtom, false));
+  };
   const configure = async (input: LanFleetSetupInput) => {
     if (environmentId === null || !allowed || appAtomRegistry.get(busyAtom)) return false;
-    appAtomRegistry.set(busyAtom, true);
-    try {
+    return whileBusy(async () => {
       const result = await updateSetup({ environmentId, input });
       if (result._tag !== "Success") {
         appAtomRegistry.set(
@@ -109,9 +114,7 @@ export function useLanFleet() {
       appAtomRegistry.set(errorAtom, null);
       appAtomRegistry.set(pausedAtom, false);
       return true;
-    } finally {
-      appAtomRegistry.set(busyAtom, false);
-    }
+    });
   };
 
   const run = async (
@@ -121,9 +124,8 @@ export function useLanFleet() {
     if (environmentId === null || !allowed) return false;
     if (appAtomRegistry.get(busyAtom)) return true;
     if (mode === "manual") appAtomRegistry.set(pausedAtom, false);
-    appAtomRegistry.set(busyAtom, true);
-    appAtomRegistry.set(errorAtom, null);
-    try {
+    return whileBusy(async () => {
+      appAtomRegistry.set(errorAtom, null);
       // One server claim at a time, drained immediately so a fleet does not take one poll per peer.
       for (let remaining = 100; remaining > 0; remaining--) {
         const current = appAtomRegistry.get(environmentCatalog.catalogValueAtom);
@@ -172,9 +174,7 @@ export function useLanFleet() {
         }
       }
       return true;
-    } finally {
-      appAtomRegistry.set(busyAtom, false);
-    }
+    });
   };
   const pause = () => {
     appAtomRegistry.set(pausedAtom, true);

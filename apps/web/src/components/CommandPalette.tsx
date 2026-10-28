@@ -66,6 +66,7 @@ import {
   MessageSquareIcon,
   PaletteIcon,
   RotateCcwIcon,
+  ServerIcon,
   SettingsIcon,
   MonitorIcon,
   SquarePenIcon,
@@ -99,7 +100,11 @@ import {
   copyPromptLink,
   promptLinkRepositoryOf,
 } from "./promptLinks/copyPromptLink";
-import { useClientSettings } from "../hooks/useSettings";
+import {
+  updateClientSettings,
+  useBoringSidebarEnabled,
+  useClientSettings,
+} from "../hooks/useSettings";
 import { useStableCallback } from "../hooks/useStableCallback";
 import { readLocalApi } from "../localApi";
 import { desktopLocalBackendId } from "../connection/desktopLocal";
@@ -244,6 +249,7 @@ import { threadRecentUse } from "@t3tools/shared/paletteSearch";
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
 const ADD_PROJECT_ENTRY_GROUP = "add-project";
 const NEW_THREAD_IN_GROUP = "projects";
+const NEW_THREAD_ON_MACHINE_GROUP = "machine-projects";
 
 /** The submenu an open intent starts in; its groups resolve while rendering. */
 function openIntentView(intent: CommandPaletteOpenIntent | null): CommandPaletteView | null {
@@ -256,7 +262,13 @@ function openIntentView(intent: CommandPaletteOpenIntent | null): CommandPalette
     case "new-thread-in":
       return {
         addonIcon: <SquarePenIcon className={ADDON_ICON_CLASS} />,
-        groups: [{ value: NEW_THREAD_IN_GROUP, label: "Projects", items: [] }],
+        groups: [
+          {
+            value: intent.environmentId ? NEW_THREAD_ON_MACHINE_GROUP : NEW_THREAD_IN_GROUP,
+            label: "Projects",
+            items: [],
+          },
+        ],
       };
     case "change-theme":
       return {
@@ -385,6 +397,11 @@ function OpenCommandPaletteDialog(props: {
       },
   );
   const linkedThreadSearch = initialSearch.linkedThreadSearch;
+  const [newThreadMachineId] = useState(() =>
+    !props.initialContext && props.openIntent?.kind === "new-thread-in"
+      ? (props.openIntent.environmentId ?? null)
+      : null,
+  );
   const [searchState, dispatchSearch] = useReducer(reduceCommandPaletteSearchState, null, () => {
     const view = props.initialContext ? null : openIntentView(props.openIntent);
     return view
@@ -426,6 +443,8 @@ function OpenCommandPaletteDialog(props: {
     reportFailure: false,
   });
   const { environments } = useEnvironments();
+  const threadGrouping = useClientSettings((settings) => settings.sidebarThreadGrouping);
+  const boringSidebarEnabled = useBoringSidebarEnabled();
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
@@ -800,6 +819,29 @@ function OpenCommandPaletteDialog(props: {
       ...projectItems.slice(noProjectIndex),
     ];
   })();
+  // A machine header's new thread must land on that machine, so each project
+  // resolves to its member there rather than the group's preferred target.
+  const machineProjectThreadItems =
+    newThreadMachineId === null
+      ? []
+      : enumerateCommandPaletteItems(
+          buildNewThreadInProjectItems({
+            projects: projectPickerEntries.flatMap(({ group }) => {
+              const member = group.memberProjects.find(
+                (project) => project.environmentId === newThreadMachineId,
+              );
+              return member === undefined ||
+                isScratchProject(member, scratchWorkspaceRootFor(member.environmentId))
+                ? []
+                : [{ ...member, displayName: group.displayName }];
+            }),
+            projectGroupByTargetKey,
+            locationByEnvironmentId: projectEnvironmentLocationById,
+            runProject: async (project) => {
+              await handleNewThread(scopeProjectRef(project.environmentId, project.id));
+            },
+          }),
+        );
 
   const {
     threadItems: allThreadItems,
@@ -1520,6 +1562,19 @@ function OpenCommandPaletteDialog(props: {
     });
   }
 
+  // The boring sidebar groups by project folder instead.
+  if (environments.length > 1 && !boringSidebarEnabled) {
+    const grouped = threadGrouping === "machine";
+    actionItems.push({
+      kind: "action",
+      value: "action:toggle-thread-grouping",
+      searchTerms: ["group", "machine", "environment", "server", "sidebar", "threads", "computer"],
+      title: grouped ? "Stop grouping threads by machine" : "Group threads by machine",
+      icon: <ServerIcon className={ITEM_ICON_CLASS} />,
+      run: () => updateClientSettings({ sidebarThreadGrouping: grouped ? "none" : "machine" }),
+    });
+  }
+
   actionItems.push({
     kind: "action",
     value: "action:settings",
@@ -1604,11 +1659,22 @@ function OpenCommandPaletteDialog(props: {
         ? addProjectEntryGroups()
         : currentView?.groups[0]?.value === NEW_THREAD_IN_GROUP
           ? [{ value: NEW_THREAD_IN_GROUP, label: "Projects", items: projectThreadItems }]
-          : currentView?.groups[0]?.value === "themes"
-            ? changeThemeItem.groups
-            : currentView?.groups[0]?.value === "appearance"
-              ? changeAppearanceItem.groups
-              : (currentView?.groups ?? rootGroups);
+          : currentView?.groups[0]?.value === NEW_THREAD_ON_MACHINE_GROUP
+            ? [
+                {
+                  value: NEW_THREAD_ON_MACHINE_GROUP,
+                  label: `Projects on ${
+                    (newThreadMachineId && environmentLabelById.get(newThreadMachineId)) ||
+                    "this machine"
+                  }`,
+                  items: machineProjectThreadItems,
+                },
+              ]
+            : currentView?.groups[0]?.value === "themes"
+              ? changeThemeItem.groups
+              : currentView?.groups[0]?.value === "appearance"
+                ? changeAppearanceItem.groups
+                : (currentView?.groups ?? rootGroups);
 
   const isLinkedThreadSearch =
     linkedThreadSearch?.linkedThreads !== undefined && deferredQuery === linkedThreadSearch.query;

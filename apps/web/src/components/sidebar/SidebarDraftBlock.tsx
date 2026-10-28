@@ -96,14 +96,20 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
         onKeyDown={handleKeyDown}
       >
         <span className="sr-only">{preview}</span>
-        <div className="relative z-10 h-[4.875rem] px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)">
-          <div className="flex h-5 min-w-0 items-center gap-1.5">
+        {/* Matches the two-line thread card; with no branch or status, the project name is line 2. */}
+        <div className="relative z-10 grid h-13 grid-cols-[auto_minmax(0,1fr)] px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)">
+          <span className="flex h-5 items-center gap-1.5 pe-1.5">
             <SquarePenIcon aria-hidden className={draftPenClassName} />
             {props.project ? (
               <ProjectFavicon project={props.project} className="size-4 shrink-0" />
             ) : null}
-            <span className="min-w-0 flex-1 truncate text-xs font-medium text-secondary-label">
-              {props.projectDisplayName}
+          </span>
+          <div className="col-start-2 flex h-5 min-w-0 items-center gap-1.5">
+            <span
+              aria-hidden
+              className="min-w-0 flex-1 truncate text-sm font-medium text-foreground/90"
+            >
+              {preview}
             </span>
             <span className="ml-auto flex h-5 min-w-5 shrink-0 items-center justify-end">
               <Tooltip>
@@ -123,8 +129,8 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
               </Tooltip>
             </span>
           </div>
-          <div aria-hidden className="mt-0.5 truncate text-sm font-medium text-foreground/90">
-            {preview}
+          <div className="col-start-2 row-start-2 h-4 truncate text-xs text-secondary-label">
+            {props.projectDisplayName}
           </div>
         </div>
       </div>

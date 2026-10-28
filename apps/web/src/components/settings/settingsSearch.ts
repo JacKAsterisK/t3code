@@ -420,6 +420,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["hide fold running monitoring threads inbox sidebar shelf"],
   },
   {
+    id: "thread-grouping",
+    title: "Group threads by machine",
+    to: "/settings/general",
+    searchTerms: ["machine environment server computer remote sidebar group"],
+  },
+  {
     id: "boring-sidebar",
     title: "Boring sidebar (group by project)",
     to: "/settings/labs",

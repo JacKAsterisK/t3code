@@ -87,6 +87,15 @@ describe("reduceCommandPaletteUiState", () => {
     ).toBeNull();
   });
 
+  it("opens New thread in... scoped to the machine a header asked for", () => {
+    const environmentId = EnvironmentId.make("build-01");
+    const state = reduceCommandPaletteUiState(
+      { open: false, mode: "command", openIntent: null, session: 0 },
+      { _tag: "OpenNewThreadIn", environmentId },
+    );
+    expect(state.openIntent).toEqual({ kind: "new-thread-in", environmentId });
+  });
+
   it("keeps the session across mode switches so only intents start the palette over", () => {
     let state: CommandPaletteUiState = {
       open: false,

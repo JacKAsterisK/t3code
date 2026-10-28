@@ -71,7 +71,9 @@ export function browseInputEndPaddingClass(input: {
 export type SearchOverlayMode = "command" | "files" | "content";
 
 export type CommandPaletteOpenIntent =
-  | { readonly kind: "add-project" | "new-thread-in" | "change-theme" }
+  | { readonly kind: "add-project" | "change-theme" }
+  // A machine header opens the submenu with only that machine's projects.
+  | { readonly kind: "new-thread-in"; readonly environmentId?: EnvironmentId }
   | {
       readonly kind: "search";
       readonly query: string;
@@ -98,7 +100,7 @@ export type CommandPaletteUiAction =
       readonly linkedThreads?: CommandPaletteLinkedThreads;
     }
   | { readonly _tag: "OpenAddProject" }
-  | { readonly _tag: "OpenNewThreadIn" }
+  | { readonly _tag: "OpenNewThreadIn"; readonly environmentId?: EnvironmentId }
   | { readonly _tag: "OpenChangeTheme" }
   | {
       readonly _tag: "OpenChildSearch";
@@ -154,7 +156,10 @@ export function reduceCommandPaletteUiState(
     case "OpenAddProject":
       return openWithIntent({ kind: "add-project" });
     case "OpenNewThreadIn":
-      return openWithIntent({ kind: "new-thread-in" });
+      return openWithIntent({
+        kind: "new-thread-in",
+        ...(action.environmentId ? { environmentId: action.environmentId } : {}),
+      });
     case "OpenChangeTheme":
       return openWithIntent({ kind: "change-theme" });
   }

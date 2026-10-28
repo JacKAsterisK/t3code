@@ -138,8 +138,8 @@ export function createSidebarSortingStrategy(input: {
       if (item.key !== active.key) groups[item.section].push(item);
     }
     const scale =
-      slimHeight !== undefined ? slimHeight / 36 : (headerScale ?? (cardHeight ?? 82) / 82);
-    cardHeight ??= 82 * scale;
+      slimHeight !== undefined ? slimHeight / 36 : (headerScale ?? (cardHeight ?? 56) / 56);
+    cardHeight ??= 56 * scale;
     slimHeight ??= 36 * scale;
     const labelHeight = (input.boundaryLabelHeight ?? 0) * scale;
     const group = groups[target.section];

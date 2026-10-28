@@ -210,3 +210,29 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 ## Additional tips
 
 - Security is important, but should not be over-indexed on, especially for dev mode/maintainer-only features.
+
+## Prefer native T3 capabilities
+
+This fork tracks upstream T3 Code. When you merge upstream or build something
+that overlaps it, check whether upstream already has the behavior. Prefer the
+native implementation when it preserves our workflow, data, access boundaries
+and reliability with less maintenance.
+
+- Read the actual upstream code, release status, Labs gates and API. Compare
+  behavior and callers, not feature names.
+- [Native feature sync](docs/maintenance/native-feature-sync.md) records each
+  overlap: decision (`keep`, `adapt`, `replace` or `defer`), evidence, gaps,
+  owner, tests and revisit condition. Update the affected rows on every sync.
+- Treat active local work, such as machine grouping in the sidebar, as
+  protected until native parity and a safe transition are verified.
+- For a real gap, write a small adapter rather than copying the upstream
+  feature. Never run two sources of truth or two competing implementations.
+- Replacing a feature requires behavioral tests, data compatibility or a
+  tested migration, startup and reconnect checks, and a rollback. Native task
+  control does not prove notification or assistant wake; test those separately.
+- Once a replacement is proven and approved, remove its obsolete code, config,
+  packaging and docs together. Keep the behavioral tests and the tracker row.
+
+This grants no authority to deploy or publish, to delete data, to add
+credentials or access, or to change security settings. It also does not allow
+overwriting unrelated work or adding a recurring manual setup step.

@@ -175,6 +175,83 @@
         "status": "rolled-back"
       },
       "scope": "Only matching adoption operation markers under continuously held both-home/profile admission. Source work generations, source snapshots and opaque backups must remain unchanged. A launched or migrated source refuses automatic rollback."
+    },
+    "import-retained-lan-history": {
+      "arguments": ["import-retained-lan-history", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "repairId": "<new32hex>",
+        "expectedPlanId": "<exact generic preview plan>",
+        "expectedReviewGeneration": "<exact reviewed historyImportPreview.reviewGeneration>",
+        "expectedSourceEnvironmentId": "<retained LAN identity>",
+        "expectedTargetEnvironmentId": "<selected original identity>",
+        "expectedSourceDataGeneration": "<held source native data generation>",
+        "expectedSourceWorkGeneration": "<held source native work generation>",
+        "expectedTargetDataGeneration": "<held target native data generation>",
+        "expectedTargetWorkGeneration": "<held target native work generation>",
+        "opaqueBackupApproved": true,
+        "admissionOwnerPid": "<actual live owning Hub parent PID>"
+      },
+      "stdout": {
+        "schemaVersion": 1,
+        "operation": "import-retained-lan-history",
+        "status": "imported-pending-verification | rolled-back",
+        "repairId": "<same32hex transaction ID>",
+        "receiptPath": "<absolute recovery/repairId/receipt.json>",
+        "sourceEnvironmentId": "<retained LAN existing identity>",
+        "targetEnvironmentId": "<selected original existing identity>",
+        "reviewGeneration": "<same64hex domain review>",
+        "sourceDataGenerationBefore": "<64hex native data generation>",
+        "sourceDataGenerationAfter": "<same unchanged native data generation>",
+        "sourceWorkGenerationBefore": "<64hex native work generation>",
+        "sourceWorkGenerationAfter": "<same unchanged native work generation>",
+        "targetDataGenerationBefore": "<64hex original before import>",
+        "targetDataGenerationAfter": "<64hex checked imported or restored original>",
+        "targetWorkGenerationBefore": "<64hex original before import>",
+        "targetWorkGenerationAfter": "<64hex checked imported or restored original; append changes full generation>",
+        "summary": "<bounded HistoryImportSummary: source/eligible/new/alreadyImported threads, source/import messages, source/import/converted cards, attachments/bytes/missing>",
+        "proof": "<targetEventHeadBefore plus paired eventPrefixGeneration, existingRowsGeneration and existingWorkGeneration semantic digests; all pairs must match>",
+        "existingWorkPreserved": true,
+        "eventPrefixPreserved": true,
+        "sourcePreserved": true
+      },
+      "scope": "Explicit settled readable-history import only, including safe rich display cards and full informational snapshots of operational cards. Fresh opaque backups of both homes and all present profiles. Source LAN is idle/read-only; selected original may preserve known unfinished work. Staged event/projector append only; no credential/settings/provider-process/runs/requests/subagent/outbox merge, no cancellation/resume, no binary/home/profile selection change."
+    },
+    "recover-import-retained-lan-history": {
+      "arguments": ["recover-import-retained-lan-history", "--json"],
+      "stdin": {
+        "schemaVersion": 1,
+        "repairId": "<same32hex>",
+        "expectedReviewGeneration": "<same64hex review>",
+        "expectedSourceEnvironmentId": "<same retained LAN identity>",
+        "expectedTargetEnvironmentId": "<same selected original identity>",
+        "admissionOwnerPid": "<actual live owning Hub parent PID>",
+        "recoveryOperation": "recover | rollback"
+      },
+      "stdout": {
+        "schemaVersion": 1,
+        "operation": "import-retained-lan-history",
+        "status": "imported-pending-verification | rolled-back",
+        "repairId": "<same32hex transaction ID>",
+        "receiptPath": "<absolute recovery/repairId/receipt.json>",
+        "sourceEnvironmentId": "<retained LAN existing identity>",
+        "targetEnvironmentId": "<selected original existing identity>",
+        "reviewGeneration": "<same64hex domain review>",
+        "sourceDataGenerationBefore": "<64hex native data generation>",
+        "sourceDataGenerationAfter": "<same unchanged native data generation>",
+        "sourceWorkGenerationBefore": "<64hex native work generation>",
+        "sourceWorkGenerationAfter": "<same unchanged native work generation>",
+        "targetDataGenerationBefore": "<64hex original before import>",
+        "targetDataGenerationAfter": "<64hex checked imported or restored original>",
+        "targetWorkGenerationBefore": "<64hex original before import>",
+        "targetWorkGenerationAfter": "<64hex checked imported or restored original; append changes full generation>",
+        "summary": "<bounded HistoryImportSummary: source/eligible/new/alreadyImported threads, source/import messages, source/import/converted cards, attachments/bytes/missing>",
+        "proof": "<targetEventHeadBefore plus paired eventPrefixGeneration, existingRowsGeneration and existingWorkGeneration semantic digests; all pairs must match>",
+        "existingWorkPreserved": true,
+        "eventPrefixPreserved": true,
+        "sourcePreserved": true
+      },
+      "scope": "Recover finishes only a matching reviewed staged/raw publication under held admission. No native journal/receipt permits only a no-op rolled-back result when a fresh domain review still matches. Rollback requires exact recorded post-import original generation plus unchanged source/profiles/selection; restore the pre-import SQLite set and quarantine newly imported immutable attachment files. Unknown or newer state refuses. All backups and quarantine bytes remain retained."
     }
   },
   "input": {
@@ -251,9 +328,9 @@
     }
   },
   "retention": {
-    "behavior": "Original and LAN histories, attachments, settings, encrypted stores and matching profiles are retained as complete separate homes; no database, credentials or provider-environment merge occurs.",
+    "behavior": "Both complete original and LAN homes plus matching profiles and fresh opaque backups are retained. Explicit import may append settled readable LAN conversations to the selected original; it never merges credentials, provider environments, operational work or settings.",
     "access": "Hub can explicitly select side-by-side-retain-original in a new stopped transaction to reopen retained LAN conversations and its existing Claude provider settings. Selecting adopt-original-retain-lan switches back. Every switch uses a fresh preview and repairId, backs up both current states and retains both histories.",
-    "limitation": "The original home's conversation list and provider settings do not automatically include LAN-only entries. Consolidated history/provider import is not implemented; do not describe retained bytes as merged or restored into one list.",
+    "limitation": "Retained histories remain separate unless the user explicitly reviews import-retained-lan-history. Only readable settled conversation history and immutable attachments are imported; provider credentials/settings remain separate and are never merged.",
     "rollback": "Rollback journals its selection restoration and can recover either side of an interrupted rollback while all source snapshots are unchanged. Any new work or durable schema/profile write refuses automatic data restoration; backups remain for reviewed recovery.",
     "verification": "Apply returns selected-pending-verification. Hub must validate selected environment, readable old history and saved connection continuity using the normal app before reporting repair complete; restoredHistoryVerified remains false in this interface.",
     "lanOnly": "When original is missing/empty, explicit LAN retention backs up and validates the initialized LAN home and existing profiles only. Its retained-original path may remain absent. It does not restore missing original conversations."
@@ -283,5 +360,20 @@
     "generations": "originalWorkGeneration and stagedOriginalWorkGeneration use the exact NativeMaintenance update workGeneration algorithm and must match. Staged migrations may change staged database bytes/dataGeneration. Both source homes and profiles remain unchanged through adoption; Hub compares their pre/post native data/work generations. Later normal candidate verification may migrate the selected source and change dataGeneration, while durable workGeneration must remain equal.",
     "recovery": "Interrupted adoption/pending-selection recovery requires pre-adoption source work generations and unchanged source/backups. Any later source migration or new work refuses automatic rollback, retaining backups for reviewed recovery.",
     "originalOnly": "Supported with expectedLanEnvironmentId:null when LAN is absent/empty; do not create an empty LAN home."
+  },
+  "historyImport": {
+    "previewAdditions": {
+      "importRetainedLanHistorySupported": "boolean capability, absent means unsupported",
+      "canImportRetainedLanHistory": "boolean offer, both homes current schema, selected original, source idle, complete source display/attachment resolution",
+      "historyImportPreview": "null or bounded schemaVersion1 domain preview with IDs, review/history generations, summary, providerMappings and baseline semantic proof",
+      "historyImportBlockers": "bounded stable reason words, including retained-history-preview-failed on unexpected preview failure",
+      "historyImportRecovery": "null normally; pending import cached recovery-only metadata {repairId,phase,receiptPath,sourceEnvironmentId,targetEnvironmentId,reviewGeneration,recoverSupported,rollbackSupported}",
+      "historyImportStorage": "null/absent when unavailable (with history-import-storage-unavailable blocker), otherwise bounded {requiredBytes,availableBytes,sufficient}; metadata-only storage estimate reserves3x target home plus source/profile backups, attachments and1GiB margin. Native reevaluates before snapshots; volatile available bytes do not enter reviewGeneration."
+    },
+    "runtimeCompatibility": "Imported attachment IDs remain flat server20-valid identifiers; exact immutable userdata/attachments/<id>.<extension> paths are returned in the transaction manifest. Provider profile/settings data is never merged.",
+    "proof": "Full native workGeneration necessarily changes after append. Domain proof requires identical pre-existing event prefix, every existing projection/receipt row and existing work semantic digest; new settled imported IDs are the only allowed additions. Native pre/post generations are separately bound.",
+    "publication": "Durable home-repair.json blocks startup before snapshots/staging. Closed, checked standalone staged SQLite main is published by same-volume raw-file rename after original main/WAL/SHM quarantine. Exact journal-owned per-attachment partial files are fsynced/hashed before immutable publication; partials are recognized or retained, never silently discarded.",
+    "crashPreview": "Before ANY ordinary home preview or target SQL, detect import journal and return its bounded cached pre-import report with only matching recovery enabled. Recovery validates identities/admission/paths/raw pins first and repairs a coherent SQLite set before target inspection.",
+    "retention": "Fresh snapshots, interrupted stages, partial copies, SQLite quarantines, imported attachment quarantines and public receipts are retained. No automatic destructive cleanup. Original selection/adoption receipt and profiles stay byte-for-byte unchanged."
   }
 }

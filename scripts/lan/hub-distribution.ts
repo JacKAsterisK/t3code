@@ -96,6 +96,8 @@ export const BUILD_INPUT_FILES = [
   "scripts/lan/home-repair.ts",
   "scripts/lan/home-repair-executor.ts",
   "scripts/lan/home-repair-migrations.ts",
+  "scripts/lan/home-repair-history.ts",
+  "scripts/lan/home-repair-import.ts",
   "scripts/lan/home-repair-native.ts",
   "apps/server/src/lan/nativeWorkStates.ts",
   "apps/server/src/lan/OfflineWorkCancellation.ts",

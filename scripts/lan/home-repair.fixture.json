@@ -158,5 +158,11 @@
     "rollback-matching-binary-data-profile-and-selection-before-new-work"
   ],
   "adoptOriginalWithWorkSupported": true,
-  "canAdoptOriginalWithWork": true
+  "canAdoptOriginalWithWork": true,
+  "importRetainedLanHistorySupported": true,
+  "canImportRetainedLanHistory": false,
+  "historyImportPreview": null,
+  "historyImportBlockers": ["history-import-requires-current-schema"],
+  "historyImportRecovery": null,
+  "historyImportStorage": null
 }

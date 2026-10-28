@@ -73,6 +73,7 @@ export async function buildHomeRepair(outDir: string) {
           "focused-tests",
           "windows-smoke",
           "home-selection-and-retention",
+          "retained-lan-history-import",
         ],
         requiredRuntimePolicyChecks: [
           "default-home-selection",
@@ -108,6 +109,8 @@ export async function buildHomeRepair(outDir: string) {
         operations: [
           "preview",
           "apply",
+          "import-retained-lan-history",
+          "recover-import-retained-lan-history",
           "adopt-original-with-work",
           "recover-adopt-original-with-work",
           "retain-selected-lan",

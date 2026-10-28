@@ -415,6 +415,270 @@
     },
     "canAdoptOriginalWithWork": {
       "type": "boolean"
+    },
+    "importRetainedLanHistorySupported": {
+      "type": "boolean"
+    },
+    "canImportRetainedLanHistory": {
+      "type": "boolean"
+    },
+    "historyImportBlockers": {
+      "maxItems": 256,
+      "items": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "historyImportPreview": {
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "reviewGeneration",
+        "sourceEnvironmentId",
+        "targetEnvironmentId",
+        "sourceHistoryGeneration",
+        "targetHistoryGeneration",
+        "summary",
+        "blockers",
+        "providerMappings",
+        "baseline"
+      ],
+      "properties": {
+        "providerMappings": {
+          "maxItems": 1024,
+          "items": {
+            "additionalProperties": false,
+            "required": ["sourceInstanceId", "driver", "targetInstanceId", "targetCandidates"],
+            "properties": {
+              "driver": {
+                "maxLength": 256,
+                "type": "string"
+              },
+              "targetCandidates": {
+                "maxItems": 1024,
+                "items": {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "targetInstanceId": {
+                "maxLength": 256,
+                "type": ["string", "null"]
+              },
+              "sourceInstanceId": {
+                "maxLength": 256,
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "additionalProperties": false,
+          "required": [
+            "sourceThreads",
+            "eligibleThreads",
+            "newThreads",
+            "alreadyImportedThreads",
+            "sourceMessages",
+            "importMessages",
+            "sourceCards",
+            "importCards",
+            "convertedCards",
+            "attachments",
+            "attachmentBytes",
+            "missingAttachments"
+          ],
+          "properties": {
+            "newThreads": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "missingAttachments": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "importMessages": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "convertedCards": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "attachments": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "eligibleThreads": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "alreadyImportedThreads": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sourceMessages": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sourceCards": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "attachmentBytes": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "sourceThreads": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "importCards": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "sourceHistoryGeneration": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "targetHistoryGeneration": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "schemaVersion": {
+          "const": 1
+        },
+        "sourceEnvironmentId": {
+          "maxLength": 256,
+          "type": "string"
+        },
+        "blockers": {
+          "maxItems": 256,
+          "items": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reviewGeneration": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "baseline": {
+          "additionalProperties": false,
+          "required": [
+            "targetEventHead",
+            "eventPrefixGeneration",
+            "existingRowsGeneration",
+            "existingWorkGeneration"
+          ],
+          "properties": {
+            "existingWorkGeneration": {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            "eventPrefixGeneration": {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            "targetEventHead": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "existingRowsGeneration": {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "targetEnvironmentId": {
+          "maxLength": 256,
+          "type": "string"
+        }
+      },
+      "type": ["object", "null"]
+    },
+    "historyImportRecovery": {
+      "additionalProperties": false,
+      "required": [
+        "repairId",
+        "phase",
+        "receiptPath",
+        "sourceEnvironmentId",
+        "targetEnvironmentId",
+        "reviewGeneration",
+        "recoverSupported",
+        "rollbackSupported"
+      ],
+      "properties": {
+        "reviewGeneration": {
+          "pattern": "^[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "receiptPath": {
+          "maxLength": 32768,
+          "type": "string"
+        },
+        "targetEnvironmentId": {
+          "maxLength": 256,
+          "type": "string"
+        },
+        "repairId": {
+          "pattern": "^[a-f0-9]{32}$",
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "backing-up",
+            "staging",
+            "publishing-attachments",
+            "publishing-database",
+            "published",
+            "rolling-back",
+            "completed",
+            "rolled-back"
+          ]
+        },
+        "sourceEnvironmentId": {
+          "maxLength": 256,
+          "type": "string"
+        },
+        "recoverSupported": {
+          "type": "boolean"
+        },
+        "rollbackSupported": {
+          "type": "boolean"
+        }
+      },
+      "type": ["object", "null"]
+    },
+    "historyImportStorage": {
+      "type": ["object", "null"],
+      "required": ["requiredBytes", "availableBytes", "sufficient"],
+      "properties": {
+        "sufficient": {
+          "type": "boolean"
+        },
+        "availableBytes": {
+          "type": "integer",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        },
+        "requiredBytes": {
+          "type": "integer",
+          "maximum": 9007199254740991,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     }
   },
   "required": [

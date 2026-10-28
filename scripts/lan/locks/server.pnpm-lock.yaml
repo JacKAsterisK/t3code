@@ -165,7 +165,7 @@ overrides:
   react-native-image-viewing: 0.2.2
   mdast-util-math: 3.0.0
   micromark-extension-llm-math: 3.1.0
-  alchemy: 2.0.0-beta.80
+  alchemy: 2.0.0-beta.84
   expo-audio: 58.0.9
   expo-network: 58.0.3
   '@clerk/expo-native-components': 0.4.0
@@ -202,7 +202,6 @@ overrides:
   '@alchemy.run/sigil>react': '-'
   '@alchemy.run/sigil>react-reconciler': '-'
   '@alchemy.run/sigil>scheduler': '-'
-  alchemy>@prisma/dev: '-'
   '@clerk/backend': 3.25.0
   '@clerk/clerk-js': 6.40.0
   '@clerk/clerk-js>@base-org/account': '-'
@@ -261,8 +260,8 @@ importers:
   .:
     dependencies:
       '@cursor/sdk':
-        specifier: 1.0.35
-        version: 1.0.35
+        specifier: 1.0.38
+        version: 1.0.38(zod@4.6.5)
       '@ff-labs/fff-bin-win32-x64':
         specifier: 0.11.0
         version: 0.11.0
@@ -281,6 +280,9 @@ importers:
       undici:
         specifier: 8.11.2
         version: 8.11.2
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
 
 packages:
 
@@ -298,39 +300,41 @@ packages:
     peerDependencies:
       '@bufbuild/protobuf': ^1.10.0
 
-  '@cursor/sdk-darwin-arm64@1.0.35':
-    resolution: {integrity: sha512-q9/y2NHTGnE0iwMfJ+FIHmj2gDGDRy45fH3rF3SAFGEGzM4xh726r64n6hH4OQYwKhcMqhqxbPGBpXHd5lRW4A==}
+  '@cursor/sdk-darwin-arm64@1.0.38':
+    resolution: {integrity: sha512-pXxj4pjbIoDo6ZjgksSf4VTD4EJz6BGDKvFjDVVUMg0PmLCVbceOnp0pqfRO8SVpdUSE45GFrXuLnSZgLag/xw==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@cursor/sdk-darwin-x64@1.0.35':
-    resolution: {integrity: sha512-0IGwzNr3Lq9IrcIRU4AlT7kTkwwVhRpQyjHqhvnKdgtn+WFYShr9gqTb44leihi/Cbf7a76yEdCgpfScBCPtxQ==}
+  '@cursor/sdk-darwin-x64@1.0.38':
+    resolution: {integrity: sha512-rutfTMq1f9WZckPFH8R5bzNzHaZg7I/TijVUkfD3GbqIqqc5OKHzdTMqZf+AFAqRDQccGJn4GLWcnQ9wTwIVNA==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@cursor/sdk-linux-arm64@1.0.35':
-    resolution: {integrity: sha512-AAx2DBqOc21kIwKuHRLl+4bCbuU7Su/BWY+TzXMgMsxAOHvLDGg7SGVvHOMV4ENczbOEcO4zc3XDbmQB4x3rdw==}
+  '@cursor/sdk-linux-arm64@1.0.38':
+    resolution: {integrity: sha512-CqmUnM8W8W2mKucSrdHO0kn4ems82siWuo7kvVJvXCtPkaziVNC++dro5h9hSh2oVgRbB91sWQ4lzsHVIDpkvA==}
     cpu: [arm64]
     os: [linux]
     hasBin: true
 
-  '@cursor/sdk-linux-x64@1.0.35':
-    resolution: {integrity: sha512-3PABXvbT/Ue3jN+ytWcNDPBWptAiJv4qzxL0m2rma3e7kyx/Q1/8FYRYunIpX21HfPGgDSURlWztEov1xdZs3Q==}
+  '@cursor/sdk-linux-x64@1.0.38':
+    resolution: {integrity: sha512-RL6OJTAF3oozMG+HNtykySQ5BOP94yJNWP65wZ2yzMLTAW9ao80++OnaWJya1lndLacHLYP+QZT4igm5TT+BWQ==}
     cpu: [x64]
     os: [linux]
     hasBin: true
 
-  '@cursor/sdk-win32-x64@1.0.35':
-    resolution: {integrity: sha512-zADtORY6QRMCBTckxTieAKxcthRiefNNHxVhX2RtO3pQGa4iQwTrHjmjUw0nqCF6sJlCrQ58DTgkrz+BZhLEcw==}
+  '@cursor/sdk-win32-x64@1.0.38':
+    resolution: {integrity: sha512-IUfuCk/S/qzEB+tfT4yWH6iSMz56Lvakn1zNjdk+oAsZ7RJWtWkZcea6eqMSRB1WLmTeQG0uetXKX330w+xI0A==}
     cpu: [x64]
     os: [win32]
     hasBin: true
 
-  '@cursor/sdk@1.0.35':
-    resolution: {integrity: sha512-CJQR4ocRFm74N1miSqSSrhWyEbvTRIJGyMfHQvZlcBIYzLMXCVPmb1bV82L4NJ8mG9TyvbckEjERjbnzpG5akQ==}
+  '@cursor/sdk@1.0.38':
+    resolution: {integrity: sha512-8UwPKaprIXvlVR71yHyNNTyFwZCOzfHW7W+FKjPdDS9Ym9FDZc51Jwsu9lAhxHf7n0US3t0pybkDaNFdldrQ+A==}
     engines: {node: '>=22.13'}
+    peerDependencies:
+      zod: ^3.25.0 || ^4.0.0
 
   '@ff-labs/fff-bin-android-arm64@0.11.0':
     resolution: {integrity: sha512-7CmURAtJg1xCETKE8d46CUpeql9tpdsdbyoNCrNRkH+t608jMy+mLQxmyw7cBDOI0ljg5BaffxGZfOS2E6kasA==}
@@ -562,8 +566,8 @@ packages:
     resolution: {integrity: sha512-u4UB2/IrKdU6lFxumHmmo1a3fCQO5tzQllRorfoRS63txhrB7xTpSn1PftwC4qEHkOaqP95fCWW4lJzwErwzhQ==}
     engines: {node: '>=22.19.0'}
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.6.5:
+    resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
 
 snapshots:
 
@@ -578,34 +582,34 @@ snapshots:
     dependencies:
       '@bufbuild/protobuf': 1.10.0
 
-  '@cursor/sdk-darwin-arm64@1.0.35':
+  '@cursor/sdk-darwin-arm64@1.0.38':
     optional: true
 
-  '@cursor/sdk-darwin-x64@1.0.35':
+  '@cursor/sdk-darwin-x64@1.0.38':
     optional: true
 
-  '@cursor/sdk-linux-arm64@1.0.35':
+  '@cursor/sdk-linux-arm64@1.0.38':
     optional: true
 
-  '@cursor/sdk-linux-x64@1.0.35':
+  '@cursor/sdk-linux-x64@1.0.38':
     optional: true
 
-  '@cursor/sdk-win32-x64@1.0.35':
+  '@cursor/sdk-win32-x64@1.0.38':
     optional: true
 
-  '@cursor/sdk@1.0.35':
+  '@cursor/sdk@1.0.38(zod@4.6.5)':
     dependencies:
       '@bufbuild/protobuf': 1.10.0
       '@connectrpc/connect': 1.7.0(@bufbuild/protobuf@1.10.0)
       '@connectrpc/connect-web': 1.7.0(@bufbuild/protobuf@1.10.0)(@connectrpc/connect@1.7.0(@bufbuild/protobuf@1.10.0))
       '@statsig/js-client': 3.31.0
-      zod: 3.25.76
+      zod: 4.6.5
     optionalDependencies:
-      '@cursor/sdk-darwin-arm64': 1.0.35
-      '@cursor/sdk-darwin-x64': 1.0.35
-      '@cursor/sdk-linux-arm64': 1.0.35
-      '@cursor/sdk-linux-x64': 1.0.35
-      '@cursor/sdk-win32-x64': 1.0.35
+      '@cursor/sdk-darwin-arm64': 1.0.38
+      '@cursor/sdk-darwin-x64': 1.0.38
+      '@cursor/sdk-linux-arm64': 1.0.38
+      '@cursor/sdk-linux-x64': 1.0.38
+      '@cursor/sdk-win32-x64': 1.0.38
 
   '@ff-labs/fff-bin-android-arm64@0.11.0':
     optional: true
@@ -762,4 +766,4 @@ snapshots:
 
   undici@8.11.2: {}
 
-  zod@3.25.76: {}
+  zod@4.6.5: {}

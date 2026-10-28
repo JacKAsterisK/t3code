@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   check:
-    # Routine LAN releases build locally. This inherited CI job is not a release gate.
+    # LAN releases build locally. This inherited CI job is not a release gate.
     if: ${{ false }}
     runs-on: [self-hosted, windows, x64, t3-lan-anvil]
     timeout-minutes: 30
@@ -23,19 +23,17 @@ jobs:
         with:
           fetch-depth: 64
       - uses: ./.github/actions/setup-ci-deps
-      - name: Select release validation profile
-        id: profile
+      - name: Select release tests
         shell: bash
         env:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: |
-          node scripts/lan/release-profile.ts scripts/lan/qualification-baseline.json "$RUNNER_TEMP/lan-release-profile.json"
-          node --input-type=module -e 'import fs from "node:fs"; import path from "node:path"; const r=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,"lan-release-profile.json"),"utf8")); fs.appendFileSync(process.env.GITHUB_OUTPUT,"profile="+r.profile+"\nneeds_browser="+r.needsBrowser+"\n"); fs.writeFileSync(path.join(process.env.RUNNER_TEMP,"lan-release-tests.txt"),r.tests.join("\n")+(r.tests.length?"\n":""));'
+          node scripts/lan/release-profile.ts "$RUNNER_TEMP/lan-release-profile.json"
+          node --input-type=module -e 'import fs from "node:fs"; import path from "node:path"; const r=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,"lan-release-profile.json"),"utf8")); fs.writeFileSync(path.join(process.env.RUNNER_TEMP,"lan-release-tests.txt"),r.tests.join("\n")+(r.tests.length?"\n":""));'
       - name: Typecheck affected applications and contracts
         shell: bash
         run: vp run --filter ./apps/server --filter @t3tools/web --filter @t3tools/desktop --filter @t3tools/contracts --filter @t3tools/client-runtime --filter @t3tools/scripts typecheck
       - name: Install workspace-local Chromium test runtime
-        if: steps.profile.outputs.needs_browser == 'true'
         shell: bash
         run: node apps/web/node_modules/playwright/cli.js install chromium --only-shell
       - name: Verify mandatory and changed release tests
@@ -52,7 +50,6 @@ jobs:
           path: ${{ runner.temp }}/lan-release-tests/
           if-no-files-found: error
       - name: Verify client version and encrypted setup UI
-        if: steps.profile.outputs.profile == 'qualification'
         shell: bash
         run: >-
           vp test run
@@ -61,13 +58,11 @@ jobs:
           apps/web/src/components/settings/LanFleetPrimary.browser.test.tsx
           apps/web/src/connection/lanFleetEnvironment.test.ts
       - name: Verify native Windows packaging and manifest restoration
-        if: steps.profile.outputs.profile == 'qualification'
         shell: bash
         run: >-
           vp test run scripts/build-desktop-artifact.test.ts
           -t 'native raw staging|Cursor SDK|target Windows natives|overlapping builds|resolved version|restore failure'
       - name: Verify build reuse, native bootstrap and both MCP access paths
-        if: steps.profile.outputs.profile == 'qualification'
         shell: bash
         run: >-
           vp test run
@@ -98,7 +93,6 @@ jobs:
         shell: bash
         run: vp test run apps/server/src/orchestration-v2/runtimeLayer.test.ts apps/server/src/scheduledTasks/ScheduledTaskService.webhook.test.ts -t 'native update admission'
       - name: Verify synthetic enrollment, delivery, polling, and retained-home behavior
-        if: steps.profile.outputs.profile == 'qualification'
         shell: bash
         run: >-
           vp test run

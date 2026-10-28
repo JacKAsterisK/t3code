@@ -1,6 +1,6 @@
 # Validating supplied Windows artifacts
 
-Routine LAN delivery is a local AnvilToad build and one ZIP, followed by a copy of the ZIP, metadata and activation policy to `\\BuildMachine\BuildShare\T3CodeLAN` and the existing Portal publishing hook. Keep focused updater/data-preservation checks. Do not create GitHub releases, upload caches/artifacts to GitHub, use cloud runners, or require per-version Hub/Portal source-pin edits. T3 Actions is disabled; optional orchestration must use self-hosted machines. Full qualification is for changes that need it, not an ordinary release checklist.
+Every LAN release is one fresh local AnvilToad build and one ZIP, then the focused functional checks, sealing, and a copy of the ZIP, metadata and activation policy to `\\BuildMachine\BuildShare\T3CodeLAN` and the existing Portal publishing hook. Keep the focused updater, stopped-state, projection and data-preservation checks. Do not create GitHub releases, upload caches/artifacts to GitHub, use cloud runners, or require per-version Hub/Portal source-pin edits. T3 Actions is disabled; optional orchestration must use self-hosted machines. Upstream merges, dependency, toolchain and build-policy changes follow the same single-build path; there is no second build, reproducibility comparison or qualification baseline.
 
 [`validate-windows-artifact.ts`](../../scripts/lan/validate-windows-artifact.ts)
 inspects existing local build inputs and portable ZIPs. It never provisions tools,
@@ -14,8 +14,8 @@ node scripts/lan/validate-windows-artifact.ts
 node scripts/lan/validate-windows-artifact.ts --request C:\Approved\validation-request.json --approved-policy-sha256 <approved-policy-file-sha256>
 ```
 
-The approved policy hash must come from separate owner review, rather than from
-the artifact's download. The CLI does not treat possession of a hash as permission
+The policy hash comes from the release's own sealing step, which generates the
+policy from the build it validates, rather than from the artifact's download. The CLI does not treat possession of a hash as permission
 to build, install or distribute. Validation writes only its JSON report to stdout.
 The native signature helper compiles its small WinVerifyTrust adapter in memory;
 it does not execute the inspected PE files. Use the repository's pinned toolchain
@@ -26,9 +26,9 @@ version and binary hash to the approved Node pin before inspecting a build.
 ## Required local inputs
 
 The request is schema 1 with absolute `policyPath`, `buildLockPath` and
-`toolchainManifestPath`. Qualification uses two independent `runs`; a routine
-release may use one candidate only after its reviewed qualification baseline,
-source changes, actual build lock and toolchain inventory establish eligibility.
+`toolchainManifestPath`. A release supplies one run with the policy's
+`validationMode: "candidate"`; two runs with `independent-rebuild` additionally
+compare their bytes when that comparison is wanted for investigation.
 Each run has `sourceId`, `sourceRoot`, `buildRoot`, `artifactPath`,
 `extractedRoot` and `toolchainRoot`. Provide clean source and build workspaces
 with their existing artifacts and extracted files. The validator reads Git metadata without fetching
@@ -47,7 +47,7 @@ must match actual bytes. The separate schema-1 toolchain manifest contains
 approved SHA-256 and exact inventory bind the rest of the supplied compiler,
 SDK/header/library, Rust/Cargo, Python, package-manager and packaging-tool closure.
 Full inventory validation refuses extra or changed files and streams their
-hashes without launching version commands. Routine candidate validation may
+hashes without launching version commands. Candidate validation may
 instead set the approved policy's `toolchainQualificationSha256` and each run's
 `toolchainQualificationPath` to the frozen qualification from its native build.
 The validator requires that exact existing receipt, manifest and physical root,
@@ -133,7 +133,7 @@ Missing offline trust/revocation information refuses validation. No online trust
 fetch or security-policy change is performed. Unsigned addons block
 `authenticode` mode. `portal-pinned` mode retains the actual native trust result
 without claiming Windows signature trust; all provenance, identity, compiled
-policy, applicable qualification and file integrity checks still apply. Hub refuses this
+policy, applicable toolchain qualification and file integrity checks still apply. Hub refuses this
 mode on an HTTP route. The operating system may block an unsigned application;
 installation does not bypass that decision.
 Synthetic tests use a mock signature port. The local native smoke verified the
@@ -141,15 +141,15 @@ existing signed Node binary against cached Windows trust, refused a deliberately
 wrong signer pin, and refused an unsigned nonexecuted PE fixture. No signer pin
 was stored or printed. This validates the trust adapter, not a T3 release signature.
 
-For qualification, the two archives must have identical length and SHA-256, including signatures,
+With `independent-rebuild`, the two archives must have identical length and SHA-256, including signatures,
 timestamps, manifests and receipts. Different bytes fail, even when extracted
 payload files match. This establishes equality of the supplied outputs. Separate
 workspace IDs and matching bytes cannot prove two independent build executions
 occurred; reviewed build provenance is still needed. Signing timestamps or
 uncontrolled package timestamps may prevent exact reproducibility and must be
 resolved in the approved build process. The validator neither normalizes away
-differences nor claims an actual reproducible build from fixture data. A routine
-single-candidate release does not claim independent rebuild reproducibility.
+differences nor claims an actual reproducible build from fixture data. A
+single-candidate release makes no reproducibility claim.
 
 Hub continues to validate its existing schema-1 build/test evidence and package
 hashes. Its minimum schema checks do not rerun this validator. Preserve the
@@ -191,7 +191,7 @@ and invoke the staged publication hook. The hook verifies the supplied hashes,
 publishes through the existing Portal publisher, and verifies the download.
 It does not deploy Portal or compile a new Hub approval for each T3 version.
 
-Use the existing sealing result when preparing metadata so the routine path does
+Use the existing sealing result when preparing metadata so the release does
 not repeat validation or build a second candidate. The legacy descriptor generator
 remains available for explicit offline validation, but a GitHub release or asset
 is not part of LAN delivery. Hub owns update discovery, stopped-state admission,

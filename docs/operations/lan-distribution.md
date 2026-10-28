@@ -1,6 +1,6 @@
 # Preparing T3 Code LAN for Hub distribution
 
-Routine LAN delivery is a local AnvilToad build and one ZIP, followed by a copy of the ZIP, metadata and activation policy to `\\BuildMachine\BuildShare\T3CodeLAN` and the existing Portal publishing hook. Keep focused updater/data-preservation checks. Do not create GitHub releases, upload caches/artifacts to GitHub, use cloud runners, or require per-version Hub/Portal source-pin edits. T3 Actions is disabled; optional orchestration must use self-hosted machines. Full qualification is for changes that need it, not an ordinary release checklist.
+Every LAN release is one fresh local AnvilToad build and one ZIP, then the focused functional checks, sealing, and a copy of the ZIP, metadata and activation policy to `\\BuildMachine\BuildShare\T3CodeLAN` and the existing Portal publishing hook. Keep the focused updater, stopped-state, projection and data-preservation checks. Do not create GitHub releases, upload caches/artifacts to GitHub, use cloud runners, or require per-version Hub/Portal source-pin edits. T3 Actions is disabled; optional orchestration must use self-hosted machines. Upstream merges, dependency, toolchain and build-policy changes follow the same single-build path; there is no second build, reproducibility comparison or qualification baseline.
 
 The LAN fork has an offline preparation contract in
 [`scripts/lan/hub-distribution.ts`](../../scripts/lan/hub-distribution.ts).
@@ -60,17 +60,17 @@ Network isolation is available with the optional Windows Sandbox runner; the
 native-directory runner makes no OS or network isolation claim. All required
 tools and caches must still match their reviewed inventory.
 
-Routine releases may build one candidate when the last qualified baseline has
-the same upstream and actual compiler/toolchain pins and the source diff does not
-change dependencies, build transforms or policy enforcement. Use
-`scripts/lan/release-profile.ts` and the reviewed `qualification-baseline.json`
-to select the CI checks; absent or inconsistent baseline evidence requires full
-qualification. CI compares declared pins, and the native release gate must check
-the actual build lock and toolchain inventory before accepting a routine profile.
-Updater, stopped-state, projection and home-preservation tests remain required.
-Requalify with two independently built candidates after upstream, dependency,
-compiler or build-transform changes; update the baseline only after that reviewed
-qualification succeeds. A single candidate is not a reproducibility proof.
+Every release builds one candidate from the final pushed commit, whatever changed
+since the previous release. After an upstream merge or a dependency change,
+refresh the offline pnpm store and staging locks, then capture a new build lock
+and toolchain manifest for that commit. The build lock and native receipt record
+what was actually built. The release then runs the packaged updater, stopped-state,
+projection and home/data-preservation checks against that build, validates the
+artifact, seals it and records the built component hashes in its policy and
+evidence. No second build, byte-reproducibility comparison, qualification
+baseline, per-release source review or green CI run is part of a release, and a
+single build makes no reproducibility claim. `scripts/lan/release-profile.ts`
+selects the mandatory release tests plus tests adjacent to changed source.
 
 The LAN profile supports native Windows x64 portable ZIPs with no WSL runtime.
 The resource monitor, Electron-hosted `server.asar`, native maintenance bundle
@@ -172,7 +172,7 @@ already exist and be empty; the CLI never cleans it.
 The request hash must come from separate review. Verification checks the full
 40-character commit, clean source, upstream ancestry, aligned versions, every
 required source/stage input and exact toolchain inventory/primary hashes. The
-standalone preparation command performs full inventory verification; routine native
+standalone preparation command performs full inventory verification; release native
 builds may use the local toolchain qualification described below. Git inspection
 discards ambient repository/index/config redirection, disables replacement refs
 and refuses grafts. It preserves normal repository access checks. Full inventory
@@ -223,18 +223,17 @@ The native request uses schema 1 with absolute `preparationRequestPath` and
 new `inputsRoot` directory. The preparation request selects the clean source,
 verified toolchain and existing empty build directory.
 
-For routine releases, set `validationMode: "candidate"` and
+For releases, set `validationMode: "candidate"` and
 `toolchainQualification: { path: "C:\\LANBuildCache\\toolchain-qualified.json" }`
 in the native request. The absolute receipt path must be outside the toolchain.
 The first use, an explicit `refresh: true`, or changed manifest, physical root or
-primary tool/version pins performs full qualification once. Subsequent releases
-check the six primary files and the existing per-use archive/native input pins;
+primary tool/version pins performs a full toolchain inventory check once.
+Subsequent releases check the six primary files and the existing per-use archive/native input pins;
 they do not enumerate or hash the complete toolchain tree. Retain this local
 cache between releases, and refresh it after intentionally changing ancillary
 toolchain files. A reused receipt records `qualified-primary-pins`, rather than
-claiming a fresh full-tree check. Independent qualification still verifies the
-full inventory. Keep the frozen `toolchain-qualification-evidence.json` beside the
-native build receipt for final artifact validation.
+claiming a fresh full-tree check. Keep the frozen
+`toolchain-qualification-evidence.json` beside the native build receipt for final artifact validation.
 
 Run the self-contained bundle with the reviewed request hash:
 
@@ -244,9 +243,8 @@ node C:\LANBuild\new-native-runner\native-runner.mjs --request C:\ApprovedBuildI
 
 The runner snapshots committed source and input bytes before offline dependency
 installation, then compiles and packages in its output directory. It never cleans
-an existing output or writes to an installed T3 home. Repeat with separate fresh
-directories for the second build; actual runtime checks and artifact validation
-remain required before publication.
+an existing output or writes to an installed T3 home. Runtime checks and artifact
+validation of that one build remain required before publication.
 
 ## Optional Windows Sandbox build
 

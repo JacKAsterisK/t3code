@@ -79,7 +79,6 @@ export const BUILD_INPUT_FILES = [
   "scripts/lan/release-pipeline.ts",
   "scripts/lan/release-runner.ts",
   "scripts/lan/release-profile.ts",
-  "scripts/lan/qualification-baseline.json",
   "scripts/lan/release-git-pins.ts",
   "scripts/lan/windows-native-build.pack.ts",
   "scripts/lan/prepare-windows-sandbox.ts",

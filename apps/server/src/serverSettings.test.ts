@@ -946,23 +946,33 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
-  it.effect("turns linked environments on with the fleet adapter without saving it", () =>
-    Effect.gen(function* () {
-      const serverConfig = yield* ServerConfig.ServerConfig;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
-      assert.isFalse((yield* serverSettings.getSettings).linkedEnvironmentsEnabled);
+  it.effect(
+    "turns the fleet adapter, and with it linked environments, on by default without saving either",
+    () =>
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        const persisted = () =>
+          fileSystem
+            .readFileString(serverConfig.settingsPath)
+            .pipe(Effect.map((raw) => JSON.parse(raw)));
+        const initial = yield* serverSettings.getSettings;
+        assert.isTrue(initial.fleetLinkedEnvironmentsEnabled);
+        assert.isTrue(initial.linkedEnvironmentsEnabled);
 
-      const on = yield* serverSettings.updateSettings({ fleetLinkedEnvironmentsEnabled: true });
-      assert.isTrue(on.linkedEnvironmentsEnabled);
-      assert.isTrue((yield* serverSettings.getSettings).linkedEnvironmentsEnabled);
-      const persisted = JSON.parse(yield* fileSystem.readFileString(serverConfig.settingsPath));
-      assert.isTrue(persisted.fleetLinkedEnvironmentsEnabled);
-      assert.isUndefined(persisted.linkedEnvironmentsEnabled);
+        // An explicit false is saved and wins over the default.
+        const off = yield* serverSettings.updateSettings({ fleetLinkedEnvironmentsEnabled: false });
+        assert.isFalse(off.linkedEnvironmentsEnabled);
+        assert.isFalse((yield* persisted()).fleetLinkedEnvironmentsEnabled);
 
-      const off = yield* serverSettings.updateSettings({ fleetLinkedEnvironmentsEnabled: false });
-      assert.isFalse(off.linkedEnvironmentsEnabled);
-    }).pipe(Effect.provide(layerServerSettings())),
+        const on = yield* serverSettings.updateSettings({ fleetLinkedEnvironmentsEnabled: true });
+        assert.isTrue(on.linkedEnvironmentsEnabled);
+        assert.isTrue((yield* serverSettings.getSettings).linkedEnvironmentsEnabled);
+        const saved = yield* persisted();
+        assert.isUndefined(saved.fleetLinkedEnvironmentsEnabled);
+        assert.isUndefined(saved.linkedEnvironmentsEnabled);
+      }).pipe(Effect.provide(layerServerSettings())),
   );
 
   it.effect("keeps a default-off provider's new instance disabled and sparse on disk", () =>

@@ -1226,11 +1226,11 @@ export const ServerSettings = Schema.Struct({
   linkedEnvironmentsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
    * T3 Code LAN: the fleet links this machine to its fleet peers as linked environments and
-   * renews those links. On, linked environments count as on here. Default it to true to turn
-   * the adapter on across the fleet.
+   * renews those links. On, linked environments count as on here. On by default across the
+   * fleet; an explicit `false` in settings.json turns it off for one machine.
    */
   fleetLinkedEnvironmentsEnabled: Schema.Boolean.pipe(
-    Schema.withDecodingDefault(Effect.succeed(false)),
+    Schema.withDecodingDefault(Effect.succeed(true)),
   ),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),

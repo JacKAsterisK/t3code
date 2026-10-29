@@ -204,7 +204,12 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
 ) {
   const { automaticGitFetchInterval, providerHealthRefreshInterval, ...overridesForMerge } =
     overrides;
-  const merged = deepMerge(DEFAULT_SERVER_SETTINGS, overridesForMerge);
+  // Upstream's tests expect linked environments off by default, which the LAN fleet default
+  // would turn on; a test opts in with `fleetLinkedEnvironmentsEnabled`.
+  const merged = deepMerge(
+    { ...DEFAULT_SERVER_SETTINGS, fleetLinkedEnvironmentsEnabled: false },
+    overridesForMerge,
+  );
   const initialSettings = yield* normalizeServerSettings({
     ...merged,
     ...(automaticGitFetchInterval !== undefined

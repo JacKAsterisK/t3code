@@ -6,9 +6,12 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import { McpSchema } from "effect/ai";
 
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import { LanToolkit } from "./toolkits/lan/tools.ts";
 
 it.effect("reports other missing capabilities with the neutral error", () => {
   const invocation: McpInvocationContext.McpInvocationScope = {
@@ -61,5 +64,53 @@ it.effect("refuses thread-owned capabilities to a caller signed in from outside 
     expect(error).toBeInstanceOf(PreviewAutomationUnavailableError);
     expect(error).toMatchObject({ capability: "preview", environmentId: "environment-1" });
     expect(error.threadId).toBeUndefined();
+  });
+});
+
+it.effect("shows the LAN task tools to outside clients but never to an in-app thread", () => {
+  const base = {
+    environmentId: EnvironmentId.make("environment-1"),
+    capabilities: new Set(["orchestration"] as const),
+    issuedAt: 1,
+  };
+  const thread: McpInvocationContext.McpInvocationScope = {
+    ...base,
+    requestNamespace: "provider-session-1",
+    thread: {
+      threadId: ThreadId.make("thread-1"),
+      providerSessionId: "provider-session-1",
+      providerInstanceId: ProviderInstanceId.make("claude"),
+    },
+    client: undefined,
+  };
+  const taskClient: McpInvocationContext.McpInvocationScope = {
+    ...base,
+    requestNamespace: "client:grant-1",
+    thread: undefined,
+    client: {
+      sessionId: "session-1",
+      grantId: "grant-1",
+      taskOnly: true,
+      label: "Gateway",
+      access: "auto",
+    },
+  };
+  const visible = (scope: McpInvocationContext.McpInvocationScope) =>
+    Effect.sync(() =>
+      Object.values(LanToolkit.tools).filter(
+        (tool) =>
+          Context.getOrUndefined(
+            tool.annotations,
+            McpSchema.EnabledWhen,
+          )?.({
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+          }) === true,
+      ),
+    ).pipe(Effect.provideService(McpInvocationContext.McpInvocationContext, scope));
+
+  return Effect.gen(function* () {
+    expect(yield* visible(thread)).toEqual([]);
+    expect(yield* visible(taskClient)).toHaveLength(Object.keys(LanToolkit.tools).length);
   });
 });

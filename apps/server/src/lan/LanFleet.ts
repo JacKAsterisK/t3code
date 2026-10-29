@@ -17,6 +17,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
@@ -46,11 +47,18 @@ const isConnectHost = Schema.is(FleetConnectHost);
 const RENEW_BEFORE_MS = 7 * 24 * 60 * 60 * 1000;
 // A connection the peer already had before this machine sent it a fleet credential.
 const EXISTING_CONNECTION = "existing-connection";
+// The same cadence as a client's automatic pickup.
+const BACKGROUND_SYNC_INTERVAL = Duration.minutes(5);
 
 export class LanFleet extends Context.Service<
   LanFleet,
   {
     readonly sync: (input: LanFleetSyncInput) => Effect.Effect<LanFleetSyncResult, LanFleetError>;
+    /**
+     * A sync with no window open: it issues, replaces and revokes this machine's credentials,
+     * but collects nothing, since only a client can save a connection.
+     */
+    readonly backgroundSync: Effect.Effect<void, LanFleetError>;
     readonly setup: Effect.Effect<LanFleetSetupState, LanFleetError>;
     readonly configure: (
       input: LanFleetSetupInput,
@@ -83,8 +91,8 @@ const make = Effect.gen(function* () {
     incoming: [],
   };
 
-  const sync = Effect.fn("LanFleet.sync")(
-    function* (input: LanFleetSyncInput) {
+  const run = Effect.fn("LanFleet.sync")(
+    function* (request: LanFleetSyncInput | "background") {
       if (launchEnvironment[FLEET_ROSTER_ENV] === "") return disabled;
       const enrolled = yield* enrollment.resolve;
       if (enrolled === null) return disabled;
@@ -129,6 +137,31 @@ const make = Effect.gen(function* () {
         Delivery.validateFleetKeys(config, self);
       }).pipe(Effect.mapError(() => new LanFleetError({ reason: "configuration" })));
       if (self === undefined) return yield* new LanFleetError({ reason: "configuration" });
+      const ownCatalogFile = path.join(
+        config.deliveryDirectory,
+        `${Delivery.deliveryFileName(self.machineId, self.machineId)}.catalog.json`,
+      );
+      // A background sync republishes the connections this machine's client last published, so
+      // peers keep seeing them, and waits until a client has published any.
+      const published =
+        request === "background" && sharedFolder && (yield* fs.exists(ownCatalogFile))
+          ? yield* readFleetJson(ownCatalogFile, Delivery.FleetCatalog).pipe(
+              // Its own signature, checked as of when it was written.
+              Effect.map((catalog) =>
+                Delivery.verifyFleetCatalog(catalog, self, catalog.createdAt) ? catalog : undefined,
+              ),
+              Effect.orElseSucceed(() => undefined),
+            )
+          : undefined;
+      if (request === "background" && published === undefined) return disabled;
+      const input: LanFleetSyncInput =
+        request !== "background"
+          ? request
+          : {
+              mode: "status",
+              sendMachineIds: [],
+              connectedEnvironmentIds: published?.connectedEnvironmentIds ?? [],
+            };
       const trusted = (machine: FleetRoster["machines"][number]) =>
         config.peers.find(
           (peer) =>
@@ -541,10 +574,7 @@ const make = Effect.gen(function* () {
             yield* writeFleetJson(journalFile, journal);
             if (config.managed)
               yield* writeFleetJson(
-                path.join(
-                  config.deliveryDirectory,
-                  `${Delivery.deliveryFileName(self.machineId, self.machineId)}.catalog.json`,
-                ),
+                ownCatalogFile,
                 Delivery.makeFleetCatalog(
                   config,
                   self,
@@ -578,8 +608,33 @@ const make = Effect.gen(function* () {
     yield* requestPeerLinkPass;
     return state;
   });
-  return LanFleet.of({ sync, setup: enrollment.status, configure });
+  return LanFleet.of({
+    sync: run,
+    backgroundSync: Effect.asVoid(run("background")),
+    setup: enrollment.status,
+    configure,
+  });
 });
 
 export const layerServices = Layer.effect(LanFleet, make);
 export const layer = layerServices.pipe(Layer.provide(FleetEnrollment.layer));
+
+/**
+ * Runs fleet sync from the server every five minutes, so renewal, access changes and revocation
+ * do not wait for an open window. A client's sync is an extra nudge; the lock keeps one at a time.
+ */
+export const layerBackground = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const fleet = yield* LanFleet;
+    yield* Effect.forkScoped(
+      fleet.backgroundSync.pipe(
+        Effect.catch((error) =>
+          error.reason === "busy"
+            ? Effect.void
+            : Effect.logWarning("Background LAN fleet sync failed.", { reason: error.reason }),
+        ),
+        Effect.repeat(Schedule.spaced(BACKGROUND_SYNC_INTERVAL)),
+      ),
+    );
+  }),
+).pipe(Layer.provide(layer));

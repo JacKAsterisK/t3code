@@ -64,6 +64,12 @@ then retires it. A peer that is offline is renewed when its signed summary is
 fresh again, including after its session expired. Only credentials this machine
 delivered are renewed; a connection the peer made another way is left alone.
 
+The server runs this issuing side itself every five minutes, so renewal, access
+changes and revocation do not wait for an open window; an open desktop's sync
+only makes them sooner, and the sync lock keeps one at a time. The server
+collects nothing, and it starts only after this machine's desktop has synced
+once: it republishes the connections that desktop last published.
+
 Limits: in owner-approval fleets a change applies only to links issued after it,
 so relink existing ones there. Outside-agent task grants are approved on the
 destination and are not tied to a machine; revoke them in **Sharing & access**. A
@@ -82,7 +88,8 @@ Members using manual sync must choose **Sync now** themselves.
 A non-owner may use **Share this machine** to send its environment to approved
 recipients. Browser and mobile clients retain manual pairing; they cannot safely
 identify a native computer or read its shared folder. Nothing installs a scheduled
-task or starts a provider. Pickup stops when the desktop app closes.
+task or starts a provider. Pickup stops when the desktop app closes; issuing,
+renewal and revocation continue from the server.
 
 Repeated requests preserve saved connections, including disabled entries. A fresh,
 signed recipient summary is checked before managed enrollment issues a credential.

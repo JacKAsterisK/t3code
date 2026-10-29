@@ -560,6 +560,50 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
         assert.deepEqual(f.issued, ["alpha", "alpha", "alpha"]);
       }).pipe(Effect.provide(testConfig)),
   );
+  it.effect("renews and revokes from the server with no window open", () =>
+    Effect.gen(function* () {
+      const f = yield* setup(true, false, true);
+      const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
+      const senderConnections = { connectedEnvironmentIds: [f.b.peer.environmentId] };
+      const senderCatalog = f.path.join(
+        f.deliveryDirectory,
+        `${Delivery.deliveryFileName("alpha", "alpha")}.catalog.json`,
+      );
+      // Until its client has published what it holds, the server has nothing to republish.
+      yield* f.sender.service.backgroundSync;
+      assert.equal(yield* f.fs.exists(senderCatalog), false);
+
+      yield* f.sync(f.recipient.service, { mode: "status" });
+      yield* f.sync(f.sender.service, { sendMachineIds: ["beta"], ...senderConnections });
+      yield* f.sync(f.recipient.service);
+      f.consume("alpha");
+      yield* f.sync(f.recipient.service, connected);
+      yield* f.sync(f.sender.service, senderConnections);
+
+      // The sender's window is closed from here on; only its server syncs.
+      yield* TestClock.adjust("24 days");
+      yield* f.sync(f.recipient.service, connected);
+      yield* f.sender.service.backgroundSync;
+      assert.deepEqual(f.issued, ["alpha", "alpha"]);
+      // It republished its client's connections and offered the renewal.
+      const catalog = JSON.parse(yield* f.fs.readFileString(senderCatalog)) as {
+        connectedEnvironmentIds: ReadonlyArray<string>;
+        availableDeliveryIds: ReadonlyArray<string>;
+      };
+      assert.deepEqual(catalog.connectedEnvironmentIds, [f.b.peer.environmentId]);
+      assert.equal(catalog.availableDeliveryIds.length, 1);
+      assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+      f.consume("alpha");
+      yield* f.sender.service.backgroundSync;
+      assert.deepEqual(f.revoked, ["session-synthetic-1"]);
+
+      // A change to read-only revokes the standard session at once.
+      f.setPolicy({ revision: 1, machines: [{ machineId: "beta", access: "read-only" }] });
+      yield* f.sender.service.backgroundSync;
+      assert.deepEqual(f.revoked, ["session-synthetic-1", "session-synthetic-2"]);
+      assert.deepEqual(f.issuedScopes.at(-1), FleetAccessPolicy.fleetCredentialScopes("read-only"));
+    }).pipe(Effect.provide(testConfig)),
+  );
   it.effect("never replaces a connection the peer had before the fleet sent it one", () =>
     Effect.gen(function* () {
       const f = yield* setup(true, false, true);

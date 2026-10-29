@@ -38,6 +38,7 @@ import {
 import { fixPath } from "./os-jank.ts";
 import * as Ws from "./ws.ts";
 import * as FleetAccessPolicy from "./lan/FleetAccessPolicy.ts";
+import * as LanFleet from "./lan/LanFleet.ts";
 import * as FleetMcpOrigin from "./lan/FleetMcpOrigin.ts";
 import * as FleetPeerHttpClient from "./lan/FleetPeerHttpClient.ts";
 import * as FleetPeerLinks from "./lan/FleetPeerLinks.ts";
@@ -793,6 +794,8 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   Layer.provide(PreviewBrowser.layer),
+  // T3 Code LAN: fleet sync from the server, so credentials renew and revoke with no window open.
+  Layer.provide(LanFleet.layerBackground),
   // T3 Code LAN: fleet machines link to each other as linked environments (off by default).
   Layer.provide(Layer.mergeAll(FleetPeerLinks.layer, FleetMcpOrigin.layer)),
   // Links to other environments, shared by Settings (WebSocket) and agents (/mcp).

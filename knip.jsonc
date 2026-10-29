@@ -40,6 +40,8 @@
         "lan/home-repair.windows-smoke.ts",
         "lan/home-repair-cancel.fixture-builder.ts",
         "lan/home-repair-cancel.windows-smoke.ts",
+        // Manual Windows smoke: runs the packaged helper's retained-history import on a fixture.
+        "lan/home-repair-import.windows-smoke.ts",
       ],
       "ignoreDependencies": ["agent-device", "esbuild"],
       // The `t3` npm package's files: copied into the package, never imported.

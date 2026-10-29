@@ -160,13 +160,12 @@ L would send `http://127.0.0.1:<port>/mcp`.
 
 ### 4. Access
 
-The adapter asks D's access-policy function ("access for a peer
-environment", provided by the access-policy work) what L may do on D. D is
-authoritative: it mints the code's scopes and returns the granted access in
-the sealed payload, and L links with exactly that. The adapter does not decide
-which direction a per-machine "read-only" flag means; the policy work defines
-that. Whichever it is, the effective value for the pair is what D's function
-returns.
+The adapter asks D's `FleetAccess.accessFor(L's environment ID)`
+(`apps/server/src/lan/FleetAccessPolicy.ts`) what L may do on D, and follows
+`FleetAccess.changes`. A machine's entry in the fleet policy is what that
+machine may do on the others. D is authoritative: it mints the code's scopes
+and returns the granted access in the sealed payload, and L links with exactly
+that.
 
 | Fleet policy | `AuthMcpClientAccess` | Code scopes (`mcpClientScopes`)                                                         |
 | ------------ | --------------------- | --------------------------------------------------------------------------------------- |
@@ -175,7 +174,7 @@ returns.
 
 **`full-access` is the level that matches fleet standard today.**
 
-- A standard fleet code carries `AuthStandardClientScopes` (`LanFleet.ts:293`),
+- A standard fleet code carries `AuthStandardClientScopes` (`fleetCredentialScopes`),
   which includes `settings:write`, `source-control:write`, terminal and
   `access:write`.
 - Through that connection, a person can start full-access threads and change

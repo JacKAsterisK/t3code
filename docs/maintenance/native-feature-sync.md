@@ -41,7 +41,7 @@ approval before code or runtime changes.
 | #   | Behavior                                         | Native equivalent                                              | Upstream status                   | Decision                                  |
 | --- | ------------------------------------------------ | -------------------------------------------------------------- | --------------------------------- | ----------------------------------------- |
 | 1   | Fleet membership and machine links               | None (T3 Connect needs the cloud)                              | —                                 | keep                                      |
-| 2   | Agent target discovery                           | `t3_environment_links`, link-request card                      | nightly, Labs beta                | adapt                                     |
+| 2   | Agent target discovery                           | `t3_environment_links`, link-request card                      | nightly, Labs beta                | adapt ([design](native-link-adapter.md))  |
 | 3   | Remote task lifecycle                            | `environmentId` on thread tools, remote `delegate_task`        | nightly, Labs beta                | replace (in-app agents) · defer (gateway) |
 | 4   | Remote questions and approvals                   | `t3_pending_request` with `environmentId`                      | nightly, Labs beta                | replace with row 3                        |
 | 5   | Task observation and notifications               | `t3_thread_wait`; delegated-task wake inside T3 only           | partial                           | keep                                      |
@@ -105,7 +105,9 @@ approval before code or runtime changes.
 - **Data:** the upstream peer-link tables (fork migrations 74–76) are empty on
   AnvilToad.
 - **Decision:** adapt. Use native discovery for in-app agents as the first
-  replacement (see Sequence). Keep `t3_lan_environments` for the gateway's
+  replacement (see Sequence). The fleet creates, renews and removes the links;
+  see [Fleet-managed native link adapter](native-link-adapter.md) for the
+  design, answers and proof plan. Keep `t3_lan_environments` for the gateway's
   grant path until rows 5, 6 and 10 are settled.
 - **Tests:** `EnvironmentRegistry.test.ts`; upstream `PeerLinks.test.ts` and
   `PeerLinkRequests.test.ts`.
@@ -225,7 +227,8 @@ approval before code or runtime changes.
   over fleet routes (row 2).
 - **Decision:** keep. If native links are adopted over fleet routes, add one
   small adapter that gives the peer fetch the fleet's pinned trust, or use
-  Tailscale routes instead.
+  Tailscale routes instead. The
+  [native link adapter](native-link-adapter.md#3-tls) design covers it.
 - **Tests:** `FleetTransport.test.ts`, `DesktopFleetGateway.test.ts`,
   `fleetTlsProxy.test.ts`. The restart behavior has no runtime proof from this
   review.

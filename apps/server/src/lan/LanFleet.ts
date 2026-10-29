@@ -8,10 +8,6 @@ import {
   type LanFleetSyncResult,
   type LanFleetSetupInput,
   type LanFleetSetupState,
-  AuthStandardClientScopes,
-  AuthOrchestrationReadScope,
-  AuthFilesystemReadScope,
-  AuthDiagnosticsReadScope,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -29,6 +25,7 @@ import * as Delivery from "./FleetDelivery.ts";
 import { readFleetJson, validateRoster, writeFleetJson } from "./FleetFiles.ts";
 import { FLEET_ROSTER_ENV, resolveFleetBootstrap } from "./FleetBootstrap.ts";
 import * as FleetEnrollment from "./FleetEnrollment.ts";
+import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 
 const Record = Schema.Struct({
   deliveryId: Schema.String,
@@ -36,6 +33,8 @@ const Record = Schema.Struct({
   status: Schema.Literals(["publishing", "pending", "connecting", "connected"]),
   pairingLinkId: Schema.optionalKey(Schema.String),
   senderCatalogCreatedAt: Schema.optionalKey(Schema.Number),
+  // A pickup that replaces a credential this machine already holds for the sender.
+  replacing: Schema.optionalKey(Schema.Boolean),
 });
 const Journal = Schema.Record(Schema.String, Record);
 type Journal = typeof Journal.Type;
@@ -64,6 +63,7 @@ const make = Effect.gen(function* () {
   const platform = yield* HostProcess.Platform;
   const connectHost = platform === "win32" && isConnectHost(hostname) ? hostname : undefined;
   const enrollment = yield* FleetEnrollment.FleetEnrollment;
+  const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
   const privateFile = path.join(serverConfig.stateDir, "lan-fleet-private.json");
   const journalFile = path.join(serverConfig.stateDir, "lan-fleet-state.json");
   const lock = path.join(serverConfig.stateDir, "lan-fleet.lock");
@@ -97,6 +97,11 @@ const make = Effect.gen(function* () {
       const config = { ...privateConfig, ...bootstrap };
       const sharedFolder =
         config.managed === true && (yield* enrollment.status).sharedFolderTrust === true;
+      // Resolving the enrollment just refreshed the policy from the share.
+      const policy = config.managed ? yield* fleetAccess.current : undefined;
+      const policyActive = policy !== undefined && policy.revision > 0;
+      // Only a shared folder tells this machine which grants a peer still holds, so it can replace them.
+      const replaceCredentials = sharedFolder && policyActive;
       const roster = yield* readFleetJson(config.rosterPath, FleetRoster);
       const localId = yield* environment.getEnvironmentId;
       const self = config.peers.find((peer) => peer.machineId === config.machineId && peer.enabled);
@@ -149,6 +154,7 @@ const make = Effect.gen(function* () {
             const machines: Array<LanFleetSyncResult["machines"][number]> = [];
             const incoming: Array<LanFleetSyncResult["incoming"][number]> = [];
             const activeLinks = sharedFolder ? [...(yield* auth.listPairingLinks())] : [];
+            const activeSessions = replaceCredentials ? yield* auth.listSessions() : [];
             const availableDeliveryIds = new Set<string>();
             const rejectedDeliveryIds = new Set<string>();
             const activeGrant = (
@@ -211,6 +217,64 @@ const make = Effect.gen(function* () {
                 }
                 let outgoingExists = yield* fs.exists(outFile);
                 let outgoingRejected = false;
+                const access =
+                  policy !== undefined && policyActive
+                    ? FleetAccessPolicy.machineAccess(policy, peer.machineId)
+                    : config.access === "read-only"
+                      ? "read-only"
+                      : "standard";
+                if (replaceCredentials) {
+                  // What this machine actually issued the peer is the truth, not the journal.
+                  const subject = `lan-fleet:${outgoingKey}`;
+                  const held = [
+                    ...activeSessions
+                      .filter((session) => session.subject === subject)
+                      .map((session) => ({
+                        access: FleetAccessPolicy.credentialAccess(session),
+                        session: true,
+                        revoke: auth.revokeSession(session.sessionId),
+                        link: undefined,
+                      })),
+                    ...activeLinks
+                      .filter((link) => link.subject === subject)
+                      .map((link) => ({
+                        access: FleetAccessPolicy.credentialAccess(link),
+                        session: false,
+                        revoke: auth.revokePairingLink(link.id),
+                        link,
+                      })),
+                  ];
+                  // Lost access ends at once; gained access waits until the peer can collect it.
+                  if (access === "read-only" || recipientReady)
+                    for (const credential of held.filter((item) => item.access !== access)) {
+                      yield* credential.revoke;
+                      if (credential.link !== undefined)
+                        activeLinks.splice(activeLinks.indexOf(credential.link), 1);
+                    }
+                  const catalogConnected = recipientConnected;
+                  recipientConnected =
+                    recipientConnected &&
+                    held.some((item) => item.session && item.access === access);
+                  if (
+                    catalogConnected &&
+                    recipientReady &&
+                    !held.some((item) => item.access === access)
+                  ) {
+                    // The peer keeps a connection here with no credential at its access: replace it.
+                    if (outgoingExists) {
+                      const replaced = yield* readFleetJson(outFile, Delivery.Delivery).pipe(
+                        Effect.map((delivery) => delivery.header.deliveryId),
+                        Effect.orElseSucceed(() => NodeCrypto.randomUUID()),
+                      );
+                      yield* fs.rename(outFile, `${outFile}.obsolete-${replaced}`);
+                    }
+                    delete journal[`sent:${outgoingKey}`];
+                    yield* writeFleetJson(journalFile, journal);
+                    sent = undefined;
+                    outgoingExists = false;
+                    requested.add(peer.machineId);
+                  }
+                }
                 if (sharedFolder && outgoingExists && !recipientConnected) {
                   const existing = yield* readFleetJson(outFile, Delivery.Delivery);
                   const valid = yield* Effect.try(() =>
@@ -291,14 +355,7 @@ const make = Effect.gen(function* () {
                   const issued = yield* auth.createPairingLink({
                     ttl: Duration.hours(24),
                     subject: `lan-fleet:${outgoingKey}`,
-                    scopes:
-                      config.access === "read-only"
-                        ? [
-                            AuthOrchestrationReadScope,
-                            AuthFilesystemReadScope,
-                            AuthDiagnosticsReadScope,
-                          ]
-                        : AuthStandardClientScopes,
+                    scopes: FleetAccessPolicy.fleetCredentialScopes(access),
                   });
                   if (sharedFolder) {
                     sent = { ...sent, pairingLinkId: issued.id };
@@ -351,11 +408,22 @@ const make = Effect.gen(function* () {
                     sharedFolder &&
                     peerCatalog?.availableDeliveryIds?.includes(delivery.header.deliveryId) ===
                       true;
+                  // The sender only offers a new grant to a connected machine to replace its credential.
+                  const replacement =
+                    grantAvailable &&
+                    received?.status === "connected" &&
+                    received.deliveryId !== delivery.header.deliveryId;
+                  const replacing =
+                    replacement ||
+                    (received?.replacing === true &&
+                      received.status === "connecting" &&
+                      received.deliveryId === delivery.header.deliveryId);
                   if (
                     delivery.header.expiresAt > now &&
                     (received === undefined ||
                       received.deliveryId === delivery.header.deliveryId ||
-                      (grantAvailable && received.status !== "connected"))
+                      (grantAvailable && received.status !== "connected") ||
+                      replacement)
                   ) {
                     const open = Effect.try(() =>
                       Delivery.openDelivery(delivery, config, peer, self, now),
@@ -366,7 +434,11 @@ const make = Effect.gen(function* () {
                     if (payload === undefined) {
                       rejectedDeliveryIds.add(delivery.header.deliveryId);
                       status = "uncertain";
-                    } else if (input.connectedEnvironmentIds.includes(peer.environmentId)) {
+                    } else if (
+                      input.connectedEnvironmentIds.includes(peer.environmentId) &&
+                      // A saved connection proves nothing until the replacement grant is spent.
+                      !(replacing && grantAvailable)
+                    ) {
                       yield* writeFleetJson(
                         path.join(config.deliveryDirectory, `${incomingKey}.receipt.json`),
                         Delivery.makeReceipt(delivery, config),
@@ -381,6 +453,7 @@ const make = Effect.gen(function* () {
                         peerCatalog?.availableDeliveryIds?.includes(delivery.header.deliveryId) ===
                           true) &&
                       (received === undefined ||
+                        replacement ||
                         (sharedFolder &&
                           received.status === "connecting" &&
                           peerCatalog?.availableDeliveryIds?.includes(
@@ -399,6 +472,7 @@ const make = Effect.gen(function* () {
                         ...(sharedFolder && peerCatalog !== undefined
                           ? { senderCatalogCreatedAt: peerCatalog.createdAt }
                           : {}),
+                        ...(replacing ? { replacing: true } : {}),
                       };
                       yield* writeFleetJson(journalFile, journal);
                       const tls =
@@ -418,6 +492,7 @@ const make = Effect.gen(function* () {
                         host: payload.origin,
                         pairingCode: payload.credential,
                         ...(tls === undefined ? {} : { tls }),
+                        ...(replacing ? { replace: true } : {}),
                       });
                     }
                     if (

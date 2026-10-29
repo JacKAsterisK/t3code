@@ -160,7 +160,8 @@ export function useLanFleet() {
             pairingCode: delivery.pairingCode,
             ...(delivery.tls === undefined ? {} : { tls: delivery.tls }),
             expectedEnvironmentId: delivery.environmentId,
-            skipExisting: true,
+            // A replacement swaps the saved credential, such as after a fleet access change.
+            skipExisting: delivery.replace !== true,
           });
           if (connected._tag !== "Success") {
             appAtomRegistry.set(

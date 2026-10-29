@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { LanFleetSetupState } from "@t3tools/contracts";
+import type { FleetAccess, LanFleetSetupState } from "@t3tools/contracts";
 import { useLanFleet } from "../../connection/lanFleet";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -348,13 +348,139 @@ function ReviewPeerDialog({ peer, onClose }: { peer: Peer; onClose: () => void }
   );
 }
 
+const machineAccessItems = [
+  { value: "read-only", label: "Read only" },
+  { value: "standard", label: "Standard" },
+];
+type MachineAccessChange = {
+  readonly machineId: string | null;
+  readonly label: string;
+  readonly access: FleetAccess;
+};
+
+/** One fleet-wide list, synced through shared storage; each machine applies it to its peers. */
+function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
+  const fleet = useLanFleet();
+  const [change, setChange] = useState<MachineAccessChange | null>(null);
+  const policy = setup.accessPolicy;
+  if (policy === undefined) return null;
+  const machines = setup.peers.filter((peer) => peer.status === "approved");
+  const accessOf = (machineId: string) =>
+    policy.machines.find((machine) => machine.machineId === machineId)?.access ??
+    policy.defaultAccess;
+  const disabled = fleet.busy || !fleet.allowed || !policy.canChange;
+  const select = (label: string, value: FleetAccess, machineId: string | null) => (
+    <div className="w-36 shrink-0">
+      <Select
+        items={machineAccessItems}
+        value={value}
+        disabled={disabled}
+        onValueChange={(next) => {
+          if ((next === "read-only" || next === "standard") && next !== value)
+            setChange({ machineId, label, access: next });
+        }}
+      >
+        <SelectTrigger aria-label={`Access for ${label}`}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectPopup>
+          {machineAccessItems.map((item) => (
+            <SelectItem key={item.value} value={item.value}>
+              {item.label}
+            </SelectItem>
+          ))}
+        </SelectPopup>
+      </Select>
+    </div>
+  );
+  return (
+    <div className="space-y-2">
+      <p className="text-sm font-medium">Machine access</p>
+      <p className="text-xs text-muted-foreground">
+        {policy.canChange
+          ? "One setting for the whole fleet. A read-only machine can view threads and tasks on the other machines but cannot start, send to, stop or approve them."
+          : "This machine has read-only access to the other machines. Only a machine with standard access can change this."}
+      </p>
+      {machines.map((peer) => (
+        <div key={peer.machineId} className="flex items-center justify-between gap-3 text-xs">
+          <span>
+            {peer.label}
+            {peer.environmentId === setup.environmentId ? " · This machine" : ""}
+          </span>
+          {select(peer.label, accessOf(peer.machineId), peer.machineId)}
+        </div>
+      ))}
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span>Machines added later</span>
+        {select("machines added later", policy.defaultAccess, null)}
+      </div>
+      {change ? (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && !fleet.busy) setChange(null);
+          }}
+        >
+          <DialogPopup>
+            <DialogHeader>
+              <DialogTitle>
+                {change.access === "read-only"
+                  ? `Make ${change.label} read only?`
+                  : `Give ${change.label} standard access?`}
+              </DialogTitle>
+              <DialogDescription>
+                {change.access === "read-only"
+                  ? "It will be able to read threads and tasks on the other machines, but not start, send to, stop or approve them."
+                  : "It will be able to start and run agents, shells and commands on the other machines, and change their files and settings."}{" "}
+                Every machine applies this automatically and replaces the credentials it gave this
+                one within a few minutes. Nothing needs approving on any machine.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <DialogClose render={<Button variant="outline" disabled={fleet.busy} />}>
+                Cancel
+              </DialogClose>
+              <Button
+                disabled={fleet.busy}
+                onClick={() =>
+                  void fleet
+                    .configure({
+                      operation: "access",
+                      confirmed: true,
+                      revision: policy.revision,
+                      defaultAccess:
+                        change.machineId === null ? change.access : policy.defaultAccess,
+                      machines:
+                        change.machineId === null
+                          ? policy.machines
+                          : [
+                              ...policy.machines.filter(
+                                (machine) => machine.machineId !== change.machineId,
+                              ),
+                              { machineId: change.machineId, access: change.access },
+                            ],
+                    })
+                    .then((ok) => {
+                      if (ok) setChange(null);
+                    })
+                }
+              >
+                Change access
+              </Button>
+            </DialogFooter>
+          </DialogPopup>
+        </Dialog>
+      ) : null}
+    </div>
+  );
+}
+
 export function LanFleetSetup() {
   const fleet = useLanFleet();
   const setup = fleet.setup;
   const [enrolling, setEnrolling] = useState(false);
   const [review, setReview] = useState<Peer | null>(null);
   const [revoke, setRevoke] = useState<Peer | null>(null);
-  const [scopeChange, setScopeChange] = useState<"read-only" | "standard" | null>(null);
   const [transportChange, setTransportChange] = useState<boolean | null>(null);
   const sharedFolderTrust = setup?.sharedFolderTrust === true;
   if (setup === null)
@@ -435,26 +561,7 @@ export function LanFleetSetup() {
               This machine's code: <code>{setup.deviceCode}</code>
             </p>
           ) : null}
-          <Select
-            items={accessItems}
-            value={setup.access}
-            disabled={fleet.busy || !fleet.allowed}
-            onValueChange={(value) => {
-              if ((value === "read-only" || value === "standard") && value !== setup.access)
-                setScopeChange(value);
-            }}
-          >
-            <SelectTrigger aria-label="Access granted by this machine">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectPopup>
-              {accessItems.map((item) => (
-                <SelectItem key={item.value} value={item.value}>
-                  {item.label}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
+          {setup.stage === "active" ? <FleetMachineAccess setup={setup} /> : null}
           {setup.stage === "pending" ? (
             <p className="text-xs text-muted-foreground">
               {sharedFolderTrust
@@ -574,52 +681,6 @@ export function LanFleetSetup() {
       )}
       {enrolling ? <EnrollmentDialog onClose={() => setEnrolling(false)} /> : null}
       {review ? <ReviewPeerDialog peer={review} onClose={() => setReview(null)} /> : null}
-      {scopeChange ? (
-        <Dialog
-          open
-          onOpenChange={(open) => {
-            if (!open && !fleet.busy) setScopeChange(null);
-          }}
-        >
-          <DialogPopup>
-            <DialogHeader>
-              <DialogTitle>Change access for new fleet links?</DialogTitle>
-              <DialogDescription>
-                {scopeChange === "standard"
-                  ? sharedFolderTrust
-                    ? "Machines connected through BuildShare may receive full access to this environment, including agents, shells, files, provider setup, settings and client access."
-                    : "Owner-approved machines may receive full access to this environment, including agents, shells, files, provider setup, settings and client access."
-                  : "New links will allow reading threads, files and diagnostics without command execution or editing."}{" "}
-                Existing sessions and saved connections are not replaced or reset; manage existing
-                access separately in Authorized clients.
-              </DialogDescription>
-            </DialogHeader>
-            <DialogFooter>
-              <DialogClose render={<Button variant="outline" disabled={fleet.busy} />}>
-                Cancel
-              </DialogClose>
-              <Button
-                disabled={fleet.busy}
-                onClick={() =>
-                  void fleet
-                    .configure({
-                      operation: "settings",
-                      confirmed: true,
-                      enabled: setup.stage !== "paused",
-                      autoPickup: setup.autoPickup,
-                      access: scopeChange,
-                    })
-                    .then((ok) => {
-                      if (ok) setScopeChange(null);
-                    })
-                }
-              >
-                Confirm new-link access
-              </Button>
-            </DialogFooter>
-          </DialogPopup>
-        </Dialog>
-      ) : null}
       {transportChange !== null ? (
         <Dialog
           open

@@ -25,6 +25,7 @@ import { resolveFleetBootstrap, trustedFleetShareRoot } from "./FleetBootstrap.t
 import { readFleetJson, validateRoster, writeFleetJson, writeFleetRoster } from "./FleetFiles.ts";
 import { secureOrigin } from "./GatewayT3OAuthClient.ts";
 import * as FleetTransport from "./FleetTransport.ts";
+import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 
 export class FleetEnrollment extends Context.Service<
   FleetEnrollment,
@@ -52,6 +53,7 @@ const make = Effect.gen(function* () {
   const config = yield* Config.ServerConfig;
   const vault = yield* Vault.FleetVault;
   const transport = yield* Effect.serviceOption(FleetTransport.FleetTransport);
+  const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
   const setupLock = path.join(config.stateDir, "lan-fleet-setup.lock");
   const bootstrap = () =>
     Effect.try({ try: () => resolveFleetBootstrap(processEnvironment), catch: configurationError });
@@ -130,7 +132,18 @@ const make = Effect.gen(function* () {
       }
     }
     if (peers.length > 100) return yield* configurationError();
+    const accessPolicy =
+      record === undefined || authority === undefined || record.fleetId !== authority.fleetId
+        ? undefined
+        : yield* fleetAccess.refresh({
+            root,
+            fleetId: record.fleetId,
+            machineId: record.machineId,
+            peers,
+            legacyAccess: record.access,
+          });
     return {
+      accessPolicy,
       ...paths,
       root,
       authorityFile,
@@ -246,8 +259,20 @@ const make = Effect.gen(function* () {
           });
       }
     }
+    const policy = current.accessPolicy;
     return {
       ...base,
+      ...(policy === undefined
+        ? {}
+        : {
+            accessPolicy: {
+              revision: policy.revision,
+              defaultAccess: policy.defaultAccess,
+              machines: policy.machines,
+              selfAccess: FleetAccessPolicy.selfAccess(policy),
+              canChange: FleetAccessPolicy.selfAccess(policy) === "standard",
+            },
+          }),
       stage:
         record === undefined ? "join" : !record.enabled ? "paused" : active ? "active" : "pending",
       owner,
@@ -287,6 +312,35 @@ const make = Effect.gen(function* () {
                 access: input.access,
               };
               yield* vault.save(updated);
+              return;
+            }
+            if (input.operation === "access") {
+              const { record, authority } = current;
+              const self = current.peers.find(
+                (peer) => peer.machineId === record?.machineId && peer.enabled,
+              );
+              if (
+                record === undefined ||
+                authority === undefined ||
+                !record.enabled ||
+                record.environmentId !== descriptor.environmentId ||
+                self === undefined ||
+                Authority.peerVerificationCode(self) !==
+                  Authority.peerVerificationCode(
+                    Authority.identityPeer(record, self.label, self.origin),
+                  )
+              )
+                return yield* configurationError();
+              yield* fleetAccess.change({
+                root: current.root,
+                fleetId: record.fleetId,
+                machineId: record.machineId,
+                peers: current.peers,
+                legacyAccess: record.access,
+                signingPrivateKey: record.signingPrivateKey,
+                expectedRevision: input.revision,
+                next: { defaultAccess: input.defaultAccess, machines: input.machines },
+              });
               return;
             }
             yield* fs.makeDirectory(current.root, { recursive: true });

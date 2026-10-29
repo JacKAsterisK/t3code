@@ -17,6 +17,8 @@ export interface SidebarMachineEntry extends SidebarMachine {
   /** Runs on the device showing this sidebar. */
   readonly isLocal: boolean;
   readonly connection: "connected" | "connecting" | "offline";
+  /** Connected, but this connection may only read, so it cannot start or send. */
+  readonly readOnly: boolean;
 }
 
 /** The machine's sidebar tree row; its thread rows name it as their parent. */
@@ -87,6 +89,11 @@ export const SidebarMachineGroupHeader = memo(function SidebarMachineGroupHeader
         {machine.isLocal ? (
           <span className="shrink-0 rounded-full border border-sidebar-border px-1.5 text-3xs leading-4 text-sidebar-muted-foreground">
             This PC
+          </span>
+        ) : null}
+        {machine.readOnly ? (
+          <span className="shrink-0 rounded-full border border-sidebar-border px-1.5 text-3xs leading-4 text-sidebar-muted-foreground">
+            Read only
           </span>
         ) : null}
         {machine.connection === "connected" ? null : (

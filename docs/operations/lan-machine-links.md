@@ -32,10 +32,34 @@ roster row for that ID is preserved; otherwise setup creates a stable machine ID
 from the environment identity. It never guesses or enrolls other devices. Adding
 another machine uses the same join/approve flow without a new build.
 
-Read-only sharing permits thread, file, and diagnostic reads. Full T3 access also
+Read-only access permits thread, file, and diagnostic reads. Standard access also
 permits agents, shell commands, file changes, provider configuration, settings,
-and client-access management. The owner approves membership; it cannot increase
-a member's locally selected access or turn on that member's automatic sync.
+and client-access management. The owner approves membership; it cannot turn on a
+member's automatic sync.
+
+## Machine access
+
+Access is one fleet-wide list, **Machine access**, kept as signed revisions in
+`fleet-access` beside the roster. Each revision is a full snapshot, signed with
+its writer's fleet key and chained to the previous revision. A revision counts
+only if its writer had standard access under the previous one, or if it only
+makes its writer read-only. The last standard machine cannot restrict itself.
+Each machine keeps the revisions it accepted, so deleting or rewriting share files
+cannot undo a change; a later write republishes lost revisions. Being the fleet
+owner grants nothing here.
+
+The receiving side enforces it. Every machine issues each peer's credential at
+that peer's access. In shared-folder fleets each sync also revokes credentials it
+issued that no longer match and delivers a replacement, which the peer's desktop
+swaps in for its saved connection. Lost access ends at the issuer's next sync;
+gained access waits until the peer is online. A read-only machine's own server
+also refuses to forward LAN task changes. Until a list is saved, each machine
+keeps the access chosen at setup.
+
+Limits: in owner-approval fleets a change applies only to links issued after it,
+so relink existing ones there. Outside-agent task grants are approved on the
+destination and are not tied to a machine; revoke them in **Sharing & access**. A
+read-only machine's credentials cannot approve new ones.
 
 ## Link approved machines
 

@@ -153,7 +153,11 @@ import { threadEnvironment } from "../state/threads";
 import { useOlderSettledShelf, useOlderSettledShelfGrowth } from "../state/olderSettledShelf";
 import { useThreadSearch } from "../state/queries";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
-import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
+import {
+  readEnvironmentScope,
+  useEnvironmentScope,
+  useReadOnlyEnvironmentIds,
+} from "../state/session";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { canShareWithGuestAtom } from "./chat/guestShareAvailability";
 import { openGuestShareDialog } from "./chat/guestShareDialogState";
@@ -1322,6 +1326,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
 
   const threadGrouping = useClientSettings((s) => s.sidebarThreadGrouping);
   const { environments: environmentPresentationList } = useEnvironments();
+  const readOnlyEnvironmentIds = useReadOnlyEnvironmentIds(environmentPresentationList);
   // Named projects first: a machine with one project starts there directly.
   const machineThreadProjects = (environmentId: EnvironmentId) => {
     const onMachine = projects.filter((project) => project.environmentId === environmentId);
@@ -1353,6 +1358,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 : phase === "connecting" || phase === "reconnecting"
                   ? "connecting"
                   : "offline",
+            readOnly:
+              phase === "connected" && readOnlyEnvironmentIds.has(environment.environmentId),
           };
         });
   const startThreadOnMachine = useStableCallback((environmentId: EnvironmentId) => {
@@ -1447,7 +1454,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             [
-              ...(machineThreadProjects(environmentId).length > 0
+              ...(machineThreadProjects(environmentId).length > 0 && !folder.machine.readOnly
                 ? [{ id: "new-thread" as const, label: `New thread on ${folder.machine.label}` }]
                 : []),
               { id: "top" as const, label: "Move to top", disabled: first, separatorBefore: true },
@@ -3535,6 +3542,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 collapsed={folder.collapsed}
                                 hiddenThreads={folder.hiddenThreads}
                                 canStartThread={
+                                  !folder.machine.readOnly &&
                                   machineThreadProjects(folder.machine.environmentId).length > 0
                                 }
                                 onToggle={toggleMachineGroup}

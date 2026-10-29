@@ -1,6 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import { createEnvironmentSessionAtoms } from "@t3tools/client-runtime/state/session";
 import {
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   type AuthEnvironmentScope,
   type AuthSessionState,
   type EnvironmentId,
@@ -60,6 +62,15 @@ export function useEnvironmentsWithScope(
       `${scope}\n${environmentIdsKey(environments.map(({ environmentId }) => environmentId))}`,
     ),
   );
+}
+
+/** Connections known to read but not operate, such as a fleet machine with read-only access. */
+export function useReadOnlyEnvironmentIds(
+  environments: ReadonlyArray<{ readonly environmentId: EnvironmentId }>,
+): ReadonlySet<EnvironmentId> {
+  const readable = useEnvironmentsWithScope(environments, AuthOrchestrationReadScope);
+  const operable = useEnvironmentsWithScope(environments, AuthOrchestrationOperateScope);
+  return new Set([...readable].filter((environmentId) => !operable.has(environmentId)));
 }
 
 export function readEnvironmentScope(

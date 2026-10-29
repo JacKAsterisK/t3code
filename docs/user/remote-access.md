@@ -9,12 +9,21 @@ kept, and uncertain pickups pause for review instead of replacing credentials.
 
 Create the fleet on the machine that will approve its members. **Automatic LAN
 encryption** offers this machine's local addresses and a separate port; confirm
-the address, access scope and pickup schedule once to enable it. New setup offers
-**Full T3 access** for remote task control; choose **Read only** to limit new links.
-Saved access choices, including existing read-only choices, stay unchanged.
-Private keys stay in the OS credential store. This does not install system certificates, change
+the address, access scope and pickup schedule once to enable it. That access applies
+until the fleet saves a **Machine access** list. Private keys stay in the OS credential store. This does not install system certificates, change
 firewall rules or require a VPN. The port must be reachable from your other
 machines. An existing HTTPS endpoint is also supported.
+
+**Machine access** sets, once for the whole fleet, what each machine may do on the
+others. A **Read only** machine can list and read the other machines' threads,
+messages and tasks, but cannot start threads, send messages, stop runs, answer
+approvals or questions, or change projects and settings there. Its sidebar marks
+those machines **Read only**. Any machine with standard access can change the
+list; a read-only machine can only restrict itself. Each machine applies a change
+on its next sync and replaces the credentials it gave the affected machine, so
+nothing needs approving or relinking; allow about ten minutes. **Machines added
+later** covers machines not yet in the list. The first list starts from the access
+chosen at setup on the machine that saves it.
 
 On each other machine, join using the owner's verification code. The owner then
 compares that machine's code from its own app before approving it. Select approved

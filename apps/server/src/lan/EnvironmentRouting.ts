@@ -36,6 +36,7 @@ import * as Schema from "effect/Schema";
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
+import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import * as NativeTaskService from "./NativeTaskService.ts";
 import * as RemoteTaskTransport from "./RemoteTaskTransport.ts";
 import * as RoutingStore from "./RoutingStore.ts";
@@ -107,6 +108,12 @@ const denied = () =>
     code: "capability_denied",
     message: "This task operation is outside the approved LAN routing grant.",
   });
+const readOnlyMachine = () =>
+  new OrchestratorMcpFailure({
+    code: "capability_denied",
+    message:
+      "This machine has read-only access to the other fleet machines. It can list, read and observe their tasks but not start, send to, interrupt or answer them.",
+  });
 const invalidDestination = () =>
   new OrchestratorMcpFailure({
     code: "orchestration_error",
@@ -134,6 +141,7 @@ const make = Effect.gen(function* () {
   const native = yield* NativeTaskService.NativeTaskService;
   const remote = yield* RemoteTaskTransport.RemoteTaskTransport;
   const environment = yield* ServerEnvironment.ServerEnvironment;
+  const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
 
   const authorize = Effect.fn("EnvironmentRouting.authorize")(function* (
     scope: Scope,
@@ -152,6 +160,12 @@ const make = Effect.gen(function* () {
     );
     if (route === undefined || grant === undefined || (write && !grant.allowOperate))
       return yield* denied();
+    if (
+      write &&
+      route.origin !== null &&
+      FleetAccessPolicy.selfAccess(yield* fleetAccess.current) === "read-only"
+    )
+      return yield* readOnlyMachine();
     const descriptor = yield* environment.getDescriptor;
     if ((route.origin === null) !== (descriptor.environmentId === environmentId))
       return yield* invalidDestination();

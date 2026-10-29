@@ -9,6 +9,7 @@ import {
   LanTaskObserveResult,
   LanTaskObservation,
   OrchestratorMcpFailure,
+  RuntimeRequestId,
   type LanRoutingConfig,
   type LanEnvironmentRoute,
   type LanTaskLaunchInput,
@@ -26,6 +27,7 @@ import type * as Invocation from "../mcp/McpInvocationContext.ts";
 import Migration from "../persistence/Migrations/069_LanRouting.ts";
 import GenerationMigration from "../persistence/Migrations/071_LanObservationGenerations.ts";
 import * as Registry from "./EnvironmentRegistry.ts";
+import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import * as Routing from "./EnvironmentRouting.ts";
 import * as Native from "./NativeTaskService.ts";
 import * as Remote from "./RemoteTaskTransport.ts";
@@ -159,6 +161,7 @@ function layer(
     readonly remote?: Remote.RemoteTaskTransport["Service"]["call"];
     readonly read?: Native.NativeTaskService["Service"]["read"];
     readonly observe?: Native.NativeTaskService["Service"]["observe"];
+    readonly fleetAccess?: "read-only" | "standard";
   } = {},
 ) {
   const database = Layer.effectDiscard(Migration.pipe(Effect.andThen(GenerationMigration))).pipe(
@@ -185,6 +188,15 @@ function layer(
       observe: options.observe ?? (() => Effect.succeed(page)),
     }),
     Layer.mock(Remote.RemoteTaskTransport)({ call: options.remote ?? (() => Effect.fail(fail())) }),
+    Layer.mock(FleetAccessPolicy.FleetAccess)({
+      current: Effect.succeed({
+        revision: 1,
+        defaultAccess: options.fleetAccess ?? "standard",
+        machines: [],
+        machineId: "machine-self",
+        peers: [],
+      }),
+    }),
   );
   return Routing.layer.pipe(Layer.provideMerge(services));
 }
@@ -239,6 +251,58 @@ it.effect(
       assert.deepEqual(second.result, metadata);
       assert.deepEqual(yield* store.owned("grant:different", environmentId), []);
     }).pipe(Effect.provide(layer())),
+);
+
+it.effect(
+  "refuses a read-only fleet machine's launch, send, interrupt and respond on another machine but lets it list, read and observe",
+  () =>
+    Effect.gen(function* () {
+      const tools = yield* Ref.make<Array<string>>([]);
+      const remote = (_route: LanEnvironmentRoute, tool: string) =>
+        Ref.update(tools, (items) => [...items, tool]).pipe(
+          Effect.as({
+            environmentId: remoteId,
+            result:
+              tool === "t3_lan_task_list"
+                ? { projectId, currentThreadId: null, threads: [], nextCursor: null, total: 0 }
+                : tool === "t3_lan_task_observe"
+                  ? page
+                  : metadata,
+          }),
+        );
+      yield* Effect.gen(function* () {
+        const router = yield* Routing.EnvironmentRouting;
+        const target = { environmentId: remoteId, threadId };
+        for (const refused of [
+          router.launch(scope(), { ...launch, environmentId: remoteId }),
+          router.send(scope(), { ...target, message: "Continue" }),
+          router.interrupt(scope(), target),
+          router.respond(scope(), {
+            ...target,
+            requestId: RuntimeRequestId.make("request:question"),
+            clientRequestId: "request:answer",
+            answers: {},
+          }),
+        ]) {
+          const error = yield* refused.pipe(Effect.flip);
+          assert.equal(error.code, "capability_denied");
+          assert.match(error.message, /read-only access to the other fleet machines/u);
+        }
+        assert.deepEqual(yield* Ref.get(tools), []);
+        yield* router.list(scope(), { environmentId: remoteId, projectId });
+        yield* router.read(scope(), target);
+        yield* router.observe(scope(), target);
+        assert.includeMembers(yield* Ref.get(tools), [
+          "t3_lan_task_list",
+          "t3_lan_task_read",
+          "t3_lan_task_observe",
+        ]);
+      }).pipe(
+        Effect.provide(
+          layer({ config: Effect.succeed(config(true)), remote, fleetAccess: "read-only" }),
+        ),
+      );
+    }),
 );
 
 it.effect("fails remote operations without creating a local fallback task", () =>

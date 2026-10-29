@@ -1,7 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
+  AuthSessionId,
   AuthStandardClientScopes,
+  type AuthClientSession,
+  type AuthEnvironmentScope,
   type AuthPairingLink,
   type FleetRoster,
 } from "@t3tools/contracts";
@@ -18,6 +21,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as LanFleet from "./LanFleet.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import * as FleetEnrollment from "./FleetEnrollment.ts";
+import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import { syntheticFleetPeer } from "./FleetDelivery.fixtures.ts";
 import { writeFleetJson, writeFleetRoster } from "./FleetFiles.ts";
 
@@ -53,8 +57,18 @@ const setup = Effect.fn("FleetTest.setup")(function* (
   };
   yield* writeFleetRoster(rosterPath, roster);
   const issued: string[] = [];
+  const issuedScopes: Array<ReadonlyArray<AuthEnvironmentScope>> = [];
   const revoked: string[] = [];
   const active = new Map<string, AuthPairingLink[]>();
+  // Pairing links a peer spent, as the sessions the issuing machine then holds for it.
+  const sessions = new Map<string, AuthClientSession[]>();
+  let policy: FleetAccessPolicy.FleetAccessState = {
+    revision: 0,
+    defaultAccess: "standard",
+    machines: [],
+    machineId: undefined,
+    peers: [],
+  };
   const create = Effect.fn("FleetTest.create")(function* (identity: typeof a) {
     const stateDir = path.join(root, identity.peer.machineId);
     yield* fs.makeDirectory(stateDir);
@@ -76,6 +90,9 @@ const setup = Effect.fn("FleetTest.setup")(function* (
         LanFleet.layerServices.pipe(
           Layer.provide(Layer.succeed(HostProcess.Hostname, `${identity.peer.machineId}.lan.test`)),
           Layer.provide(Layer.succeed(HostProcess.Platform, "win32")),
+          Layer.provide(
+            Layer.mock(FleetAccessPolicy.FleetAccess)({ current: Effect.sync(() => policy) }),
+          ),
           Layer.provide(
             Layer.mock(FleetEnrollment.FleetEnrollment)({
               resolve: Effect.as(Effect.void, undefined),
@@ -106,6 +123,7 @@ const setup = Effect.fn("FleetTest.setup")(function* (
               createPairingLink: (input) =>
                 Effect.gen(function* () {
                   issued.push(identity.peer.machineId);
+                  issuedScopes.push(input?.scopes ?? AuthStandardClientScopes);
                   if (failIssue)
                     return yield* new EnvironmentAuth.ServerAuthPairingLinkCreationError({
                       cause: "synthetic failure",
@@ -115,7 +133,7 @@ const setup = Effect.fn("FleetTest.setup")(function* (
                     id: `synthetic-${issued.length}`,
                     credential: "synthetic-pairing-code",
                     subject: input?.subject ?? "fixture",
-                    scopes: AuthStandardClientScopes,
+                    scopes: input?.scopes ?? AuthStandardClientScopes,
                     createdAt,
                     expiresAt: DateTime.makeUnsafe(DateTime.toEpochMillis(createdAt) + 86_400_000),
                   };
@@ -126,6 +144,17 @@ const setup = Effect.fn("FleetTest.setup")(function* (
                   return link;
                 }),
               listPairingLinks: () => Effect.sync(() => active.get(identity.peer.machineId) ?? []),
+              listSessions: () => Effect.sync(() => sessions.get(identity.peer.machineId) ?? []),
+              revokeSession: (sessionId) =>
+                Effect.sync(() => {
+                  const held = sessions.get(identity.peer.machineId) ?? [];
+                  sessions.set(
+                    identity.peer.machineId,
+                    held.filter((session) => session.sessionId !== sessionId),
+                  );
+                  revoked.push(sessionId);
+                  return held.some((session) => session.sessionId === sessionId);
+                }),
               revokePairingLink: (id) =>
                 Effect.sync(() => {
                   const links = active.get(identity.peer.machineId) ?? [];
@@ -181,7 +210,26 @@ const setup = Effect.fn("FleetTest.setup")(function* (
           peers,
         });
     }),
+    issuedScopes,
+    setPolicy: (next: Partial<FleetAccessPolicy.FleetAccessState>) => {
+      policy = { ...policy, ...next };
+    },
     consume: (machineId: string) => {
+      sessions.set(machineId, [
+        ...(sessions.get(machineId) ?? []),
+        ...(active.get(machineId) ?? []).map((link) => ({
+          sessionId: AuthSessionId.make(`session-${link.id}`),
+          subject: link.subject,
+          scopes: link.scopes,
+          method: "bearer-access-token" as const,
+          client: { deviceType: "desktop" as const },
+          issuedAt: link.createdAt,
+          expiresAt: link.expiresAt,
+          lastConnectedAt: null,
+          connected: true,
+          current: false,
+        })),
+      ]);
       active.set(machineId, []);
     },
   };
@@ -369,6 +417,46 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
           "connected",
         );
         assert.deepEqual(f.issued, ["alpha"]);
+      }).pipe(Effect.provide(testConfig)),
+  );
+  it.effect(
+    "replaces a connected peer's credential when its fleet access changes, with no approval",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* setup(true, false, true);
+        f.setPolicy({ revision: 1 });
+        const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        assert.equal((yield* f.sync(f.recipient.service)).incoming[0]?.replace, undefined);
+        f.consume("alpha");
+        yield* f.sync(f.recipient.service, connected);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+
+        f.setPolicy({ revision: 2, machines: [{ machineId: "beta", access: "read-only" }] });
+        yield* TestClock.adjust("1 second");
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "pending");
+        // The standard session ends at once, and the replacement carries only read scopes.
+        assert.deepEqual(f.revoked, ["session-synthetic-1"]);
+        assert.deepEqual(
+          f.issuedScopes.at(-1),
+          FleetAccessPolicy.fleetCredentialScopes("read-only"),
+        );
+        const replacement = yield* f.sync(f.recipient.service, connected);
+        assert.equal(replacement.incoming.length, 1);
+        assert.equal(replacement.incoming[0]?.replace, true);
+        // A saved connection is not proof of pickup while the replacement grant is unspent.
+        yield* TestClock.adjust("1 second");
+        yield* f.sync(f.sender.service);
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+
+        f.consume("alpha");
+        yield* TestClock.adjust("1 second");
+        yield* f.sync(f.sender.service);
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming.length, 0);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+        assert.deepEqual(f.issued, ["alpha", "alpha"]);
+        assert.deepEqual(f.revoked, ["session-synthetic-1"]);
       }).pipe(Effect.provide(testConfig)),
   );
   it.effect("keeps interrupted credential issuance reserved instead of minting again", () =>

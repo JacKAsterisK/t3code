@@ -113,7 +113,11 @@ import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
 import { serverEnvironment } from "../state/server";
 import { threadEnvironment } from "../state/threads";
-import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
+import {
+  readEnvironmentScope,
+  useEnvironmentScope,
+  useReadOnlyEnvironmentIds,
+} from "~/state/session";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
@@ -525,6 +529,16 @@ function OpenCommandPaletteDialog(props: {
     ...targetProject,
     displayName: group.displayName,
   }));
+  // A read-only connection, such as a fleet machine with read-only access, cannot start threads.
+  const readOnlyEnvironmentIds = useReadOnlyEnvironmentIds(environments);
+  const canStartThreadIn = (environmentId: EnvironmentId) =>
+    !readOnlyEnvironmentIds.has(environmentId);
+  const newThreadProjects = projectPickerEntries.flatMap(({ group, targetProject }) => {
+    const target = canStartThreadIn(targetProject.environmentId)
+      ? targetProject
+      : group.memberProjects.find((member) => canStartThreadIn(member.environmentId));
+    return target === undefined ? [] : [{ ...target, displayName: group.displayName }];
+  });
   const projectGroupByTargetKey = new Map(
     projectPickerEntries.map(({ group, targetProject }) => [
       `${targetProject.environmentId}:${targetProject.id}`,
@@ -641,7 +655,11 @@ function OpenCommandPaletteDialog(props: {
   const currentProjectEnvironmentId =
     activeThread?.environmentId ?? activeDraftThread?.environmentId ?? null;
   const currentProjectId = activeThread?.projectId ?? activeDraftThread?.projectId ?? null;
-  const scratchTargetEnvironmentId = scratchEnvironmentId(currentProjectEnvironmentId);
+  const scratchCandidateEnvironmentId = scratchEnvironmentId(currentProjectEnvironmentId);
+  const scratchTargetEnvironmentId =
+    scratchCandidateEnvironmentId !== null && canStartThreadIn(scratchCandidateEnvironmentId)
+      ? scratchCandidateEnvironmentId
+      : null;
   const supportsTriage = (environmentId: EnvironmentId | null) =>
     environments.find((environment) => environment.environmentId === environmentId)?.serverConfig
       ?.environment.capabilities.triage === true;
@@ -782,7 +800,7 @@ function OpenCommandPaletteDialog(props: {
       isScratchProject(project, scratchWorkspaceRootFor(project.environmentId));
     const projectItems = enumerateCommandPaletteItems(
       buildNewThreadInProjectItems({
-        projects: pickerProjects.filter((project) => !isScratch(project)),
+        projects: newThreadProjects.filter((project) => !isScratch(project)),
         projectGroupByTargetKey,
         locationByEnvironmentId: projectEnvironmentLocationById,
         runProject: async (project) => {
@@ -804,7 +822,8 @@ function OpenCommandPaletteDialog(props: {
     );
     if (scratchTargetEnvironmentId === null) return projectItems;
 
-    const noProjectIndex = pickerProjects[0] !== undefined && isScratch(pickerProjects[0]) ? 0 : 1;
+    const noProjectIndex =
+      newThreadProjects[0] !== undefined && isScratch(newThreadProjects[0]) ? 0 : 1;
     return [
       ...projectItems.slice(0, noProjectIndex),
       {
@@ -822,7 +841,7 @@ function OpenCommandPaletteDialog(props: {
   // A machine header's new thread must land on that machine, so each project
   // resolves to its member there rather than the group's preferred target.
   const machineProjectThreadItems =
-    newThreadMachineId === null
+    newThreadMachineId === null || !canStartThreadIn(newThreadMachineId)
       ? []
       : enumerateCommandPaletteItems(
           buildNewThreadInProjectItems({
@@ -1194,12 +1213,15 @@ function OpenCommandPaletteDialog(props: {
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
 
-  if (projects.length > 0) {
+  if (newThreadProjects.length > 0) {
     const activeProjectTitle =
       projectPickerEntries.find((entry) => entry.isPreferred)?.group.displayName ??
       (currentProjectId ? (projectTitleById.get(currentProjectId) ?? null) : null);
 
-    if (activeProjectTitle) {
+    if (
+      activeProjectTitle &&
+      (contextualProjectRef === null || canStartThreadIn(contextualProjectRef.environmentId))
+    ) {
       actionItems.push({
         kind: "action",
         value: "action:new-thread",

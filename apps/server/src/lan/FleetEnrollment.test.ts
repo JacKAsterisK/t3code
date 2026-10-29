@@ -26,6 +26,7 @@ import * as FleetEnrollment from "./FleetEnrollment.ts";
 import * as FleetVault from "./FleetVault.ts";
 import * as Authority from "./FleetAuthority.ts";
 import * as LanFleet from "./LanFleet.ts";
+import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import { FLEET_ROSTER_ENV, WINDOWS_FLEET_SHARE_ROOT } from "./FleetBootstrap.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 
@@ -141,9 +142,16 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
             Layer.provide(
               Layer.succeed(HostProcess.Environment, { [FLEET_ROSTER_ENV]: rosterPath }),
             ),
+            Layer.provideMerge(
+              FleetAccessPolicy.layer.pipe(
+                Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)),
+                Layer.provide(Config.layer(config)),
+              ),
+            ),
           ),
         );
         const enrollment = Context.get(enrollmentServices, FleetEnrollment.FleetEnrollment);
+        const fleetAccess = Context.get(enrollmentServices, FleetAccessPolicy.FleetAccess);
         const links = yield* LanFleet.LanFleet.pipe(
           Effect.provide(
             LanFleet.layerServices.pipe(
@@ -151,6 +159,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
               Layer.provide(Config.layer(config)),
               Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
               Layer.provide(Layer.succeed(FleetEnrollment.FleetEnrollment, enrollment)),
+              Layer.provide(Layer.succeed(FleetAccessPolicy.FleetAccess, fleetAccess)),
               Layer.provide(
                 Layer.succeed(HostProcess.Environment, { [FLEET_ROSTER_ENV]: rosterPath }),
               ),
@@ -719,6 +728,88 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         assert.equal(yield* f.b.enrollment.resolve, null);
         assert.deepEqual(f.a.record()!.tls, beforeA.tls);
         assert.equal(f.issued.length, 2);
+      }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect(
+    "syncs the fleet access policy and refuses a read-only machine lifting its own restriction",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false, "accessible");
+        yield* f.a.enrollment.configure({
+          operation: "start",
+          confirmed: true,
+          origin: "https://alpha.example.test",
+          autoPickup: true,
+          access: "standard",
+        });
+        yield* f.join("");
+        const alpha = f.a.record()!.machineId;
+        const beta = f.b.record()!.machineId;
+        const change = (
+          peer: typeof f.a,
+          revision: number,
+          machines: ReadonlyArray<{ machineId: string; access: "read-only" | "standard" }>,
+        ) =>
+          peer.enrollment.configure({
+            operation: "access",
+            confirmed: true,
+            revision,
+            defaultAccess: "standard",
+            machines,
+          });
+        assert.equal((yield* f.b.enrollment.status).accessPolicy?.revision, 0);
+        yield* change(f.a, 0, [{ machineId: beta, access: "read-only" }]);
+        const synced = (yield* f.b.enrollment.status).accessPolicy;
+        assert.equal(synced?.revision, 1);
+        assert.equal(synced?.selfAccess, "read-only");
+        assert.equal(synced?.canChange, false);
+
+        for (const machines of [[], [{ machineId: alpha, access: "read-only" as const }]])
+          assert.equal((yield* change(f.b, 1, machines).pipe(Effect.flip)).reason, "configuration");
+        // A signed file a read-only machine writes straight to the share is not accepted either.
+        const head = (yield* f.fs.readDirectory(f.path.join(f.root, "fleet-access")))[0]!;
+        const forged = FleetAccessPolicy.signAccessEntry(
+          {
+            version: 1,
+            fleetId: f.b.record()!.fleetId,
+            revision: 2,
+            previous: FleetAccessPolicy.entryDigest(
+              yield* readFleetJson(
+                f.path.join(f.root, "fleet-access", head),
+                FleetAccessPolicy.FleetAccessEntry,
+              ).pipe(Effect.provideService(FileSystem.FileSystem, f.fs)),
+            ),
+            signerMachineId: beta,
+            createdAt: 0,
+            defaultAccess: "standard",
+            machines: [],
+          },
+          f.b.record()!.signingPrivateKey,
+        );
+        yield* writeFleetJson(
+          f.path.join(f.root, "fleet-access", FleetAccessPolicy.entryFileName(forged)),
+          forged,
+        ).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+        // Nor does deleting the share's history roll back what a machine already accepted.
+        yield* f.fs.remove(f.path.join(f.root, "fleet-access", head));
+        for (const peer of [f.a, f.b]) {
+          const policy = (yield* peer.enrollment.status).accessPolicy;
+          assert.equal(policy?.revision, 1);
+          assert.deepEqual(policy?.machines, [{ machineId: beta, access: "read-only" }]);
+        }
+        // The last standard machine cannot restrict itself, or no one could lift the policy.
+        assert.equal(
+          (yield* change(f.a, 1, [
+            { machineId: alpha, access: "read-only" },
+            { machineId: beta, access: "read-only" },
+          ]).pipe(Effect.flip)).reason,
+          "configuration",
+        );
+        yield* change(f.a, 1, [{ machineId: beta, access: "standard" }]);
+        assert.equal((yield* f.b.enrollment.status).accessPolicy?.selfAccess, "standard");
+        // A machine may always restrict itself.
+        yield* change(f.b, 2, [{ machineId: beta, access: "read-only" }]);
+        assert.equal((yield* f.a.enrollment.status).accessPolicy?.revision, 3);
       }).pipe(Effect.provide(configLayer)),
   );
   it.effect(

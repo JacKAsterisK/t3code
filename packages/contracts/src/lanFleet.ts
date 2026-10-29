@@ -75,12 +75,16 @@ export const LanFleetSyncResult = Schema.Struct({
       host: Schema.String,
       pairingCode: Schema.String,
       tls: Schema.optionalKey(FleetTlsIdentity),
+      // The sender replaced a credential this machine already holds, such as after an access change.
+      replace: Schema.optionalKey(Schema.Boolean),
     }),
   ),
 });
 export type LanFleetSyncResult = typeof LanFleetSyncResult.Type;
 
-const FleetAccess = Schema.Literals(["read-only", "standard"]);
+export const FleetAccess = Schema.Literals(["read-only", "standard"]);
+export type FleetAccess = typeof FleetAccess.Type;
+const FleetMachineAccess = Schema.Struct({ machineId: FleetMachineId, access: FleetAccess });
 const VerificationCode = Schema.String.check(Schema.isPattern(/^[a-f0-9]{12}$/u));
 export const LanFleetSetupInput = Schema.Union([
   Schema.Struct({
@@ -124,6 +128,14 @@ export const LanFleetSetupInput = Schema.Union([
     machineIds: Schema.Array(FleetMachineId).check(Schema.isMaxLength(100)),
   }),
   Schema.Struct({
+    operation: Schema.Literal("access"),
+    confirmed: Schema.Boolean,
+    // The fleet policy revision this change was made against; a newer one fails the change.
+    revision: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+    defaultAccess: FleetAccess,
+    machines: Schema.Array(FleetMachineAccess).check(Schema.isMaxLength(100)),
+  }),
+  Schema.Struct({
     operation: Schema.Literal("transport"),
     confirmed: Schema.Boolean,
     enabled: Schema.Boolean,
@@ -146,7 +158,19 @@ export const LanFleetSetupState = Schema.Struct({
   tlsReady: Schema.optionalKey(Schema.Boolean),
   suggestedTlsOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
   autoPickup: Schema.Boolean,
+  // Used until the fleet has an access policy; the first policy takes it as its default.
   access: FleetAccess,
+  accessPolicy: Schema.optionalKey(
+    Schema.Struct({
+      // Zero until a machine saves the first fleet-wide policy.
+      revision: Schema.Number,
+      defaultAccess: FleetAccess,
+      machines: Schema.Array(FleetMachineAccess),
+      selfAccess: FleetAccess,
+      // Read-only machines may only restrict themselves.
+      canChange: Schema.Boolean,
+    }),
+  ),
   peers: Schema.Array(
     Schema.Struct({
       machineId: FleetMachineId,

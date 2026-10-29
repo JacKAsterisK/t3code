@@ -1,9 +1,11 @@
+// @effect-diagnostics nodeBuiltinImport:off -- A random per-process mark, never sent off this machine.
+import * as NodeCrypto from "node:crypto";
 import { LanFleetError } from "@t3tools/contracts";
 import {
   createFleetTlsCertificate,
   verifyFleetTlsCertificate,
 } from "@t3tools/shared/fleetTlsCertificate";
-import type { FleetProxy } from "@t3tools/shared/fleetTlsProxy";
+import { FLEET_TLS_FORWARD_HEADER, type FleetProxy } from "@t3tools/shared/fleetTlsProxy";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -29,6 +31,11 @@ export class FleetTransport extends Context.Service<
     readonly persist: (record: FleetVaultRecord) => Effect.Effect<void, LanFleetError>;
     /** The https origin of the encrypted endpoint this server is running, if any. */
     readonly origin: Effect.Effect<string | undefined>;
+    /**
+     * Whether that endpoint forwarded this request, so it really arrived over TLS. A `Host`
+     * header says nothing: any plain-http client can send the endpoint's.
+     */
+    readonly forwarded: (headers: Readonly<Record<string, string | undefined>>) => boolean;
   }
 >()("t3/lan/FleetTransport") {}
 
@@ -38,6 +45,7 @@ const make = Effect.gen(function* () {
   const vault = yield* Vault.FleetVault;
   const network = yield* Network.FleetNetwork;
   const mutex = yield* Semaphore.make(1);
+  const forwardedMark = NodeCrypto.randomBytes(32).toString("base64url");
   let running: { origin: string; proxy: FleetProxy } | undefined;
   const suggestions = network.addresses.pipe(
     Effect.map((addresses) =>
@@ -105,6 +113,7 @@ const make = Effect.gen(function* () {
     const endpoint = {
       target: `http://${config.host === "::1" ? "[::1]" : config.host === undefined || ["0.0.0.0", "::", "localhost"].includes(config.host) ? "127.0.0.1" : config.host}:${config.port}/`,
       serverTls: identity,
+      forwardedMark,
     };
     const proxy = yield* network
       .listen({ ...endpoint, listen: { address: "::", port: Number(url.port || 443) } })
@@ -167,6 +176,15 @@ const make = Effect.gen(function* () {
     prepare,
     persist,
     origin: Effect.sync(() => running?.origin),
+    forwarded: (headers) => {
+      const mark = Buffer.from(headers[FLEET_TLS_FORWARD_HEADER] ?? "");
+      const expected = Buffer.from(forwardedMark);
+      return (
+        running !== undefined &&
+        mark.length === expected.length &&
+        NodeCrypto.timingSafeEqual(mark, expected)
+      );
+    },
     ready: Effect.fn("FleetTransport.ready")((record) =>
       Effect.sync(
         () =>

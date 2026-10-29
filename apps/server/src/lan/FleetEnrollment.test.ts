@@ -16,7 +16,10 @@ import * as Path from "effect/Path";
 import * as Context from "effect/Context";
 import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
+import * as Duration from "effect/Duration";
+import * as TestClock from "effect/testing/TestClock";
 import * as FleetTransport from "./FleetTransport.ts";
+import { DEPARTURE_CHECKS, DEPARTURE_GRACE_MS } from "./FleetMembership.ts";
 import * as FleetNetwork from "./FleetNetwork.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "../environment/DirectEndpoints.ts";
@@ -44,6 +47,8 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
   });
   const root = share ? WINDOWS_FLEET_SHARE_ROOT : diskRoot;
   let sharedFolderAccessible = share === "accessible";
+  // Paths that briefly read as not found, as a share can.
+  const absent = new Set<string>();
   const localPath = (file: string) =>
     share && (file === root || file.startsWith(root + "\\"))
       ? path.join(diskRoot, file.slice(root.length))
@@ -51,7 +56,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
   // The virtual UNC share is mapped entirely to a fresh temp directory. No real SMB path is touched.
   const fs = FileSystem.FileSystem.of({
     ...diskFs,
-    exists: (file) => diskFs.exists(localPath(file)),
+    exists: (file) => (absent.has(file) ? Effect.succeed(false) : diskFs.exists(localPath(file))),
     stat: (file) => diskFs.stat(localPath(file)),
     readFileString: (file, options) => diskFs.readFileString(localPath(file), options),
     makeDirectory: (file, options) => diskFs.makeDirectory(localPath(file), options),
@@ -260,6 +265,10 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     issued,
     setSharedFolderAccessible: (value: boolean) => {
       sharedFolderAccessible = value;
+    },
+    setAbsent: (file: string, value: boolean) => {
+      if (value) absent.add(file);
+      else absent.delete(file);
     },
   };
 });
@@ -503,6 +512,30 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         assert.equal((yield* f.sync(f.a, [f.a.environmentId])).incoming.length, 1);
         assert.equal((yield* f.sync(f.b, [f.b.environmentId])).incoming.length, 1);
         assert.equal(f.issued.length, 2);
+
+        // The enrollment folder briefly reads as absent. Leaving would revoke everything beta
+        // holds on alpha, so one miss, or several within the grace period, is not leaving.
+        const requests = f.path.join(f.root, "fleet-enrollment");
+        const peersOf = Effect.map(f.a.enrollment.resolve, (config) =>
+          (config?.peers ?? []).filter((peer) => peer.enabled).map((peer) => peer.machineId),
+        );
+        const beta = (yield* f.b.enrollment.resolve)!.machineId;
+        f.setAbsent(requests, true);
+        for (let check = 0; check < 5; check++) assert.include(yield* peersOf, beta);
+        yield* TestClock.adjust(Duration.millis(DEPARTURE_GRACE_MS - 1));
+        assert.include(yield* peersOf, beta);
+        // The folder comes back before the grace runs out: nothing was lost, and a later miss
+        // starts its grace again.
+        f.setAbsent(requests, false);
+        assert.include(yield* peersOf, beta);
+        f.setAbsent(requests, true);
+        assert.include(yield* peersOf, beta);
+        yield* TestClock.adjust(Duration.millis(DEPARTURE_GRACE_MS - 1));
+        assert.include(yield* peersOf, beta);
+        // Missing for the whole grace period, over several checks, it has left.
+        yield* TestClock.adjust(Duration.millis(1));
+        for (let check = 0; check < DEPARTURE_CHECKS; check++) yield* peersOf;
+        assert.notInclude(yield* peersOf, beta);
       }).pipe(Effect.provide(configLayer)),
   );
   it.effect(

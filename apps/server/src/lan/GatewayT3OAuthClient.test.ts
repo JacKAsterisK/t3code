@@ -46,7 +46,10 @@ const state = (): GatewayOAuthState => ({
   },
 });
 
-const setup = (initial?: GatewayOAuthState) => {
+const setup = (
+  initial?: GatewayOAuthState,
+  fleetAssertion?: (grantId: string) => Promise<string | undefined>,
+) => {
   let saved = initial;
   let observed = 0;
   const calls: { url: string; init: RequestInit | undefined }[] = [];
@@ -80,6 +83,7 @@ const setup = (initial?: GatewayOAuthState) => {
     origin,
     redirectUri,
     now: () => observed,
+    ...(fleetAssertion === undefined ? {} : { fleetAssertion }),
     credentials: {
       load: async () => saved,
       save: async (value) => {
@@ -190,6 +194,19 @@ it("single-flights renewal and never retries an uncertain rotated token or task 
     "authorization-required",
   );
   expect(tokenCalls).toBe(1);
+});
+
+it("signs each refresh as its fleet machine for the grant it renews", async () => {
+  const expired = state();
+  const test = setup(
+    { ...expired, tokens: { ...expired.tokens!, accessExpiresAt: 0 } },
+    async (grantId) => `signed-for-${grantId}`,
+  );
+  await test.client.callTaskTool("t3_lan_task_read", {});
+  const refresh = test.calls.find((call) => call.url.endsWith("/token"));
+  expect(new URLSearchParams(String(refresh?.init?.body)).get("fleet_assertion")).toBe(
+    "signed-for-stable-grant",
+  );
 });
 
 it("refuses forged issuer metadata and broad or identity-changing token responses", async () => {

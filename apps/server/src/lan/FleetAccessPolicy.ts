@@ -280,26 +280,27 @@ export interface FleetAccessState {
   readonly machineId: string | undefined;
   readonly peers: ReadonlyArray<{ readonly machineId: string; readonly environmentId: string }>;
   /**
-   * The share's policy could not be read. The last accepted policy still applies; with none,
-   * every machine reads as read-only rather than falling back to the legacy setting.
+   * The share's policy could not be read. The last accepted policy still caps credentials, and
+   * with none nothing changes. Nothing is revoked or replaced for access until a read succeeds.
    */
   readonly unavailable?: boolean;
 }
 
 export const machineAccess = (state: FleetAccessState, machineId: string) =>
   accessOf(state, machineId);
-/** This machine's own access; a machine outside any fleet is unrestricted. */
+/** This machine's own access; outside any fleet, or before any saved policy, it is unrestricted. */
 export const selfAccess = (state: FleetAccessState): Level =>
-  state.machineId === undefined
+  state.machineId === undefined || state.revision === 0
     ? "standard"
-    : state.revision === 0
-      ? state.unavailable === true
-        ? "read-only"
-        : "standard"
-      : accessOf(state, state.machineId);
-/** Whether access follows a saved policy, or failed closed because it could not be read. */
-export const policyApplies = (state: FleetAccessState) =>
-  state.revision > 0 || state.unavailable === true;
+    : accessOf(state, state.machineId);
+/** Whether access follows a saved policy; before one, each credential keeps its access. */
+export const policyApplies = (state: FleetAccessState) => state.revision > 0;
+/**
+ * Whether the policy was just read from the share. Only then may access revoke or replace
+ * anything: a read error only caps, at the last accepted policy, so it never costs a machine a
+ * credential that the share coming back would not restore.
+ */
+export const mayRevokeForAccess = (state: FleetAccessState) => state.unavailable !== true;
 
 interface FleetAccessInput {
   readonly root: string;
@@ -366,8 +367,7 @@ const make = Effect.gen(function* () {
     unavailable: boolean,
   ): FleetAccessState => ({
     revision: evaluation?.revision ?? 0,
-    defaultAccess:
-      evaluation?.snapshot?.defaultAccess ?? (unavailable ? "read-only" : legacyAccess),
+    defaultAccess: evaluation?.snapshot?.defaultAccess ?? legacyAccess,
     machines: evaluation?.snapshot?.machines ?? [],
     machineId: value?.machineId,
     peers: value?.peers ?? [],

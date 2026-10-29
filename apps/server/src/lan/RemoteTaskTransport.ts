@@ -7,6 +7,7 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import {
   GatewayOAuthState,
@@ -36,6 +37,15 @@ export class RoutingCredentials extends Context.Service<
   }
 >()("t3/lan/RemoteTaskTransport/RoutingCredentials") {}
 
+/** Optional: this machine's fleet identity, which signs each task grant refresh as itself. */
+export class RoutingFleetIdentity extends Context.Service<
+  RoutingFleetIdentity,
+  {
+    /** Signs `grantId` for the environment `audience`; undefined outside a fleet. */
+    readonly sign: (audience: string, grantId: string) => Effect.Effect<string | undefined>;
+  }
+>()("t3/lan/RemoteTaskTransport/RoutingFleetIdentity") {}
+
 // These Promise adapters let tryPromise or the OAuth client map parse failures at their boundary.
 const decodeDescriptor = Schema.decodeUnknownSync(ExecutionEnvironmentDescriptor);
 const decodeTaskArguments = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
@@ -54,12 +64,14 @@ const unavailable = () =>
 const make = Effect.gen(function* () {
   const request = yield* RoutingFetch;
   const credentials = yield* RoutingCredentials;
+  const identity = yield* Effect.serviceOption(RoutingFleetIdentity);
   const clients = new Map<string, ReturnType<typeof makeGatewayT3OAuthClient>>();
   const call = Effect.fn("RemoteTaskTransport.call")(function* (
     route: LanEnvironmentRoute,
     tool: string,
     input: unknown,
   ) {
+    const services = yield* Effect.context<never>();
     return yield* Effect.tryPromise({
       try: async () => {
         if (route.origin === null || route.credentialRef === null)
@@ -87,6 +99,15 @@ const make = Effect.gen(function* () {
             redirectUri: "http://127.0.0.1/oauth/t3/callback",
             fetch: request,
             credentials: credentials.forRoute(route.environmentId, route.credentialRef),
+            // A grant from before grants recorded their approver becomes this machine's.
+            ...(Option.isNone(identity)
+              ? {}
+              : {
+                  fleetAssertion: (grantId: string) =>
+                    Effect.runPromiseWith(services)(
+                      identity.value.sign(route.environmentId, grantId),
+                    ),
+                }),
           });
           clients.set(key, client);
         }

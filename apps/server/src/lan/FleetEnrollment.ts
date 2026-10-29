@@ -26,6 +26,7 @@ import { readFleetJson, validateRoster, writeFleetJson, writeFleetRoster } from 
 import { secureOrigin } from "./GatewayT3OAuthClient.ts";
 import * as FleetTransport from "./FleetTransport.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
+import { makeMembership } from "./FleetMembership.ts";
 
 export class FleetEnrollment extends Context.Service<
   FleetEnrollment,
@@ -55,6 +56,7 @@ const make = Effect.gen(function* () {
   const transport = yield* Effect.serviceOption(FleetTransport.FleetTransport);
   const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
   const setupLock = path.join(config.stateDir, "lan-fleet-setup.lock");
+  const membership = yield* makeMembership(path.join(config.stateDir, "lan-fleet-members.json"));
   const bootstrap = () =>
     Effect.try({ try: () => resolveFleetBootstrap(processEnvironment), catch: configurationError });
   const load = Effect.fn("FleetEnrollment.load")(function* () {
@@ -132,6 +134,23 @@ const make = Effect.gen(function* () {
       }
     }
     if (peers.length > 100) return yield* configurationError();
+    // A machine this successful read misses, such as when the enrollment folder briefly reads as
+    // absent, stays until it is shown disabled or stays missing: leaving revokes everything.
+    const removed = new Set([
+      ...peers.filter((peer) => !peer.enabled).map((peer) => peer.machineId),
+      ...roster.machines.filter((machine) => !machine.enabled).map((machine) => machine.machineId),
+    ]);
+    for (const peer of yield* membership.check(
+      peers.filter((peer) => peer.enabled),
+      removed,
+    ))
+      if (
+        !peers.some(
+          (existing) =>
+            existing.machineId === peer.machineId || existing.environmentId === peer.environmentId,
+        )
+      )
+        peers.push(peer);
     const accessPolicy =
       record === undefined || authority === undefined || record.fleetId !== authority.fleetId
         ? undefined

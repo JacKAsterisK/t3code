@@ -24,6 +24,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
+import * as CredentialAttribution from "../auth/CredentialAttribution.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as McpOAuth from "../auth/McpOAuth.ts";
 import * as ServerConfig from "../config.ts";
@@ -205,10 +206,12 @@ const make = Effect.gen(function* () {
         .revokeSession(sessionId as AuthSessionId)
         .pipe(Effect.tap(() => Effect.sync(() => revoked.add(sessionId))));
     // Narrowed access ends at once; calls fail until the peer relinks, never with the old access.
+    // A policy the share could not just give only caps each call.
+    const narrows = FleetAccessPolicy.mayRevokeForAccess(yield* fleetAccess.current);
     for (const session of entry.sessions)
       if (
         active.has(session.sessionId) &&
-        (level === undefined || rank(session.level) > rank(level))
+        (level === undefined || (narrows && rank(session.level) > rank(level)))
       )
         yield* revoke(session.sessionId);
     let offer = entry.offer;
@@ -290,18 +293,20 @@ const make = Effect.gen(function* () {
     }));
   });
 
-  /** A peer left the fleet: nothing it was given here stays usable. */
+  /** A peer left the fleet, or this adapter was turned off: nothing it was given here stays usable. */
   const forgetServed = Effect.fn("FleetPeerLinks.forgetServed")(function* (
-    fleet: FleetContext.FleetLinkContext,
+    fleet: FleetContext.FleetLinkContext | undefined,
     machineId: string,
   ) {
     const entry = (yield* Ref.get(state)).serving[machineId] ?? emptyServing;
     for (const session of entry.sessions)
       yield* auth.revokeSession(session.sessionId as AuthSessionId);
     yield* revokeCodes(codePrefix(machineId));
-    const files = Delivery.peerLinkFileNames(fleet.self.machineId, machineId);
-    yield* removeShare(shareFile(fleet.deliveryDirectory, files.offer));
-    yield* removeShare(shareFile(fleet.deliveryDirectory, files.receipt));
+    if (fleet !== undefined) {
+      const files = Delivery.peerLinkFileNames(fleet.self.machineId, machineId);
+      yield* removeShare(shareFile(fleet.deliveryDirectory, files.offer));
+      yield* removeShare(shareFile(fleet.deliveryDirectory, files.receipt));
+    }
     yield* updateServing(machineId, () => undefined);
   });
 
@@ -399,17 +404,57 @@ const make = Effect.gen(function* () {
     yield* setLinking(peer.machineId, entry);
   });
 
-  /** A peer left the fleet: forget the link this adapter made to it. Other links are never touched. */
+  /**
+   * A peer left the fleet, or this adapter was turned off: forget the link this adapter made to
+   * it. Other links are never touched.
+   */
   const forgetLink = Effect.fn("FleetPeerLinks.forgetLink")(function* (
-    fleet: FleetContext.FleetLinkContext,
+    fleet: FleetContext.FleetLinkContext | undefined,
     machineId: string,
     entry: Linking,
   ) {
     yield* peerLinks.unlink(entry.environmentId);
-    const files = Delivery.peerLinkFileNames(machineId, fleet.self.machineId);
-    yield* removeShare(shareFile(fleet.deliveryDirectory, files.request));
+    if (fleet !== undefined) {
+      const files = Delivery.peerLinkFileNames(machineId, fleet.self.machineId);
+      yield* removeShare(shareFile(fleet.deliveryDirectory, files.request));
+    }
     yield* setLinking(machineId, undefined);
   });
+
+  /**
+   * Turned off means off: the links this adapter made are forgotten, and every peer-link code and
+   * session this machine issued is revoked, including any its state lost track of. Ordinary fleet
+   * connections are not peer links and are left alone.
+   */
+  const switchOff = Effect.fn("FleetPeerLinks.switchOff")(function* () {
+    yield* trust.replace([]);
+    const current = yield* Ref.get(state);
+    const tracked = Object.keys(current.linking).length + Object.keys(current.serving).length;
+    const fleet =
+      tracked === 0 ? undefined : yield* context.load.pipe(Effect.orElseSucceed(() => undefined));
+    yield* forEachPeer(
+      Object.entries(current.linking),
+      ([machineId]) => machineId,
+      ([machineId, entry]) => forgetLink(fleet, machineId, entry),
+    );
+    yield* forEachPeer(
+      Object.keys(current.serving),
+      (machineId) => machineId,
+      (machineId) => forgetServed(fleet, machineId),
+    );
+    yield* revokeCodes(SUBJECT_PREFIX);
+    for (const session of yield* auth.listSessions())
+      if (
+        CredentialAttribution.attributionRoot(session.subject)?.startsWith(SUBJECT_PREFIX) === true
+      )
+        yield* auth.revokeSession(session.sessionId);
+  });
+
+  /** On only when settings positively say so; a settings read error changes nothing. */
+  const adapterSetting = serverSettings.getSettings.pipe(
+    Effect.map((settings) => settings.fleetLinkedEnvironmentsEnabled),
+    Effect.option,
+  );
 
   const forEachPeer = <A, E>(
     items: ReadonlyArray<A>,
@@ -432,9 +477,10 @@ const make = Effect.gen(function* () {
 
   const pass = passLock.withPermits(1)(
     Effect.gen(function* () {
-      const settings = yield* serverSettings.getSettings.pipe(Effect.option);
-      if (Option.isNone(settings) || !settings.value.fleetLinkedEnvironmentsEnabled) {
-        yield* trust.replace([]);
+      const enabled = yield* adapterSetting;
+      if (Option.isNone(enabled)) return;
+      if (!enabled.value) {
+        yield* switchOff();
         return;
       }
       const fleet = yield* context.load;
@@ -492,7 +538,17 @@ const make = Effect.gen(function* () {
     if (!subject.startsWith(SUBJECT_PREFIX)) return Effect.succeed(true);
     const [machineId, deliveryId] = subject.slice(SUBJECT_PREFIX.length).split(":");
     if (machineId === undefined || deliveryId === undefined) return Effect.succeed(false);
-    return updateServing(machineId, (current) => ({
+    // A peer that still has the adapter on is refused here while this machine has it off.
+    return adapterSetting.pipe(
+      Effect.flatMap((enabled) =>
+        Option.isSome(enabled) && enabled.value
+          ? recordSession(machineId, deliveryId, sessionId)
+          : Effect.succeed(false),
+      ),
+    );
+  };
+  const recordSession = (machineId: string, deliveryId: string, sessionId: string) =>
+    updateServing(machineId, (current) => ({
       ...current,
       sessions: [
         ...current.sessions,
@@ -511,7 +567,6 @@ const make = Effect.gen(function* () {
         ),
       ),
     );
-  };
 
   return FleetPeerLinks.of({
     pass,

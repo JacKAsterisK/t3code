@@ -53,6 +53,21 @@ export class CredentialAccessCap extends Context.Service<
   }
 >()("t3/auth/CredentialAttribution/CredentialAccessCap") {}
 
+/**
+ * Optional: attributes a task grant from before grants recorded their approver, at its next
+ * refresh, to the fleet machine holding it. The holder proves who it is by signing for that one
+ * grant with its own fleet key, so it can only ever name itself.
+ */
+export class McpGrantAttribution extends Context.Service<
+  McpGrantAttribution,
+  {
+    /** The grant an assertion is for and the subject it attributes it to; undefined if invalid. */
+    readonly verify: (
+      assertion: string,
+    ) => Effect.Effect<{ readonly grantId: string; readonly subject: string } | undefined>;
+  }
+>()("t3/auth/CredentialAttribution/McpGrantAttribution") {}
+
 /** A session store whose verified sessions carry only the scopes the cap allows now. */
 export const cappedSessionStore = (
   sessions: SessionStore.SessionStore["Service"],

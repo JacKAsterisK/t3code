@@ -28,9 +28,12 @@ chosen at setup on the machine that saves it.
 Each machine enforces the list itself, for everything the restricted machine and
 its agents hold there: its fleet connection, pairing codes it made, and agent
 task grants approved through it. A restriction applies to them right away, before
-anything is replaced. A machine removed from the fleet can use none of them.
+anything is replaced. A machine removed from the fleet can use none of them. If
+the shared folder briefly can't be read, each machine keeps applying the last
+list it read and takes nothing away until it can read it again.
 Agent task grants approved before this version only read while any machine is
-restricted; approve them again on the destination to restore task changes.
+restricted, until the machine holding one next renews it, within an hour, which
+ties it to that machine. Nothing needs approving again.
 
 The list trusts the fleet's shared folder: anything that can write there can
 already join the fleet. It stops a read-only machine through the app, its agents
@@ -41,7 +44,8 @@ Fleet links do not expire. In a shared-folder fleet, each machine replaces the
 credential it gave another machine a week before it would expire, or as soon as
 that machine is back online if it was away longer, and that machine swaps it in
 the same way. Giving out, renewing and withdrawing access keeps running with no
-T3 window open; collecting a link needs the desktop app open.
+T3 window open. Collecting a link needs the desktop app open; it collects renewals
+of links it already has even with automatic pickup off, and as soon as it opens.
 
 On each other machine, join using the owner's verification code. The owner then
 compares that machine's code from its own app before approving it. Select approved

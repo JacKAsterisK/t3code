@@ -550,6 +550,8 @@ export const AuthMcpTokenRequest = Schema.Struct({
   code_verifier: Schema.optionalKey(Schema.String),
   resource: Schema.optionalKey(Schema.String),
   refresh_token: Schema.optionalKey(Schema.String),
+  /** T3 Code LAN: a fleet machine's signed claim to hold the grant it refreshes. */
+  fleet_assertion: Schema.optionalKey(Schema.String),
 }).pipe(HttpApiSchema.asFormUrlEncoded());
 export type AuthMcpTokenRequest = typeof AuthMcpTokenRequest.Type;
 

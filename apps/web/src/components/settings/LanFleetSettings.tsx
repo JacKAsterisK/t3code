@@ -17,13 +17,12 @@ export function LanFleetCoordinator() {
   useEffect(() => {
     if (fleet.environmentId !== null && fleet.allowed) initialize();
   }, [fleet.environmentId, fleet.allowed]);
+  // Polls even with automatic pickup off: renewals of accepted links need no decision, and only
+  // new links wait for Sync now.
   const enabled =
-    !fleet.paused &&
-    ((fleet.summary?.enabled === true && fleet.summary.autoPickup) ||
-      (fleet.setup !== null &&
-        fleet.setup.autoPickup &&
-        (fleet.setup.stage === "pending" || fleet.setup.stage === "active")));
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- runs the fleet pickup polling timer while automatic pickup is enabled
+    fleet.summary?.enabled === true ||
+    (fleet.setup !== null && (fleet.setup.stage === "pending" || fleet.setup.stage === "active"));
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- runs the fleet pickup polling timer while this machine is in a fleet
   useEffect(() => {
     if (!enabled || !fleet.allowed || fleet.environmentId === null) return;
     return startFleetPolling(poll, pause);
@@ -65,10 +64,10 @@ export function LanFleetSettings() {
         <p className="text-xs text-muted-foreground">
           {fleet.summary?.enabled
             ? fleet.paused
-              ? "Automatic pickup is paused. Sync now to check again."
+              ? "Sync keeps failing, so it now checks every 30 minutes. Sync now checks at once."
               : fleet.summary.autoPickup
                 ? "Assigned links are checked every 5 minutes while this desktop app is open."
-                : "Automatic pickup is off. Sync now to collect assigned links."
+                : "Automatic pickup is off: Sync now collects new links. Renewals of existing links are still collected every 5 minutes while this desktop app is open."
             : fleet.setup?.sharedFolderTrust
               ? "Connect this machine through BuildShare to enable LAN links."
               : "Complete fleet setup to approve this machine before connecting."}

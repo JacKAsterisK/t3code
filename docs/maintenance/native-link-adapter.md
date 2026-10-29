@@ -33,7 +33,7 @@ The fork changes upstream in four small places, each an optional hook. None
 of them touches `apps/server/src/peer`:
 
 - a pinned-TLS HTTP client provided to the peer services in `server.ts`
-- an MCP OAuth public origin for requests addressed to the fleet TLS endpoint
+- an MCP OAuth public origin for requests the fleet TLS endpoint forwarded
   (`mcpOAuthHttp.ts`)
 - attribution of a pairing-code session to its fleet code (`McpOAuth.ts`,
   `EnvironmentAuth.ts`). The fleet access policy builds on it: every MCP
@@ -151,10 +151,12 @@ Smallest hooks:
      endpoint.
 2. **D: OAuth public origin.** In `mcpOAuthHttp.ts`, `requestUrls` consults an
    optional `McpOAuthPublicOrigin` service. The fork provides it from
-   `FleetTransport`. When the request's `Host` equals the running fleet TLS
-   origin's host, the issuer and resource use that https origin.
-   - A spoofed `Host` only renames the resource: the code, PKCE and pairing
-     code are still required.
+   `FleetTransport`. When the fleet TLS endpoint forwarded the request, the
+   issuer and resource use its https origin.
+   - The endpoint marks what it forwards with a per-process secret header
+     (`FLEET_TLS_FORWARD_HEADER`) and drops any copy a client sent. `Host`
+     alone proves nothing: a plain-http client can name the endpoint's host,
+     and must not be told it is on https.
    - Setting `x-forwarded-proto` in the proxy instead was rejected. It would
      change `toURL` for DPoP, WebSocket and HTTP auth on every existing fleet
      client connection (`dpop.ts`, `EnvironmentAuth.ts`, `http.ts`, `ws.ts`).
@@ -228,6 +230,13 @@ A policy change takes effect without approval:
   without changes. The derived value is never written to `settings.json`.
   - The Labs switch keeps its own stored value, but reads as on while the
     fleet setting is on. To stop linking, turn the fleet setting off.
+  - Off is off. The next pass forgets the links this machine's adapter made,
+    revokes every peer-link code and session it issued (including ones its
+    state lost track of), and removes its offers and requests from the share.
+    A peer that still has it on is refused: no code is offered, and a session
+    from a code redeemed just before is not recorded, so it is revoked. Links
+    made by hand and the fleet's own client connections are untouched. A
+    settings read error changes nothing.
   - The origin hook (answer 3) also applies only while the fleet setting is
     on, so an off machine behaves exactly as before.
   - **To turn the adapter on everywhere later,** change the
@@ -331,17 +340,16 @@ machine's fleet deliveries. Do it only with Dan's approval.
 **Undo**, in order:
 
 1. Set `fleetLinkedEnvironmentsEnabled` back off on CryoFrog and PandaMedic.
-   This stops the adapter, which would otherwise relink, and turns Linked
-   environments back to its own Labs value. Links already made stay.
-2. **Forget** the link on CryoFrog.
-3. Revoke "T3 Code · CryoFrog" in PandaMedic's Sharing & access.
-4. Delete the throwaway threads and project (`t3_project_delete` with
+   This turns Linked environments back to its own Labs value, and on its next
+   pass each machine forgets the link its adapter made and revokes the
+   peer-link sessions and codes it issued ("T3 Code · CryoFrog" on PandaMedic).
+2. Delete the throwaway threads and project (`t3_project_delete` with
    `environmentId`) and the clone folder.
-5. Delete the pair's `*.peer-link*.json` files from the share, and
-   `lan-fleet-peer-links.json` on both machines.
-6. Reinstall the current release if needed, and remove
+3. Check that no `*.peer-link*.json` files for the pair remain on the share;
+   delete any that do.
+4. Reinstall the current release if needed, and remove
    `fleetLinkedEnvironmentsEnabled` from `settings.json`.
-7. Re-run step 0 and compare.
+5. Re-run step 0 and compare.
 
 ### How to run the proof
 
@@ -368,9 +376,14 @@ machine's fleet deliveries. Do it only with Dan's approval.
   server service.
   - It runs a pass at startup, every 10 minutes, after each `LanFleet.sync`
     and `configure`, and on every access-policy or settings change.
-  - It does nothing unless `fleetLinkedEnvironmentsEnabled` is on, fleet
+  - It links nothing unless `fleetLinkedEnvironmentsEnabled` is on, fleet
     enrollment is active and shared-folder trust is on (`FleetContext.ts`).
-    When the fleet cannot be read, it removes nothing.
+    While the setting is off, each pass undoes what it made (answer 5). When
+    the fleet cannot be read, it removes nothing, and a machine only missing
+    from the trust check keeps its links until it stays missing (see
+    [LAN machine links](../operations/lan-machine-links.md#machine-access)).
+    A policy the share could not just give narrows no link; each call is
+    still capped.
   - Each share file has one writer (L writes requests and receipts, D writes
     offers), so there is no share lock. Passes are serialized in-process. A
     session attributed during a pass never waits for it: the two machines

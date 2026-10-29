@@ -294,6 +294,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const sessionObserver = yield* Effect.serviceOption(McpPeerLinkSessionObserver);
+  const grantAttribution = yield* Effect.serviceOption(CredentialAttribution.McpGrantAttribution);
   const linksEnabled = serverSettings.getSettings.pipe(
     Effect.map((settings) => settings.linkedEnvironmentsEnabled),
     Effect.orElseSucceed(() => false),
@@ -604,12 +605,18 @@ const make = Effect.gen(function* () {
             "client_id, refresh_token and the secure MCP resource are required.",
           );
         }
+        // An unattributed grant's fleet holder signs for it; any other claim changes nothing.
+        const holder =
+          token.fleet_assertion === undefined || Option.isNone(grantAttribution)
+            ? undefined
+            : yield* grantAttribution.value.verify(token.fleet_assertion);
         return yield* grants
           .refresh({
             clientId: token.client_id,
             resource: urls.resource,
             token: token.refresh_token,
             client: deriveAuthClientMetadata({ request }),
+            ...(holder === undefined ? {} : { holder }),
           })
           .pipe(
             Effect.map(grantResult),

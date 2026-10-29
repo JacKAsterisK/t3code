@@ -1,4 +1,5 @@
-// @effect-diagnostics nodeBuiltinImport:off -- Fixture share files are compared byte for byte.
+// @effect-diagnostics nodeBuiltinImport:off -- Fixture share files are compared byte for byte, and one plain-http request sets its own Host.
+import * as NodeHttp from "node:http";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { NodeHttpServer } from "@effect/platform-node";
 import {
@@ -10,7 +11,7 @@ import {
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import { createFleetTlsCertificate } from "@t3tools/shared/fleetTlsCertificate";
-import { startFleetProxy } from "@t3tools/shared/fleetTlsProxy";
+import { FLEET_TLS_FORWARD_HEADER, startFleetProxy } from "@t3tools/shared/fleetTlsProxy";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type { DeepPartial } from "@t3tools/shared/Struct";
 import * as Context from "effect/Context";
@@ -57,6 +58,25 @@ import * as FleetPeerHttpClient from "./FleetPeerHttpClient.ts";
 import * as FleetPeerLinks from "./FleetPeerLinks.ts";
 import * as FleetTransport from "./FleetTransport.ts";
 
+// What the synthetic fleet endpoint stamps on what it forwards; the server's own is random.
+const FORWARDED_MARK = "synthetic-forwarded-mark";
+
+/** A plain-http request straight to a backend, naming whatever `Host` its caller chooses. */
+const plainGet = (url: string, host: string) =>
+  Effect.promise(
+    () =>
+      new Promise<string>((resolve, reject) => {
+        const request = NodeHttp.get(url, { headers: { host }, agent: false }, (response) => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk: string) => (body += chunk));
+          response.on("end", () => resolve(body));
+          response.on("error", reject);
+        });
+        request.on("error", reject);
+      }),
+  );
+
 class FleetPeerTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.metadata)
   .add(EnvironmentHttpApi.groups.mcpOAuth) {}
@@ -92,6 +112,7 @@ const makeMachine = (input: {
     const fleet = yield* Ref.make<FleetContext.FleetLinkContext | undefined>(undefined);
     const levels = yield* Ref.make<Record<string, FleetAccessLevel>>({});
     const transportOrigin = yield* Ref.make<string | undefined>(undefined);
+    const backendOrigin = yield* Ref.make<string | undefined>(undefined);
     const descriptor = descriptorOf(input.identity.peer.environmentId, input.identity.peer.label);
     const context = yield* FleetPeerLinks.layerServices.pipe(
       Layer.provideMerge(FleetMcpOrigin.layer),
@@ -107,10 +128,21 @@ const makeMachine = (input: {
         Layer.mock(FleetAccessPolicy.FleetAccess)({
           accessFor: (environmentId) =>
             Ref.get(levels).pipe(Effect.map((current) => current[environmentId])),
+          // The levels above come from a policy just read from the share.
+          current: Effect.succeed({
+            revision: 1,
+            defaultAccess: "standard",
+            machines: [],
+            machineId: input.identity.peer.machineId,
+            peers: [],
+          }),
         }),
       ),
       Layer.provide(
-        Layer.mock(FleetTransport.FleetTransport)({ origin: Ref.get(transportOrigin) }),
+        Layer.mock(FleetTransport.FleetTransport)({
+          origin: Ref.get(transportOrigin),
+          forwarded: (headers) => headers[FLEET_TLS_FORWARD_HEADER] === FORWARDED_MARK,
+        }),
       ),
       Layer.provideMerge(Sqlite.layerMemory),
       Layer.provideMerge(ServerSecretStore.layer),
@@ -135,6 +167,7 @@ const makeMachine = (input: {
       fleet,
       levels,
       transportOrigin,
+      backendOrigin,
       adapter: Context.get(context, FleetPeerLinks.FleetPeerLinks),
       links: Context.get(context, PeerLinks.PeerLinks),
       mcp: Context.get(context, PeerMcpClient.PeerMcpClient),
@@ -203,12 +236,14 @@ const serveBehindFleetEndpoint = (machine: Machine) =>
           listen: { address: "127.0.0.1", port: 0 },
           target: `http://127.0.0.1:${address.port}/`,
           serverTls: { certificate: certificate.certificate, privateKey: certificate.privateKey },
+          forwardedMark: FORWARDED_MARK,
         }),
       ),
       (proxy) => Effect.promise(() => proxy.close()),
     );
     const origin = new URL(endpoint.httpBaseUrl).origin;
     yield* Ref.set(machine.transportOrigin, origin);
+    yield* Ref.set(machine.backendOrigin, `http://127.0.0.1:${address.port}`);
     return {
       origin,
       certificate: certificate.certificate,
@@ -327,6 +362,13 @@ it.live(
         const first = yield* linkOf;
         expect(first?.access).toBe("full-access");
         expect(first?.urls).toEqual([fleet.endpoint.origin]);
+        // Through the endpoint, sign-in names its https origin; a plain-http client that only
+        // names the endpoint's host is not told it is on https.
+        const spoofed = yield* plainGet(
+          `${yield* Ref.get(linked.backendOrigin)}/.well-known/oauth-authorization-server`,
+          new URL(fleet.endpoint.origin).host,
+        );
+        expect(spoofed).toContain(`"issuer":"http://${new URL(fleet.endpoint.origin).host}"`);
         expect(yield* callerAccess(fleet)).toBe("full-access");
         const [firstSession] = yield* linkedSessions;
         expect(yield* linkedSessions).toHaveLength(1);
@@ -400,6 +442,56 @@ it.live(
           ),
         ).toBe(true);
         expect(yield* shareSnapshot(fleet.share)).toEqual(fleetFiles);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live(
+  "turned off, forgets its links and revokes what it issued, refusing peers that still have it on",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+        const { cryoFrog, pandaMedic, linking, linked } = fleet;
+        const linkOf = linking.links
+          .get(pandaMedic.peer.environmentId)
+          .pipe(Effect.map(Option.getOrUndefined));
+        const fleetSubject = `lan-fleet:${Delivery.deliveryFileName(pandaMedic.peer.machineId, cryoFrog.peer.machineId)}`;
+        const fleetCode = yield* linked.auth.createPairingLink({
+          subject: fleetSubject,
+          ttl: Duration.hours(24),
+        });
+        const fleetSession = yield* linked.auth.issueSession({ subject: fleetSubject });
+        yield* round(fleet);
+        expect(yield* callerAccess(fleet)).toBe("full-access");
+        const switchOff = (machine: Machine) =>
+          Context.get(machine.context, ServerSettings.ServerSettingsService).updateSettings({
+            fleetLinkedEnvironmentsEnabled: false,
+          });
+
+        // PandaMedic turns it off; CryoFrog still has it on and keeps asking.
+        yield* switchOff(linked);
+        yield* round(fleet);
+        expect(yield* linked.linkSessions(cryoFrog)).toEqual([]);
+        expect(
+          (yield* linked.auth.listPairingLinks()).filter((code) => code.id !== fleetCode.id),
+        ).toEqual([]);
+        expect(yield* callerAccess(fleet)).not.toBe("full-access");
+
+        // CryoFrog turns it off too: the link its adapter made is forgotten.
+        yield* switchOff(linking);
+        yield* linking.adapter.pass;
+        expect(yield* linkOf).toBeUndefined();
+
+        // The fleet's own connection is exactly as it was.
+        expect((yield* linked.auth.listPairingLinks()).map((code) => code.id)).toEqual([
+          fleetCode.id,
+        ]);
+        expect(
+          (yield* linked.auth.listSessions()).some(
+            (session) => session.sessionId === fleetSession.sessionId,
+          ),
+        ).toBe(true);
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
 );

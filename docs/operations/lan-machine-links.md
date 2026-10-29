@@ -62,9 +62,11 @@ The list fails closed:
 - A machine never starts a second first revision while the share holds any
   history, even history it cannot follow.
 - If the share's list cannot be read, including more than 1,000 revision files,
-  a machine keeps the list it accepted and reports it unreadable; with none, it
-  treats every machine as read-only rather than using the setup access. Changes
-  are refused until it can read the list.
+  a machine keeps capping each use at the list it accepted and reports it
+  unreadable, but revokes and replaces nothing for access until a read
+  succeeds, so a share blip never costs a credential. A machine that never
+  accepted a list behaves as before one was saved. Changes are refused until it
+  can read the list.
 - A change holds `fleet-access.lock` for a moment. A lock older than two minutes
   was left by a crash, and the next change clears it.
 
@@ -76,8 +78,12 @@ and MCP sessions and `t3_lan_*` task grants approved with any of those. Each use
 of such a credential, over HTTP, WebSocket RPC or MCP, gets at most that
 machine's current access. A read-only machine's still-open connections and task
 grants lose launch, send, interrupt, respond, settings and fleet changes at once.
-A machine the fleet disabled, or that the roster no longer trusts, can use
-nothing.
+A machine the fleet disabled, or whose roster entry now names another identity,
+can use nothing. One a successful trust check only misses, such as when the
+enrollment folder briefly reads as absent, keeps its access until it has stayed
+missing for 15 minutes over at least three checks; a read error never counts.
+Each machine records this in `lan-fleet-members.json` and `lan-fleet-trusted.json`
+in its userdata, so a restart does not reset it.
 
 Revocation follows on the issuer at startup, every ten minutes and whenever the
 list or the fleet's machines change. It revokes sessions, grants and codes
@@ -92,15 +98,29 @@ The same replacement renews fleet links. A credential becomes a session with the
 default 30-day lifetime, and in shared-folder fleets the issuer delivers a
 replacement once less than seven days remain, whether or not a list was saved.
 The old session keeps working until the peer connects with the new one, which
-then retires it. A peer that is offline is renewed when its signed summary is
-fresh again, including after its session expired. Only credentials this machine
-delivered are renewed; a connection the peer made another way is left alone.
+then retires every session issued before it. A replacement counts as done only
+once the peer uses it: one redeemed but unused an hour later, such as when saving
+it failed, is replaced again while the old session still works. A peer that is
+offline is renewed when its signed summary is fresh again, including after its
+session expired. Only credentials this machine delivered are renewed; a
+connection the peer made another way is left alone.
+
+The receiving desktop collects a renewal or replacement of a connection it
+already accepted every five minutes while it is open, whether or not automatic
+pickup is on: it is no new trust decision. Automatic pickup only governs new
+links. Failing syncs slow it to every 30 minutes but never stop it. The saved
+connection lives in the desktop app, so the server cannot collect for it; while
+the app is closed nothing uses the connection, and on opening it collects the
+pending renewal straight away, since the issuer keeps one available until the
+new session is in use.
 
 The server runs this issuing side itself every five minutes, so renewal, access
 changes and revocation do not wait for an open window; an open desktop's sync
-only makes them sooner, and the sync lock keeps one at a time. The server
-collects nothing, and it starts only after this machine's desktop has synced
-once: it republishes the connections that desktop last published.
+only makes them sooner, and the sync lock keeps one at a time. It starts only
+after this machine's desktop has synced once: it republishes the connections
+that desktop last published. A sync lock left by a server that stopped mid-sync
+is cleared once its owner process is gone, or after ten minutes; a background
+sync that keeps finding the lock held logs a warning.
 
 Limits:
 
@@ -109,11 +129,16 @@ Limits:
 - A task grant approved on the destination by its own user, or with a pairing
   code created there, is that user's decision and is not tied to a machine;
   revoke it in **Sharing & access**.
-- Task grants approved before grants recorded their approver cannot be
-  attributed. While the list restricts any machine, they only read; approve them
-  again to restore task changes.
-- Pairing codes minted by a fleet session before codes recorded their minter are
-  not attributed either. Revoke unused ones in **Sharing & access**.
+- Task grants approved before grants recorded their approver are attributed at
+  their next refresh, within an hour, to the fleet machine whose server holds
+  them: it signs a claim for that one grant with its own fleet key, so a machine
+  can only ever claim its own grants, at its own access. Until then, and for a
+  holder that is not a fleet server, they only read while the list restricts
+  any machine.
+- Sessions redeemed from pairing codes a fleet session minted before codes
+  recorded their minter are not attributed. They keep the access they were
+  issued with until they expire, at most 30 days after this version is
+  installed. Revoke them in **Sharing & access** to end them sooner.
 
 Shared-folder trust is the boundary. Anything that can write the fleet share can
 already join the fleet: it can file enrollment requests, edit roster entries or

@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { AuthStandardClientScopes, EnvironmentHttpApi, mcpClientScopes } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -28,6 +29,8 @@ import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import * as FleetContext from "./FleetContext.ts";
 import * as FleetCredentialAccess from "./FleetCredentialAccess.ts";
 import * as Delivery from "./FleetDelivery.ts";
+import { syntheticFleetPeer } from "./FleetDelivery.fixtures.ts";
+import * as FleetGrantAttribution from "./FleetGrantAttribution.ts";
 
 // CryoFrog's server, receiving calls from AnvilToad. Only synthetic identities and an in-memory
 // database are used.
@@ -57,14 +60,32 @@ const restrict = (machineId: string) => {
   };
 };
 
+const identities = Object.fromEntries(
+  [CRYO, ANVIL, PANDA].map((machineId) => [machineId, syntheticFleetPeer(machineId)]),
+);
+/** What CryoFrog's full trust check finds: itself, and the peers it still trusts. */
+const context = FleetContext.FleetContext.of({
+  load: Effect.sync(
+    () =>
+      ({
+        self: identities[CRYO]!.peer,
+        peers: trusted.map((machineId) => ({
+          peer: identities[machineId]!.peer,
+          connectHost: undefined,
+        })),
+      }) as unknown as FleetContext.FleetLinkContext,
+  ),
+});
+
 class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.auth)
   .add(EnvironmentHttpApi.groups.mcpOAuth) {}
 
 const layerConfig = ServerConfig.layerTest(process.cwd(), { prefix: "t3-fleet-credential-test-" });
-const layerAccess = FleetCredentialAccess.layerServices.pipe(
-  Layer.provide(Layer.mock(FleetAccessPolicy.FleetAccess)({ current: Effect.sync(() => policy) })),
-);
+const layerPolicy = Layer.mock(FleetAccessPolicy.FleetAccess)({
+  current: Effect.sync(() => policy),
+});
+const layerAccess = FleetCredentialAccess.layerServices.pipe(Layer.provideMerge(layerPolicy));
 const layerCap = Layer.effect(
   CredentialAttribution.CredentialAccessCap,
   FleetCredentialAccess.FleetCredentialAccess.pipe(
@@ -93,14 +114,7 @@ const makeLayerRoutes = (capture: (services: Services) => void) =>
         const auth = yield* EnvironmentAuth.EnvironmentAuth;
         const grants = yield* McpOAuthGrants.McpOAuthGrants;
         const access = yield* FleetCredentialAccess.FleetCredentialAccess;
-        const context = FleetContext.FleetContext.of({
-          load: Effect.sync(
-            () =>
-              ({
-                peers: trusted.map((machineId) => ({ peer: { machineId } })),
-              }) as unknown as FleetContext.FleetLinkContext,
-          ),
-        });
+        const policyService = yield* FleetAccessPolicy.FleetAccess;
         capture({
           auth,
           grants,
@@ -108,6 +122,7 @@ const makeLayerRoutes = (capture: (services: Services) => void) =>
             Effect.provideService(FleetCredentialAccess.FleetCredentialAccess, access),
             Effect.provideService(EnvironmentAuth.EnvironmentAuth, auth),
             Effect.provideService(FleetContext.FleetContext, context),
+            Effect.provideService(FleetAccessPolicy.FleetAccess, policyService),
             Effect.orDie,
           ),
         });
@@ -118,6 +133,11 @@ const makeLayerRoutes = (capture: (services: Services) => void) =>
       Layer.provide(
         McpOAuthHttp.layer.pipe(
           Layer.provide(McpOAuth.layer),
+          Layer.provide(
+            FleetGrantAttribution.layerServices.pipe(
+              Layer.provide(Layer.succeed(FleetContext.FleetContext, context)),
+            ),
+          ),
           Layer.provide(ServerSettings.layerTest({ linkedEnvironmentsEnabled: true })),
         ),
       ),
@@ -283,6 +303,14 @@ it.live("refuses a downgraded machine's existing task grant at the receiver, the
       // Nor can its still-standard fleet session mint codes or change this machine's settings.
       expect((yield* mintCode(handler, anvil.token)).status).toBe(403);
 
+      // A policy the share could not just give only caps: nothing is revoked until it reads.
+      policy = { ...policy, unavailable: true };
+      yield* revoke;
+      expect((yield* auth.authenticateMcpClient(mcpRequest(refreshed.access_token))).access).toBe(
+        "read-only",
+      );
+      const { unavailable: _unavailable, ...readable } = policy;
+      policy = readable;
       yield* revoke;
       expect(
         yield* auth
@@ -340,6 +368,77 @@ it.live(
         expect((yield* auth.authenticateMcpClient(mcpRequest(legacy.token))).access).toBe(
           "read-only",
         );
+      }),
+    ),
+);
+
+it.live(
+  "attributes an unattributed task grant to the fleet machine holding it at its next refresh",
+  () =>
+    withRoutes((handler, { auth, grants }) =>
+      Effect.gen(function* () {
+        // Grants from before grants recorded who approved them, each held by one machine's server.
+        const legacy = () =>
+          grants.issue({
+            clientId: "legacy",
+            resource: `${ORIGIN}/mcp`,
+            access: "auto",
+            client: { deviceType: "bot" },
+            renewable: true,
+          });
+        const issuedAt = yield* Clock.currentTimeMillis;
+        const claim = (signer: string, grantId: string, key = signer) =>
+          FleetGrantAttribution.signGrantAssertion({
+            signer,
+            signingPrivateKey: identities[key]!.signingPrivateKey,
+            audience: identities[CRYO]!.peer.environmentId,
+            grantId,
+            issuedAt,
+          });
+        const refresh = (refreshToken: string, assertion?: string) =>
+          handler(
+            at(
+              "/oauth/mcp/token",
+              form({
+                grant_type: "refresh_token",
+                client_id: "legacy",
+                refresh_token: refreshToken,
+                resource: `${ORIGIN}/mcp`,
+                ...(assertion === undefined ? {} : { fleet_assertion: assertion }),
+              }),
+            ),
+          ).pipe(Effect.flatMap(json<{ access_token: string; refresh_token: string }>));
+        const accessOf = (token: string) =>
+          auth.authenticateMcpClient(mcpRequest(token)).pipe(Effect.map((client) => client.access));
+        restrict(ANVIL);
+
+        // PandaMedic's server signs as itself: its grant does task work again, with no approval.
+        const panda = yield* legacy();
+        expect(yield* accessOf(panda.token)).toBe("read-only");
+        const pandaRefreshed = yield* refresh(panda.refreshToken!, claim(PANDA, panda.grantId));
+        expect(yield* accessOf(pandaRefreshed.access_token)).toBe("auto");
+        // It stays attributed without asking again.
+        expect(yield* accessOf((yield* refresh(pandaRefreshed.refresh_token)).access_token)).toBe(
+          "auto",
+        );
+
+        // AnvilToad can sign only as itself, which makes its grant its own: read-only.
+        const anvil = yield* legacy();
+        const anvilRefreshed = yield* refresh(anvil.refreshToken!, claim(ANVIL, anvil.grantId));
+        expect(yield* accessOf(anvilRefreshed.access_token)).toBe("read-only");
+        // Once attributed, no claim moves it to another machine.
+        const moved = yield* refresh(anvilRefreshed.refresh_token, claim(PANDA, anvil.grantId));
+        expect(yield* accessOf(moved.access_token)).toBe("read-only");
+
+        // Claiming PandaMedic with its own key, or reusing PandaMedic's claim, changes nothing.
+        const forged = yield* legacy();
+        const forgedRefreshed = yield* refresh(
+          forged.refreshToken!,
+          claim(PANDA, forged.grantId, ANVIL),
+        );
+        expect(yield* accessOf(forgedRefreshed.access_token)).toBe("read-only");
+        const replayed = yield* refresh(forgedRefreshed.refresh_token, claim(PANDA, panda.grantId));
+        expect(yield* accessOf(replayed.access_token)).toBe("read-only");
       }),
     ),
 );

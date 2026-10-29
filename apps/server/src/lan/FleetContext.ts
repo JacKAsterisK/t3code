@@ -7,11 +7,13 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import { FLEET_ROSTER_ENV, resolveFleetBootstrap } from "./FleetBootstrap.ts";
 import * as FleetEnrollment from "./FleetEnrollment.ts";
 import { readFleetJson, validateRoster } from "./FleetFiles.ts";
+import { makeMembership } from "./FleetMembership.ts";
 
 export interface FleetLinkPeer {
   readonly peer: Delivery.FleetPeer;
@@ -45,6 +47,10 @@ const make = Effect.gen(function* () {
   const launchEnvironment = yield* HostProcess.Environment;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const enrollment = yield* FleetEnrollment.FleetEnrollment;
+  const serverConfig = yield* ServerConfig.ServerConfig;
+  const membership = yield* makeMembership(
+    path.join(serverConfig.stateDir, "lan-fleet-trusted.json"),
+  );
 
   const load = Effect.gen(function* () {
     if (launchEnvironment[FLEET_ROSTER_ENV] === "") return undefined;
@@ -90,10 +96,35 @@ const make = Effect.gen(function* () {
     if (selfEntry === undefined || trusted(selfEntry) === undefined)
       return yield* configurationError();
     const now = DateTime.toEpochMillis(yield* DateTime.now);
-    const peers: Array<FleetLinkPeer> = [];
-    for (const machine of roster.machines) {
+    const found = roster.machines.flatMap((machine) => {
       const peer = trusted(machine);
-      if (peer === undefined || peer.machineId === self.machineId) continue;
+      return peer === undefined || peer.machineId === self.machineId ? [] : [peer];
+    });
+    // A peer this read shows disabled, or under another identity, has left; one it only misses
+    // stays until it stays missing, so a roster blip costs no machine its credentials.
+    const removed = new Set(
+      config.peers
+        .filter(
+          (peer) =>
+            !peer.enabled ||
+            roster.machines.some(
+              (machine) =>
+                machine.machineId === peer.machineId &&
+                (!machine.enabled ||
+                  machine.environmentId !== peer.environmentId ||
+                  machine.origin !== peer.origin),
+            ),
+        )
+        .map((peer) => peer.machineId),
+    );
+    const retained = (yield* membership.check(found, removed)).flatMap((missed) =>
+      config.peers.filter(
+        (peer) =>
+          peer.enabled && peer.machineId === missed.machineId && peer.machineId !== self.machineId,
+      ),
+    );
+    const peers: Array<FleetLinkPeer> = [];
+    for (const peer of [...found, ...retained]) {
       const catalogFile = path.join(
         config.deliveryDirectory,
         `${Delivery.deliveryFileName(peer.machineId, peer.machineId)}.catalog.json`,

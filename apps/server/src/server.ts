@@ -40,6 +40,7 @@ import * as Ws from "./ws.ts";
 import * as FleetAccessPolicy from "./lan/FleetAccessPolicy.ts";
 import * as LanFleet from "./lan/LanFleet.ts";
 import * as FleetMcpOrigin from "./lan/FleetMcpOrigin.ts";
+import * as FleetGrantAttribution from "./lan/FleetGrantAttribution.ts";
 import * as FleetPeerHttpClient from "./lan/FleetPeerHttpClient.ts";
 import * as FleetCredentialAccess from "./lan/FleetCredentialAccess.ts";
 import * as FleetPeerLinks from "./lan/FleetPeerLinks.ts";
@@ -804,6 +805,9 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.mergeAll(
       FleetPeerLinks.layer,
       FleetMcpOrigin.layer,
+      // Task grants from before grants recorded their approver: each holder signs for its own.
+      FleetGrantAttribution.layer,
+      FleetGrantAttribution.layerSigner,
       // The same cap as EnvironmentAuth's, by layer memoization, for each WebSocket RPC call.
       FleetCredentialAccess.layerCap,
       FleetCredentialAccess.layerRevocation,

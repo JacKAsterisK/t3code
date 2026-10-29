@@ -9,6 +9,7 @@ import {
   type LanFleetSetupInput,
   type LanFleetSetupState,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -23,6 +24,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { isProcessAlive } from "../serverRuntimeState.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import { readFleetJson, validateRoster, writeFleetJson } from "./FleetFiles.ts";
 import { FLEET_ROSTER_ENV, resolveFleetBootstrap } from "./FleetBootstrap.ts";
@@ -45,10 +47,21 @@ const isFleetError = Schema.is(LanFleetError);
 const isConnectHost = Schema.is(FleetConnectHost);
 // Fleet credentials become sessions with the default 30-day lifetime; replace them a week early.
 const RENEW_BEFORE_MS = 7 * 24 * 60 * 60 * 1000;
+// A peer connects with a session it collected within moments; one unused this long was not saved.
+export const UNUSED_SESSION_GRACE_MS = 60 * 60 * 1000;
 // A connection the peer already had before this machine sent it a fleet credential.
 const EXISTING_CONNECTION = "existing-connection";
 // The same cadence as a client's automatic pickup.
 const BACKGROUND_SYNC_INTERVAL = Duration.minutes(5);
+// A sync holds its lock for seconds; one this old was left by a process that stopped mid-sync.
+const STALE_SYNC_LOCK_MS = 10 * 60 * 1000;
+// Background syncs that found the lock held this many times in a row are worth a warning.
+const BUSY_WARNING_STREAK = 3;
+const LockOwner = Schema.Struct({
+  pid: Schema.Number,
+  instance: Schema.String,
+  createdAt: Schema.Number,
+});
 
 export class LanFleet extends Context.Service<
   LanFleet,
@@ -90,6 +103,42 @@ const make = Effect.gen(function* () {
     machines: [],
     incoming: [],
   };
+  // Tells this server's own syncs, which only ever wait, from a lock a killed process left.
+  const instance = NodeCrypto.randomUUID();
+  const lockOwner = path.join(lock, "owner.json");
+  const busy = () => new LanFleetError({ reason: "busy" });
+
+  /** The sync lock, cleared first if a process that died holding it left it behind. */
+  const acquireLock = Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    const claim = Effect.gen(function* () {
+      yield* fs.makeDirectory(lock);
+      yield* writeFleetJson(lockOwner, { pid: process.pid, instance, createdAt: now }).pipe(
+        Effect.ignore,
+      );
+    });
+    if ((yield* Effect.result(claim))._tag === "Success") return;
+    const owner = yield* readFleetJson(lockOwner, LockOwner).pipe(Effect.option);
+    const modified = yield* fs.stat(lock).pipe(
+      Effect.map((info) => Option.getOrUndefined(info.mtime)?.getTime()),
+      Effect.orElseSucceed(() => undefined),
+    );
+    const stale = Option.match(owner, {
+      // Its owner is gone, or so old that its process ID now names another process.
+      onSome: (held) =>
+        held.instance !== instance &&
+        (!isProcessAlive(held.pid) || now - held.createdAt > STALE_SYNC_LOCK_MS),
+      // Killed before it recorded an owner.
+      onNone: () => modified !== undefined && now - modified > STALE_SYNC_LOCK_MS,
+    });
+    if (!stale) return yield* busy();
+    yield* Effect.logWarning("Clearing a LAN fleet sync lock a stopped process left behind.");
+    // Moving it aside is atomic, so two servers clearing it cannot both go on to take it.
+    const aside = `${lock}.stale-${NodeCrypto.randomUUID()}`;
+    yield* fs.rename(lock, aside).pipe(Effect.mapError(busy));
+    yield* fs.remove(aside, { recursive: true }).pipe(Effect.ignore);
+    yield* claim.pipe(Effect.mapError(busy));
+  }).pipe(Effect.provideService(FileSystem.FileSystem, fs));
 
   const run = Effect.fn("LanFleet.sync")(
     function* (request: LanFleetSyncInput | "background") {
@@ -118,8 +167,10 @@ const make = Effect.gen(function* () {
       const policy = config.managed ? yield* fleetAccess.current : undefined;
       const policyActive = policy !== undefined && policy.revision > 0;
       // Only a shared folder tells this machine which grants a peer still holds, so it can replace
-      // them: to renew them, and once a policy is saved, to match each peer's access.
-      const enforcePolicy = sharedFolder && policyActive;
+      // them: to renew them, and once a policy is saved, to match each peer's access. A policy
+      // the share could not just give caps where it is used but revokes nothing.
+      const enforcePolicy =
+        sharedFolder && policyActive && FleetAccessPolicy.mayRevokeForAccess(policy);
       const roster = yield* readFleetJson(config.rosterPath, FleetRoster);
       const localId = yield* environment.getEnvironmentId;
       const self = config.peers.find((peer) => peer.machineId === config.machineId && peer.enabled);
@@ -186,7 +237,7 @@ const make = Effect.gen(function* () {
         return yield* new LanFleetError({ reason: "configuration" });
 
       return yield* Effect.acquireUseRelease(
-        fs.makeDirectory(lock).pipe(Effect.mapError(() => new LanFleetError({ reason: "busy" }))),
+        acquireLock,
         () =>
           Effect.gen(function* () {
             const now = DateTime.toEpochMillis(yield* DateTime.now);
@@ -277,6 +328,7 @@ const make = Effect.gen(function* () {
                         session: true,
                         expiresAt: DateTime.toEpochMillis(session.expiresAt),
                         used: session.connected || session.lastConnectedAt !== null,
+                        issuedAt: DateTime.toEpochMillis(session.issuedAt),
                         revoke: auth.revokeSession(session.sessionId),
                         link: undefined,
                       })),
@@ -287,6 +339,7 @@ const make = Effect.gen(function* () {
                         session: false,
                         expiresAt: DateTime.toEpochMillis(link.expiresAt),
                         used: false,
+                        issuedAt: DateTime.toEpochMillis(link.createdAt),
                         revoke: auth.revokePairingLink(link.id),
                         link,
                       })),
@@ -301,9 +354,15 @@ const make = Effect.gen(function* () {
                   // Before the first saved policy, a credential keeps the access it was issued at.
                   const current = (item: (typeof held)[number]) =>
                     !enforcePolicy || item.access === access;
-                  // An unspent grant is a replacement in flight; a session lasts until renewal is due.
+                  // An unspent grant is a replacement in flight; a session lasts until renewal is
+                  // due. One the peer redeemed but has not used counts only while it may still be
+                  // saving it, so a pickup that failed to save is replaced before the session it
+                  // was replacing runs out.
                   const fresh = (item: (typeof held)[number]) =>
-                    current(item) && (!item.session || item.expiresAt - now > RENEW_BEFORE_MS);
+                    current(item) &&
+                    (!item.session ||
+                      (item.expiresAt - now > RENEW_BEFORE_MS &&
+                        (item.used || now - item.issuedAt < UNUSED_SESSION_GRACE_MS)));
                   // Without a policy, only a peer that took a fleet credential is renewed.
                   const renewable =
                     enforcePolicy ||
@@ -313,10 +372,14 @@ const make = Effect.gen(function* () {
                   if (renewable)
                     recipientConnected =
                       recipientConnected && held.some((item) => item.session && fresh(item));
-                  // Once the peer uses its renewed session, the one it replaced is retired.
-                  if (held.some((item) => item.session && item.used && fresh(item)))
+                  // Once the peer uses its renewed session, the ones issued before it are retired.
+                  // A later one it has not used yet may be what it saved, so that one stays.
+                  const inUse = held
+                    .filter((item) => item.session && item.used && fresh(item))
+                    .toSorted((left, right) => right.issuedAt - left.issuedAt)[0];
+                  if (inUse !== undefined)
                     for (const credential of held.filter(
-                      (item) => item.session && current(item) && !fresh(item),
+                      (item) => item.session && current(item) && item.issuedAt < inUse.issuedAt,
                     ))
                       yield* credential.revoke;
                   if (catalogConnected && recipientReady && renewable && !held.some(fresh)) {
@@ -524,7 +587,10 @@ const make = Effect.gen(function* () {
                             received.senderCatalogCreatedAt === undefined ||
                             peerCatalog.createdAt > received.senderCatalogCreatedAt))) &&
                       incoming.length < 1 &&
-                      (input.mode === "manual" || (input.mode === "automatic" && config.autoPickup))
+                      // Renewing a connection already accepted is no new trust decision, so a
+                      // client collects it whether or not automatic pickup is on.
+                      (input.mode === "manual" ||
+                        (input.mode === "automatic" && (config.autoPickup || replacing)))
                     ) {
                       journal[`received:${incomingKey}`] = {
                         deliveryId: delivery.header.deliveryId,
@@ -626,13 +692,25 @@ export const layer = layerServices.pipe(Layer.provide(FleetEnrollment.layer));
 export const layerBackground = Layer.effectDiscard(
   Effect.gen(function* () {
     const fleet = yield* LanFleet;
+    // A client's sync holding the lock is normal; one that never lets go stops renewal.
+    let busyStreak = 0;
     yield* Effect.forkScoped(
       fleet.backgroundSync.pipe(
-        Effect.catch((error) =>
-          error.reason === "busy"
-            ? Effect.void
-            : Effect.logWarning("Background LAN fleet sync failed.", { reason: error.reason }),
-        ),
+        Effect.tap(() => Effect.sync(() => (busyStreak = 0))),
+        Effect.catch((error) => {
+          if (error.reason !== "busy") {
+            busyStreak = 0;
+            return Effect.logWarning("Background LAN fleet sync failed.", {
+              reason: error.reason,
+            });
+          }
+          busyStreak += 1;
+          return busyStreak % BUSY_WARNING_STREAK === 0
+            ? Effect.logWarning("Background LAN fleet sync keeps finding its lock held.", {
+                attempts: busyStreak,
+              })
+            : Effect.void;
+        }),
         Effect.repeat(Schedule.spaced(BACKGROUND_SYNC_INTERVAL)),
       ),
     );

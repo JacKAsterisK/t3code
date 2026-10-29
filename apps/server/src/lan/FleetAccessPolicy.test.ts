@@ -277,7 +277,7 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
     }).pipe(Effect.provide(configLayer)),
   );
 
-  it.effect("fails closed when the share is flooded with entry files", () =>
+  it.effect("keeps the last accepted policy when the share is flooded with entry files", () =>
     Effect.gen(function* () {
       const f = yield* fleet();
       const cryo = yield* f.machine();
@@ -293,11 +293,15 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
       expect(cached.revision).toBe(1);
       expect(f.accessOf(cached, f.anvil)).toBe("read-only");
       expect((yield* f.change(cryo, f.cryo, 1, []).pipe(Effect.flip)).reason).toBe("unavailable");
-      // One without it never falls back to the legacy setting: nothing is standard until it reads.
+      // It caps at that policy but may revoke nothing for access until the share reads again.
+      expect(FleetAccessPolicy.policyApplies(cached)).toBe(true);
+      expect(FleetAccessPolicy.mayRevokeForAccess(cached)).toBe(false);
+      // One that never accepted a policy behaves as before any was saved, never read-only.
       const fresh = yield* (yield* f.machine()).refresh(f.input(f.anvil));
       expect(fresh.unavailable).toBe(true);
-      expect(FleetAccessPolicy.selfAccess(fresh)).toBe("read-only");
-      expect(f.accessOf(fresh, f.panda)).toBe("read-only");
+      expect(FleetAccessPolicy.policyApplies(fresh)).toBe(false);
+      expect(FleetAccessPolicy.selfAccess(fresh)).toBe("standard");
+      expect(f.accessOf(fresh, f.panda)).toBe("standard");
     }).pipe(Effect.provide(configLayer)),
   );
 });

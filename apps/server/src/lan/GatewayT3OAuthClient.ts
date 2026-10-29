@@ -117,6 +117,8 @@ export const makeGatewayT3OAuthClient = (options: {
   readonly credentials: GatewayCredentialStore;
   readonly fetch?: typeof globalThis.fetch;
   readonly now?: () => number;
+  /** A fleet machine's signed claim to hold `grantId`, sent with each refresh. */
+  readonly fleetAssertion?: (grantId: string) => Promise<string | undefined>;
 }) => {
   const origin = secureOrigin(options.origin);
   const resource = `${origin}/mcp`;
@@ -405,6 +407,8 @@ export const makeGatewayT3OAuthClient = (options: {
     if (state.tokens.refreshExpiresAt <= now())
       throw new GatewayOAuthError("authorization-required");
     if (state.tokens.accessExpiresAt > now() + 60_000) return state.tokens.accessToken;
+    // Servers that do not know it ignore the extra field; one that cannot be signed is left out.
+    const assertion = await options.fleetAssertion?.(state.tokens.grantId).catch(() => undefined);
     // Persist uncertainty first: a lost rotated response must never replay the old
     // refresh token after a process restart and revoke an otherwise healthy family.
     await save({ ...state, renewalRequired: true });
@@ -415,6 +419,7 @@ export const makeGatewayT3OAuthClient = (options: {
           client_id: state.clientId,
           refresh_token: state.tokens.refreshToken,
           resource,
+          ...(assertion === undefined ? {} : { fleet_assertion: assertion }),
         }),
       ),
       state.tokens.grantId,

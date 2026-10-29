@@ -9,6 +9,7 @@ import {
   type FleetRoster,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as TestClock from "effect/testing/TestClock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -233,7 +234,8 @@ const setup = Effect.fn("FleetTest.setup")(function* (
     setPolicy: (next: Partial<FleetAccessPolicy.FleetAccessState>) => {
       policy = { ...policy, ...next };
     },
-    consume: (machineId: string) => {
+    /** The peer redeems its grants; `used` false is a pickup whose saving then failed. */
+    consume: (machineId: string, used = true) => {
       sessions.set(machineId, [
         ...(sessions.get(machineId) ?? []),
         ...(active.get(machineId) ?? []).map((link) => ({
@@ -245,7 +247,7 @@ const setup = Effect.fn("FleetTest.setup")(function* (
           issuedAt: link.createdAt,
           // The default session lifetime, which fleet renewal works within.
           expiresAt: DateTime.makeUnsafe(DateTime.toEpochMillis(link.createdAt) + 30 * 86_400_000),
-          lastConnectedAt: link.createdAt,
+          lastConnectedAt: used ? link.createdAt : null,
           connected: false,
           current: false,
         })),
@@ -604,6 +606,52 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
       assert.deepEqual(f.issuedScopes.at(-1), FleetAccessPolicy.fleetCredentialScopes("read-only"));
     }).pipe(Effect.provide(testConfig)),
   );
+  it.effect(
+    "collects a renewal with automatic pickup off, and replaces one redeemed but never saved",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* setup(false, false, true);
+        const connected = {
+          mode: "automatic" as const,
+          connectedEnvironmentIds: [f.a.peer.environmentId],
+        };
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        // A new link still waits for Sync now.
+        assert.equal(
+          (yield* f.sync(f.recipient.service, { mode: "automatic" })).incoming.length,
+          0,
+        );
+        assert.equal((yield* f.sync(f.recipient.service)).incoming.length, 1);
+        f.consume("alpha");
+        yield* f.sync(f.recipient.service, connected);
+        yield* f.sync(f.sender.service);
+
+        // Renewing that accepted link is no new decision: automatic sync collects it.
+        yield* TestClock.adjust("24 days");
+        yield* f.sync(f.recipient.service, connected);
+        yield* f.sync(f.sender.service);
+        assert.deepEqual(f.issued, ["alpha", "alpha"]);
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+
+        // The peer redeems it, but saving it fails: its client still uses the old session.
+        f.consume("alpha", false);
+        yield* f.sync(f.sender.service);
+        assert.deepEqual(f.issued, ["alpha", "alpha"]);
+        // Unused past the time a save takes, it is no renewal: another goes out well before
+        // the old session runs out, with nothing revoked meanwhile.
+        yield* TestClock.adjust(Duration.millis(LanFleet.UNUSED_SESSION_GRACE_MS));
+        yield* f.sync(f.recipient.service, connected);
+        yield* f.sync(f.sender.service);
+        assert.deepEqual(f.issued, ["alpha", "alpha", "alpha"]);
+        assert.deepEqual(f.revoked, []);
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+        // Used, it retires both sessions issued before it.
+        f.consume("alpha");
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+        assert.deepEqual(f.revoked.toSorted(), ["session-synthetic-1", "session-synthetic-2"]);
+      }).pipe(Effect.provide(testConfig)),
+  );
   it.effect("never replaces a connection the peer had before the fleet sent it one", () =>
     Effect.gen(function* () {
       const f = yield* setup(true, false, true);
@@ -639,9 +687,26 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
       );
       assert.deepEqual(f.issued, ["alpha"]);
       const lock = f.path.join(f.sender.stateDir, "lan-fleet.lock");
+      const owner = f.path.join(lock, "owner.json");
       yield* f.fs.makeDirectory(lock);
       assert.equal((yield* f.sync(f.sender.service).pipe(Effect.flip)).reason, "busy");
       assert.equal(yield* f.fs.exists(lock), true);
+      // Another live server holds it.
+      yield* writeFleetJson(owner, {
+        pid: process.pid,
+        instance: "other",
+        createdAt: DateTime.toEpochMillis(yield* DateTime.now),
+      });
+      assert.equal((yield* f.sync(f.sender.service).pipe(Effect.flip)).reason, "busy");
+      // Its server was killed mid-sync: the lock is cleared, or renewal would stop for good.
+      yield* writeFleetJson(owner, { pid: 2_147_483_646, instance: "other", createdAt: 0 });
+      assert.equal((yield* f.sync(f.sender.service)).enabled, true);
+      assert.equal(yield* f.fs.exists(lock), false);
+      // Killed before it recorded an owner, long enough ago.
+      yield* f.fs.makeDirectory(lock);
+      yield* f.fs.utimes(lock, 0, 0);
+      assert.equal((yield* f.sync(f.sender.service)).enabled, true);
+      assert.equal(yield* f.fs.exists(lock), false);
     }).pipe(Effect.provide(testConfig)),
   );
 

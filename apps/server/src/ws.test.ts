@@ -1,7 +1,12 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   AuthSessionId,
+  type AuthEnvironmentScope,
+  type ScheduledTaskListResult,
+  WsScheduledTasksSubscribeRpc,
   EnvironmentId,
   ProjectId,
   ThreadId,
@@ -928,6 +933,97 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
       [[[snapshotFor("/b", "2026-10-25T00:00:00.000Z")], []]],
     );
     yield* server.write(0, { _tag: "Interrupt", requestId: configRequest, interruptors: [] });
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+    Effect.scoped,
+  ),
+);
+
+it.effect("stops showing webhook URLs once a connection's access narrows after it opened", () =>
+  Effect.gen(function* () {
+    const lists = yield* Queue.unbounded<ScheduledTaskListResult>();
+    const responses = yield* Queue.unbounded<ScheduledTaskListResult>();
+    const list = {
+      tasks: [
+        {
+          id: "task",
+          title: "Nightly",
+          webhook: { path: "/hooks/task", url: "https://hooks.example.test/task", hasSecret: true },
+        },
+      ],
+    } as unknown as ScheduledTaskListResult;
+    // The connection opened as standard; a fleet access change then caps it at read-only.
+    let current: ReadonlyArray<AuthEnvironmentScope> = [
+      AuthOrchestrationReadScope,
+      AuthOrchestrationOperateScope,
+    ];
+    const server = yield* RpcServer.makeNoSerialization(
+      RpcGroup.make(WsScheduledTasksSubscribeRpc),
+      {
+        ...WS_RPC_SERVER_OPTIONS,
+        onFromServer: (response) =>
+          response._tag === "Chunk"
+            ? Effect.forEach(response.values, (value) => Queue.offer(responses, value), {
+                discard: true,
+              })
+            : Effect.void,
+      },
+    ).pipe(
+      Effect.provide(
+        layerWsRpc(
+          {
+            sessionId: AuthSessionId.make("fleet-peer"),
+            subject: "fleet-peer",
+            method: "bearer-access-token",
+            scopes: current,
+          },
+          {},
+          yield* ServerBrowser.ServerBrowser,
+          Effect.sync(() => current),
+        ).pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              layerUnusedConfigRpcServices,
+              Layer.mock(ScheduledTasks.ScheduledTaskService)({
+                subscribeList: () => Stream.fromQueue(lists),
+              }),
+              Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+              Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+              Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+              Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+              Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+                scratchRoot: Effect.succeedNone,
+                namedProjectsRoot: process.cwd(),
+              }),
+              Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+              Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+            ),
+          ),
+        ),
+      ),
+    );
+    const requestId = RpcMessage.RequestId("tasks");
+    yield* server.write(0, {
+      _tag: "Request",
+      id: requestId,
+      tag: WS_METHODS.scheduledTasksSubscribe,
+      payload: {},
+      headers: Headers.empty,
+    });
+    yield* Queue.offer(lists, list);
+    assert.isDefined((yield* Queue.take(responses)).tasks[0]?.webhook);
+    yield* server.write(0, { _tag: "Ack", requestId });
+    current = [AuthOrchestrationReadScope];
+    yield* Queue.offer(lists, list);
+    assert.isUndefined((yield* Queue.take(responses)).tasks[0]?.webhook);
+    yield* server.write(0, { _tag: "Interrupt", requestId, interruptors: [] });
   }).pipe(
     Effect.provide(
       Layer.mergeAll(

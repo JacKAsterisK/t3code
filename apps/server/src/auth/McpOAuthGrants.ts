@@ -15,6 +15,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as CredentialAttribution from "./CredentialAttribution.ts";
 import * as SessionStore from "./SessionStore.ts";
 
 const ACCESS_TTL_SECONDS = 60 * 60;
@@ -94,6 +95,11 @@ export class McpOAuthGrants extends Context.Service<
       readonly resource: string;
       readonly token: string;
       readonly client: AuthClientMetadata;
+      /**
+       * Who holds the grant, proven by its fleet machine. It applies only to a grant from before
+       * grants recorded their approver; one with an approver is never re-attributed.
+       */
+      readonly holder?: { readonly grantId: string; readonly subject: string };
     }) => Effect.Effect<IssuedGrant, McpOAuthGrantError>;
     readonly revoke: (input: {
       readonly clientId: string;
@@ -266,7 +272,10 @@ const make = Effect.gen(function* () {
               },
               ttl,
               Math.floor((grant.expiresAt - now) / 1000),
-              grant.subject,
+              grant.subject === CredentialAttribution.MCP_CLIENT_SUBJECT &&
+                input.holder?.grantId === grant.grantId
+                ? input.holder.subject
+                : grant.subject,
             );
             yield* sql`UPDATE auth_mcp_refresh_tokens SET spent = 1 WHERE token_hash = ${yield* hashToken(input.token)}`;
             yield* sql`INSERT INTO auth_mcp_refresh_tokens(token_hash, grant_id) VALUES (${yield* hashToken(nextToken)}, ${grant.grantId})`;

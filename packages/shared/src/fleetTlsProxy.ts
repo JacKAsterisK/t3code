@@ -55,6 +55,9 @@ export function fleetTlsRequestOptions(
   };
 }
 
+/** Marks a request the encrypted fleet endpoint forwarded; only that endpoint can set it. */
+export const FLEET_TLS_FORWARD_HEADER = "x-t3-fleet-tls";
+
 /** No redirect or caller-supplied destination can escape this adapter's approved endpoint. */
 export async function startFleetProxy(input: {
   readonly listen: { readonly address: string; readonly port: number };
@@ -65,6 +68,11 @@ export async function startFleetProxy(input: {
     readonly origin?: string;
   };
   readonly peerTls?: { readonly identity: FleetTlsTrust; readonly now: number };
+  /**
+   * A secret the encrypted endpoint sets as `FLEET_TLS_FORWARD_HEADER` on what it forwards, so
+   * the backend can tell a request that really arrived over TLS. A client's own copy is dropped.
+   */
+  readonly forwardedMark?: string;
 }): Promise<FleetProxy> {
   const target = new URL(input.target);
   const advertised =
@@ -123,8 +131,11 @@ export async function startFleetProxy(input: {
       "x-forwarded-host",
       "x-forwarded-proto",
       "x-real-ip",
+      FLEET_TLS_FORWARD_HEADER,
     ])
       delete result[name];
+    if (input.serverTls !== undefined && input.forwardedMark !== undefined)
+      result[FLEET_TLS_FORWARD_HEADER] = input.forwardedMark;
     return result;
   };
   const options = (incoming: NodeHttp.IncomingMessage): NodeHttps.RequestOptions => ({

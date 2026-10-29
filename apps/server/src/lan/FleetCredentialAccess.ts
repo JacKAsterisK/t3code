@@ -122,10 +122,14 @@ export const revokeExcess = Effect.fn("FleetCredentialAccess.revokeExcess")(func
   const access = yield* FleetCredentialAccess;
   const auth = yield* EnvironmentAuth.EnvironmentAuth;
   const context = yield* FleetContext.FleetContext;
+  const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
   // Only a full trust check against the share decides that a machine lost its trust.
   const fleet = yield* context.load.pipe(Effect.orElseSucceed(() => undefined));
   if (fleet === undefined) return;
   yield* access.setTrusted(new Set(fleet.peers.map(({ peer }) => peer.machineId)));
+  // A policy this pass could not read only caps; it never costs a credential recovery would not
+  // give back. The machines' trust above came from a successful check.
+  const forAccess = FleetAccessPolicy.mayRevokeForAccess(yield* fleetAccess.current);
   const excess = Effect.fn("FleetCredentialAccess.excess")(function* (
     credential: { readonly subject: string } & Parameters<
       typeof FleetAccessPolicy.credentialAccess
@@ -137,7 +141,11 @@ export const revokeExcess = Effect.fn("FleetCredentialAccess.revokeExcess")(func
     if (allowed === undefined) return false;
     if (allowed === "none") return true;
     if (credential.subject === root && root.startsWith(FLEET_CREDENTIAL_PREFIX)) return false;
-    return allowed === "read-only" && FleetAccessPolicy.credentialAccess(credential) === "standard";
+    return (
+      forAccess &&
+      allowed === "read-only" &&
+      FleetAccessPolicy.credentialAccess(credential) === "standard"
+    );
   });
   for (const session of yield* auth.listSessions())
     if (yield* excess(session)) yield* auth.revokeSession(session.sessionId);
@@ -150,7 +158,10 @@ export const layerRevocation = Layer.effectDiscard(
   Effect.gen(function* () {
     const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
     const services = yield* Effect.context<
-      FleetCredentialAccess | EnvironmentAuth.EnvironmentAuth | FleetContext.FleetContext
+      | FleetCredentialAccess
+      | EnvironmentAuth.EnvironmentAuth
+      | FleetContext.FleetContext
+      | FleetAccessPolicy.FleetAccess
     >();
     const requests = yield* Queue.sliding<void>(1);
     const request = Queue.offer(requests, undefined).pipe(Effect.asVoid);

@@ -1228,6 +1228,10 @@ export const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
+  // What the connection may use now, such as after its fleet access narrows; never more than at open.
+  currentScopes: Effect.Effect<ReadonlyArray<AuthEnvironmentScope>> = Effect.succeed(
+    currentSession.scopes,
+  ),
 ) =>
   Layer.effectContext(
     Effect.gen(function* () {
@@ -1405,20 +1409,27 @@ export const layerWsRpc = (
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const relayClient = yield* RelayClient.RelayClient;
-      // Webhook URLs start agents; expose them only to operate-scoped sessions while keeping tasks readable.
-      const withVisibleWebhookUrls = (result: ScheduledTaskListResult): ScheduledTaskListResult =>
-        currentSession.scopes.includes(AuthOrchestrationOperateScope)
-          ? result
-          : {
-              tasks: result.tasks.map(({ webhook: _webhook, ...task }) => task),
-            };
+      // Webhook URLs start agents; expose them only to operate-scoped sessions while keeping tasks
+      // readable. Checked per list, so a connection whose fleet access narrowed stops seeing them.
+      const withVisibleWebhookUrls = (result: ScheduledTaskListResult) =>
+        currentScopes.pipe(
+          Effect.map((scopes): ScheduledTaskListResult =>
+            scopes.includes(AuthOrchestrationOperateScope)
+              ? result
+              : { tasks: result.tasks.map(({ webhook: _webhook, ...task }) => task) },
+          ),
+        );
       const authorizeEffect = <A, E, R>(
         requiredScope: AuthEnvironmentScope,
         effect: Effect.Effect<A, E, R>,
       ): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
-        currentSession.scopes.includes(requiredScope)
-          ? effect
-          : Effect.fail(rpcAuthorizationError(requiredScope));
+        Effect.flatMap(
+          currentScopes,
+          (scopes): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
+            scopes.includes(requiredScope)
+              ? effect
+              : Effect.fail(rpcAuthorizationError(requiredScope)),
+        );
 
       const acpRegistryProject = Effect.fn("ws.acpRegistry.project")(function* (
         projectId: ProjectId,
@@ -2169,7 +2180,7 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
-          scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
+          scheduledTasks.subscribeList().pipe(Stream.mapEffect(withVisibleWebhookUrls)),
         [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),
         [WS_METHODS.scheduledTasksSetEnabled]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
@@ -3368,7 +3379,20 @@ export const layer = Layer.unwrap(
         }).pipe(
           Effect.scoped,
           Effect.provide(
-            layerWsRpc(session, clientAnalyticsProps, serverBrowser).pipe(
+            layerWsRpc(
+              session,
+              clientAnalyticsProps,
+              serverBrowser,
+              Option.isSome(accessCap)
+                ? accessCap.value
+                    .scopes(session)
+                    .pipe(
+                      Effect.map((granted) =>
+                        (granted ?? []).filter((scope) => session.scopes.includes(scope)),
+                      ),
+                    )
+                : undefined,
+            ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Handler-context reporters see only request defects, not server-wide defects.
               Layer.provide(DefectReporter.layer),

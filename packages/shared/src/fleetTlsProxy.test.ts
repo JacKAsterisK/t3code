@@ -8,7 +8,11 @@ import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import { createFleetTlsCertificate } from "./fleetTlsCertificate.ts";
-import { fleetTlsRequestOptions, startFleetProxy } from "./fleetTlsProxy.ts";
+import {
+  FLEET_TLS_FORWARD_HEADER,
+  fleetTlsRequestOptions,
+  startFleetProxy,
+} from "./fleetTlsProxy.ts";
 
 vi.mock("./distribution.ts", () => ({ desktopProtocolSchemes: ["t3code-lan"] }));
 
@@ -220,9 +224,11 @@ it.live("streams an authenticated request through the encrypted endpoint and loc
     yield* Effect.promise(async () => {
       const received: string[] = [];
       const cookies: Array<string | undefined> = [];
+      const marks: Array<string | string[] | undefined> = [];
       const backend = NodeHttp.createServer((request, response) => {
         received.push(request.headers.authorization ?? "");
         cookies.push(request.headers.cookie);
+        marks.push(request.headers[FLEET_TLS_FORWARD_HEADER]);
         response.setHeader("set-cookie", "synthetic=must-not-escape");
         response.end("synthetic task data");
       });
@@ -232,6 +238,7 @@ it.live("streams an authenticated request through the encrypted endpoint and loc
         listen: { address: "127.0.0.1", port: 0 },
         target: `http://127.0.0.1:${port}/`,
         serverTls: key,
+        forwardedMark: "synthetic-mark",
       });
       const identity = {
         origin: new URL(endpoint.httpBaseUrl).origin,
@@ -247,10 +254,13 @@ it.live("streams an authenticated request through the encrypted endpoint and loc
         expect(
           await get(`${gateway.httpBaseUrl}api/synthetic`, "Bearer synthetic-only", {
             cookie: "synthetic-local-session=private",
+            [FLEET_TLS_FORWARD_HEADER]: "forged-by-client",
           }),
         ).toEqual({ status: 200, body: "synthetic task data" });
         expect(received).toEqual(["Bearer synthetic-only"]);
         expect(cookies).toEqual([undefined]);
+        // Only the encrypted endpoint's own mark reaches the backend, never a client's.
+        expect(marks).toEqual(["synthetic-mark"]);
         expect(
           (
             await get(gateway.httpBaseUrl, "Bearer synthetic-only", {

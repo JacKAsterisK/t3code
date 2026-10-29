@@ -124,7 +124,7 @@ export function useLanFleet() {
     if (environmentId === null || !allowed) return false;
     if (appAtomRegistry.get(busyAtom)) return true;
     if (mode === "manual") appAtomRegistry.set(pausedAtom, false);
-    return whileBusy(async () => {
+    const synced = whileBusy(async () => {
       appAtomRegistry.set(errorAtom, null);
       // One server claim at a time, drained immediately so a fleet does not take one poll per peer.
       for (let remaining = 100; remaining > 0; remaining--) {
@@ -176,12 +176,17 @@ export function useLanFleet() {
       }
       return true;
     });
+    // Polling slows after repeated failures but never stops; a success ends the slowdown.
+    return synced.then((ok) => {
+      if (ok) appAtomRegistry.set(pausedAtom, false);
+      return ok;
+    });
   };
   const pause = () => {
     appAtomRegistry.set(pausedAtom, true);
     appAtomRegistry.set(
       errorAtom,
-      "Automatic pickup paused after three failed syncs. Use Sync now to check again.",
+      "Fleet sync failed three times in a row. It keeps checking every 30 minutes; Sync now checks at once.",
     );
   };
   return {

@@ -7,7 +7,7 @@ function fakeTimers() {
 }
 
 describe("desktop fleet polling", () => {
-  it("checks immediately and every five minutes, then stops after three failures", async () => {
+  it("checks immediately and every five minutes, then every 30 after three failures", async () => {
     using _timers = fakeTimers();
     const sync = vi.fn().mockResolvedValue(false);
     const pause = vi.fn();
@@ -17,8 +17,15 @@ describe("desktop fleet polling", () => {
     await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
     expect(sync).toHaveBeenCalledTimes(3);
     expect(pause).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(30 * 60 * 1000);
+    // It never stops, so a share that comes back is picked up without Sync now.
+    await vi.advanceTimersByTimeAsync(29 * 60 * 1000);
     expect(sync).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    expect(sync).toHaveBeenCalledTimes(4);
+    expect(pause).toHaveBeenCalledTimes(1);
+    sync.mockResolvedValue(true);
+    await vi.advanceTimersByTimeAsync(35 * 60 * 1000);
+    expect(sync).toHaveBeenCalledTimes(6);
     stop();
   });
 

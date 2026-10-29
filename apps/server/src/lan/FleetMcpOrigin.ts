@@ -6,9 +6,9 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as FleetTransport from "./FleetTransport.ts";
 
 /**
- * The encrypted fleet endpoint forwards to this server over plain http and keeps the `Host`
- * header, so a peer link's sign-in there must name the endpoint's https origin. Setting
- * `x-forwarded-proto` in the proxy instead would change every existing fleet connection.
+ * The encrypted fleet endpoint forwards over plain http, so a peer link's sign-in there must
+ * name its https origin; `x-forwarded-proto` would change every fleet connection. Only requests
+ * the endpoint marked get it: a plain-http client can send any `Host`.
  */
 export const layer = Layer.effect(
   McpOAuth.McpOAuthPublicOrigin,
@@ -22,7 +22,9 @@ export const layer = Layer.effect(
         if (settings._tag === "None" || !settings.value.fleetLinkedEnvironmentsEnabled)
           return undefined;
         const origin = yield* transport.origin;
-        return origin !== undefined && request.headers.host === new URL(origin).host
+        return origin !== undefined &&
+          transport.forwarded(request.headers) &&
+          request.headers.host === new URL(origin).host
           ? origin
           : undefined;
       }),

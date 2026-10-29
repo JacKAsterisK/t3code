@@ -349,7 +349,12 @@ approval before code or runtime changes.
   `apps/server/src/auth/CredentialAttribution.ts`, shared with the peer-link
   adapter: subjects `lan-fleet-by:<root>` and `mcp-client:<root>|local`, a
   `CredentialAccessCap` applied to verified sessions in `EnvironmentAuth.ts`, to
-  task grants in `authenticateMcpClient`, and per call in `RpcAuthorization.layer`. See [LAN machine links](../operations/lan-machine-links.md#machine-access).
+  task grants in `authenticateMcpClient`, and per call in `RpcAuthorization.layer`
+  and the WebSocket handlers that check scopes themselves (`layerWsRpc`).
+  `FleetGrantAttribution.ts` attributes pre-attribution task grants to their
+  holder through a signed `fleet_assertion` on refresh (`McpOAuthGrants.refresh`).
+  `FleetMembership.ts` keeps a machine a trust check only misses until it stays
+  missing. See [LAN machine links](../operations/lan-machine-links.md#machine-access).
 - **Upstream:** each peer link and outside-agent grant has one
   `AuthMcpClientAccess` mode, set by whoever approves it on the destination.
   There is no fleet-wide policy and no way to change a link's mode without
@@ -357,21 +362,31 @@ approval before code or runtime changes.
   and the `orchestration:operate` checks on RPCs and in the web client.
 - **Must preserve:** the receiving machine enforces; one signed, synced policy; a
   read-only machine cannot lift its own restriction; changes need no approval or
-  relink; links between unaffected machines are untouched.
-- **Gaps:** task grants approved before attribution are read-only while any
-  machine is restricted, until reapproved. Codes minted before attribution are
-  not tied to a machine. Owner-approval fleets get no automatic credential
-  replacement. Software forging share files is out of scope (shared-folder trust).
+  relink; links between unaffected machines are untouched. Only a successful
+  read revokes: an unreadable policy caps at the last accepted one and revokes
+  nothing, and with none accepted changes nothing; a machine leaves only when
+  shown disabled or missing for the departure grace. A grant holder's claim
+  re-attributes only an unattributed grant, and only to the claim's signer.
+- **Gaps:** task grants approved before attribution only read while any machine
+  is restricted until their holder's next refresh, and indefinitely for a holder
+  that is not a fleet server. Sessions from codes minted before attribution keep
+  their issued access until they expire (at most 30 days). Webhook URLs a
+  connection saw while standard stay usable after it is downgraded, until rotated.
+  Owner-approval fleets get no automatic credential replacement. Software forging
+  share files is out of scope (shared-folder trust).
 - **Data:** signed revisions in `fleet-access` on the share and the accepted chain
-  in `userdata\lan-fleet-access.json`. No database migration.
+  in `userdata\lan-fleet-access.json`; trust-check misses in
+  `lan-fleet-members.json` and `lan-fleet-trusted.json`. No database migration.
 - **Decision:** keep. A fleet adapter that creates native peer links must take
   each link's access from `FleetAccess.accessFor` and follow `FleetAccess.changes`
   instead of choosing one itself.
 - **Tests:** `FleetAccessPolicy.test.ts` (competing and orphaned revisions,
   departed signers, locks, floods), `FleetCredentialAccess.test.ts` (receiver
-  caps and revocation), `RpcAuthorization.test.ts` (per-call scopes),
-  `FleetEnrollment.test.ts` (sync and refused lifts), `LanFleet.test.ts`
-  (replacement), `EnvironmentRouting.test.ts`.
+  caps, revocation, unreadable policy, holder attribution),
+  `RpcAuthorization.test.ts` (per-call scopes), `ws.test.ts` (webhook URLs),
+  `FleetEnrollment.test.ts` (sync, refused lifts, departure grace),
+  `LanFleet.test.ts` (replacement, renewal, stale sync lock),
+  `GatewayT3OAuthClient.test.ts`, `EnvironmentRouting.test.ts`.
 - **Owner:** Dan. **Rollback:** set every machine to Standard in **Machine
   access**; each machine replaces the read-only credentials on its next sync.
 - **Revisit:** when upstream adds per-link access changes or project-scoped links.

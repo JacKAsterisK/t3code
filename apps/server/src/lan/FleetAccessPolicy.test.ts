@@ -125,6 +125,7 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
   const seedOf = (...machines: ReadonlyArray<Machine>) => ({
     version: 1,
     fleetId: FLEET_ID,
+    defaultAccess: "standard",
     readOnly: machines.map((machine) => machine.peer.machineId),
   });
   return {
@@ -288,6 +289,23 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
       }).pipe(Effect.provide(configLayer)),
   );
 
+  it.effect("gives unnamed machines the starting list's default, whichever machine adopts it", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
+      // The adopting machine was set up granting read-only; the list still says standard.
+      const adopted = yield* (yield* f.machine()).refresh({
+        ...f.input(f.panda),
+        legacyAccess: "read-only",
+      });
+      expect(adopted.revision).toBe(1);
+      expect(adopted.defaultAccess).toBe("standard");
+      expect(f.accessOf(adopted, f.cryo)).toBe("standard");
+      expect(f.accessOf(adopted, f.panda)).toBe("standard");
+      expect(f.accessOf(adopted, f.anvil)).toBe("read-only");
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("lets only one of the machines adopting the starting list at once write it", () =>
     Effect.gen(function* () {
       const f = yield* fleet();
@@ -351,6 +369,8 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
         { ...f.seedOf(f.anvil), version: 2 },
         { ...f.seedOf(f.anvil), fleetId: "another-fleet" },
         { ...f.seedOf(f.anvil), standard: ids(f.cryo) },
+        { version: 1, fleetId: FLEET_ID, readOnly: ids(f.anvil) },
+        { ...f.seedOf(f.anvil), defaultAccess: "full" },
         f.seedOf(),
         { ...f.seedOf(), readOnly: ["machine-not-in-this-fleet"] },
         f.seedOf(f.anvil, f.anvil),

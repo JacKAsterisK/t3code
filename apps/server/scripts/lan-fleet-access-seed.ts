@@ -11,7 +11,8 @@ import { FleetAccessSeed, SEED_FILE } from "../src/lan/FleetAccessPolicy.ts";
 import { readFleetJson, writeFleetJson } from "../src/lan/FleetFiles.ts";
 
 // node apps/server/scripts/lan-fleet-access-seed.ts <roster.json> <machineId>... [--write]
-// Prints the starting access list that makes the named machines read-only; --write places it
+// Prints the starting access list that makes the named machines read-only and every other machine,
+// including Machines added later, standard; --write places it
 // beside the roster. It refuses once a list exists, since machines would then ignore it.
 const args = process.argv.slice(2);
 const write = args.includes("--write");
@@ -19,6 +20,7 @@ const [rosterArg, ...machineIds] = args.filter((arg) => arg !== "--write");
 const refuse = (message: string) =>
   Effect.logError(message).pipe(Effect.andThen(new LanFleetError({ reason: "configuration" })));
 const decodeSeed = Schema.decodeUnknownEffect(FleetAccessSeed);
+const encodeSeed = Schema.encodeEffect(Schema.fromJsonString(FleetAccessSeed));
 
 NodeRuntime.runMain(
   Effect.gen(function* () {
@@ -38,13 +40,14 @@ NodeRuntime.runMain(
     const seed = yield* decodeSeed({
       version: 1,
       fleetId: authority.fleetId,
+      defaultAccess: "standard",
       readOnly: machineIds,
     });
     for (const machineId of machineIds)
       yield* Effect.log(
         `read-only: ${machineId} (${machines.find((machine) => machine.machineId === machineId)?.label})`,
       );
-    yield* Effect.log(JSON.stringify(seed));
+    yield* Effect.log(yield* encodeSeed(seed));
     if (!write) return;
     const history = path.join(root, "fleet-access");
     if ((yield* fs.exists(history)) && (yield* fs.readDirectory(history)).length > 0)

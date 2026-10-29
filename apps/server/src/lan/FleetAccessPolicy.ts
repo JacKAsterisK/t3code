@@ -56,13 +56,16 @@ export type FleetAccessEntry = typeof FleetAccessEntry.Type;
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 /**
- * `fleet-access-seed.json` beside the roster: machines that start read-only, for a fleet with no
- * list yet. It only restricts, and the first machine to read it signs it in as revision 1.
+ * `fleet-access-seed.json` beside the roster: machines that start read-only, and the access every
+ * other machine (and Machines added later) starts with, for a fleet with no list yet. The first
+ * machine to read it signs it in as revision 1.
  */
 export const SEED_FILE = "fleet-access-seed.json";
 export const FleetAccessSeed = Schema.Struct({
   version: Schema.Literal(1),
   fleetId: Schema.String.check(Schema.isMaxLength(256)),
+  // Explicit, so the result never depends on which machine adopts it first.
+  defaultAccess: FleetAccessLevel,
   readOnly: Schema.Array(FleetMachineId).check(Schema.isMinLength(1), Schema.isMaxLength(100)),
 });
 export type FleetAccessSeed = typeof FleetAccessSeed.Type;
@@ -442,9 +445,8 @@ const make = Effect.gen(function* () {
       named.some((machineId) => !input.peers.some((peer) => peer.machineId === machineId))
     )
       return invalidSeed("a machine it names is not in the fleet");
-    // Unnamed machines keep the default a first list saved in Settings would keep.
     const snapshot: FleetAccessSnapshot = {
-      defaultAccess: input.legacyAccess,
+      defaultAccess: seed.value.defaultAccess,
       machines: normalize(named.map((machineId) => ({ machineId, access: "read-only" }))),
     };
     if (

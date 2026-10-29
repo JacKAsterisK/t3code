@@ -72,12 +72,12 @@ The list fails closed:
 
 A fleet with no list yet can start from `fleet-access-seed.json` beside the
 roster, which names the machines that start read-only:
-`{"version":1,"fleetId":"<fleetId from fleet-authority.json>","readOnly":["<machineId>"]}`.
+`{"version":1,"fleetId":"<fleetId from fleet-authority.json>","defaultAccess":"standard","readOnly":["<machineId>"]}`.
 The first machine on LAN 1.0.26 or later that reads it, with no revision on the
 share or in its own copy, signs it in as revision 1 through the ordinary change
-path. Machines it doesn't name, and **Machines added later**, keep the default a
-first list saved in Settings would keep (the adopting machine's setup access). It
-only restricts. Once any list exists, here or on the share, it is ignored for
+path. Machines it doesn't name, and **Machines added later**, get its
+`defaultAccess`, so the result doesn't depend on which machine adopts it; the
+command writes `standard`. Once any list exists, here or on the share, it is ignored for
 good, so later changes go through Settings. A file that doesn't parse, names
 another fleet or an unknown machine, repeats a machine or leaves no machine
 standard is refused: Machine access shows it, the server logs it, and nothing

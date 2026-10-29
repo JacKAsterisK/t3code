@@ -3,9 +3,12 @@
 Design for letting in-app agents work on other fleet machines through
 upstream's linked environments (peer links), with the fleet doing the pairing,
 renewal and removal. It replaces the in-app use of the `t3_lan_*` tools
-([native feature sync](native-feature-sync.md) rows 2–4 and 7). Status:
-proposed design, not implemented. Evidence is from fork `main` at `bb224f99b`
-(upstream `9826dbb99`); `apps/server/src/peer` is unmodified from upstream.
+([native feature sync](native-feature-sync.md) rows 2–4 and 7). Status: the
+adapter (waves 1 and 2) is built and ships off; turn it on per machine with
+`fleetLinkedEnvironmentsEnabled` (see [How to run the proof](#how-to-run-the-proof)).
+The fleet status UI (wave 3) and tool coexistence (wave 4) are not built.
+Evidence is from fork `main` at `bb224f99b` (upstream `9826dbb99`);
+`apps/server/src/peer` is unmodified from upstream.
 
 ## Summary
 
@@ -34,7 +37,8 @@ of them touches `apps/server/src/peer`:
   (`mcpOAuthHttp.ts`)
 - attribution of a pairing-code session to its fleet code (`McpOAuth.ts`,
   `EnvironmentAuth.ts`)
-- a LAN-build default for `linkedEnvironmentsEnabled` (`serverSettings.ts`)
+- `fleetLinkedEnvironmentsEnabled`, which reads `linkedEnvironmentsEnabled` as
+  on while it is on (`serverSettings.ts`)
 
 The fleet's existing client-connection deliveries, the roster, enrollment and
 saved connections are not changed. The adapter keeps its state in JSON, so it
@@ -77,7 +81,7 @@ Conditions and changes:
 
 | Condition                                                                                                                                                               | Change                                                                    | Where    |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | -------- |
-| `linkedEnvironmentsEnabled` on L (`PeerLinks.ts:402`) and on D (registration, `McpOAuth.ts:340`; `/mcp`, `McpHttpServer.ts`)                                            | LAN default on                                                            | answer 5 |
+| `linkedEnvironmentsEnabled` on L (`PeerLinks.ts:402`) and on D (registration, `McpOAuth.ts:340`; `/mcp`, `McpHttpServer.ts`)                                            | On wherever `fleetLinkedEnvironmentsEnabled` is on                        | answer 5 |
 | Code scopes cover the access. Today's read-only fleet scopes include `orchestration:read`, and standard scopes are a superset of the `full-access` scopes               | Mint exactly `mcpClientScopes(access)` for the policy's access            | Part E   |
 | L may send the code only to https, loopback or tailnet (`PeerLinks.ts:133`)                                                                                             | Pinned-TLS client                                                         | answer 3 |
 | The `resource` L sends must equal D's computed `${origin}/mcp` (`McpOAuth.ts:127`)                                                                                      | D-side origin hook                                                        | answer 3 |
@@ -185,21 +189,22 @@ that.
 - Each forwarded call is still capped at the calling agent's own runtime and
   interaction modes (`T3-Mode-Limit`).
 
-If the owner prefers the fence over parity, map standard to `auto`. That gives
-up only settings and source-control writes and unfenced changes. **Decision
-for Dan.**
+**Decided: standard maps to `full-access`.** The mapping is `linkAccess` in
+`apps/server/src/lan/FleetPeerLinks.ts`; mapping standard to `auto` instead
+would give up only settings and source-control writes and unfenced changes.
 
 A policy change takes effect without approval:
 
-- D's adapter subscribes to the policy's change notifications. For each
-  affected peer it mints a code at the new access and seals it to L as an
-  unsolicited offer.
-- When access is narrowed, D also revokes L's attributed link sessions at
+- D's adapter runs a pass on each policy change notification. Every
+  attributed session records the access of the code it came from.
+- When access is narrowed, D revokes L's sessions above the new access at
   once (Part C). Calls fail until L relinks, never with the old access.
+- D offers L a code unasked whenever L's last link is at another access, or
+  L holds no live session here (revoked by hand, for example), and re-offers
+  after each code expires until L takes one.
 - When access is widened, the old session stays until L's relink succeeds.
-- L's adapter consumes the offer on its next pass, or immediately when it
-  handles the same notification. `PeerLinks.link` then replaces the row with
-  the new `access`.
+- L's adapter consumes the offer on its next pass. `PeerLinks.link` then
+  replaces the row with the new `access`.
 - Neither machine shows a prompt.
 
 ### 5. Gating
@@ -213,16 +218,24 @@ A policy change takes effect without approval:
   `McpOAuth.register`, the `/mcp` middleware, `hiddenWhileLinksOff` (which hides
   the link tools), `McpToolAccess` (which refuses forwarded calls) and the
   client's `offersLinkedEnvironments`.
-- **Recommendation.** For LAN builds (`isLanDistribution`), override the
-  setting's default to `true` in `apps/server/src/serverSettings.ts`, where
-  defaults are merged.
-  - Settings are stored sparse, with defaults stripped, so an unset value
-    becomes on and an explicit `false` is kept.
-  - The Labs switch stays and works. Turning it off stops the adapter and
-    upstream links, and the fleet status reports it.
-  - No setting is written on any machine, and no upstream read site changes.
-- **Rejected.** Having the adapter write the setting (it would fight a user's
-  explicit off). Bypassing the gate in each read site (five upstream files).
+- **Built.** A fork server setting, `fleetLinkedEnvironmentsEnabled`, off by
+  default, turns the adapter on for one machine. While it is on, settings
+  readers see `linkedEnvironmentsEnabled` as on
+  (`resolveReadSettings` in `apps/server/src/serverSettings.ts`), so every
+  upstream read site, both machines' sign-in gates and the client follow
+  without changes. The derived value is never written to `settings.json`.
+  - The Labs switch keeps its own stored value, but reads as on while the
+    fleet setting is on. To stop linking, turn the fleet setting off.
+  - The origin hook (answer 3) also applies only while the fleet setting is
+    on, so an off machine behaves exactly as before.
+  - **To turn the adapter on everywhere later,** change the
+    `withDecodingDefault(Effect.succeed(false))` of
+    `fleetLinkedEnvironmentsEnabled` in `packages/contracts/src/settings.ts`
+    to `true`. An explicit `false` in a machine's `settings.json` still wins.
+- **Rejected.** A LAN-build default of on for `linkedEnvironmentsEnabled`
+  (it would turn links on for every machine in the next release). Having the
+  adapter write the setting (it would fight a user's explicit off). Bypassing
+  the gate in each read site (five upstream files).
 
 ### 6. Duplicates
 
@@ -253,8 +266,10 @@ Coexistence until retirement:
 1. Fleet machines are adapter-owned: they never need the link card.
    `t3_environment_link` with a fleet `environmentId` returns `linked`. If a
    person links a fleet machine by hand, the adapter adopts the link and
-   relinks it at the policy's access on its next pass. The adapter never
-   touches links to machines outside the fleet.
+   relinks it at the policy's access on its next pass. The hand-made session
+   on D is not attributed, so the fleet never revokes it; revoke it in D's
+   **Sharing & access**. The adapter never touches links to machines outside
+   the fleet.
 2. After the proof, hide `LanToolkit` from sessions that aren't task-only
    (Part H). Use an `EnabledWhen` annotation like upstream's
    `hiddenWhileLinksOff`. Task-only grants (the deferred gateway) keep the
@@ -289,11 +304,11 @@ are gateway concerns (rows 5, 6 and 10) and stay with the deferred gateway.
 read-only in the planned policy, so the mutating steps can run. AnvilToad (and
 SPDevMachine) appear only in the optional read-only step. Prerequisites:
 
-- Parts A–F are built.
-- The candidate build is installed on CryoFrog and PandaMedic only.
+- A LAN release with the adapter is installed on CryoFrog and PandaMedic.
+- `fleetLinkedEnvironmentsEnabled` is on for those two machines only.
 - The policy grants each of them standard toward the other.
 - A test-only override shortens the renewal window
-  (`T3CODE_LAN_PEER_LINK_RENEW_WITHIN`, added in Part E).
+  (`T3CODE_LAN_PEER_LINK_RENEW_WITHIN`, a duration such as `31 days`).
 
 | #   | Step                                                                                                                                                                                                                                                                           | Shows                                                                                                                                                                                                                            |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -313,33 +328,60 @@ machine's fleet deliveries. Do it only with Dan's approval.
 
 **Undo**, in order:
 
-1. Turn **Linked environments** off in Labs on CryoFrog and PandaMedic. This
-   stops the adapter, which would otherwise relink.
+1. Set `fleetLinkedEnvironmentsEnabled` back off on CryoFrog and PandaMedic.
+   This stops the adapter, which would otherwise relink, and turns Linked
+   environments back to its own Labs value. Links already made stay.
 2. **Forget** the link on CryoFrog.
 3. Revoke "T3 Code · CryoFrog" in PandaMedic's Sharing & access.
 4. Delete the throwaway threads and project (`t3_project_delete` with
    `environmentId`) and the clone folder.
 5. Delete the pair's `*.peer-link*.json` files from the share, and
    `lan-fleet-peer-links.json` on both machines.
-6. Reinstall the current release if needed, and set Labs back to unset.
+6. Reinstall the current release if needed, and remove
+   `fleetLinkedEnvironmentsEnabled` from `settings.json`.
 7. Re-run step 0 and compare.
+
+### How to run the proof
+
+1. Ship a LAN release containing the adapter. Install it on CryoFrog and
+   PandaMedic; other machines may have it too, since it stays off.
+2. On each of the two machines, add `"fleetLinkedEnvironmentsEnabled": true`
+   to the server's `settings.json` in its userdata directory. The server
+   reloads the file and runs a pass at once; no restart is needed. Nothing
+   else is written to `settings.json`.
+3. Run the table above. **Sync now** requests a pass after it finishes;
+   otherwise passes run every 10 minutes, at startup, and on every policy or
+   settings change. A first link takes two passes on each machine.
+4. For step 5, start CryoFrog's server with
+   `T3CODE_LAN_PEER_LINK_RENEW_WITHIN="31 days"`, sync both machines twice,
+   then restart it without the variable. With the variable left set, the link
+   renews on every pass.
+5. Undo as listed above.
 
 ## Design
 
 ### Components
 
-- **`FleetPeerLinks`** (new, `apps/server/src/lan/FleetPeerLinks.ts`): a
-  scoped server service.
+- **`FleetPeerLinks`** (`apps/server/src/lan/FleetPeerLinks.ts`): a scoped
+  server service.
   - It runs a pass at startup, every 10 minutes, after each `LanFleet.sync`
-    and `configure`, and on access-policy change notifications.
-  - It does nothing unless fleet enrollment is active, shared-folder trust is
-    on, and `PeerLinks.enabled`.
-  - Share I/O happens under its own lock, `lan-fleet-peer-links.lock`.
-    Network linking happens outside every lock, so client sync never reports
+    and `configure`, and on every access-policy or settings change.
+  - It does nothing unless `fleetLinkedEnvironmentsEnabled` is on, fleet
+    enrollment is active and shared-folder trust is on (`FleetContext.ts`).
+    When the fleet cannot be read, it removes nothing.
+  - Each share file has one writer (L writes requests and receipts, D writes
+    offers), so there is no share lock. Passes are serialized in-process. A
+    session attributed during a pass never waits for it: the two machines
+    may be linking to each other at the same moment.
+  - Linking happens outside LanFleet's lock, so client sync never reports
     `busy` because of it.
-- **Share files** (signed and recipient-sealed with the existing keys):
-  - `<L>-><D>.peer-link-request.json`, signed by L: request ID, the access L
-    expects, `createdAt` and `expiresAt`.
+- **`FleetPeerHttpClient`** (answer 3) holds the trusted peers' TLS identities,
+  which each pass replaces. Off, the list is empty.
+- **`FleetMcpOrigin`** (answer 3) is the D-side origin hook.
+- **Share files** (signed and recipient-sealed with the existing keys), named
+  by the same sender/recipient hash as deliveries (`peerLinkFileNames`):
+  - `<L>-><D>.peer-link-request.json`, signed by L: request ID, `createdAt`
+    and `expiresAt` (one hour). D decides the access, so L sends none.
   - `<D>-><L>.peer-link.json`: a `Delivery` whose header carries
     `purpose: "peer-link"` and whose payload carries the code and the
     `access` D granted.
@@ -350,43 +392,47 @@ machine's fleet deliveries. Do it only with Dan's approval.
   new field. That would break today's deliveries while the fleet is on mixed
   versions.
 
-- **Local state** (`<stateDir>/lan-fleet-peer-links.json`): machines L has
-  linked (environment ID, access, delivery ID, `linkedAt`), outstanding
-  requests and offers, and, on D, the session IDs attributed to each peer.
-  There are no database tables, so no migration.
+- **Local state** (`<stateDir>/lan-fleet-peer-links.json`): links L made
+  (environment ID, access, delivery ID, `linkedAt`), outstanding requests,
+  and, on D, each peer's offer, last linked access and attributed sessions
+  with the access of the code each came from. There are no database tables,
+  so no migration.
 
-### Pass on L (for each trusted peer D)
+### Pass on L (for each trusted peer D with a TLS identity)
 
-1. Want a link when D is trusted, has a TLS identity with its endpoint
-   enabled, and the link is one of: missing, expired, unfenced, inside the
-   renewal window, failing with a revoked or unauthorized error, at an access
-   that differs from D's last offer, or at a URL that isn't D's current
-   `tls.origin`. If so, write a request file, unless a fresh one is
-   outstanding.
-2. If `<D>-><L>.peer-link.json` exists, opens with L's key, verifies, has
-   `purpose: "peer-link"` and isn't expired, call `PeerLinks.link` with:
-   `url: D.tls.origin`, `expectedEnvironmentId: D.environmentId`,
-   `expectedLabel`, `pairingCode` and the granted `access`. On success, write
-   the receipt, delete the request and record the link. On
-   `pairing_rejected`, `incompatible` or `disabled`, record the reason for
-   fleet status and don't retry until the next offer.
+1. If `<D>-><L>.peer-link.json` exists, opens with L's key, verifies, has
+   `purpose: "peer-link"`, isn't expired and wasn't already used, call
+   `PeerLinks.link` with `url: D.tls.origin`,
+   `expectedEnvironmentId: D.environmentId`, `expectedLabel`, `pairingCode`
+   and the granted `access`. On success, write the receipt, delete the request
+   and record the link. Any refusal is recorded and the code isn't retried;
+   an unreachable peer is retried on the next pass.
+2. Want a link when it is missing, expired, unfenced, inside the renewal
+   window, at a URL that isn't D's current `tls.origin`, or not the link the
+   adapter recorded (a hand-made one). If so, write a request file, unless a
+   fresh one is outstanding.
 3. For each recorded link whose machine is no longer trusted, or whose roster
    entry is gone or disabled, call `PeerLinks.unlink`. Links the adapter
    didn't record and that aren't to fleet machines are never touched.
 
 ### Pass on D (for each trusted peer L)
 
-1. For a valid request from L, or a policy change for L: compute
-   `access = accessForPeer(L)` and mint with
-   `createPairingLink({ ttl: 1h, subject: "lan-fleet-peer-link:<D>-><L>", scopes: mcpClientScopes(access) })`.
-   Then seal the code to L and record the delivery.
-2. When `consumeMcpApprovalCode` spends a `lan-fleet-peer-link:` code, the
+1. Revoke L's attributed sessions whose code carried more than
+   `accessFor(L)` now allows.
+2. On L's receipt for the current offer, record the linked access, revoke L's
+   other attributed sessions and delete the offer and receipt. Drop an offer
+   that expired or is at another access, revoking its unused code.
+3. With no offer outstanding, offer a code for a valid unanswered request
+   from L, or unasked when L's last link is at another access or L holds no
+   live session here. Revoke L's unused codes, mint with
+   `createPairingLink({ ttl: 1h, subject: "lan-fleet-peer-link:<L>:<delivery ID>", scopes: mcpClientScopes(linkAccess(access)) })`,
+   then seal the code to L.
+4. When `consumeMcpApprovalCode` spends a `lan-fleet-peer-link:` code, the
    session that `exchangeCode` then issues is reported to `FleetPeerLinks`
-   (Part C), which records it for L.
-3. On L's receipt, revoke L's older attributed sessions and delete the
-   delivery. On a narrowed policy, revoke all of L's sessions at once. When L
-   leaves the fleet, revoke them all, and revoke any unused codes for L with
-   `revokePairingLink`.
+   (Part C), which records it for L with its delivery's access. A session it
+   cannot record is revoked and the sign-in fails.
+5. When L leaves the fleet, revoke all its attributed sessions and unused
+   codes, and delete its offer and receipt.
 
 ### Fleet status
 

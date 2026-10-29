@@ -108,12 +108,16 @@ approval before code or runtime changes.
 - **Decision:** adapt. Use native discovery for in-app agents as the first
   replacement (see Sequence). The fleet creates, renews and removes the links;
   see [Fleet-managed native link adapter](native-link-adapter.md) for the
-  design, answers and proof plan. Keep `t3_lan_environments` for the gateway's
-  grant path until rows 5, 6 and 10 are settled.
-- **Tests:** `EnvironmentRegistry.test.ts`; upstream `PeerLinks.test.ts` and
+  design, answers and proof plan. The adapter is built and ships off
+  (`fleetLinkedEnvironmentsEnabled`); the live proof is next. Keep
+  `t3_lan_environments` for the gateway's grant path until rows 5, 6 and 10
+  are settled.
+- **Tests:** `EnvironmentRegistry.test.ts`, `FleetPeerLinks.test.ts`,
+  `FleetPeerHttpClient.test.ts`; upstream `PeerLinks.test.ts` and
   `PeerLinkRequests.test.ts`.
-- **Owner:** Dan. **Rollback:** turn Labs off, **Forget** the link here and
-  revoke it in the destination's **Sharing & access**.
+- **Owner:** Dan. **Rollback:** set `fleetLinkedEnvironmentsEnabled` off,
+  **Forget** the link here and revoke it in the destination's **Sharing &
+  access**.
 - **Revisit:** when linked environments leave Labs or ship in a stable release,
   or when links become renewable.
 

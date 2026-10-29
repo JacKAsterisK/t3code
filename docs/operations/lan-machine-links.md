@@ -73,18 +73,40 @@ The list fails closed:
 A fleet with no list yet can start from `fleet-access-seed.json` beside the
 roster, which names the machines that start read-only:
 `{"version":1,"fleetId":"<fleetId from fleet-authority.json>","defaultAccess":"standard","readOnly":["<machineId>"]}`.
-The first machine on LAN 1.0.26 or later that reads it, with no revision on the
-share or in its own copy, signs it in as revision 1 through the ordinary change
-path. Machines it doesn't name, and **Machines added later**, get its
-`defaultAccess`, so the result doesn't depend on which machine adopts it; the
-command writes `standard`. Once any list exists, here or on the share, it is ignored for
-good, so later changes go through Settings. A file that doesn't parse, names
-another fleet or an unknown machine, repeats a machine or leaves no machine
-standard is refused: Machine access shows it, the server logs it, and nothing
-links until it is fixed or removed or a list is saved. Machines adopting it at
-once serialize on the lock, and any competing first revisions merge as above.
-Older builds never read it. Write it with the checker, which reads the roster and
-authority, refuses once a list exists, and writes only with `--write`:
+A machine on LAN 1.0.26 or later that reads it, with no revision on the share or
+in its own copy, signs it in as revision 1 through the ordinary change path, but
+only once every enabled machine it makes read-only can take the result:
+
+- Adopting it replaces the read-only machines' fleet credentials at once. LAN
+  1.0.24 cannot take a replacement for a connection it already has, so it would
+  lose its connections to every 1.0.25 or later machine until it updates.
+- So each machine it names says, when it sees the list on 1.0.26 or later, that
+  it can: it signs `fleet-access-ready/<machineId>.json` beside the roster. A
+  fresh connection summary is no such sign, since 1.0.24 with automatic pickup
+  publishes one too.
+- A machine adopts the list anyway 24 hours after it first saw it. A named
+  machine that has not updated by then is off or not updating; once it updates,
+  it collects its read-only replacement with no relink. Each machine records when
+  it first saw the list in `userdata\lan-fleet-access-seed.json`, so a restart does
+  not restart the wait.
+- While it waits, Machine access names the machines it waits for and when it
+  applies anyway. Placing the file early is safe: older builds never read it, and
+  newer ones wait like this.
+
+Machines it doesn't name, and **Machines added later**, get its `defaultAccess`,
+so the result doesn't depend on which machine adopts it; the command writes
+`standard`. Once the share holds revision 1 and gives it back, the machine that
+adopted it deletes the file, so a later loss of the share's list cannot bring it
+back in; if that fails, it stays. Once any list exists, here or on the share, the
+file is ignored for good, so later changes go through Settings. A file that
+doesn't parse, names another fleet or an unknown machine, repeats a machine or
+leaves no machine standard is refused: Machine access shows it, the server logs
+it, and nothing links until it is fixed or removed or a list is saved. A file the
+share cannot give, such as while it is unreachable, only waits; it is never
+reported as refused. Machines adopting it at once serialize on the lock, and any
+competing first revisions merge as above. Write it with the checker, which reads
+the roster and authority, refuses once a list exists, and writes only with
+`--write`:
 
 ```powershell
 node apps/server/scripts/lan-fleet-access-seed.ts \\fileserver\private-share\fleet-roster.json <machineId> <machineId> --write
@@ -211,13 +233,23 @@ operation, not an automatic key rotation.
 From LAN 1.0.26 each server links itself to every trusted fleet peer as an
 upstream linked environment, so in-app agents use `t3_environment_links` and
 `environmentId` on the native tools. In-app threads no longer see the `t3_lan_*`
-tools, which only ever served outside task clients. Each link carries the access
-the destination's Machine access list gives this machine: standard is
-`full-access`, read-only is `read-only`. A machine opts out with
+tools, which have refused every in-app thread since they were added; only outside
+task clients can use them. Each link carries the access the destination's Machine
+access list gives this machine: standard is `full-access`, read-only is
+`read-only`.
+
+Links form only once the fleet has a Machine access list, adopted from a starting
+list or saved in Settings. Until then no machine asks for or offers a link, since
+a link would carry each machine's setup access, normally standard. That includes a
+machine with no saved list that finds no `fleet-access` folder on the share.
+
+Linked environments count as on only while the fleet links this machine: it is an
+active fleet member, as of its last fleet read, and a list exists. Labs then shows
+the switch on and locked. Anywhere else, such as a development or unenrolled
+install, the Labs switch decides as upstream. A machine opts out with
 `"fleetLinkedEnvironmentsEnabled": false` in its `userdata\settings.json`; on its
-next pass it forgets the links it made and revokes those it issued. While a
-starting list waits or is refused, no machine asks for or offers a link. Design,
-share files and the live proof: [native link adapter](../maintenance/native-link-adapter.md).
+next pass it forgets the links it made and revokes those it issued. Design, share
+files and the live proof: [native link adapter](../maintenance/native-link-adapter.md).
 
 ## Hub bootstrap contract
 

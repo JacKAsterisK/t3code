@@ -5,7 +5,9 @@ upstream's linked environments (peer links), with the fleet doing the pairing,
 renewal and removal. It replaces the in-app use of the `t3_lan_*` tools
 ([native feature sync](native-feature-sync.md) rows 2–4 and 7). Status: the
 adapter (waves 1 and 2) and tool coexistence (wave 4) are built, and from LAN
-1.0.26 `fleetLinkedEnvironmentsEnabled` is on by default on every machine. The
+1.0.26 `fleetLinkedEnvironmentsEnabled` is on by default on every machine. Links
+form once the fleet has a Machine access list, adopted from a starting list or
+saved in Settings; before that the adapter neither offers nor links. The
 fleet status UI (wave 3) is not built, and the adapter has only run in the test
 runner, not yet between two real servers (see [How to run the proof](#how-to-run-the-proof)).
 Evidence is from fork `main` at `bb224f99b` (upstream `9826dbb99`);
@@ -41,7 +43,8 @@ of them touches `apps/server/src/peer`:
   session and task grant also carries its approver in its subject, and
   `auth/CredentialAttribution.ts` maps any credential to its fleet machine
 - `fleetLinkedEnvironmentsEnabled`, which reads `linkedEnvironmentsEnabled` as
-  on while it is on (`serverSettings.ts`)
+  on while it is on and the fleet links this machine (`serverSettings.ts`,
+  through an optional `FleetAccess`)
 
 The fleet's existing client-connection deliveries, the roster, enrollment and
 saved connections are not changed. The adapter keeps its state in JSON, so it
@@ -84,7 +87,7 @@ Conditions and changes:
 
 | Condition                                                                                                                                                               | Change                                                                    | Where    |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | -------- |
-| `linkedEnvironmentsEnabled` on L (`PeerLinks.ts:402`) and on D (registration, `McpOAuth.ts:340`; `/mcp`, `McpHttpServer.ts`)                                            | On wherever `fleetLinkedEnvironmentsEnabled` is on                        | answer 5 |
+| `linkedEnvironmentsEnabled` on L (`PeerLinks.ts:402`) and on D (registration, `McpOAuth.ts:340`; `/mcp`, `McpHttpServer.ts`)                                            | On wherever the fleet links the machine                                   | answer 5 |
 | Code scopes cover the access. Today's read-only fleet scopes include `orchestration:read`, and standard scopes are a superset of the `full-access` scopes               | Mint exactly `mcpClientScopes(access)` for the policy's access            | Part E   |
 | L may send the code only to https, loopback or tailnet (`PeerLinks.ts:133`)                                                                                             | Pinned-TLS client                                                         | answer 3 |
 | The `resource` L sends must equal D's computed `${origin}/mcp` (`McpOAuth.ts:127`)                                                                                      | D-side origin hook                                                        | answer 3 |
@@ -208,10 +211,13 @@ A policy change takes effect without approval:
   L holds no live session here (revoked by hand, for example), and re-offers
   after each code expires until L takes one.
 - When access is widened, the old session stays until L's relink succeeds.
-- Before the fleet has a list, `accessFor` gives every peer the default, so a
-  code would carry standard. While a starting list (`fleet-access-seed.json`)
-  waits to be adopted or is refused, `FleetAccessState.seed` is set and neither
-  side asks for or offers a code; once the list exists, links form at its access
+- Before the fleet has a list, `accessFor` gives every peer its issuer's setup
+  access, normally standard, so a code would carry full access even for a
+  machine the fleet means to make read-only. So until a list exists
+  (`policyApplies`), neither side asks for or offers a code: whether a starting
+  list (`fleet-access-seed.json`) waits, is refused or was never placed, and
+  when a machine with no saved list finds no `fleet-access` folder. Once the
+  list exists, links form at its access
   ([LAN machine links](../operations/lan-machine-links.md#machine-access)).
 - L's adapter consumes the offer on its next pass. `PeerLinks.link` then
   replaces the row with the new `access`.
@@ -230,13 +236,22 @@ A policy change takes effect without approval:
   client's `offersLinkedEnvironments`.
 - **Built.** A fork server setting, `fleetLinkedEnvironmentsEnabled`, on by
   default since LAN 1.0.26, runs the adapter. An explicit `false` in a machine's
-  `settings.json` turns it off there. While it is on, settings
-  readers see `linkedEnvironmentsEnabled` as on
+  `settings.json` turns it off there. While it is on and the fleet links this
+  machine, settings readers see `linkedEnvironmentsEnabled` as on
   (`resolveReadSettings` in `apps/server/src/serverSettings.ts`), so every
   upstream read site, both machines' sign-in gates and the client follow
   without changes. The derived value is never written to `settings.json`.
-  - The Labs switch keeps its own stored value, but reads as on while the
-    fleet setting is on. To stop linking, turn the fleet setting off.
+  - "The fleet links this machine" is `fleetLinksApply`: as of its last fleet
+    read it is an enabled member, and a list exists. Settings reads it from an
+    optional `FleetAccess` (which depends only on the server config, so there is
+    no cycle); `server.ts` provides the same instance the rest of the server
+    uses, and a flip re-emits settings. Readers see it as the read-only
+    `fleetLinkedEnvironmentsActive`.
+  - A development or unenrolled install, or a member before its fleet has a
+    list, keeps upstream's Labs setting in charge.
+  - The Labs switch keeps its own stored value. While
+    `fleetLinkedEnvironmentsActive` it reads as on and is locked; to stop
+    linking, turn the fleet setting off.
   - Off is off. The next pass forgets the links this machine's adapter made,
     revokes every peer-link code and session it issued (including ones its
     state lost track of), and removes its offers and requests from the share.
@@ -244,10 +259,12 @@ A policy change takes effect without approval:
     from a code redeemed just before is not recorded, so it is revoked. Links
     made by hand and the fleet's own client connections are untouched. A
     settings read error changes nothing.
-  - The origin hook (answer 3) also applies only while the fleet setting is
-    on, so an off machine behaves exactly as before.
-  - `ServerSettings.layerTest` starts with the fleet setting off, so upstream's
-    tests keep upstream's off default; fork tests opt in.
+  - The origin hook (answer 3) also applies only while
+    `fleetLinkedEnvironmentsActive`, so an off machine behaves exactly as
+    before.
+  - `ServerSettings.layerTest` keeps the real default. Without a
+    `FleetAccess` that lists the machine, linked environments still read as off,
+    so upstream's tests keep upstream's off default.
 - **Rejected.** A LAN-build default of on for `linkedEnvironmentsEnabled`
   (it would turn links on for every machine in the next release). Having the
   adapter write the setting (it would fight a user's explicit off). Bypassing
@@ -285,7 +302,8 @@ Coexistence until retirement:
    the fleet.
 2. `LanToolkit` is hidden from in-app threads (Part H), by an `EnabledWhen`
    annotation (`hiddenFromThreads` in `McpInvocationContext.ts`). Routing
-   refuses every thread caller anyway (`principal` in `EnvironmentRouting.ts`).
+   refuses every thread caller anyway (`principal` in `EnvironmentRouting.ts`,
+   since `ddfb97717d`), so hiding them took no reach from in-app threads.
    Outside clients, task-only grants (the deferred gateway) included, keep the
    tools, and the `taskOnlyTools` gate in `McpToolAccess.ts` is unchanged.
 3. `lan-routing.json`, `EnvironmentRouting` and `RemoteTaskTransport` stay
@@ -357,9 +375,10 @@ machine's fleet deliveries. Do it only with Dan's approval.
 
 ### How to run the proof
 
-1. Place `fleet-access-seed.json` before publishing 1.0.26 (older builds
-   ignore it), then install 1.0.26. The first machine to read it adopts it;
-   Machine access shows the list. Nothing is added to `settings.json`.
+1. Place `fleet-access-seed.json` at any time (older builds ignore it), then
+   install 1.0.26. It is adopted once AnvilToad and SPDevMachine run 1.0.26, or
+   24 hours after a 1.0.26 machine first saw it; until then Machine access says
+   which machines it waits for. Nothing is added to `settings.json`.
 2. Run the table above. **Sync now** requests a pass after it finishes;
    otherwise passes run every 10 minutes, at startup, and on every policy or
    settings change. A first link takes two passes on each machine.
@@ -378,7 +397,8 @@ machine's fleet deliveries. Do it only with Dan's approval.
   - It runs a pass at startup, every 10 minutes, after each `LanFleet.sync`
     and `configure`, and on every access-policy or settings change.
   - It links nothing unless `fleetLinkedEnvironmentsEnabled` is on, fleet
-    enrollment is active and shared-folder trust is on (`FleetContext.ts`).
+    enrollment is active and shared-folder trust is on (`FleetContext.ts`),
+    and it neither offers nor links until the fleet has a Machine access list.
     While the setting is off, each pass undoes what it made (answer 5). When
     the fleet cannot be read, it removes nothing, and a machine only missing
     from the trust check keeps its links until it stays missing (see
@@ -547,7 +567,10 @@ access-policy work also touches (`LanFleet.ts`, `packages/contracts/src/lanFleet
   default. Re-check them on each upstream sync, under row 2.
 - **Mixed versions.** A machine without the adapter ignores the new files,
   and its peers show `peer needs update`. Nothing in today's catalog or
-  delivery formats changes.
+  delivery formats changes. A starting list waits for the machines it makes
+  read-only to run 1.0.26, since 1.0.24 cannot take the replaced credentials
+  that adopting it makes 1.0.25 and later issuers send
+  ([LAN machine links](../operations/lan-machine-links.md#machine-access)).
 - **Revocation depends on Part C.** Without it, each renewal leaves the
   superseded session valid on D until it expires (up to about 30 days). Its
   token is deleted on L, but a narrowed policy wouldn't be enforced on D

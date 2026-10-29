@@ -109,13 +109,17 @@ approval before code or runtime changes.
   replacement (see Sequence). The fleet creates, renews and removes the links;
   see [Fleet-managed native link adapter](native-link-adapter.md) for the
   design, answers and proof plan. From LAN 1.0.26 the adapter is on by default
-  on every machine (`fleetLinkedEnvironmentsEnabled`), and links wait until the
-  fleet has a Machine access list, adopted from `fleet-access-seed.json` when
-  one is placed. It has not yet run between two real servers. Keep
+  on every machine (`fleetLinkedEnvironmentsEnabled`). It neither offers nor
+  links until the fleet has a Machine access list, adopted from
+  `fleet-access-seed.json` or saved in Settings, and linked environments count
+  as on only for an active member with a list; elsewhere Labs decides. A
+  starting list waits for the machines it makes read-only to run 1.0.26, at
+  most 24 hours. It has not yet run between two real servers. Keep
   `t3_lan_environments` for the gateway's grant path until rows 5, 6 and 10
   are settled.
 - **Tests:** `EnvironmentRegistry.test.ts`, `FleetPeerLinks.test.ts`,
-  `FleetPeerHttpClient.test.ts`, `serverSettings.test.ts` (default on);
+  `FleetPeerHttpClient.test.ts`, `serverSettings.test.ts` (default on, only
+  with a list), `McpHttpServer.test.ts` (link tools with the real default);
   upstream `PeerLinks.test.ts` and `PeerLinkRequests.test.ts`.
 - **Owner:** Dan. **Rollback:** `"fleetLinkedEnvironmentsEnabled": false` in a
   machine's `settings.json` (its next pass forgets and revokes what its adapter
@@ -378,14 +382,16 @@ approval before code or runtime changes.
   Owner-approval fleets get no automatic credential replacement. Software forging
   share files is out of scope (shared-folder trust).
 - **Data:** signed revisions in `fleet-access` on the share, an optional one-time
-  starting list `fleet-access-seed.json` beside the roster, the accepted chain
-  in `userdata\lan-fleet-access.json`; trust-check misses in
+  starting list `fleet-access-seed.json` beside the roster (removed once
+  adopted) with signed readiness markers in `fleet-access-ready`, the accepted
+  chain in `userdata\lan-fleet-access.json`, when the starting list was first
+  seen in `userdata\lan-fleet-access-seed.json`; trust-check misses in
   `lan-fleet-members.json` and `lan-fleet-trusted.json`. No database migration.
 - **Decision:** keep. A fleet adapter that creates native peer links must take
   each link's access from `FleetAccess.accessFor` and follow `FleetAccess.changes`
   instead of choosing one itself.
 - **Tests:** `FleetAccessPolicy.test.ts` (competing and orphaned revisions, the
-  starting list, departed signers, locks, floods),
+  starting list and its readiness wait, departed signers, locks, floods),
   `FleetCredentialAccess.test.ts` (receiver caps, revocation, unreadable
   policy, holder attribution),
   `RpcAuthorization.test.ts` (per-call scopes), `ws.test.ts` (webhook URLs),

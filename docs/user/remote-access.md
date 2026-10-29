@@ -52,9 +52,11 @@ links them as [linked environments](#link-another-environment) by itself, at eac
 machine's **Machine access**: a standard machine's agents get full access, a
 read-only machine's agents can only read. Nothing needs turning on or approving.
 Links renew themselves, follow access changes within about ten minutes, and go
-away when a machine leaves the fleet. If an administrator placed a starting access
-list on the shared folder, the first updated machine saves it as the fleet's first
-**Machine access** list, and machines link only once it is saved. To keep one
+away when a machine leaves the fleet. Machines link only once the fleet has a
+**Machine access** list. If an administrator placed a starting access list on the
+shared folder, an updated machine saves it as that list once the machines it makes
+read-only have updated too, or a day after it first saw the file; otherwise saving
+access in **Machine access** starts one. To keep one
 machine out, add `"fleetLinkedEnvironmentsEnabled": false` to its server
 `settings.json`.
 
@@ -352,8 +354,9 @@ Linked environments is a beta. Turn it on for both machines in **Settings →
 Labs**; on mobile, **Settings → Labs** lists each connected machine. While it is
 off on either machine, agents start nothing over a link between them. A task
 already running on the other machine still finishes, and if that machine has it
-off, its result arrives once it is back on. In a LAN fleet it stays on, and fleet
-machines are linked for you (see above).
+off, its result arrives once it is back on. On a LAN fleet machine it stays on once
+the fleet has a **Machine access** list, and fleet machines are linked for you (see
+above); until then, and outside a fleet, the switch decides.
 
 On the machine you will work from, open **Settings → Environments → Linked environments**,
 choose **Link**, and pick the other machine or enter its address. The list

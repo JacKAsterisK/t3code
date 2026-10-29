@@ -33,6 +33,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as CredentialAttribution from "./CredentialAttribution.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as McpOAuthGrants from "./McpOAuthGrants.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
@@ -224,7 +225,7 @@ interface PendingCode {
   readonly expiresAtMs: number;
   readonly taskOnly: boolean;
   readonly renewable: boolean;
-  /** The subject of the pairing code that approved it. */
+  /** The subject of the pairing code or browser session that approved it. */
   readonly approvalSubject: string | undefined;
 }
 
@@ -245,7 +246,11 @@ export class McpOAuth extends Context.Service<
       request: HttpServerRequest.HttpServerRequest,
       authorization: AuthorizationRequest,
     ) => Effect.Effect<
-      | { readonly csrfToken: string; readonly scopes: ReadonlyArray<AuthEnvironmentScope> }
+      | {
+          readonly csrfToken: string;
+          readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+          readonly subject: string;
+        }
       | undefined
     >;
     readonly approve: (input: {
@@ -468,7 +473,11 @@ const make = Effect.gen(function* () {
         // Approving manages access, and a session may only hand out scopes it holds.
         session.scopes.includes(AuthAccessWriteScope) &&
         session.scopes.includes(AuthOrchestrationReadScope)
-          ? { csrfToken: csrfToken(session.sessionId, authorization), scopes: session.scopes }
+          ? {
+              csrfToken: csrfToken(session.sessionId, authorization),
+              scopes: session.scopes,
+              subject: session.subject,
+            }
           : undefined,
       ),
       Effect.orElseSucceed(() => undefined),
@@ -538,6 +547,7 @@ const make = Effect.gen(function* () {
           description: "Your session cannot approve this request. Enter a pairing code instead.",
         });
       }
+      approvalSubject = session.subject;
     }
     const code = yield* mintCode(input.authorization, decision.access, approvalSubject);
     yield* Effect.logInfo("Approved an MCP client sign-in.", {
@@ -656,6 +666,8 @@ const make = Effect.gen(function* () {
             access: pending.access,
             client: { ...deriveAuthClientMetadata({ request }), label: pending.clientName },
             renewable: pending.renewable,
+            // A grant acts for the fleet machine whose credential approved it, if any.
+            subject: CredentialAttribution.mcpClientSubject(pending.approvalSubject ?? ""),
           })
           .pipe(
             Effect.map(grantResult),
@@ -668,6 +680,9 @@ const make = Effect.gen(function* () {
           access: pending.access,
           peerLink: pending.peerLink,
           client: deriveAuthClientMetadata({ request }),
+          ...(pending.approvalSubject === undefined
+            ? {}
+            : { approvalSubject: pending.approvalSubject }),
         })
         .pipe(
           Effect.catch((cause) =>

@@ -141,6 +141,7 @@ const make = Effect.gen(function* () {
             machineId: record.machineId,
             peers,
             legacyAccess: record.access,
+            signingPrivateKey: record.signingPrivateKey,
           });
     return {
       accessPolicy,
@@ -270,7 +271,8 @@ const make = Effect.gen(function* () {
               defaultAccess: policy.defaultAccess,
               machines: policy.machines,
               selfAccess: FleetAccessPolicy.selfAccess(policy),
-              canChange: FleetAccessPolicy.selfAccess(policy) === "standard",
+              canChange:
+                FleetAccessPolicy.selfAccess(policy) === "standard" && policy.unavailable !== true,
             },
           }),
       stage:

@@ -25,6 +25,18 @@ nothing needs approving or relinking; allow about ten minutes. **Machines added
 later** covers machines not yet in the list. The first list starts from the access
 chosen at setup on the machine that saves it.
 
+Each machine enforces the list itself, for everything the restricted machine and
+its agents hold there: its fleet connection, pairing codes it made, and agent
+task grants approved through it. A restriction applies to them right away, before
+anything is replaced. A machine removed from the fleet can use none of them.
+Agent task grants approved before this version only read while any machine is
+restricted; approve them again on the destination to restore task changes.
+
+The list trusts the fleet's shared folder: anything that can write there can
+already join the fleet. It stops a read-only machine through the app, its agents
+and its credentials, not software on it that deliberately forges files on the
+share. See [LAN machine links](../operations/lan-machine-links.md#machine-access).
+
 Fleet links do not expire. In a shared-folder fleet, each machine replaces the
 credential it gave another machine a week before it would expire, or as soon as
 that machine is back online if it was away longer, and that machine swaps it in

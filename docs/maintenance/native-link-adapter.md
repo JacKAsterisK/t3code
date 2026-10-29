@@ -36,7 +36,9 @@ of them touches `apps/server/src/peer`:
 - an MCP OAuth public origin for requests addressed to the fleet TLS endpoint
   (`mcpOAuthHttp.ts`)
 - attribution of a pairing-code session to its fleet code (`McpOAuth.ts`,
-  `EnvironmentAuth.ts`)
+  `EnvironmentAuth.ts`). The fleet access policy builds on it: every MCP
+  session and task grant also carries its approver in its subject, and
+  `auth/CredentialAttribution.ts` maps any credential to its fleet machine
 - `fleetLinkedEnvironmentsEnabled`, which reads `linkedEnvironmentsEnabled` as
   on while it is on (`serverSettings.ts`)
 

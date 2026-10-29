@@ -343,8 +343,13 @@ approval before code or runtime changes.
 - **Local:** `apps/server/src/lan/FleetAccessPolicy.ts` (the `FleetAccess`
   service), `LanFleet.ts` (issue, revoke and replace peer credentials),
   `FleetEnrollment.ts` (the `access` setup operation), `EnvironmentRouting.ts`
-  (a read-only machine forwards no task changes) and **Machine access** in
-  `LanFleetSetup.tsx`. See [LAN machine links](../operations/lan-machine-links.md#machine-access).
+  (a read-only machine forwards no task changes), `FleetCredentialAccess.ts`
+  (each credential capped at its machine's access per use, and revocation) and
+  **Machine access** in `LanFleetSetup.tsx`. Attribution is
+  `apps/server/src/auth/CredentialAttribution.ts`, shared with the peer-link
+  adapter: subjects `lan-fleet-by:<root>` and `mcp-client:<root>|local`, a
+  `CredentialAccessCap` applied to verified sessions in `EnvironmentAuth.ts`, to
+  task grants in `authenticateMcpClient`, and per call in `RpcAuthorization.layer`. See [LAN machine links](../operations/lan-machine-links.md#machine-access).
 - **Upstream:** each peer link and outside-agent grant has one
   `AuthMcpClientAccess` mode, set by whoever approves it on the destination.
   There is no fleet-wide policy and no way to change a link's mode without
@@ -353,16 +358,20 @@ approval before code or runtime changes.
 - **Must preserve:** the receiving machine enforces; one signed, synced policy; a
   read-only machine cannot lift its own restriction; changes need no approval or
   relink; links between unaffected machines are untouched.
-- **Gaps:** outside-agent task grants are not tied to a machine, so a destination
-  cannot narrow them (none are installed). Owner-approval fleets get no automatic
-  credential replacement.
+- **Gaps:** task grants approved before attribution are read-only while any
+  machine is restricted, until reapproved. Codes minted before attribution are
+  not tied to a machine. Owner-approval fleets get no automatic credential
+  replacement. Software forging share files is out of scope (shared-folder trust).
 - **Data:** signed revisions in `fleet-access` on the share and the accepted chain
   in `userdata\lan-fleet-access.json`. No database migration.
 - **Decision:** keep. A fleet adapter that creates native peer links must take
   each link's access from `FleetAccess.accessFor` and follow `FleetAccess.changes`
   instead of choosing one itself.
-- **Tests:** `FleetAccessPolicy.test.ts`, `FleetEnrollment.test.ts` (sync and
-  refused lifts), `LanFleet.test.ts` (replacement), `EnvironmentRouting.test.ts`.
+- **Tests:** `FleetAccessPolicy.test.ts` (competing and orphaned revisions,
+  departed signers, locks, floods), `FleetCredentialAccess.test.ts` (receiver
+  caps and revocation), `RpcAuthorization.test.ts` (per-call scopes),
+  `FleetEnrollment.test.ts` (sync and refused lifts), `LanFleet.test.ts`
+  (replacement), `EnvironmentRouting.test.ts`.
 - **Owner:** Dan. **Rollback:** set every machine to Standard in **Machine
   access**; each machine replaces the read-only credentials on its next sync.
 - **Revisit:** when upstream adds per-link access changes or project-scoped links.

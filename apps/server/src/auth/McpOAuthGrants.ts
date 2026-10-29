@@ -54,6 +54,7 @@ const GrantRow = Schema.Struct({
   revokedAt: Schema.NullOr(Schema.Number),
   sessionRevokedAt: Schema.NullOr(Schema.String),
   clientLabel: Schema.NullOr(Schema.String),
+  subject: Schema.String,
   spent: Schema.Number,
 });
 const decodeGrantRow = Schema.decodeUnknownEffect(GrantRow);
@@ -79,6 +80,8 @@ export class McpOAuthGrants extends Context.Service<
       readonly access: AuthMcpClientAccess;
       readonly client: AuthClientMetadata;
       readonly renewable: boolean;
+      /** Its sessions' subject, which says who approved it; kept across refreshes. */
+      readonly subject?: string;
     }) => Effect.Effect<IssuedGrant, McpOAuthGrantError>;
     readonly binding: (
       sessionId: AuthSessionId,
@@ -125,10 +128,11 @@ const make = Effect.gen(function* () {
     client: AuthClientMetadata,
     ttlSeconds: number,
     sessionSeconds: number,
+    subject: string,
   ) {
     return yield* sessions
       .issue({
-        subject: "mcp-client",
+        subject,
         method: "bearer-access-token",
         scopes:
           access === "read-only"
@@ -153,7 +157,13 @@ const make = Effect.gen(function* () {
       return yield* sql
         .withTransaction(
           Effect.gen(function* () {
-            const issued = yield* issueSession(input.access, input.client, ttl, expiresIn);
+            const issued = yield* issueSession(
+              input.access,
+              input.client,
+              ttl,
+              expiresIn,
+              input.subject ?? "mcp-client",
+            );
             yield* sql`INSERT INTO auth_mcp_grants
           (grant_id, client_id, resource, session_id, access, expires_at, renewable)
           VALUES (${grantId}, ${input.clientId}, ${input.resource}, ${issued.sessionId},
@@ -202,7 +212,7 @@ const make = Effect.gen(function* () {
     if (token.length > 512) return Option.none<typeof GrantRow.Type>();
     const rows = yield* sql`SELECT g.grant_id AS "grantId", g.client_id AS "clientId",
       g.resource, g.session_id AS "sessionId", g.access, g.expires_at AS "expiresAt",
-      g.renewable, g.revoked_at AS "revokedAt", s.revoked_at AS "sessionRevokedAt", s.client_label AS "clientLabel", t.spent
+      g.renewable, g.revoked_at AS "revokedAt", s.revoked_at AS "sessionRevokedAt", s.client_label AS "clientLabel", s.subject, t.spent
       FROM auth_mcp_refresh_tokens t JOIN auth_mcp_grants g ON g.grant_id = t.grant_id
       JOIN auth_sessions s ON s.session_id = g.session_id WHERE t.token_hash = ${yield* hashToken(token)}`.pipe(
       Effect.mapError(storageError),
@@ -256,6 +266,7 @@ const make = Effect.gen(function* () {
               },
               ttl,
               Math.floor((grant.expiresAt - now) / 1000),
+              grant.subject,
             );
             yield* sql`UPDATE auth_mcp_refresh_tokens SET spent = 1 WHERE token_hash = ${yield* hashToken(input.token)}`;
             yield* sql`INSERT INTO auth_mcp_refresh_tokens(token_hash, grant_id) VALUES (${yield* hashToken(nextToken)}, ${grant.grantId})`;

@@ -17,6 +17,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -29,20 +30,30 @@ import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 type Level = FleetAccessLevel;
 const Digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const MachineAccess = Schema.Struct({ machineId: FleetMachineId, access: FleetAccessLevel });
-
-/** One revision of the fleet-wide policy: a full snapshot, signed by the machine that wrote it. */
-export const FleetAccessEntry = Schema.Struct({
-  version: Schema.Literal(1),
+const entryFields = {
   fleetId: Schema.String.check(Schema.isMaxLength(256)),
   revision: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
-  previous: Schema.NullOr(Digest),
   signerMachineId: FleetMachineId,
   createdAt: Schema.Number,
   defaultAccess: FleetAccessLevel,
   machines: Schema.Array(MachineAccess).check(Schema.isMaxLength(100)),
   signature: Schema.String.check(Schema.isMaxLength(1024)),
-});
+};
+
+/**
+ * One revision of the fleet-wide policy: a full snapshot, signed by the machine that wrote it.
+ * Version 1 follows one revision, or none for the first; version 2 joins competing revisions.
+ */
+export const FleetAccessEntry = Schema.Union([
+  Schema.Struct({ version: Schema.Literal(1), previous: Schema.NullOr(Digest), ...entryFields }),
+  Schema.Struct({
+    version: Schema.Literal(2),
+    previous: Schema.Array(Digest).check(Schema.isMinLength(2), Schema.isMaxLength(16)),
+    ...entryFields,
+  }),
+]);
 export type FleetAccessEntry = typeof FleetAccessEntry.Type;
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 export interface FleetAccessSnapshot {
   readonly defaultAccess: Level;
@@ -55,6 +66,8 @@ const LocalCache = Schema.Struct({
   machineId: FleetMachineId,
   peers: Schema.Array(Schema.Struct({ machineId: FleetMachineId, environmentId: Schema.String })),
   entries: Schema.Array(FleetAccessEntry).check(Schema.isMaxLength(10_000)),
+  // Entries kept only so later ones still have their parents; they never count as verified.
+  unverified: Schema.optionalKey(Schema.Array(Digest).check(Schema.isMaxLength(10_000))),
 });
 type LocalCache = typeof LocalCache.Type;
 
@@ -78,6 +91,13 @@ export const entryDigest = (entry: FleetAccessEntry) =>
 export const entryFileName = (entry: FleetAccessEntry) =>
   `${String(entry.revision).padStart(6, "0")}-${entryDigest(entry).slice(0, 16)}.json`;
 const ENTRY_FILE = /^\d{6}-[a-f0-9]{16}\.json$/u;
+// More entry files than this is a flood, not a history: the policy reads as unavailable.
+const MAX_SHARE_ENTRIES = 1000;
+// A change holds the share lock for moments; one older than this was left by a crash.
+export const STALE_LOCK_MS = 2 * 60 * 1000;
+
+const parentsOf = (entry: FleetAccessEntry): ReadonlyArray<string> =>
+  entry.version === 2 ? entry.previous : entry.previous === null ? [] : [entry.previous];
 
 const normalize = (machines: FleetAccessSnapshot["machines"]) =>
   [...new Map(machines.map((machine) => [machine.machineId, machine.access])).entries()]
@@ -87,6 +107,26 @@ const normalize = (machines: FleetAccessSnapshot["machines"]) =>
 const accessOf = (snapshot: FleetAccessSnapshot, machineId: string): Level =>
   snapshot.machines.find((machine) => machine.machineId === machineId)?.access ??
   snapshot.defaultAccess;
+
+const sameSnapshot = (left: FleetAccessSnapshot, right: FleetAccessSnapshot) =>
+  left.defaultAccess === right.defaultAccess &&
+  JSON.stringify(normalize(left.machines)) === JSON.stringify(normalize(right.machines));
+
+/** Each machine at the most restrictive access any of the snapshots gives it. */
+function mostRestrictive(snapshots: ReadonlyArray<FleetAccessSnapshot>): FleetAccessSnapshot {
+  const least = (levels: ReadonlyArray<Level>): Level =>
+    levels.includes("read-only") ? "read-only" : "standard";
+  const ids = new Set(snapshots.flatMap((snapshot) => snapshot.machines.map((m) => m.machineId)));
+  return {
+    defaultAccess: least(snapshots.map((snapshot) => snapshot.defaultAccess)),
+    machines: normalize(
+      [...ids].map((machineId) => ({
+        machineId,
+        access: least(snapshots.map((snapshot) => accessOf(snapshot, machineId))),
+      })),
+    ),
+  };
+}
 
 /**
  * Before any policy every machine may write one. After that a standard machine may change
@@ -104,15 +144,19 @@ function authorizeAccessChange(
   return others(previous) === others(next) && accessOf(next, signerMachineId) === "read-only";
 }
 
+/** A machine the fleet knows must remain able to change the policy, or no one could lift it. */
+const keepsAStandardMachine = (snapshot: FleetAccessSnapshot, machineIds: ReadonlyArray<string>) =>
+  machineIds.some((machineId) => accessOf(snapshot, machineId) === "standard");
+
 export function signAccessEntry(
-  entry: Omit<FleetAccessEntry, "signature" | "machines"> & FleetAccessSnapshot,
+  entry: DistributiveOmit<FleetAccessEntry, "signature" | "machines"> & FleetAccessSnapshot,
   signingPrivateKey: string,
 ): FleetAccessEntry {
-  const unsigned: FleetAccessEntry = {
+  const unsigned = {
     ...entry,
     machines: normalize(entry.machines),
     signature: "",
-  };
+  } as FleetAccessEntry;
   return {
     ...unsigned,
     signature: NodeCrypto.sign(null, Buffer.from(entryData(unsigned)), signingPrivateKey).toString(
@@ -127,7 +171,6 @@ function verifiedSigner(entry: FleetAccessEntry, peers: ReadonlyArray<FleetPeer>
   const key = NodeCrypto.createPublicKey(signer.signingPublicKey);
   return (
     key.asymmetricKeyType === "ed25519" &&
-    JSON.stringify(normalize(entry.machines)) === JSON.stringify(entry.machines) &&
     NodeCrypto.verify(
       null,
       Buffer.from(entryData(entry)),
@@ -137,34 +180,77 @@ function verifiedSigner(entry: FleetAccessEntry, peers: ReadonlyArray<FleetPeer>
   );
 }
 
+export interface AccessRevision {
+  readonly entry: FleetAccessEntry;
+  readonly digest: string;
+  /** Signed by a current peer's current key, or accepted here when it was. */
+  readonly verified: boolean;
+  /** What it grants: its snapshot, or for an unverified one, no more than its parents grant. */
+  readonly effective: FleetAccessSnapshot;
+}
+
+export interface AccessEvaluation {
+  readonly revisions: ReadonlyArray<AccessRevision>;
+  /** Revisions nothing follows yet. Competing ones all apply, most restrictively. */
+  readonly heads: ReadonlyArray<AccessRevision>;
+  readonly snapshot: FleetAccessSnapshot | undefined;
+  readonly revision: number;
+}
+
 /**
- * Extends the chain this machine already accepted with entries from the share. Accepted
- * entries are never replaced, so deleting or rewriting share files cannot undo a change here.
+ * Each entry is checked against what its parents grant. One no current key verifies (its writer
+ * left or changed keys) still restricts but never lifts. Competing heads combine to each machine's
+ * most restrictive access, so no revision undoes a restriction another valid one imposes.
  */
-function extendAccessChain(input: {
+function evaluateAccess(input: {
   readonly fleetId: string;
   readonly accepted: ReadonlyArray<FleetAccessEntry>;
   readonly candidates: ReadonlyArray<FleetAccessEntry>;
   readonly peers: ReadonlyArray<FleetPeer>;
-}): ReadonlyArray<FleetAccessEntry> {
-  const chain = [...input.accepted];
-  for (;;) {
-    const head = chain.at(-1);
-    const previous = head === undefined ? null : entryDigest(head);
-    const next = input.candidates
-      .filter(
-        (entry) =>
-          entry.fleetId === input.fleetId &&
-          entry.revision === chain.length + 1 &&
-          entry.previous === previous &&
-          authorizeAccessChange(head, entry, entry.signerMachineId) &&
-          verifiedSigner(entry, input.peers),
-      )
-      // Two valid writers of one revision is a lost race; every machine keeps the same one.
-      .sort((left, right) => (entryDigest(left) < entryDigest(right) ? -1 : 1))[0];
-    if (next === undefined) return chain;
-    chain.push(next);
+}): AccessEvaluation {
+  const sticky = new Set(input.accepted.map(entryDigest));
+  const known = input.peers.map((peer) => peer.machineId);
+  const entries = new Map<string, FleetAccessEntry>();
+  for (const entry of [...input.accepted, ...input.candidates])
+    if (entry.fleetId === input.fleetId) entries.set(entryDigest(entry), entry);
+  const revisions = new Map<string, AccessRevision>();
+  for (const [digest, entry] of [...entries].toSorted(
+    ([leftDigest, left], [rightDigest, right]) =>
+      left.revision - right.revision || (leftDigest < rightDigest ? -1 : 1),
+  )) {
+    const parents = parentsOf(entry).map((parent) => revisions.get(parent));
+    if (parents.some((parent) => parent === undefined)) continue;
+    const resolved = parents as ReadonlyArray<AccessRevision>;
+    if (entry.revision !== 1 + Math.max(0, ...resolved.map((parent) => parent.entry.revision)))
+      continue;
+    if (
+      !sticky.has(digest) &&
+      (JSON.stringify(normalize(entry.machines)) !== JSON.stringify(entry.machines) ||
+        // Without any peers (a cache read at startup) there is nothing to check this against.
+        (known.length > 0 && !keepsAStandardMachine(entry, known)) ||
+        !resolved.every((parent) =>
+          authorizeAccessChange(parent.effective, entry, entry.signerMachineId),
+        ))
+    )
+      continue;
+    const verified = sticky.has(digest) || verifiedSigner(entry, input.peers);
+    revisions.set(digest, {
+      entry,
+      digest,
+      verified,
+      effective: verified
+        ? { defaultAccess: entry.defaultAccess, machines: entry.machines }
+        : mostRestrictive([entry, ...resolved.map((parent) => parent.effective)]),
+    });
   }
+  const followed = new Set([...revisions.values()].flatMap((item) => parentsOf(item.entry)));
+  const heads = [...revisions.values()].filter((item) => !followed.has(item.digest));
+  return {
+    revisions: [...revisions.values()],
+    heads,
+    snapshot: heads.length === 0 ? undefined : mostRestrictive(heads.map((head) => head.effective)),
+    revision: Math.max(0, ...heads.map((head) => head.entry.revision)),
+  };
 }
 
 const READ_ONLY_SCOPES: ReadonlyArray<AuthEnvironmentScope> = [
@@ -193,15 +279,27 @@ export interface FleetAccessState {
   readonly machines: FleetAccessSnapshot["machines"];
   readonly machineId: string | undefined;
   readonly peers: ReadonlyArray<{ readonly machineId: string; readonly environmentId: string }>;
+  /**
+   * The share's policy could not be read. The last accepted policy still applies; with none,
+   * every machine reads as read-only rather than falling back to the legacy setting.
+   */
+  readonly unavailable?: boolean;
 }
 
 export const machineAccess = (state: FleetAccessState, machineId: string) =>
   accessOf(state, machineId);
 /** This machine's own access; a machine outside any fleet is unrestricted. */
 export const selfAccess = (state: FleetAccessState): Level =>
-  state.revision === 0 || state.machineId === undefined
+  state.machineId === undefined
     ? "standard"
-    : accessOf(state, state.machineId);
+    : state.revision === 0
+      ? state.unavailable === true
+        ? "read-only"
+        : "standard"
+      : accessOf(state, state.machineId);
+/** Whether access follows a saved policy, or failed closed because it could not be read. */
+export const policyApplies = (state: FleetAccessState) =>
+  state.revision > 0 || state.unavailable === true;
 
 interface FleetAccessInput {
   readonly root: string;
@@ -209,6 +307,8 @@ interface FleetAccessInput {
   readonly machineId: string;
   readonly peers: ReadonlyArray<FleetPeer>;
   readonly legacyAccess: Level;
+  /** When given, a read may re-sign a head whose writer's key no longer verifies. */
+  readonly signingPrivateKey?: string;
 }
 
 /**
@@ -223,7 +323,7 @@ export class FleetAccess extends Context.Service<
     readonly current: Effect.Effect<FleetAccessState>;
     /** Emits whenever a fleet read accepts a new policy revision or peer set. */
     readonly changes: Stream.Stream<FleetAccessState>;
-    /** Reads the share's policy chain. Share failures keep the last accepted policy. */
+    /** Reads the share's policy. Share failures keep the last accepted policy. */
     readonly refresh: (input: FleetAccessInput) => Effect.Effect<FleetAccessState>;
     /** Signs and publishes a new revision as this machine; refused if this machine may not. */
     readonly change: (
@@ -252,22 +352,44 @@ const make = Effect.gen(function* () {
       )
     : undefined;
   let cache: LocalCache | undefined = readCache;
-  const stateOf = (value: LocalCache | undefined, legacyAccess: Level): FleetAccessState => {
-    const head = value?.entries.at(-1);
+  const cachedEntries = (value: LocalCache | undefined) => {
+    const unverified = new Set(value?.unverified ?? []);
     return {
-      revision: head?.revision ?? 0,
-      defaultAccess: head?.defaultAccess ?? legacyAccess,
-      machines: head?.machines ?? [],
-      machineId: value?.machineId,
-      peers: value?.peers ?? [],
+      accepted: (value?.entries ?? []).filter((entry) => !unverified.has(entryDigest(entry))),
+      kept: (value?.entries ?? []).filter((entry) => unverified.has(entryDigest(entry))),
     };
   };
-  const state = yield* SubscriptionRef.make(stateOf(cache, "standard"));
+  const stateOf = (
+    value: LocalCache | undefined,
+    evaluation: AccessEvaluation | undefined,
+    legacyAccess: Level,
+    unavailable: boolean,
+  ): FleetAccessState => ({
+    revision: evaluation?.revision ?? 0,
+    defaultAccess:
+      evaluation?.snapshot?.defaultAccess ?? (unavailable ? "read-only" : legacyAccess),
+    machines: evaluation?.snapshot?.machines ?? [],
+    machineId: value?.machineId,
+    peers: value?.peers ?? [],
+    ...(unavailable ? { unavailable: true } : {}),
+  });
+  const startup =
+    cache === undefined
+      ? undefined
+      : evaluateAccess({
+          fleetId: cache.fleetId,
+          ...((entries) => ({ accepted: entries.accepted, candidates: entries.kept }))(
+            cachedEntries(cache),
+          ),
+          peers: [],
+        });
+  const state = yield* SubscriptionRef.make(stateOf(cache, startup, "standard", false));
 
   const readShare = Effect.fn("FleetAccess.readShare")(function* (directory: string) {
     if (!(yield* fs.exists(directory))) return [];
     const names = (yield* fs.readDirectory(directory)).filter((name) => ENTRY_FILE.test(name));
-    if (names.length > 1000) return [];
+    if (names.length > MAX_SHARE_ENTRIES)
+      return yield* new LanFleetError({ reason: "unavailable" });
     const entries: Array<FleetAccessEntry> = [];
     for (const name of names) {
       const entry = yield* readFleetJson(path.join(directory, name), FleetAccessEntry).pipe(
@@ -281,15 +403,19 @@ const make = Effect.gen(function* () {
   const refreshUnlocked = Effect.fn("FleetAccess.refresh")(
     function* (input: FleetAccessInput) {
       const directory = path.join(input.root, "fleet-access");
-      const accepted =
-        cache?.fleetId === input.fleetId && cache.machineId === input.machineId
-          ? cache.entries
-          : [];
-      const candidates = yield* readShare(directory).pipe(Effect.orElseSucceed(() => []));
-      const entries = extendAccessChain({
+      const own = cache?.fleetId === input.fleetId && cache.machineId === input.machineId;
+      const { accepted, kept } = cachedEntries(own ? cache : undefined);
+      const read = yield* readShare(directory).pipe(Effect.option);
+      const unavailable = Option.isNone(read);
+      if (unavailable)
+        yield* Effect.logWarning(
+          "The fleet access policy on the share could not be read; the last accepted policy still applies.",
+        );
+      const candidates = Option.getOrElse(read, () => []);
+      const evaluation = evaluateAccess({
         fleetId: input.fleetId,
         accepted,
-        candidates,
+        candidates: [...kept, ...candidates],
         peers: input.peers,
       });
       const next: LocalCache = {
@@ -299,7 +425,10 @@ const make = Effect.gen(function* () {
         peers: input.peers
           .filter((peer) => peer.enabled)
           .map((peer) => ({ machineId: peer.machineId, environmentId: peer.environmentId })),
-        entries,
+        entries: evaluation.revisions.map((item) => item.entry),
+        unverified: evaluation.revisions
+          .filter((item) => !item.verified)
+          .map((item) => item.digest),
       };
       if (JSON.stringify(next) !== JSON.stringify(cache)) {
         yield* writeFleetJson(cacheFile, next).pipe(
@@ -310,75 +439,172 @@ const make = Effect.gen(function* () {
         );
         cache = next;
       }
-      const updated = stateOf(cache, input.legacyAccess);
+      const updated = stateOf(cache, evaluation, input.legacyAccess, unavailable);
       if (JSON.stringify(updated) !== JSON.stringify(yield* SubscriptionRef.get(state)))
         yield* SubscriptionRef.set(state, updated);
-      return { state: updated, directory, candidates };
+      return { state: updated, directory, candidates, evaluation, unavailable };
+    },
+    Effect.provideService(FileSystem.FileSystem, fs),
+  );
+  type View = Effect.Success<ReturnType<typeof refreshUnlocked>>;
+
+  /** The share lock, cleared first if a crash left it behind. */
+  const withShareLock = <A, E>(root: string, use: Effect.Effect<A, E>) => {
+    const lock = path.join(root, "fleet-access.lock");
+    const busy = () => new LanFleetError({ reason: "busy" });
+    const acquire = Effect.gen(function* () {
+      if ((yield* Effect.result(fs.makeDirectory(lock)))._tag === "Success") return;
+      const now = yield* Clock.currentTimeMillis;
+      const stale = yield* fs.stat(lock).pipe(
+        Effect.map((info) =>
+          Option.match(info.mtime, {
+            onNone: () => false,
+            onSome: (modified) => now - modified.getTime() > STALE_LOCK_MS,
+          }),
+        ),
+        Effect.orElseSucceed(() => false),
+      );
+      if (!stale) return yield* busy();
+      yield* Effect.logWarning("Clearing a fleet access lock a crashed change left behind.");
+      // Moving it aside is atomic, so two machines clearing it cannot both go on to take it.
+      const aside = `${lock}.stale-${NodeCrypto.randomUUID()}`;
+      yield* fs.rename(lock, aside).pipe(Effect.mapError(busy));
+      yield* fs.remove(aside, { recursive: true }).pipe(Effect.ignore);
+      yield* fs.makeDirectory(lock).pipe(Effect.mapError(busy));
+    });
+    return Effect.acquireUseRelease(
+      acquire,
+      () => use,
+      () => fs.remove(lock, { recursive: true }).pipe(Effect.ignore),
+    );
+  };
+
+  /** Signs `next` as this machine after every head it may follow, and writes it to the share. */
+  const publish = Effect.fn("FleetAccess.publish")(
+    function* (
+      input: FleetAccessInput & { readonly signingPrivateKey: string },
+      view: View,
+      next: FleetAccessSnapshot,
+    ) {
+      const { evaluation, directory, candidates } = view;
+      const parents = evaluation.heads
+        .filter((head) => authorizeAccessChange(head.effective, next, input.machineId))
+        .toSorted((left, right) => (left.digest < right.digest ? -1 : 1))
+        .slice(0, 16);
+      // Never a second first revision while any history exists, even history this machine
+      // cannot follow: it would only ever add a competing chain.
+      if (
+        parents.length === 0 &&
+        (evaluation.revisions.length > 0 ||
+          candidates.some((entry) => entry.fleetId === input.fleetId))
+      )
+        return yield* configurationError();
+      yield* fs.makeDirectory(directory, { recursive: true });
+      // Republish accepted entries the share lost, so machines joining later can verify them.
+      const present = new Set(candidates.map(entryFileName));
+      for (const { entry } of evaluation.revisions)
+        if (!present.has(entryFileName(entry)))
+          yield* writeFleetJson(path.join(directory, entryFileName(entry)), entry);
+      const common = {
+        fleetId: input.fleetId,
+        revision: 1 + Math.max(0, ...parents.map((parent) => parent.entry.revision)),
+        signerMachineId: input.machineId,
+        createdAt: yield* Clock.currentTimeMillis,
+        ...next,
+      };
+      const entry = signAccessEntry(
+        parents.length > 1
+          ? { version: 2, previous: parents.map((parent) => parent.digest), ...common }
+          : { version: 1, previous: parents[0]?.digest ?? null, ...common },
+        input.signingPrivateKey,
+      );
+      yield* writeFleetJson(path.join(directory, entryFileName(entry)), entry);
+      return entry;
     },
     Effect.provideService(FileSystem.FileSystem, fs),
   );
 
+  /**
+   * A head accepted here whose writer has since left or changed keys reads as restrict-only on a
+   * machine without this cache. A standard machine re-signs it so every machine reads the same.
+   */
+  const endorse = Effect.fn("FleetAccess.endorse")(function* (input: FleetAccessInput, view: View) {
+    const key = input.signingPrivateKey;
+    const snapshot = view.evaluation.snapshot;
+    if (
+      key === undefined ||
+      view.unavailable ||
+      snapshot === undefined ||
+      accessOf(snapshot, input.machineId) !== "standard" ||
+      !view.evaluation.heads.some(
+        (head) => head.verified && !verifiedSigner(head.entry, input.peers),
+      )
+    )
+      return view.state;
+    return yield* withShareLock(
+      input.root,
+      Effect.gen(function* () {
+        const fresh = yield* refreshUnlocked(input);
+        if (fresh.evaluation.snapshot === undefined) return fresh.state;
+        yield* publish({ ...input, signingPrivateKey: key }, fresh, fresh.evaluation.snapshot);
+        return (yield* refreshUnlocked(input)).state;
+      }),
+    ).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("A fleet access revision could not be re-signed.", { cause }).pipe(
+          Effect.as(view.state),
+        ),
+      ),
+    );
+  });
+
   const refresh = (input: FleetAccessInput) =>
-    mutex.withPermits(1)(refreshUnlocked(input).pipe(Effect.map(({ state }) => state)));
+    mutex.withPermits(1)(
+      refreshUnlocked(input).pipe(Effect.flatMap((view) => endorse(input, view))),
+    );
 
   const change: FleetAccess["Service"]["change"] = (input) =>
     mutex.withPermits(1)(
-      Effect.gen(function* () {
-        const lock = path.join(input.root, "fleet-access.lock");
-        return yield* Effect.acquireUseRelease(
-          fs.makeDirectory(lock).pipe(Effect.mapError(() => new LanFleetError({ reason: "busy" }))),
-          () =>
-            Effect.gen(function* () {
-              const { state: current, directory, candidates } = yield* refreshUnlocked(input);
-              if (current.revision !== input.expectedRevision) return yield* configurationError();
-              const enabled = input.peers.filter((peer) => peer.enabled);
-              const next: FleetAccessSnapshot = {
-                defaultAccess: input.next.defaultAccess,
-                machines: normalize(
-                  input.next.machines.filter((machine) =>
-                    enabled.some((peer) => peer.machineId === machine.machineId),
-                  ),
-                ),
-              };
-              const head = cache?.entries.at(-1);
-              if (
-                !authorizeAccessChange(head, next, input.machineId) ||
-                // Someone must remain able to change the policy, or no one could lift it.
-                !enabled.some((peer) => accessOf(next, peer.machineId) === "standard")
-              )
-                return yield* configurationError();
-              if (
-                head !== undefined &&
-                head.defaultAccess === next.defaultAccess &&
-                JSON.stringify(head.machines) === JSON.stringify(next.machines)
-              )
-                return current;
-              yield* fs.makeDirectory(directory, { recursive: true });
-              // Republish accepted entries the share lost, so machines joining later can verify them.
-              const present = new Set(candidates.map(entryFileName));
-              for (const entry of cache?.entries ?? [])
-                if (!present.has(entryFileName(entry)))
-                  yield* writeFleetJson(path.join(directory, entryFileName(entry)), entry);
-              const entry = signAccessEntry(
-                {
-                  version: 1,
-                  fleetId: input.fleetId,
-                  revision: current.revision + 1,
-                  previous: head === undefined ? null : entryDigest(head),
-                  signerMachineId: input.machineId,
-                  createdAt: yield* Clock.currentTimeMillis,
-                  ...next,
-                },
-                input.signingPrivateKey,
-              );
-              yield* writeFleetJson(path.join(directory, entryFileName(entry)), entry);
-              const { state: written } = yield* refreshUnlocked(input);
-              if (written.revision !== entry.revision) return yield* configurationError();
-              return written;
-            }),
-          () => fs.remove(lock, { recursive: true }).pipe(Effect.ignore),
-        );
-      }).pipe(
+      withShareLock(
+        input.root,
+        Effect.gen(function* () {
+          const view = yield* refreshUnlocked(input);
+          if (view.unavailable) return yield* new LanFleetError({ reason: "unavailable" });
+          if (view.state.revision !== input.expectedRevision) return yield* configurationError();
+          const current = view.evaluation.snapshot;
+          // Entries are kept for machines that are not enabled peers right now, so a restricted
+          // machine that drops out and comes back is still restricted.
+          const next: FleetAccessSnapshot = {
+            defaultAccess: input.next.defaultAccess,
+            machines: normalize(input.next.machines),
+          };
+          if (
+            next.machines.length > 100 ||
+            !authorizeAccessChange(current, next, input.machineId) ||
+            // Someone must remain able to change the policy, or no one could lift it.
+            !input.peers.some(
+              (peer) => peer.enabled && accessOf(next, peer.machineId) === "standard",
+            )
+          )
+            return yield* configurationError();
+          if (
+            current !== undefined &&
+            view.evaluation.heads.length === 1 &&
+            sameSnapshot(current, next)
+          )
+            return view.state;
+          const entry = yield* publish(input, view, next);
+          const written = yield* refreshUnlocked(input);
+          // A competing head that restricts more still applies; report it rather than succeed.
+          if (
+            !written.evaluation.revisions.some((item) => item.digest === entryDigest(entry)) ||
+            written.evaluation.snapshot === undefined ||
+            !sameSnapshot(written.evaluation.snapshot, next)
+          )
+            return yield* configurationError();
+          return written.state;
+        }),
+      ).pipe(
         Effect.mapError((error) =>
           isFleetError(error) ? error : new LanFleetError({ reason: "unavailable" }),
         ),

@@ -41,20 +41,52 @@ member's automatic sync.
 
 Access is one fleet-wide list, **Machine access**, kept as signed revisions in
 `fleet-access` beside the roster. Each revision is a full snapshot, signed with
-its writer's fleet key and chained to the previous revision. A revision counts
-only if its writer had standard access under the previous one, or if it only
-makes its writer read-only. The last standard machine cannot restrict itself.
-Each machine keeps the revisions it accepted, so deleting or rewriting share files
-cannot undo a change; a later write republishes lost revisions. Being the fleet
-owner grants nothing here.
+its writer's fleet key and chained to the revision it follows. A revision counts
+only if its writer had standard access under what it follows, or if it only
+makes its writer read-only. A revision that leaves no machine the fleet knows at
+standard access does not count, and the last standard machine cannot restrict
+itself. Being the fleet owner grants nothing here.
+
+The list fails closed:
+
+- Competing revisions, such as two first lists or two machines saving at once,
+  all apply, each machine at the most restrictive access any of them gives it.
+  The next save follows all of them. A machine cannot lift its own restriction
+  by writing a rival revision, whatever its contents or timestamp.
+- Each machine keeps the revisions it accepted, so deleting or rewriting share
+  files cannot undo a change; a later write republishes lost revisions. A machine
+  with no saved copy reads the same result from the share.
+- A revision whose writer has since left or changed keys still restricts but
+  cannot lift anything for a machine that never verified it. A standard machine
+  that did verify it re-signs it on its next read, so every machine agrees again.
+- A machine never starts a second first revision while the share holds any
+  history, even history it cannot follow.
+- If the share's list cannot be read, including more than 1,000 revision files,
+  a machine keeps the list it accepted and reports it unreadable; with none, it
+  treats every machine as read-only rather than using the setup access. Changes
+  are refused until it can read the list.
+- A change holds `fleet-access.lock` for a moment. A lock older than two minutes
+  was left by a crash, and the next change clears it.
 
 The receiving side enforces it. Every machine issues each peer's credential at
-that peer's access. In shared-folder fleets each sync also revokes credentials it
-issued that no longer match and delivers a replacement, which the peer's desktop
-swaps in for its saved connection. Lost access ends at the issuer's next sync;
-gained access waits until the peer is online. A read-only machine's own server
-also refuses to forward LAN task changes. Until a list is saved, each machine
-keeps the access chosen at setup.
+that peer's access. Every credential a fleet machine holds here is attributed to
+that machine by subjects this server sets: its fleet credential, its peer-link
+sessions, pairing codes its sessions mint and the sessions redeemed from them,
+and MCP sessions and `t3_lan_*` task grants approved with any of those. Each use
+of such a credential, over HTTP, WebSocket RPC or MCP, gets at most that
+machine's current access. A read-only machine's still-open connections and task
+grants lose launch, send, interrupt, respond, settings and fleet changes at once.
+A machine the fleet disabled, or that the roster no longer trusts, can use
+nothing.
+
+Revocation follows on the issuer at startup, every ten minutes and whenever the
+list or the fleet's machines change. It revokes sessions, grants and codes
+attributed to a downgraded machine above its access, and everything attributed
+to a departed or untrusted one. In shared-folder fleets each sync also replaces a
+peer's own fleet credential at its access; the peer's desktop swaps it in for its
+saved connection. Gained access waits until the peer is online. A read-only
+machine's own server also refuses to forward LAN task changes. Until a list is
+saved, each machine keeps the access chosen at setup.
 
 The same replacement renews fleet links. A credential becomes a session with the
 default 30-day lifetime, and in shared-folder fleets the issuer delivers a
@@ -70,10 +102,26 @@ only makes them sooner, and the sync lock keeps one at a time. The server
 collects nothing, and it starts only after this machine's desktop has synced
 once: it republishes the connections that desktop last published.
 
-Limits: in owner-approval fleets a change applies only to links issued after it,
-so relink existing ones there. Outside-agent task grants are approved on the
-destination and are not tied to a machine; revoke them in **Sharing & access**. A
-read-only machine's credentials cannot approve new ones.
+Limits:
+
+- In owner-approval fleets a change applies only to links issued after it, so
+  relink existing ones there.
+- A task grant approved on the destination by its own user, or with a pairing
+  code created there, is that user's decision and is not tied to a machine;
+  revoke it in **Sharing & access**.
+- Task grants approved before grants recorded their approver cannot be
+  attributed. While the list restricts any machine, they only read; approve them
+  again to restore task changes.
+- Pairing codes minted by a fleet session before codes recorded their minter are
+  not attributed either. Revoke unused ones in **Sharing & access**.
+
+Shared-folder trust is the boundary. Anything that can write the fleet share can
+already join the fleet: it can file enrollment requests, edit roster entries or
+swap keys. These controls stop a restricted machine, its agents and its
+credentials through the app, `t3_lan_*` tools, task grants, peer links and direct
+calls. They do not stop software on that machine that deliberately forges fleet
+files on the share. Keep write access to the share to the fleet's machines and
+their administrators.
 
 ## Link approved machines
 

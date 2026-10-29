@@ -41,6 +41,7 @@ import * as FleetAccessPolicy from "./lan/FleetAccessPolicy.ts";
 import * as LanFleet from "./lan/LanFleet.ts";
 import * as FleetMcpOrigin from "./lan/FleetMcpOrigin.ts";
 import * as FleetPeerHttpClient from "./lan/FleetPeerHttpClient.ts";
+import * as FleetCredentialAccess from "./lan/FleetCredentialAccess.ts";
 import * as FleetPeerLinks from "./lan/FleetPeerLinks.ts";
 import * as FleetTransport from "./lan/FleetTransport.ts";
 import * as AgentScopeLive from "./process/agentScope.ts";
@@ -512,6 +513,8 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
 const layerAuth = EnvironmentAuth.layer.pipe(
+  // T3 Code LAN: each fleet machine's credentials are capped at its current fleet access.
+  Layer.provide(FleetCredentialAccess.layerCap),
   Layer.provideMerge(layerPersistence),
   Layer.provide(layerServerEnvironment),
   Layer.provide(ServerSecretStore.layer),
@@ -797,7 +800,15 @@ const layerMakeRoutes = Layer.mergeAll(
   // T3 Code LAN: fleet sync from the server, so credentials renew and revoke with no window open.
   Layer.provide(LanFleet.layerBackground),
   // T3 Code LAN: fleet machines link to each other as linked environments (off by default).
-  Layer.provide(Layer.mergeAll(FleetPeerLinks.layer, FleetMcpOrigin.layer)),
+  Layer.provide(
+    Layer.mergeAll(
+      FleetPeerLinks.layer,
+      FleetMcpOrigin.layer,
+      // The same cap as EnvironmentAuth's, by layer memoization, for each WebSocket RPC call.
+      FleetCredentialAccess.layerCap,
+      FleetCredentialAccess.layerRevocation,
+    ),
+  ),
   // Links to other environments, shared by Settings (WebSocket) and agents (/mcp).
   Layer.provide(
     PeerForwarding.layer.pipe(

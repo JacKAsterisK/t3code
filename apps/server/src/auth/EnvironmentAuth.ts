@@ -36,6 +36,7 @@ import * as HttpServerRequest from "effect/http/HttpServerRequest";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerConfig from "../config.ts";
+import * as CredentialAttribution from "./CredentialAttribution.ts";
 import * as EnvironmentAuthPolicy from "./EnvironmentAuthPolicy.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
@@ -70,7 +71,7 @@ export interface IssuedBearerSession {
 }
 
 // MCP client tokens are restricted to /mcp; HTTP API and WebSocket RPC would bypass their access cap.
-const MCP_CLIENT_SUBJECT = "mcp-client";
+const { MCP_CLIENT_SUBJECT, isMcpClientSubject } = CredentialAttribution;
 const MCP_CLIENT_SESSION_TTL = Duration.days(30);
 
 export interface McpClientSession {
@@ -487,8 +488,10 @@ export class EnvironmentAuth extends Context.Service<
       readonly proofKeyThumbprint?: string;
       readonly purpose?: "startup";
     }) => Effect.Effect<IssuedPairingLink, ServerAuthInternalError>;
+    /** `principal` is who asked; a fleet machine's code stays attributed to it. */
     readonly issuePairingCredential: (
       input?: AuthCreatePairingCredentialInput,
+      principal?: { readonly subject: string },
     ) => Effect.Effect<AuthPairingCredentialResult, ServerAuthInternalError>;
     readonly issueStartupPairingCredential: () => Effect.Effect<
       AuthPairingCredentialResult,
@@ -543,6 +546,8 @@ export class EnvironmentAuth extends Context.Service<
       readonly access: AuthMcpClientAccess;
       readonly peerLink: boolean;
       readonly client: AuthClientMetadata;
+      /** The subject of whoever approved it, which the session stays attributed to. */
+      readonly approvalSubject?: string;
     }) => Effect.Effect<
       {
         readonly sessionId: AuthSessionId;
@@ -605,7 +610,7 @@ function toBootstrapExchangeError(
 }
 
 const rejectMcpClientAudience = <S extends { readonly subject: string }>(session: S) =>
-  session.subject === MCP_CLIENT_SUBJECT
+  isMcpClientSubject(session.subject)
     ? Effect.fail(
         new ServerAuthInvalidCredentialError({
           diagnostic: "MCP client sessions are only accepted by the MCP endpoint.",
@@ -707,7 +712,12 @@ function isBrowserOriginAllowed(
 export const make = Effect.gen(function* () {
   const policy = yield* EnvironmentAuthPolicy.EnvironmentAuthPolicy;
   const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
-  const sessions = yield* SessionStore.SessionStore;
+  // Every verified session is limited to what its fleet machine may do at the time it is used.
+  const accessCap = yield* Effect.serviceOption(CredentialAttribution.CredentialAccessCap);
+  const sessions = CredentialAttribution.cappedSessionStore(
+    yield* SessionStore.SessionStore,
+    accessCap,
+  );
   const mcpGrants = yield* McpOAuthGrants.McpOAuthGrants;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const crypto = yield* Crypto.Crypto;
@@ -1128,10 +1138,16 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("EnvironmentAuth.revokeOtherSessionsExcept"),
     );
 
-  const issuePairingCredential: EnvironmentAuth["Service"]["issuePairingCredential"] = (input) =>
+  const issuePairingCredential: EnvironmentAuth["Service"]["issuePairingCredential"] = (
+    input,
+    principal,
+  ) =>
     issuePairingCredentialForSubject({
       scopes: input?.scopes ?? AuthStandardClientScopes,
-      subject: "one-time-token",
+      subject:
+        (principal === undefined
+          ? undefined
+          : CredentialAttribution.derivedSubject(principal.subject)) ?? "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
     }).pipe(Effect.withSpan("EnvironmentAuth.issuePairingCredential"));
 
@@ -1295,15 +1311,30 @@ export const make = Effect.gen(function* () {
     return sessions.verify(token).pipe(
       mapSessionVerificationErrors,
       Effect.flatMap((session) =>
-        session.subject === MCP_CLIENT_SUBJECT && session.method === "bearer-access-token"
+        isMcpClientSubject(session.subject) && session.method === "bearer-access-token"
           ? mcpGrants.binding(session.sessionId).pipe(
+              Effect.flatMap((binding) =>
+                // A task grant from before grants recorded their approver can only be capped here.
+                (Option.isSome(accessCap) && Option.isSome(binding)
+                  ? accessCap.value.scopes({ ...session, taskGrant: true })
+                  : Effect.succeed(session.scopes)
+                ).pipe(
+                  Effect.flatMap((scopes) =>
+                    scopes === undefined
+                      ? Effect.fail(
+                          new McpOAuthGrants.McpOAuthGrantError({ reason: "invalid_grant" }),
+                        )
+                      : Effect.succeed({ binding, scopes }),
+                  ),
+                ),
+              ),
               Effect.map(
-                (binding) =>
+                ({ binding, scopes }) =>
                   ({
                     sessionId: session.sessionId,
                     ...Option.getOrElse(binding, () => ({})),
                     label: session.client.label ?? "MCP client",
-                    access: session.scopes.includes(AuthOrchestrationOperateScope)
+                    access: scopes.includes(AuthOrchestrationOperateScope)
                       ? (session.runtimeModeCeiling ?? "approval-required")
                       : "read-only",
                     peerLink: session.peerLink === true,
@@ -1329,7 +1360,10 @@ export const make = Effect.gen(function* () {
   const issueMcpClientSession: EnvironmentAuth["Service"]["issueMcpClientSession"] = (input) =>
     sessions
       .issue({
-        subject: MCP_CLIENT_SUBJECT,
+        subject:
+          input.approvalSubject === undefined
+            ? MCP_CLIENT_SUBJECT
+            : CredentialAttribution.mcpClientSubject(input.approvalSubject),
         method: "bearer-access-token",
         scopes: mcpClientScopes(input.access),
         ttl: MCP_CLIENT_SESSION_TTL,

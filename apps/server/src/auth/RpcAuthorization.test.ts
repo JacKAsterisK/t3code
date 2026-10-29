@@ -181,6 +181,49 @@ describe("settings mutation authorization", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("checks what an open connection may do at each call, not when it connected", () =>
+    Effect.gen(function* () {
+      let handled = 0;
+      let current: ReadonlyArray<"settings:write" | "orchestration:read"> | undefined = [
+        AuthSettingsWriteScope,
+        AuthOrchestrationReadScope,
+      ];
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.serverUpdateSettings, () =>
+              Effect.sync(() => {
+                handled++;
+                return DEFAULT_SERVER_SETTINGS;
+              }),
+            ),
+            RpcAuthorization.layer(
+              [AuthSettingsWriteScope, AuthOrchestrationReadScope],
+              undefined,
+              Effect.sync(() => current),
+            ),
+          ),
+        ),
+      );
+      const update = client[WS_METHODS.serverUpdateSettings]({
+        patch: { defaultRuntimeMode: "full-access" },
+      });
+      yield* update;
+      expect(handled).toBe(1);
+      // The fleet narrowed this connection's machine to read-only while it stayed open.
+      current = [AuthOrchestrationReadScope];
+      expect(yield* update.pipe(Effect.flip)).toMatchObject({
+        requiredPermission: AuthSettingsWriteScope,
+      });
+      // A machine that left the fleet may do nothing.
+      current = undefined;
+      expect(yield* update.pipe(Effect.flip)).toMatchObject({
+        requiredPermission: AuthSettingsWriteScope,
+      });
+      expect(handled).toBe(1);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("does not let a settings grant create or remove providers", () =>
     Effect.gen(function* () {
       let handled = false;

@@ -27,6 +27,8 @@ export class FleetTransport extends Context.Service<
     ) => Effect.Effect<StoredTls, LanFleetError>;
     readonly ready: (record: FleetVaultRecord) => Effect.Effect<boolean>;
     readonly persist: (record: FleetVaultRecord) => Effect.Effect<void, LanFleetError>;
+    /** The https origin of the encrypted endpoint this server is running, if any. */
+    readonly origin: Effect.Effect<string | undefined>;
   }
 >()("t3/lan/FleetTransport") {}
 
@@ -164,6 +166,7 @@ const make = Effect.gen(function* () {
     suggestions,
     prepare,
     persist,
+    origin: Effect.sync(() => running?.origin),
     ready: Effect.fn("FleetTransport.ready")((record) =>
       Effect.sync(
         () =>

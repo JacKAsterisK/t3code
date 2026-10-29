@@ -15,6 +15,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -26,6 +27,7 @@ import { readFleetJson, validateRoster, writeFleetJson } from "./FleetFiles.ts";
 import { FLEET_ROSTER_ENV, resolveFleetBootstrap } from "./FleetBootstrap.ts";
 import * as FleetEnrollment from "./FleetEnrollment.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
+import * as FleetPeerLinks from "./FleetPeerLinks.ts";
 
 const Record = Schema.Struct({
   deliveryId: Schema.String,
@@ -68,6 +70,9 @@ const make = Effect.gen(function* () {
   const connectHost = platform === "win32" && isConnectHost(hostname) ? hostname : undefined;
   const enrollment = yield* FleetEnrollment.FleetEnrollment;
   const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
+  const peerLinks = yield* Effect.serviceOption(FleetPeerLinks.FleetPeerLinks);
+  // A sync may bring new catalogs, trust or peer-link requests for the peer-link adapter.
+  const requestPeerLinkPass = Option.isSome(peerLinks) ? peerLinks.value.requestPass : Effect.void;
   const privateFile = path.join(serverConfig.stateDir, "lan-fleet-private.json");
   const journalFile = path.join(serverConfig.stateDir, "lan-fleet-state.json");
   const lock = path.join(serverConfig.stateDir, "lan-fleet.lock");
@@ -566,8 +571,14 @@ const make = Effect.gen(function* () {
       isFleetError(error) ? error : new LanFleetError({ reason: "unavailable" }),
     ),
     Effect.provideService(FileSystem.FileSystem, fs),
+    Effect.tap(() => requestPeerLinkPass),
   );
-  return LanFleet.of({ sync, setup: enrollment.status, configure: enrollment.configure });
+  const configure = Effect.fn("LanFleet.configure")(function* (input: LanFleetSetupInput) {
+    const state = yield* enrollment.configure(input);
+    yield* requestPeerLinkPass;
+    return state;
+  });
+  return LanFleet.of({ sync, setup: enrollment.status, configure });
 });
 
 export const layerServices = Layer.effect(LanFleet, make);

@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- Node owns the key formats; canonical JSON contains only schema-validated envelope fields.
 import * as NodeCrypto from "node:crypto";
 import {
+  AuthMcpClientAccess,
   FleetMachine,
   FleetMachineId,
   FleetTlsIdentity,
@@ -44,7 +45,10 @@ const Header = Schema.Struct({
   recipientId: FleetMachineId,
   expiresAt: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
   ephemeralPublicKey: Pem,
+  // A code for a fleet peer link, never a desktop client connection. Covered by the AAD and signature.
+  purpose: Schema.optionalKey(Schema.Literal("peer-link")),
 });
+export type DeliveryPurpose = NonNullable<typeof Header.Type.purpose>;
 export const Delivery = Schema.Struct({
   header: Header,
   nonce: Text,
@@ -58,6 +62,8 @@ const Payload = Schema.Struct({
   recipientEnvironmentId: FleetMachine.fields.environmentId,
   origin: FleetMachine.fields.origin,
   credential: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  /** The access the sender granted a peer link; only peer-link deliveries carry it. */
+  access: Schema.optionalKey(AuthMcpClientAccess),
 });
 const decodePayload = Schema.decodeSync(Schema.fromJsonString(Payload));
 const isConnectHost = Schema.is(FleetConnectHost);
@@ -205,6 +211,8 @@ export function sealDelivery(input: {
   deliveryId: string;
   expiresAt: number;
   credential: string;
+  /** A peer-link code and the access it grants; absent for a desktop client delivery. */
+  peerLink?: { readonly access: AuthMcpClientAccess };
 }): Delivery {
   const ephemeral = NodeCrypto.generateKeyPairSync("x25519");
   const header = {
@@ -214,6 +222,7 @@ export function sealDelivery(input: {
     recipientId: input.recipient.machineId,
     expiresAt: input.expiresAt,
     ephemeralPublicKey: ephemeral.publicKey.export({ type: "spki", format: "pem" }).toString(),
+    ...(input.peerLink === undefined ? {} : { purpose: "peer-link" as const }),
   };
   const shared = NodeCrypto.diffieHellman({
     privateKey: ephemeral.privateKey,
@@ -227,6 +236,7 @@ export function sealDelivery(input: {
     recipientEnvironmentId: input.recipient.environmentId,
     origin: input.sender.origin,
     credential: input.credential,
+    ...(input.peerLink === undefined ? {} : { access: input.peerLink.access }),
   };
   const delivery: Delivery = {
     header,
@@ -253,8 +263,10 @@ export function verifyDelivery(
   sender: FleetPeer,
   recipient: FleetPeer,
   now: number,
+  purpose?: DeliveryPurpose,
 ): boolean {
   return (
+    delivery.header.purpose === purpose &&
     delivery.header.recipientId === recipient.machineId &&
     delivery.header.senderId === sender.machineId &&
     delivery.header.expiresAt > now &&
@@ -274,8 +286,9 @@ export function openDelivery(
   sender: FleetPeer,
   self: FleetPeer,
   now: number,
+  purpose?: DeliveryPurpose,
 ) {
-  if (!verifyDelivery(delivery, sender, self, now))
+  if (!verifyDelivery(delivery, sender, self, now, purpose))
     throw new Error("Fleet delivery assignment, expiry or signature mismatch");
   const shared = NodeCrypto.diffieHellman({
     privateKey: NodeCrypto.createPrivateKey(config.encryptionPrivateKey),
@@ -296,7 +309,8 @@ export function openDelivery(
   if (
     payload.senderEnvironmentId !== sender.environmentId ||
     payload.recipientEnvironmentId !== self.environmentId ||
-    payload.origin !== sender.origin
+    payload.origin !== sender.origin ||
+    (payload.access !== undefined) !== (purpose === "peer-link")
   )
     throw new Error("Fleet environment identity mismatch");
   return payload;
@@ -343,3 +357,82 @@ export const deliveryFileName = (senderId: string, recipientId: string) =>
   NodeCrypto.createHash("sha256")
     .update(JSON.stringify([senderId, recipientId]))
     .digest("hex");
+
+/** A linking machine asks a fleet peer for a peer-link code. Only the named recipient answers it. */
+export const PeerLinkRequest = Schema.Struct({
+  version: Schema.Literal(1),
+  requestId: Header.fields.deliveryId,
+  senderId: FleetMachineId,
+  recipientId: FleetMachineId,
+  createdAt: Schema.Number,
+  expiresAt: Schema.Number,
+  signature: Text,
+});
+export type PeerLinkRequest = typeof PeerLinkRequest.Type;
+const requestData = (request: PeerLinkRequest) =>
+  JSON.stringify([
+    "peer-link-request",
+    request.version,
+    request.requestId,
+    request.senderId,
+    request.recipientId,
+    request.createdAt,
+    request.expiresAt,
+  ]);
+
+export function makePeerLinkRequest(input: {
+  config: FleetPrivateConfig;
+  recipient: FleetPeer;
+  requestId: string;
+  now: number;
+  expiresAt: number;
+}): PeerLinkRequest {
+  const request: PeerLinkRequest = {
+    version: 1,
+    requestId: input.requestId,
+    senderId: input.config.machineId,
+    recipientId: input.recipient.machineId,
+    createdAt: input.now,
+    expiresAt: input.expiresAt,
+    signature: "",
+  };
+  return {
+    ...request,
+    signature: NodeCrypto.sign(
+      null,
+      Buffer.from(requestData(request)),
+      input.config.signingPrivateKey,
+    ).toString("base64"),
+  };
+}
+
+export function verifyPeerLinkRequest(
+  request: PeerLinkRequest,
+  sender: FleetPeer,
+  recipient: FleetPeer,
+  now: number,
+): boolean {
+  return (
+    request.senderId === sender.machineId &&
+    request.recipientId === recipient.machineId &&
+    request.createdAt <= now + 60_000 &&
+    request.expiresAt > now &&
+    request.expiresAt <= request.createdAt + 24 * 60 * 60 * 1000 &&
+    NodeCrypto.verify(
+      null,
+      Buffer.from(requestData(request)),
+      publicKey(sender.signingPublicKey, "ed25519"),
+      Buffer.from(request.signature, "base64"),
+    )
+  );
+}
+
+/** Share files for a peer link that `recipientId` makes to `senderId`, which issues the codes. */
+export const peerLinkFileNames = (senderId: string, recipientId: string) => {
+  const offer = deliveryFileName(senderId, recipientId);
+  return {
+    request: `${deliveryFileName(recipientId, senderId)}.peer-link-request.json`,
+    offer: `${offer}.peer-link.json`,
+    receipt: `${offer}.peer-link.receipt.json`,
+  };
+};

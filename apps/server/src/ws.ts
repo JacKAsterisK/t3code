@@ -111,6 +111,7 @@ import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
 import * as LanFleet from "./lan/LanFleet.ts";
 import * as FleetTransport from "./lan/FleetTransport.ts";
+import * as FleetPeerLinks from "./lan/FleetPeerLinks.ts";
 import * as FleetAccessPolicy from "./lan/FleetAccessPolicy.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -3291,6 +3292,7 @@ export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const fleetTransport = yield* FleetTransport.FleetTransport;
     const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
+    const fleetPeerLinks = yield* Effect.serviceOption(FleetPeerLinks.FleetPeerLinks);
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
@@ -3375,6 +3377,11 @@ export const layer = Layer.unwrap(
                 LanFleet.layer.pipe(
                   Layer.provide(Layer.succeed(FleetTransport.FleetTransport, fleetTransport)),
                   Layer.provide(Layer.succeed(FleetAccessPolicy.FleetAccess, fleetAccess)),
+                  Layer.provide(
+                    Option.isSome(fleetPeerLinks)
+                      ? Layer.succeed(FleetPeerLinks.FleetPeerLinks, fleetPeerLinks.value)
+                      : Layer.empty,
+                  ),
                 ),
               ),
               Layer.provide(

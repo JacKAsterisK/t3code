@@ -216,7 +216,7 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
   });
   const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);
   const writeSemaphore = yield* Semaphore.make(1);
-  const getSettings = Ref.get(currentSettingsRef).pipe(Effect.map(resolveTextGenerationProvider));
+  const getSettings = Ref.get(currentSettingsRef).pipe(Effect.map(resolveReadSettings));
 
   const updateTestSettings = (
     update: (current: ServerSettings) => Effect.Effect<ServerSettings, ServerSettingsError>,
@@ -226,7 +226,7 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
         Effect.flatMap(update),
         Effect.flatMap(normalizeServerSettings),
         Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
-        Effect.map(resolveTextGenerationProvider),
+        Effect.map(resolveReadSettings),
       ),
     );
 
@@ -414,6 +414,15 @@ function resolveTextGenerationProvider(settings: ServerSettings): ServerSettings
     selectionSupportsTextGeneration(settings, settings.textGenerationModelSelection)
     ? settings
     : fallbackTextGenerationProvider(settings);
+}
+
+/** What readers see. Derived values are never written back to settings.json. */
+function resolveReadSettings(settings: ServerSettings): ServerSettings {
+  const resolved = resolveTextGenerationProvider(settings);
+  // The fleet adapter links this machine to its peers, which needs linked environments here.
+  return resolved.fleetLinkedEnvironmentsEnabled && !resolved.linkedEnvironmentsEnabled
+    ? { ...resolved, linkedEnvironmentsEnabled: true }
+    : resolved;
 }
 
 function fallbackTextGenerationProvider(settings: ServerSettings): ServerSettings {
@@ -846,7 +855,7 @@ const make = Effect.gen(function* () {
           ),
         ),
       ),
-      Stream.map(resolveTextGenerationProvider),
+      Stream.map(resolveReadSettings),
     );
 
   type SecretChange = {
@@ -1025,7 +1034,7 @@ const make = Effect.gen(function* () {
         );
         yield* Cache.set(settingsCache, cacheKey, { settings: next, parseFailure: Option.none() });
         yield* emitChange(next);
-        return resolveTextGenerationProvider(materialized);
+        return resolveReadSettings(materialized);
       }),
     );
 
@@ -1033,7 +1042,7 @@ const make = Effect.gen(function* () {
     writeSemaphore.withPermits(1)(
       getSettingsFromCache.pipe(
         Effect.flatMap(materializeSettingsSecrets),
-        Effect.map(resolveTextGenerationProvider),
+        Effect.map(resolveReadSettings),
         Effect.flatMap(use),
       ),
     );
@@ -1143,7 +1152,7 @@ const make = Effect.gen(function* () {
     ready: Deferred.await(startedDeferred),
     getSettings: getSettingsFromCache.pipe(
       Effect.flatMap(materializeSettingsSecrets),
-      Effect.map(resolveTextGenerationProvider),
+      Effect.map(resolveReadSettings),
     ),
     updateSettings: (patch) =>
       updateAndPersistSettings((current) =>

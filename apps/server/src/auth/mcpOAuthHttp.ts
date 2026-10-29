@@ -6,6 +6,7 @@ import {
   mcpClientScopes,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as HttpEffect from "effect/http/HttpEffect";
@@ -32,7 +33,17 @@ const noStore = HttpEffect.appendPreResponseHandler((_request, response) =>
   ),
 );
 
-const requestUrls = Effect.map(HttpServerRequest.HttpServerRequest, McpOAuth.requestUrls);
+/* Request instrumentation already owns the span. */
+const makeRequestUrls = Effect.fnUntraced(function* (
+  publicOrigin: Option.Option<McpOAuth.McpOAuthPublicOrigin["Service"]>,
+) {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  return McpOAuth.requestUrls(
+    request,
+    Option.isSome(publicOrigin) ? yield* publicOrigin.value.forRequest(request) : undefined,
+  );
+});
+type RequestUrls = ReturnType<typeof makeRequestUrls>;
 
 /**
  * An unverified client or redirect is reported, never redirected; any other problem goes back to
@@ -42,6 +53,7 @@ const forwardedAuthorization =
   /* Request instrumentation already owns the span; keep this helper in that context. */
   Effect.fnUntraced(function* (
     oauth: McpOAuth.McpOAuth["Service"],
+    requestUrls: RequestUrls,
     request: AuthMcpAuthorizationRequest,
   ) {
     const urls = yield* requestUrls;
@@ -60,6 +72,7 @@ export const layer = HttpApiBuilder.group(
   "mcpOAuth",
   Effect.fnUntraced(function* (handlers) {
     const oauth = yield* McpOAuth.McpOAuth;
+    const requestUrls = makeRequestUrls(yield* Effect.serviceOption(McpOAuth.McpOAuthPublicOrigin));
     const protectedResource = () =>
       requestUrls.pipe(Effect.map(McpOAuth.protectedResourceMetadata));
 
@@ -107,7 +120,7 @@ export const layer = HttpApiBuilder.group(
       )
       .handle("approval", ({ payload, request }) =>
         Effect.gen(function* () {
-          const resolved = yield* forwardedAuthorization(oauth, payload);
+          const resolved = yield* forwardedAuthorization(oauth, requestUrls, payload);
           if ("redirectTo" in resolved) return resolved;
           const urls = yield* requestUrls;
           const session = yield* oauth.approvingBrowserSession(request, resolved);
@@ -132,7 +145,7 @@ export const layer = HttpApiBuilder.group(
       )
       .handle("decision", ({ payload, request }) =>
         Effect.gen(function* () {
-          const resolved = yield* forwardedAuthorization(oauth, payload.authorization);
+          const resolved = yield* forwardedAuthorization(oauth, requestUrls, payload.authorization);
           if ("redirectTo" in resolved) return resolved;
           yield* noStore;
           const { decision } = payload;

@@ -946,6 +946,25 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
+  it.effect("turns linked environments on with the fleet adapter without saving it", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      assert.isFalse((yield* serverSettings.getSettings).linkedEnvironmentsEnabled);
+
+      const on = yield* serverSettings.updateSettings({ fleetLinkedEnvironmentsEnabled: true });
+      assert.isTrue(on.linkedEnvironmentsEnabled);
+      assert.isTrue((yield* serverSettings.getSettings).linkedEnvironmentsEnabled);
+      const persisted = JSON.parse(yield* fileSystem.readFileString(serverConfig.settingsPath));
+      assert.isTrue(persisted.fleetLinkedEnvironmentsEnabled);
+      assert.isUndefined(persisted.linkedEnvironmentsEnabled);
+
+      const off = yield* serverSettings.updateSettings({ fleetLinkedEnvironmentsEnabled: false });
+      assert.isFalse(off.linkedEnvironmentsEnabled);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("keeps a default-off provider's new instance disabled and sparse on disk", () =>
     Effect.gen(function* () {
       const serverConfig = yield* ServerConfig.ServerConfig;

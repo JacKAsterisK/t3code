@@ -126,6 +126,46 @@ describe("recipient-protected fleet deliveries", () => {
     expect(() => Delivery.validateFleetKeys(f.recipientConfig, f.a.peer)).toThrow();
   });
 
+  it("never opens a peer-link code as a client delivery, or a client delivery as a peer-link code", () => {
+    const f = fixture();
+    const peerLink = Delivery.sealDelivery({
+      config: f.senderConfig,
+      sender: f.a.peer,
+      recipient: f.b.peer,
+      deliveryId: "00000000-0000-4000-8000-000000000002",
+      expiresAt: now + 60_000,
+      credential,
+      peerLink: { access: "read-only" },
+    });
+    const open = (delivery: Delivery.Delivery, purpose?: Delivery.DeliveryPurpose) =>
+      Delivery.openDelivery(delivery, f.recipientConfig, f.a.peer, f.b.peer, now, purpose);
+    expect(open(peerLink, "peer-link")).toMatchObject({ credential, access: "read-only" });
+    expect(() => open(peerLink)).toThrow();
+    expect(Delivery.verifyDelivery(peerLink, f.a.peer, f.b.peer, now)).toBe(false);
+    expect(() => open(f.envelope, "peer-link")).toThrow();
+    const { purpose: _purpose, ...unmarked } = peerLink.header;
+    expect(() => open({ ...peerLink, header: unmarked })).toThrow();
+    expect(() =>
+      open({ ...f.envelope, header: { ...f.envelope.header, purpose: "peer-link" } }, "peer-link"),
+    ).toThrow();
+  });
+
+  it("accepts a peer-link request only from its signer, to its recipient, before it expires", () => {
+    const f = fixture();
+    const request = Delivery.makePeerLinkRequest({
+      config: f.recipientConfig,
+      recipient: f.a.peer,
+      requestId: "00000000-0000-4000-8000-000000000003",
+      now,
+      expiresAt: now + 60_000,
+    });
+    const verify = Delivery.verifyPeerLinkRequest;
+    expect(verify(request, f.b.peer, f.a.peer, now)).toBe(true);
+    expect(verify(request, f.a.peer, f.b.peer, now)).toBe(false);
+    expect(verify({ ...request, expiresAt: now + 120_000 }, f.b.peer, f.a.peer, now)).toBe(false);
+    expect(verify(request, f.b.peer, f.a.peer, now + 60_000)).toBe(false);
+  });
+
   it("accepts only the assigned recipient's signed receipt for the exact delivery", () => {
     const f = fixture();
     const receipt = Delivery.makeReceipt(f.envelope, f.recipientConfig);

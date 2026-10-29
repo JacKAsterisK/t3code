@@ -12,6 +12,7 @@ import {
   type AuthMcpRevokeRequest,
   type AuthMcpClientAccess,
   type AuthEnvironmentScope,
+  type AuthSessionId,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   MCP_PEER_LINK_SOFTWARE_ID,
@@ -63,13 +64,45 @@ export interface McpOAuthUrls {
   readonly resource: string;
 }
 
-export const requestUrls = (request: HttpServerRequest.HttpServerRequest): McpOAuthUrls => {
-  const origin = Option.match(HttpServerRequest.toURL(request), {
-    onNone: () => "http://localhost",
-    onSome: (url) => url.origin,
-  });
+export const requestUrls = (
+  request: HttpServerRequest.HttpServerRequest,
+  publicOrigin?: string,
+): McpOAuthUrls => {
+  const origin =
+    publicOrigin ??
+    Option.match(HttpServerRequest.toURL(request), {
+      onNone: () => "http://localhost",
+      onSome: (url) => url.origin,
+    });
   return { issuer: origin, resource: `${origin}/mcp` };
 };
+
+/**
+ * Optional: the https origin a request reached this server at, when a TLS front forwards it
+ * over plain http with its `Host` kept, so the issuer and resource name what the client used.
+ */
+export class McpOAuthPublicOrigin extends Context.Service<
+  McpOAuthPublicOrigin,
+  {
+    readonly forRequest: (
+      request: HttpServerRequest.HttpServerRequest,
+    ) => Effect.Effect<string | undefined>;
+  }
+>()("t3/auth/McpOAuth/McpOAuthPublicOrigin") {}
+
+/**
+ * Optional: told which pairing code's subject each new peer-link session came from, so the
+ * code's issuer can revoke that session later. A session it could not record is refused.
+ */
+export class McpPeerLinkSessionObserver extends Context.Service<
+  McpPeerLinkSessionObserver,
+  {
+    readonly sessionIssued: (input: {
+      readonly subject: string;
+      readonly sessionId: AuthSessionId;
+    }) => Effect.Effect<boolean>;
+  }
+>()("t3/auth/McpOAuth/McpPeerLinkSessionObserver") {}
 
 export const protectedResourceMetadata = (
   urls: McpOAuthUrls,
@@ -191,6 +224,8 @@ interface PendingCode {
   readonly expiresAtMs: number;
   readonly taskOnly: boolean;
   readonly renewable: boolean;
+  /** The subject of the pairing code that approved it. */
+  readonly approvalSubject: string | undefined;
 }
 
 export type ApprovalDecision = Exclude<AuthMcpApprovalDecision, { readonly _tag: "deny" }>;
@@ -253,6 +288,7 @@ const make = Effect.gen(function* () {
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const crypto = yield* Crypto.Crypto;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const sessionObserver = yield* Effect.serviceOption(McpPeerLinkSessionObserver);
   const linksEnabled = serverSettings.getSettings.pipe(
     Effect.map((settings) => settings.linkedEnvironmentsEnabled),
     Effect.orElseSucceed(() => false),
@@ -441,6 +477,7 @@ const make = Effect.gen(function* () {
   const mintCode = Effect.fn("McpOAuth.mintCode")(function* (
     authorization: AuthorizationRequest,
     access: AuthMcpClientAccess,
+    approvalSubject: string | undefined,
   ) {
     const now = yield* Clock.currentTimeMillis;
     const code = Buffer.from(yield* crypto.randomBytes(32).pipe(Effect.orDie)).toString(
@@ -459,6 +496,7 @@ const make = Effect.gen(function* () {
         expiresAtMs: now + AUTHORIZATION_CODE_TTL_MS,
         taskOnly: authorization.taskOnly,
         renewable: authorization.renewable,
+        approvalSubject,
       });
       return next;
     });
@@ -472,20 +510,23 @@ const make = Effect.gen(function* () {
         description: "Task-only access is limited to Auto or a lower mode.",
       });
     }
+    let approvalSubject: string | undefined;
     if (decision._tag === "pairing-code") {
-      yield* environmentAuth.consumeMcpApprovalCode(decision.code, decision.access).pipe(
-        Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
-          Effect.logError("MCP approval code check failed.", { cause }).pipe(
-            Effect.andThen(
-              Effect.fail(
-                new McpOAuthPageError({
-                  description: "The code could not be checked. Try again.",
-                }),
+      ({ subject: approvalSubject } = yield* environmentAuth
+        .consumeMcpApprovalCode(decision.code, decision.access)
+        .pipe(
+          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
+            Effect.logError("MCP approval code check failed.", { cause }).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new McpOAuthPageError({
+                    description: "The code could not be checked. Try again.",
+                  }),
+                ),
               ),
             ),
           ),
-        ),
-      );
+        ));
     } else {
       const session = yield* approvingBrowserSession(input.request, input.authorization);
       if (
@@ -498,7 +539,7 @@ const make = Effect.gen(function* () {
         });
       }
     }
-    const code = yield* mintCode(input.authorization, decision.access);
+    const code = yield* mintCode(input.authorization, decision.access, approvalSubject);
     yield* Effect.logInfo("Approved an MCP client sign-in.", {
       client: input.authorization.client.name,
       access: decision.access,
@@ -637,6 +678,18 @@ const make = Effect.gen(function* () {
             ),
           ),
         );
+      if (
+        pending.peerLink &&
+        pending.approvalSubject !== undefined &&
+        Option.isSome(sessionObserver) &&
+        !(yield* sessionObserver.value.sessionIssued({
+          subject: pending.approvalSubject,
+          sessionId: issued.sessionId,
+        }))
+      ) {
+        yield* environmentAuth.revokeSession(issued.sessionId).pipe(Effect.ignore);
+        return yield* fail("invalid_grant", "The session could not be issued.");
+      }
       return {
         access_token: issued.token,
         token_type: "Bearer",

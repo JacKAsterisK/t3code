@@ -38,6 +38,10 @@ import {
 import { fixPath } from "./os-jank.ts";
 import * as Ws from "./ws.ts";
 import * as FleetAccessPolicy from "./lan/FleetAccessPolicy.ts";
+import * as FleetMcpOrigin from "./lan/FleetMcpOrigin.ts";
+import * as FleetPeerHttpClient from "./lan/FleetPeerHttpClient.ts";
+import * as FleetPeerLinks from "./lan/FleetPeerLinks.ts";
+import * as FleetTransport from "./lan/FleetTransport.ts";
 import * as AgentScopeLive from "./process/agentScope.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
@@ -789,13 +793,18 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   Layer.provide(PreviewBrowser.layer),
+  // T3 Code LAN: fleet machines link to each other as linked environments (off by default).
+  Layer.provide(Layer.mergeAll(FleetPeerLinks.layer, FleetMcpOrigin.layer)),
   // Links to other environments, shared by Settings (WebSocket) and agents (/mcp).
   Layer.provide(
     PeerForwarding.layer.pipe(
       Layer.provideMerge(PeerMcpClient.layer),
       Layer.provideMerge(PeerLinks.layer),
+      Layer.provide(FleetPeerHttpClient.layer),
     ),
   ),
+  // The same encrypted endpoint the fleet's WebSocket setup runs, by layer memoization.
+  Layer.provide(Layer.mergeAll(FleetPeerHttpClient.layerTrust, FleetTransport.layer)),
   Layer.provide(PreviewAutomationBroker.layer),
   // One fleet access policy for fleet setup (WebSocket) and LAN task routing (/mcp).
   Layer.provide(FleetAccessPolicy.layer),

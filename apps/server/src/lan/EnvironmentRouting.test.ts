@@ -219,6 +219,21 @@ it.effect(
         (yield* router.environments(provider).pipe(Effect.flip)).code,
         "capability_denied",
       );
+      // An in-app thread is refused even with an approved client session and grant, so hiding the
+      // LAN task tools from threads takes no reach away.
+      const inThread = { ...scope(), thread: provider.thread };
+      assert.equal(
+        (yield* router.environments(inThread).pipe(Effect.flip)).code,
+        "capability_denied",
+      );
+      assert.equal(
+        (yield* router.launch(inThread, { ...launch, environmentId }).pipe(Effect.flip)).code,
+        "capability_denied",
+      );
+      assert.equal(
+        (yield* router.list(inThread, { environmentId, projectId }).pipe(Effect.flip)).code,
+        "capability_denied",
+      );
       const readOnly = { ...scope(), client: { ...scope().client!, access: "read-only" as const } };
       assert.equal(
         (yield* router.launch(readOnly, { ...launch, environmentId }).pipe(Effect.flip)).code,

@@ -22,8 +22,10 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
+import * as FleetAccessPolicy from "./lan/FleetAccessPolicy.ts";
 import { sourceControlHostSecretName } from "./sourceControl/sourceControlHostSecrets.ts";
 import * as ServerConfig from "./config.ts";
 import * as SqlitePersistence from "./persistence/Sqlite.ts";
@@ -947,32 +949,82 @@ it.layer(NodeServices.layer)("server settings", (it) => {
   );
 
   it.effect(
-    "turns the fleet adapter, and with it linked environments, on by default without saving either",
+    "turns linked environments on by default only for an active fleet member with an access list, without saving it",
     () =>
-      Effect.gen(function* () {
-        const serverConfig = yield* ServerConfig.ServerConfig;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
-        const persisted = () =>
-          fileSystem
-            .readFileString(serverConfig.settingsPath)
-            .pipe(Effect.map((raw) => JSON.parse(raw)));
-        const initial = yield* serverSettings.getSettings;
-        assert.isTrue(initial.fleetLinkedEnvironmentsEnabled);
-        assert.isTrue(initial.linkedEnvironmentsEnabled);
+      Effect.scoped(
+        Effect.gen(function* () {
+          const noFleet: FleetAccessPolicy.FleetAccessState = {
+            revision: 0,
+            defaultAccess: "standard",
+            machines: [],
+            machineId: undefined,
+            peers: [],
+          };
+          const member: FleetAccessPolicy.FleetAccessState = {
+            ...noFleet,
+            revision: 1,
+            machineId: "machine-self",
+            peers: [{ machineId: "machine-self", environmentId: "environment-self" }],
+          };
+          const fleetState = yield* SubscriptionRef.make(noFleet);
+          const fleetAccess = Layer.mock(FleetAccessPolicy.FleetAccess)({
+            current: SubscriptionRef.get(fleetState),
+            changes: SubscriptionRef.changes(fleetState),
+          });
+          yield* Effect.gen(function* () {
+            const serverConfig = yield* ServerConfig.ServerConfig;
+            const fileSystem = yield* FileSystem.FileSystem;
+            const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+            const persisted = () =>
+              fileSystem
+                .readFileString(serverConfig.settingsPath)
+                .pipe(Effect.map((raw) => JSON.parse(raw)));
+            // A development or unenrolled install: the fleet setting is on, the Labs one decides.
+            const initial = yield* serverSettings.getSettings;
+            assert.isTrue(initial.fleetLinkedEnvironmentsEnabled);
+            assert.isFalse(initial.fleetLinkedEnvironmentsActive);
+            assert.isFalse(initial.linkedEnvironmentsEnabled);
+            assert.isTrue(
+              (yield* serverSettings.updateSettings({ linkedEnvironmentsEnabled: true }))
+                .linkedEnvironmentsEnabled,
+            );
+            assert.isFalse(
+              (yield* serverSettings.updateSettings({ linkedEnvironmentsEnabled: false }))
+                .linkedEnvironmentsEnabled,
+            );
 
-        // An explicit false is saved and wins over the default.
-        const off = yield* serverSettings.updateSettings({ fleetLinkedEnvironmentsEnabled: false });
-        assert.isFalse(off.linkedEnvironmentsEnabled);
-        assert.isFalse((yield* persisted()).fleetLinkedEnvironmentsEnabled);
+            // The fleet reads a list with this machine in it: readers are told, and see it on.
+            const changes = yield* serverSettings.subscribeChanges;
+            const next = yield* changes.pipe(Stream.runHead, Effect.forkScoped);
+            yield* SubscriptionRef.set(fleetState, member);
+            const emitted = Option.getOrThrow(yield* Fiber.join(next));
+            assert.isTrue(emitted.fleetLinkedEnvironmentsActive);
+            assert.isTrue(emitted.linkedEnvironmentsEnabled);
+            assert.isTrue((yield* serverSettings.getSettings).linkedEnvironmentsEnabled);
 
-        const on = yield* serverSettings.updateSettings({ fleetLinkedEnvironmentsEnabled: true });
-        assert.isTrue(on.linkedEnvironmentsEnabled);
-        assert.isTrue((yield* serverSettings.getSettings).linkedEnvironmentsEnabled);
-        const saved = yield* persisted();
-        assert.isUndefined(saved.fleetLinkedEnvironmentsEnabled);
-        assert.isUndefined(saved.linkedEnvironmentsEnabled);
-      }).pipe(Effect.provide(layerServerSettings())),
+            // An explicit false is saved and wins over the default.
+            const off = yield* serverSettings.updateSettings({
+              fleetLinkedEnvironmentsEnabled: false,
+            });
+            assert.isFalse(off.linkedEnvironmentsEnabled);
+            assert.isFalse(off.fleetLinkedEnvironmentsActive);
+            assert.isFalse((yield* persisted()).fleetLinkedEnvironmentsEnabled);
+
+            const on = yield* serverSettings.updateSettings({
+              fleetLinkedEnvironmentsEnabled: true,
+            });
+            assert.isTrue(on.linkedEnvironmentsEnabled);
+            const saved = yield* persisted();
+            assert.isUndefined(saved.fleetLinkedEnvironmentsEnabled);
+            assert.isUndefined(saved.fleetLinkedEnvironmentsActive);
+            assert.isUndefined(saved.linkedEnvironmentsEnabled);
+
+            // Disabled in the fleet, it falls back to the Labs setting again.
+            yield* SubscriptionRef.set(fleetState, { ...member, peers: [] });
+            assert.isFalse((yield* serverSettings.getSettings).linkedEnvironmentsEnabled);
+          }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provide(fleetAccess))));
+        }),
+      ),
   );
 
   it.effect("keeps a default-off provider's new instance disabled and sparse on disk", () =>

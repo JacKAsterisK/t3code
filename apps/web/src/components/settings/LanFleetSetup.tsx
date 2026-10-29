@@ -401,10 +401,28 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
           ? "One setting for the whole fleet. A read-only machine can view threads and tasks on the other machines but cannot start, send to, stop or approve them."
           : "This machine has read-only access to the other machines. Only a machine with standard access can change this."}
       </p>
-      {policy.seed === "waiting" ? (
+      {policy.seed === "waiting" && policy.seedPending !== undefined ? (
+        <p className="text-xs text-muted-foreground">
+          This fleet's starting access list applies once{" "}
+          {policy.seedPending.machineIds
+            .map(
+              (machineId) =>
+                setup.peers.find((peer) => peer.machineId === machineId)?.label ?? machineId,
+            )
+            .join(" and ")}{" "}
+          {policy.seedPending.machineIds.length === 1 ? "has" : "have"} updated, or at{" "}
+          {new Date(policy.seedPending.adoptAt).toLocaleString()} if not. Machines link to each
+          other once it is in place.
+        </p>
+      ) : policy.seed === "waiting" ? (
         <p className="text-xs text-muted-foreground">
           Applying this fleet's starting access list. Machines link to each other once it is in
           place.
+        </p>
+      ) : policy.revision === 0 && policy.seed === undefined ? (
+        <p className="text-xs text-muted-foreground">
+          Machines link to each other once this fleet has an access list. Changing access here saves
+          one.
         </p>
       ) : policy.seed === "invalid" ? (
         <p className="text-xs text-destructive">

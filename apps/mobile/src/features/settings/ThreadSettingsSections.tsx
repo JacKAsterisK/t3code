@@ -253,7 +253,7 @@ function BetaSettingsSection() {
             disabled={
               !writable.has(environment.environmentId) ||
               // The LAN fleet keeps it on there.
-              environment.serverConfig?.settings.fleetLinkedEnvironmentsEnabled === true
+              environment.serverConfig?.settings.fleetLinkedEnvironmentsActive === true
             }
             onValueChange={(value) =>
               void updateSettings({

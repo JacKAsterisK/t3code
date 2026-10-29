@@ -171,6 +171,13 @@ export const LanFleetSetupState = Schema.Struct({
       canChange: Schema.Boolean,
       // A starting list on the share, before any list exists: not adopted yet, or unusable.
       seed: Schema.optionalKey(Schema.Literals(["waiting", "invalid"])),
+      // While it waits for the machines it makes read-only to update, and when it applies anyway.
+      seedPending: Schema.optionalKey(
+        Schema.Struct({
+          machineIds: Schema.Array(FleetMachineId),
+          adoptAt: Schema.Number,
+        }),
+      ),
     }),
   ),
   peers: Schema.Array(

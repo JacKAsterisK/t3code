@@ -19,7 +19,7 @@ export const layer = Layer.effect(
       // Per request; the OAuth handler's span already covers it.
       forRequest: Effect.fnUntraced(function* (request) {
         const settings = yield* serverSettings.getSettings.pipe(Effect.option);
-        if (settings._tag === "None" || !settings.value.fleetLinkedEnvironmentsEnabled)
+        if (settings._tag === "None" || !settings.value.fleetLinkedEnvironmentsActive)
           return undefined;
         const origin = yield* transport.origin;
         return origin !== undefined &&

@@ -183,6 +183,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
                       return link;
                     }),
                   listPairingLinks: () => Effect.succeed(activeLinks),
+                  listSessions: () => Effect.succeed([]),
                   revokePairingLink: (id) =>
                     Effect.sync(() => {
                       const index = activeLinks.findIndex((link) => link.id === id);

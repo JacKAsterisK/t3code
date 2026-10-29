@@ -25,6 +25,11 @@ nothing needs approving or relinking; allow about ten minutes. **Machines added
 later** covers machines not yet in the list. The first list starts from the access
 chosen at setup on the machine that saves it.
 
+Fleet links do not expire. In a shared-folder fleet, each machine replaces the
+credential it gave another machine a week before it would expire, or as soon as
+that machine is back online if it was away longer, and that machine swaps it in
+the same way.
+
 On each other machine, join using the owner's verification code. The owner then
 compares that machine's code from its own app before approving it. Select approved
 members and use **Link both ways**. The shared roster contains discovery metadata;

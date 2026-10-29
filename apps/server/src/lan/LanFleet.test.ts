@@ -25,6 +25,19 @@ import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import { syntheticFleetPeer } from "./FleetDelivery.fixtures.ts";
 import { writeFleetJson, writeFleetRoster } from "./FleetFiles.ts";
 
+const unexpired = <T extends { readonly expiresAt: DateTime.Utc }>(
+  items: ReadonlyArray<T>,
+  open: (item: T) => boolean,
+) =>
+  DateTime.now.pipe(
+    Effect.map((now) =>
+      items.filter(
+        (item) =>
+          open(item) || DateTime.toEpochMillis(item.expiresAt) > DateTime.toEpochMillis(now),
+      ),
+    ),
+  );
+
 const setup = Effect.fn("FleetTest.setup")(function* (
   autoPickup = true,
   failIssue = false,
@@ -143,8 +156,14 @@ const setup = Effect.fn("FleetTest.setup")(function* (
                   ]);
                   return link;
                 }),
-              listPairingLinks: () => Effect.sync(() => active.get(identity.peer.machineId) ?? []),
-              listSessions: () => Effect.sync(() => sessions.get(identity.peer.machineId) ?? []),
+              // Like the auth stores, an expired grant or session is gone unless its socket is open.
+              listPairingLinks: () =>
+                unexpired(active.get(identity.peer.machineId) ?? [], () => false),
+              listSessions: () =>
+                unexpired(
+                  sessions.get(identity.peer.machineId) ?? [],
+                  (session) => session.connected,
+                ),
               revokeSession: (sessionId) =>
                 Effect.sync(() => {
                   const held = sessions.get(identity.peer.machineId) ?? [];
@@ -224,9 +243,10 @@ const setup = Effect.fn("FleetTest.setup")(function* (
           method: "bearer-access-token" as const,
           client: { deviceType: "desktop" as const },
           issuedAt: link.createdAt,
-          expiresAt: link.expiresAt,
-          lastConnectedAt: null,
-          connected: true,
+          // The default session lifetime, which fleet renewal works within.
+          expiresAt: DateTime.makeUnsafe(DateTime.toEpochMillis(link.createdAt) + 30 * 86_400_000),
+          lastConnectedAt: link.createdAt,
+          connected: false,
           current: false,
         })),
       ]);
@@ -458,6 +478,100 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
         assert.deepEqual(f.issued, ["alpha", "alpha"]);
         assert.deepEqual(f.revoked, ["session-synthetic-1"]);
       }).pipe(Effect.provide(testConfig)),
+  );
+  it.effect.each([0, 1])(
+    "renews a fleet credential a week before it expires, at access policy revision %i",
+    (revision) =>
+      Effect.gen(function* () {
+        const f = yield* setup(true, false, true);
+        f.setPolicy({ revision });
+        const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        yield* f.sync(f.recipient.service);
+        f.consume("alpha");
+        yield* f.sync(f.recipient.service, connected);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+
+        // Eight days left: the credential is left alone.
+        yield* TestClock.adjust("22 days");
+        yield* f.sync(f.recipient.service, connected);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+        assert.deepEqual(f.issued, ["alpha"]);
+
+        // Six days left: a replacement goes out, and the old session keeps working meanwhile.
+        yield* TestClock.adjust("2 days");
+        yield* f.sync(f.recipient.service, connected);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "pending");
+        yield* f.sync(f.sender.service);
+        assert.deepEqual(f.issued, ["alpha", "alpha"]);
+        assert.deepEqual(f.revoked, []);
+        const renewal = yield* f.sync(f.recipient.service, connected);
+        assert.equal(renewal.incoming.length, 1);
+        assert.equal(renewal.incoming[0]?.replace, true);
+
+        // The peer reconnects with its renewed session, which retires the old one.
+        f.consume("alpha");
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+        assert.deepEqual(f.revoked, ["session-synthetic-1"]);
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming.length, 0);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+        assert.deepEqual(f.issued, ["alpha", "alpha"]);
+      }).pipe(Effect.provide(testConfig)),
+  );
+  it.effect(
+    "waits for an offline peer and recovers its connection after its credential expired",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* setup(true, false, true);
+        const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        yield* f.sync(f.recipient.service);
+        f.consume("alpha");
+        yield* f.sync(f.recipient.service, connected);
+        yield* f.sync(f.sender.service);
+
+        // Renewal is due, but the peer is offline: nothing is issued or revoked.
+        yield* TestClock.adjust("24 days");
+        yield* f.sync(f.sender.service);
+        yield* TestClock.adjust("10 days");
+        yield* f.sync(f.sender.service);
+        assert.deepEqual(f.issued, ["alpha"]);
+        assert.deepEqual(f.revoked, []);
+
+        // Back after its session expired, the peer gets a replacement with no approval.
+        yield* f.sync(f.recipient.service, connected);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "pending");
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+
+        // Offline again before it collected that grant: once the grant lapses, it gets one more.
+        yield* TestClock.adjust("25 hours");
+        yield* f.sync(f.sender.service);
+        assert.deepEqual(f.issued, ["alpha", "alpha"]);
+        yield* f.sync(f.recipient.service, connected);
+        yield* f.sync(f.sender.service);
+        assert.deepEqual(f.issued, ["alpha", "alpha", "alpha"]);
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+        f.consume("alpha");
+        yield* f.sync(f.sender.service);
+        yield* f.sync(f.recipient.service, connected);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+        assert.deepEqual(f.issued, ["alpha", "alpha", "alpha"]);
+      }).pipe(Effect.provide(testConfig)),
+  );
+  it.effect("never replaces a connection the peer had before the fleet sent it one", () =>
+    Effect.gen(function* () {
+      const f = yield* setup(true, false, true);
+      const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
+      yield* f.sync(f.recipient.service, connected);
+      assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+      yield* TestClock.adjust("40 days");
+      yield* f.sync(f.recipient.service, connected);
+      assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+      assert.deepEqual(f.issued, []);
+      assert.deepEqual(f.revoked, []);
+    }).pipe(Effect.provide(testConfig)),
   );
   it.effect("keeps interrupted credential issuance reserved instead of minting again", () =>
     Effect.gen(function* () {

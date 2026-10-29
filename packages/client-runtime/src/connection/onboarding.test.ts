@@ -164,6 +164,7 @@ function layerPairingHttp(
 function layerPairingOnboarding(
   options?: Parameters<typeof layerPairingHttp>[1],
   calls: Array<{ readonly url: string; readonly init: RequestInit }> = [],
+  registered: unknown[] = [],
 ) {
   const dependencies = Layer.mergeAll(
     layerClientPresentation,
@@ -173,7 +174,7 @@ function layerPairingOnboarding(
       listDisabled: Effect.succeed([]),
     }),
     Layer.mock(Persistence.ConnectionRegistrationStore)({
-      register: () => Effect.void,
+      register: (registration) => Effect.sync(() => void registered.push(registration)),
       setEnabled: () => Effect.void,
     }),
     Layer.mock(Persistence.EnvironmentCacheStore)({}),
@@ -334,6 +335,27 @@ describe("connection onboarding", () => {
       }).pipe(Effect.provide(layerPairingOnboarding(undefined, calls)));
     },
   );
+  it.effect("swaps the saved credential when a fleet sender replaces it", () => {
+    const registered: unknown[] = [];
+    return Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      yield* registerSwitchedOffEnvironment;
+      const result = yield* onboarding.registerPairing({
+        ...PAIRING_INPUT,
+        expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+        skipExisting: false,
+      });
+      expect(result).toBe(PAIRED_ENVIRONMENT_ID);
+      expect(registered.at(-1)).toMatchObject({
+        target: { connectionId: PAIRED_PROFILE.connectionId },
+        credential: { token: "bearer-token" },
+      });
+      const entries = yield* SubscriptionRef.get(registry.entries);
+      expect(entries.size).toBe(1);
+      expect(entries.get(PAIRED_ENVIRONMENT_ID)?.enabled).toBe(true);
+    }).pipe(Effect.provide(layerPairingOnboarding(undefined, [], registered)));
+  });
   it.effect("prepares a persisted bearer registration from pairing details", () =>
     Effect.gen(function* () {
       const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];

@@ -40,6 +40,10 @@ const Journal = Schema.Record(Schema.String, Record);
 type Journal = typeof Journal.Type;
 const isFleetError = Schema.is(LanFleetError);
 const isConnectHost = Schema.is(FleetConnectHost);
+// Fleet credentials become sessions with the default 30-day lifetime; replace them a week early.
+const RENEW_BEFORE_MS = 7 * 24 * 60 * 60 * 1000;
+// A connection the peer already had before this machine sent it a fleet credential.
+const EXISTING_CONNECTION = "existing-connection";
 
 export class LanFleet extends Context.Service<
   LanFleet,
@@ -100,8 +104,9 @@ const make = Effect.gen(function* () {
       // Resolving the enrollment just refreshed the policy from the share.
       const policy = config.managed ? yield* fleetAccess.current : undefined;
       const policyActive = policy !== undefined && policy.revision > 0;
-      // Only a shared folder tells this machine which grants a peer still holds, so it can replace them.
-      const replaceCredentials = sharedFolder && policyActive;
+      // Only a shared folder tells this machine which grants a peer still holds, so it can replace
+      // them: to renew them, and once a policy is saved, to match each peer's access.
+      const enforcePolicy = sharedFolder && policyActive;
       const roster = yield* readFleetJson(config.rosterPath, FleetRoster);
       const localId = yield* environment.getEnvironmentId;
       const self = config.peers.find((peer) => peer.machineId === config.machineId && peer.enabled);
@@ -154,7 +159,7 @@ const make = Effect.gen(function* () {
             const machines: Array<LanFleetSyncResult["machines"][number]> = [];
             const incoming: Array<LanFleetSyncResult["incoming"][number]> = [];
             const activeLinks = sharedFolder ? [...(yield* auth.listPairingLinks())] : [];
-            const activeSessions = replaceCredentials ? yield* auth.listSessions() : [];
+            const activeSessions = sharedFolder ? yield* auth.listSessions() : [];
             const availableDeliveryIds = new Set<string>();
             const rejectedDeliveryIds = new Set<string>();
             const activeGrant = (
@@ -223,7 +228,7 @@ const make = Effect.gen(function* () {
                     : config.access === "read-only"
                       ? "read-only"
                       : "standard";
-                if (replaceCredentials) {
+                if (sharedFolder) {
                   // What this machine actually issued the peer is the truth, not the journal.
                   const subject = `lan-fleet:${outgoingKey}`;
                   const held = [
@@ -232,6 +237,8 @@ const make = Effect.gen(function* () {
                       .map((session) => ({
                         access: FleetAccessPolicy.credentialAccess(session),
                         session: true,
+                        expiresAt: DateTime.toEpochMillis(session.expiresAt),
+                        used: session.connected || session.lastConnectedAt !== null,
                         revoke: auth.revokeSession(session.sessionId),
                         link: undefined,
                       })),
@@ -240,27 +247,43 @@ const make = Effect.gen(function* () {
                       .map((link) => ({
                         access: FleetAccessPolicy.credentialAccess(link),
                         session: false,
+                        expiresAt: DateTime.toEpochMillis(link.expiresAt),
+                        used: false,
                         revoke: auth.revokePairingLink(link.id),
                         link,
                       })),
                   ];
                   // Lost access ends at once; gained access waits until the peer can collect it.
-                  if (access === "read-only" || recipientReady)
+                  if (enforcePolicy && (access === "read-only" || recipientReady))
                     for (const credential of held.filter((item) => item.access !== access)) {
                       yield* credential.revoke;
                       if (credential.link !== undefined)
                         activeLinks.splice(activeLinks.indexOf(credential.link), 1);
                     }
+                  // Before the first saved policy, a credential keeps the access it was issued at.
+                  const current = (item: (typeof held)[number]) =>
+                    !enforcePolicy || item.access === access;
+                  // An unspent grant is a replacement in flight; a session lasts until renewal is due.
+                  const fresh = (item: (typeof held)[number]) =>
+                    current(item) && (!item.session || item.expiresAt - now > RENEW_BEFORE_MS);
+                  // Without a policy, only a peer that took a fleet credential is renewed.
+                  const renewable =
+                    enforcePolicy ||
+                    held.some((item) => item.session) ||
+                    (sent !== undefined && sent.deliveryId !== EXISTING_CONNECTION);
                   const catalogConnected = recipientConnected;
-                  recipientConnected =
-                    recipientConnected &&
-                    held.some((item) => item.session && item.access === access);
-                  if (
-                    catalogConnected &&
-                    recipientReady &&
-                    !held.some((item) => item.access === access)
-                  ) {
-                    // The peer keeps a connection here with no credential at its access: replace it.
+                  if (renewable)
+                    recipientConnected =
+                      recipientConnected && held.some((item) => item.session && fresh(item));
+                  // Once the peer uses its renewed session, the one it replaced is retired.
+                  if (held.some((item) => item.session && item.used && fresh(item)))
+                    for (const credential of held.filter(
+                      (item) => item.session && current(item) && !fresh(item),
+                    ))
+                      yield* credential.revoke;
+                  if (catalogConnected && recipientReady && renewable && !held.some(fresh)) {
+                    // The peer keeps a connection here with no credential at its access, or one
+                    // that is about to expire or already has: replace it.
                     if (outgoingExists) {
                       const replaced = yield* readFleetJson(outFile, Delivery.Delivery).pipe(
                         Effect.map((delivery) => delivery.header.deliveryId),
@@ -330,7 +353,7 @@ const make = Effect.gen(function* () {
                 }
                 if (recipientConnected) {
                   sent = {
-                    deliveryId: sent?.deliveryId ?? "existing-connection",
+                    deliveryId: sent?.deliveryId ?? EXISTING_CONNECTION,
                     expiresAt: sent?.expiresAt ?? now,
                     status: "connected",
                   };
@@ -413,11 +436,11 @@ const make = Effect.gen(function* () {
                     grantAvailable &&
                     received?.status === "connected" &&
                     received.deliveryId !== delivery.header.deliveryId;
+                  // A grant that follows an unspent replacement, such as one that lapsed while
+                  // this machine was offline, still replaces.
                   const replacing =
                     replacement ||
-                    (received?.replacing === true &&
-                      received.status === "connecting" &&
-                      received.deliveryId === delivery.header.deliveryId);
+                    (received?.replacing === true && received.status === "connecting");
                   if (
                     delivery.header.expiresAt > now &&
                     (received === undefined ||

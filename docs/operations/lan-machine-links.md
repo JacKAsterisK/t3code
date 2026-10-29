@@ -56,6 +56,14 @@ gained access waits until the peer is online. A read-only machine's own server
 also refuses to forward LAN task changes. Until a list is saved, each machine
 keeps the access chosen at setup.
 
+The same replacement renews fleet links. A credential becomes a session with the
+default 30-day lifetime, and in shared-folder fleets the issuer delivers a
+replacement once less than seven days remain, whether or not a list was saved.
+The old session keeps working until the peer connects with the new one, which
+then retires it. A peer that is offline is renewed when its signed summary is
+fresh again, including after its session expired. Only credentials this machine
+delivered are renewed; a connection the peer made another way is left alone.
+
 Limits: in owner-approval fleets a change applies only to links issued after it,
 so relink existing ones there. Outside-agent task grants are approved on the
 destination and are not tied to a machine; revoke them in **Sharing & access**. A

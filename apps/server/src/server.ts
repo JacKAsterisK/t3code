@@ -254,6 +254,9 @@ const layerPtyAdapter = NodePtyAdapter.layer;
 
 const layerServerSettings = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
+  // T3 Code LAN: the fleet's links turn linked environments on only for an active member with a
+  // Machine access list. The same policy instance as below, by layer memoization.
+  Layer.provide(FleetAccessPolicy.layer),
   Layer.provideMerge(SqlitePersistence.layerConfig),
 );
 

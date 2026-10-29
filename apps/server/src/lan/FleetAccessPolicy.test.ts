@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off -- the test signs a readiness marker as another machine would.
+import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { ORCHESTRATION_V2_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
@@ -55,8 +57,9 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
   const anvil = syntheticFleetPeer("anviltoad");
   const spd = syntheticFleetPeer("spdevmachine");
   let peers: ReadonlyArray<FleetPeer> = [cryo.peer, panda.peer, anvil.peer, spd.peer];
-  const machine = Effect.fn("FleetAccessPolicyTest.machine")(function* () {
-    const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-state-" });
+  const machine = Effect.fn("FleetAccessPolicyTest.machine")(function* (existingStateDir?: string) {
+    const stateDir =
+      existingStateDir ?? (yield* fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-state-" }));
     const context = yield* Layer.build(
       FleetAccessPolicy.layer.pipe(Layer.provide(Config.layer({ ...base, stateDir }))),
     );
@@ -128,6 +131,34 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
     defaultAccess: "standard",
     readOnly: machines.map((machine) => machine.peer.machineId),
   });
+  const seedFile = path.join(root, FleetAccessPolicy.SEED_FILE);
+  const readyDirectory = path.join(root, FleetAccessPolicy.SEED_READY_DIRECTORY);
+  /** What a machine on a build that takes replaced credentials writes, signed by `signer`. */
+  const markReady = (self: Machine, signer: Machine = self) => {
+    const marker = {
+      version: 1 as const,
+      fleetId: FLEET_ID,
+      machineId: self.peer.machineId,
+      createdAt: 0,
+    };
+    const data = JSON.stringify([
+      "fleet-access-ready",
+      marker.version,
+      marker.fleetId,
+      marker.machineId,
+      marker.createdAt,
+    ]);
+    return fs.makeDirectory(readyDirectory, { recursive: true }).pipe(
+      Effect.andThen(
+        writeFleetJson(path.join(readyDirectory, `${self.peer.machineId}.json`), {
+          ...marker,
+          signature: NodeCrypto.sign(null, Buffer.from(data), signer.signingPrivateKey).toString(
+            "base64",
+          ),
+        }),
+      ),
+    );
+  };
   return {
     fs,
     path,
@@ -146,6 +177,8 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
     readOnly,
     writeSeed,
     seedOf,
+    seedFile,
+    markReady,
     setPeers: (next: ReadonlyArray<FleetPeer>) => {
       peers = next;
     },
@@ -273,6 +306,16 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
         expect(waiting).toMatchObject({ revision: 0, seed: "waiting" });
         expect(yield* f.fs.exists(f.directory)).toBe(false);
 
+        // SPDevMachine runs a build that takes a replaced credential. It says so, and waits for
+        // AnvilToad.
+        const spd = yield* (yield* f.machine()).refresh(f.input(f.spd));
+        expect(spd).toMatchObject({
+          revision: 0,
+          seed: "waiting",
+          seedPending: { machineIds: [f.anvil.peer.machineId] },
+        });
+        expect(yield* f.fs.exists(f.directory)).toBe(false);
+
         // A machine the list makes read-only may adopt it: it only restricts.
         const adopted = yield* (yield* f.machine()).refresh(f.input(f.anvil));
         expect(adopted.revision).toBe(1);
@@ -286,6 +329,8 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
         expect(other.seed).toBeUndefined();
         expect(other).toMatchObject({ revision: 1, machines: adopted.machines });
         expect(yield* f.fs.readDirectory(f.directory)).toHaveLength(1);
+        // Read back from the share, the starting list is spent and removed.
+        expect(yield* f.fs.exists(f.seedFile)).toBe(false);
       }).pipe(Effect.provide(configLayer)),
   );
 
@@ -293,6 +338,8 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
     Effect.gen(function* () {
       const f = yield* fleet();
       yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
+      yield* f.markReady(f.anvil);
+      yield* f.markReady(f.spd);
       // The adopting machine was set up granting read-only; the list still says standard.
       const adopted = yield* (yield* f.machine()).refresh({
         ...f.input(f.panda),
@@ -310,6 +357,8 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
     Effect.gen(function* () {
       const f = yield* fleet();
       yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
+      yield* f.markReady(f.anvil);
+      yield* f.markReady(f.spd);
       const machines = [
         [yield* f.machine(), f.cryo],
         [yield* f.machine(), f.panda],
@@ -386,6 +435,104 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
       const none = yield* (yield* f.machine()).refresh(f.input(f.cryo));
       expect(none.revision).toBe(0);
       expect(none.seed).toBeUndefined();
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect(
+    "waits for the machines a starting list makes read-only to update, at most a day from first sight",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fleet();
+        yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
+        // Both still run builds that cannot take a replaced credential: nothing is adopted.
+        const stateDir = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-state-" });
+        const cryo = yield* f.machine(stateDir);
+        const first = yield* cryo.refresh(f.input(f.cryo));
+        expect(first).toMatchObject({
+          revision: 0,
+          seed: "waiting",
+          seedPending: {
+            machineIds: [f.anvil.peer.machineId, f.spd.peer.machineId],
+            adoptAt: FleetAccessPolicy.SEED_READY_WAIT_MS,
+          },
+        });
+        expect(FleetAccessPolicy.policyApplies(first)).toBe(false);
+        // A marker another machine's key signed does not count.
+        yield* f.markReady(f.anvil, f.cryo);
+        yield* TestClock.adjust(FleetAccessPolicy.SEED_READY_WAIT_MS - 1);
+        // A restart keeps when this machine first saw the list.
+        const restarted = yield* f.machine(stateDir);
+        expect(yield* restarted.refresh(f.input(f.cryo))).toMatchObject({
+          revision: 0,
+          seedPending: {
+            machineIds: [f.anvil.peer.machineId, f.spd.peer.machineId],
+            adoptAt: FleetAccessPolicy.SEED_READY_WAIT_MS,
+          },
+        });
+        expect(yield* f.fs.exists(f.directory)).toBe(false);
+        // A machine that first sees it later waits longer; one that updated is not waited for.
+        yield* f.markReady(f.anvil);
+        const late = yield* (yield* f.machine()).refresh(f.input(f.panda));
+        expect(late.seedPending).toEqual({
+          machineIds: [f.spd.peer.machineId],
+          adoptAt: 2 * FleetAccessPolicy.SEED_READY_WAIT_MS - 1,
+        });
+
+        // A day after CryoFrog first saw it, SPDevMachine still has not updated: it is adopted.
+        yield* TestClock.adjust(1);
+        const adopted = yield* restarted.refresh(f.input(f.cryo));
+        expect(adopted.revision).toBe(1);
+        expect(adopted.seed).toBeUndefined();
+        expect(adopted.seedPending).toBeUndefined();
+        expect(f.accessOf(adopted, f.anvil)).toBe("read-only");
+        expect(f.accessOf(adopted, f.spd)).toBe("read-only");
+        expect(yield* f.fs.exists(f.seedFile)).toBe(false);
+      }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("waits only for the read-only machines the fleet has enabled", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
+      yield* f.markReady(f.anvil);
+      f.setPeers([f.cryo.peer, f.panda.peer, f.anvil.peer, { ...f.spd.peer, enabled: false }]);
+      const adopted = yield* (yield* f.machine()).refresh(f.input(f.cryo));
+      expect(adopted.revision).toBe(1);
+      expect(f.accessOf(adopted, f.spd)).toBe("read-only");
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect(
+    "never brings a spent starting list back once the share and this machine lose the list",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fleet();
+        yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
+        yield* f.markReady(f.anvil);
+        yield* f.markReady(f.spd);
+        expect((yield* (yield* f.machine()).refresh(f.input(f.cryo))).revision).toBe(1);
+        expect(yield* f.fs.exists(f.seedFile)).toBe(false);
+        // The share's list is lost and this machine has no saved history: fleet-access reads as
+        // not found. There is no list, nothing is adopted, and no list applies to links.
+        yield* f.fs.remove(f.directory, { recursive: true });
+        const lost = yield* (yield* f.machine()).refresh(f.input(f.panda));
+        expect(lost.revision).toBe(0);
+        expect(lost.seed).toBeUndefined();
+        expect(FleetAccessPolicy.policyApplies(lost)).toBe(false);
+        expect(yield* f.fs.exists(f.directory)).toBe(false);
+      }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("waits, without calling it invalid, for a starting list it cannot read", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      // Present but unreadable, as when the share stops answering mid-read.
+      yield* f.fs.makeDirectory(f.seedFile);
+      const state = yield* (yield* f.machine()).refresh(f.input(f.cryo));
+      expect(state.revision).toBe(0);
+      expect(state.seed).toBeUndefined();
+      expect(state.unavailable).toBe(true);
+      expect(yield* f.fs.exists(f.directory)).toBe(false);
     }).pipe(Effect.provide(configLayer)),
   );
 

@@ -53,6 +53,7 @@ import {
   isModelSelectionProviderEnabled,
 } from "@t3tools/shared/serverSettings";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
+import * as FleetAccessPolicy from "./lan/FleetAccessPolicy.ts";
 import {
   readSecretFieldValues,
   sourceControlHostSecretName,
@@ -220,12 +221,9 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
 ) {
   const { automaticGitFetchInterval, providerHealthRefreshInterval, ...overridesForMerge } =
     overrides;
-  // Upstream's tests expect linked environments off by default, which the LAN fleet default
-  // would turn on; a test opts in with `fleetLinkedEnvironmentsEnabled`.
-  const merged = deepMerge(
-    { ...DEFAULT_SERVER_SETTINGS, fleetLinkedEnvironmentsEnabled: false },
-    overridesForMerge,
-  );
+  // The LAN fleet default stays on here: linked environments still read as off, as upstream's
+  // tests expect, unless a fleet access service with a list for this machine is provided.
+  const merged = deepMerge(DEFAULT_SERVER_SETTINGS, overridesForMerge);
   const initialSettings = yield* normalizeServerSettings({
     ...merged,
     ...(automaticGitFetchInterval !== undefined
@@ -237,7 +235,8 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
   });
   const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);
   const writeSemaphore = yield* Semaphore.make(1);
-  const getSettings = Ref.get(currentSettingsRef).pipe(Effect.map(resolveReadSettings));
+  const fleetLinks = yield* makeFleetLinkReads;
+  const getSettings = Ref.get(currentSettingsRef).pipe(Effect.flatMap(fleetLinks.resolve));
 
   const updateTestSettings = (
     update: (current: ServerSettings) => Effect.Effect<ServerSettings, ServerSettingsError>,
@@ -247,7 +246,7 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
         Effect.flatMap(update),
         Effect.flatMap(normalizeServerSettings),
         Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
-        Effect.map(resolveReadSettings),
+        Effect.flatMap(fleetLinks.resolve),
       ),
     );
 
@@ -440,13 +439,56 @@ function resolveTextGenerationProvider(settings: ServerSettings): ServerSettings
 }
 
 /** What readers see. Derived values are never written back to settings.json. */
-function resolveReadSettings(settings: ServerSettings): ServerSettings {
+function resolveReadSettings(settings: ServerSettings, fleetLinksApply: boolean): ServerSettings {
   const resolved = resolveTextGenerationProvider(settings);
-  // The fleet adapter links this machine to its peers, which needs linked environments here.
-  return resolved.fleetLinkedEnvironmentsEnabled && !resolved.linkedEnvironmentsEnabled
-    ? { ...resolved, linkedEnvironmentsEnabled: true }
-    : resolved;
+  // The fleet adapter links this machine to its peers, which needs linked environments here. It
+  // links only for an active fleet member once the fleet has a Machine access list; anywhere
+  // else, such as a development or unenrolled install, the Labs setting decides.
+  const active = resolved.fleetLinkedEnvironmentsEnabled && fleetLinksApply;
+  return resolved.fleetLinkedEnvironmentsActive === active &&
+    (!active || resolved.linkedEnvironmentsEnabled)
+    ? resolved
+    : {
+        ...resolved,
+        fleetLinkedEnvironmentsActive: active,
+        linkedEnvironmentsEnabled: resolved.linkedEnvironmentsEnabled || active,
+      };
 }
+
+/**
+ * Reads settings as resolved against this machine's fleet state, and emits whenever that state
+ * turns the fleet's links on or off. Without the fleet access service, the Labs setting decides.
+ */
+const makeFleetLinkReads = Effect.gen(function* () {
+  const fleetAccess = yield* Effect.serviceOption(FleetAccessPolicy.FleetAccess);
+  const applies = Option.match(fleetAccess, {
+    onNone: () => Effect.succeed(false),
+    onSome: (service) =>
+      service.current.pipe(
+        Effect.map(FleetAccessPolicy.fleetLinksApply),
+        // Reading the state cannot fail; a test double without one reads as no fleet.
+        Effect.catchDefect(() => Effect.succeed(false)),
+      ),
+  });
+  // What readers saw last, so a change made before the watch below starts is not missed.
+  const last = yield* Ref.make(yield* applies);
+  return {
+    resolve: (settings: ServerSettings) =>
+      applies.pipe(Effect.map((active) => resolveReadSettings(settings, active))),
+    /** Runs `emit` whenever the fleet's links turn on or off here. */
+    watch: (emit: Effect.Effect<void>) =>
+      Option.match(fleetAccess, {
+        onNone: () => Effect.void,
+        onSome: (service) =>
+          Stream.runForEach(service.changes, (state) => {
+            const next = FleetAccessPolicy.fleetLinksApply(state);
+            return Ref.getAndSet(last, next).pipe(
+              Effect.flatMap((previous) => (previous === next ? Effect.void : emit)),
+            );
+          }),
+      }),
+  };
+});
 
 function fallbackTextGenerationProvider(settings: ServerSettings): ServerSettings {
   const fallback = fallbackTextGenerationModelSelection(
@@ -600,6 +642,7 @@ const make = Effect.gen(function* () {
 
   const emitChange = (settings: ServerSettings) =>
     PubSub.publish(changesPubSub, settings).pipe(Effect.asVoid);
+  const fleetLinks = yield* makeFleetLinkReads;
 
   const readConfigExists = fs.exists(settingsPath).pipe(
     Effect.mapError(
@@ -868,6 +911,7 @@ const make = Effect.gen(function* () {
   // Background sweeps read settings every few seconds; reading secret files each time is wasted.
   // Every secret write rewrites the settings file, so a new cached object implies fresh secrets.
   // A read that overlaps a secret write may see files a rollback then restores, so it is not kept.
+  // Only the secrets are cached: the read view also follows fleet state, which changes on its own.
   let materialized: { readonly source: ServerSettings; readonly value: ServerSettings } | null =
     null;
   let secretWriteGeneration = 0;
@@ -880,7 +924,6 @@ const make = Effect.gen(function* () {
       if (materialized?.source === source) return Effect.succeed(materialized.value);
       const generation = secretWriteGeneration;
       return materializeSettingsSecrets(source).pipe(
-        Effect.map(resolveReadSettings),
         Effect.tap((value) =>
           Effect.sync(() => {
             if (generation === secretWriteGeneration) materialized = { source, value };
@@ -888,6 +931,7 @@ const make = Effect.gen(function* () {
         ),
       );
     }),
+    Effect.flatMap(fleetLinks.resolve),
   );
 
   const materializeChanges = (changes: Stream.Stream<ServerSettings>) =>
@@ -904,7 +948,7 @@ const make = Effect.gen(function* () {
           ),
         ),
       ),
-      Stream.map(resolveReadSettings),
+      Stream.mapEffect(fleetLinks.resolve),
     );
 
   type SecretChange = {
@@ -1083,10 +1127,9 @@ const make = Effect.gen(function* () {
           }).pipe(Effect.ensuring(invalidateMaterialized)),
         );
         yield* Cache.set(settingsCache, cacheKey, { settings: next, parseFailure: Option.none() });
-        const resolved = resolveReadSettings(materializedNext);
-        materialized = { source: next, value: resolved };
+        materialized = { source: next, value: materializedNext };
         yield* emitChange(next);
-        return resolved;
+        return yield* fleetLinks.resolve(materializedNext);
       }),
     );
 
@@ -1192,6 +1235,11 @@ const make = Effect.gen(function* () {
 
     yield* Deferred.succeed(startedDeferred, undefined).pipe(Effect.orDie);
   });
+
+  // The fleet's links turning on or off here changes what readers see.
+  yield* fleetLinks
+    .watch(getSettingsFromCache.pipe(Effect.flatMap(emitChange), Effect.ignoreCause({ log: true })))
+    .pipe(Effect.forkIn(watcherScope));
 
   return {
     start,

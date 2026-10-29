@@ -70,6 +70,37 @@ export const FleetAccessSeed = Schema.Struct({
 });
 export type FleetAccessSeed = typeof FleetAccessSeed.Type;
 
+/**
+ * `fleet-access-ready/<machineId>.json` beside the roster, signed by that machine: it runs a build
+ * that swaps in a replaced fleet credential. LAN 1.0.24 cannot, so adopting the starting list while
+ * a machine it makes read-only still runs it would cut that machine's connections off.
+ */
+export const SEED_READY_DIRECTORY = "fleet-access-ready";
+const SeedReady = Schema.Struct({
+  version: Schema.Literal(1),
+  fleetId: Schema.String.check(Schema.isMaxLength(256)),
+  machineId: FleetMachineId,
+  createdAt: Schema.Number,
+  signature: Schema.String.check(Schema.isMaxLength(1024)),
+});
+type SeedReady = typeof SeedReady.Type;
+const seedReadyData = (marker: SeedReady) =>
+  JSON.stringify([
+    "fleet-access-ready",
+    marker.version,
+    marker.fleetId,
+    marker.machineId,
+    marker.createdAt,
+  ]);
+/** How long a machine waits for those machines before adopting the starting list anyway. */
+export const SEED_READY_WAIT_MS = 24 * 60 * 60 * 1000;
+// When this machine first saw the fleet's starting list.
+const SeedSeen = Schema.Struct({
+  version: Schema.Literal(1),
+  fleetId: Schema.String,
+  firstSeenAt: Schema.Number,
+});
+
 export interface FleetAccessSnapshot {
   readonly defaultAccess: Level;
   readonly machines: ReadonlyArray<typeof MachineAccess.Type>;
@@ -304,6 +335,14 @@ export interface FleetAccessState {
    * cannot be used. Until a list exists nothing may be linked.
    */
   readonly seed?: "waiting" | "invalid";
+  /**
+   * While a usable starting list waits for machines it makes read-only to run a build that can
+   * take a replaced credential: those machines, and when it is adopted anyway.
+   */
+  readonly seedPending?: {
+    readonly machineIds: ReadonlyArray<string>;
+    readonly adoptAt: number;
+  };
 }
 
 export const machineAccess = (state: FleetAccessState, machineId: string) =>
@@ -315,6 +354,14 @@ export const selfAccess = (state: FleetAccessState): Level =>
     : accessOf(state, state.machineId);
 /** Whether access follows a saved policy; before one, each credential keeps its access. */
 export const policyApplies = (state: FleetAccessState) => state.revision > 0;
+/**
+ * Whether the fleet would link this machine to its peers: it was an enabled member at its last
+ * fleet read, and a list exists. Only then do linked environments count as on here.
+ */
+export const fleetLinksApply = (state: FleetAccessState) =>
+  policyApplies(state) &&
+  state.machineId !== undefined &&
+  state.peers.some((peer) => peer.machineId === state.machineId);
 /**
  * Whether the policy was just read from the share. Only then may access revoke or replace
  * anything: a read error only caps, at the last accepted policy, so it never costs a machine a
@@ -386,6 +433,7 @@ const make = Effect.gen(function* () {
     legacyAccess: Level,
     unavailable: boolean,
     seed?: FleetAccessState["seed"],
+    seedPending?: FleetAccessState["seedPending"],
   ): FleetAccessState => ({
     revision: evaluation?.revision ?? 0,
     defaultAccess: evaluation?.snapshot?.defaultAccess ?? legacyAccess,
@@ -394,6 +442,7 @@ const make = Effect.gen(function* () {
     peers: value?.peers ?? [],
     ...(unavailable ? { unavailable: true } : {}),
     ...(seed === undefined ? {} : { seed }),
+    ...(seedPending === undefined ? {} : { seedPending }),
   });
   const startup =
     cache === undefined
@@ -424,6 +473,8 @@ const make = Effect.gen(function* () {
 
   type SeedRead =
     | { readonly _tag: "absent" }
+    // The share did not answer. Wait for it: the file may not even exist.
+    | { readonly _tag: "unavailable" }
     | { readonly _tag: "invalid"; readonly reason: string }
     | { readonly _tag: "valid"; readonly snapshot: FleetAccessSnapshot };
   const invalidSeed = (reason: string): SeedRead => ({ _tag: "invalid", reason });
@@ -431,12 +482,15 @@ const make = Effect.gen(function* () {
   const readSeed = Effect.fn("FleetAccess.readSeed")(function* (input: FleetAccessInput) {
     const file = path.join(input.root, SEED_FILE);
     const exists = yield* Effect.result(fs.exists(file));
-    if (exists._tag === "Failure") return invalidSeed("unreadable");
+    if (exists._tag === "Failure") return { _tag: "unavailable" } satisfies SeedRead;
     if (!exists.success) return { _tag: "absent" } satisfies SeedRead;
     const seed = yield* readFleetJson(file, FleetAccessSeed).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
-      Effect.option,
+      Effect.asSome,
+      Effect.catchTags({ PlatformError: () => Effect.succeed("unavailable" as const) }),
+      Effect.orElseSucceed(() => Option.none<FleetAccessSeed>()),
     );
+    if (seed === "unavailable") return { _tag: "unavailable" } satisfies SeedRead;
     if (Option.isNone(seed)) return invalidSeed("malformed");
     const named = seed.value.readOnly;
     if (seed.value.fleetId !== input.fleetId) return invalidSeed("another fleet");
@@ -454,6 +508,120 @@ const make = Effect.gen(function* () {
     )
       return invalidSeed("it leaves no machine standard");
     return { _tag: "valid", snapshot } satisfies SeedRead;
+  });
+
+  const readyFile = (root: string, machineId: string) =>
+    path.join(root, SEED_READY_DIRECTORY, `${machineId}.json`);
+  const verifiedReady = (marker: SeedReady | undefined, fleetId: string, peer: FleetPeer) => {
+    if (marker === undefined || marker.fleetId !== fleetId || marker.machineId !== peer.machineId)
+      return false;
+    const key = NodeCrypto.createPublicKey(peer.signingPublicKey);
+    return (
+      key.asymmetricKeyType === "ed25519" &&
+      NodeCrypto.verify(
+        null,
+        Buffer.from(seedReadyData(marker)),
+        key,
+        Buffer.from(marker.signature, "base64"),
+      )
+    );
+  };
+  const readReady = (root: string, machineId: string) =>
+    readFleetJson(readyFile(root, machineId), SeedReady).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.orElseSucceed(() => undefined),
+    );
+  // This server's own marker, once written or found, so it is not read again on every refresh.
+  let markedReady: string | undefined;
+  /** Tells the fleet this machine takes a replaced credential. */
+  const markReady = Effect.fn("FleetAccess.markReady")(function* (
+    input: FleetAccessInput,
+    now: number,
+  ) {
+    const key = input.signingPrivateKey;
+    const self = input.peers.find((peer) => peer.machineId === input.machineId && peer.enabled);
+    const mark = `${input.fleetId}:${input.machineId}`;
+    if (key === undefined || self === undefined || markedReady === mark) return;
+    if (!verifiedReady(yield* readReady(input.root, input.machineId), input.fleetId, self)) {
+      const unsigned: SeedReady = {
+        version: 1,
+        fleetId: input.fleetId,
+        machineId: input.machineId,
+        createdAt: now,
+        signature: "",
+      };
+      const signature = NodeCrypto.sign(null, Buffer.from(seedReadyData(unsigned)), key);
+      const written = yield* fs
+        .makeDirectory(path.join(input.root, SEED_READY_DIRECTORY), { recursive: true })
+        .pipe(
+          Effect.andThen(
+            writeFleetJson(readyFile(input.root, input.machineId), {
+              ...unsigned,
+              signature: signature.toString("base64"),
+            }),
+          ),
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.as(true),
+          Effect.catchCause((cause) =>
+            Effect.logWarning(
+              "This machine could not tell the fleet that it takes replaced credentials.",
+              { cause },
+            ).pipe(Effect.as(false)),
+          ),
+        );
+      if (!written) return;
+    }
+    markedReady = mark;
+  });
+
+  const seenFile = path.join(config.stateDir, "lan-fleet-access-seed.json");
+  let seen: typeof SeedSeen.Type | undefined;
+  /** When this machine first saw the fleet's starting list, kept so a restart does not reset it. */
+  const firstSeen = Effect.fn("FleetAccess.firstSeen")(function* (fleetId: string, now: number) {
+    if (seen === undefined && (yield* fs.exists(seenFile).pipe(Effect.orElseSucceed(() => false))))
+      seen = yield* readFleetJson(seenFile, SeedSeen).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.orElseSucceed(() => undefined),
+      );
+    if (seen?.fleetId === fleetId) return seen.firstSeenAt;
+    seen = { version: 1, fleetId, firstSeenAt: now };
+    yield* writeFleetJson(seenFile, seen).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("When this machine first saw the starting access list was not saved.", {
+          cause,
+        }),
+      ),
+    );
+    return now;
+  });
+
+  /**
+   * Adopting the list replaces the fleet credentials of the machines it makes read-only. It waits
+   * until each of them runs a build that takes the replacement, or a day after this machine first
+   * saw the list: a machine that has not updated by then is off or not updating, and recovers
+   * through the replacement once it does.
+   */
+  const seedReadiness = Effect.fn("FleetAccess.seedReadiness")(function* (
+    input: FleetAccessInput,
+    snapshot: FleetAccessSnapshot,
+  ) {
+    const now = yield* Clock.currentTimeMillis;
+    const named = snapshot.machines
+      .filter((machine) => machine.access === "read-only")
+      .map((machine) => machine.machineId);
+    if (named.includes(input.machineId)) yield* markReady(input, now);
+    const adoptAt = (yield* firstSeen(input.fleetId, now)) + SEED_READY_WAIT_MS;
+    const machineIds: Array<string> = [];
+    for (const machineId of named) {
+      const peer = input.peers.find((item) => item.machineId === machineId && item.enabled);
+      if (
+        peer !== undefined &&
+        !verifiedReady(yield* readReady(input.root, machineId), input.fleetId, peer)
+      )
+        machineIds.push(machineId);
+    }
+    return { machineIds, adoptAt, ready: machineIds.length === 0 || now >= adoptAt };
   });
 
   const refreshUnlocked = Effect.fn("FleetAccess.refresh")(
@@ -501,12 +669,17 @@ const make = Effect.gen(function* () {
         kept.length > 0 ||
         candidates.some((entry) => entry.fleetId === input.fleetId);
       const seed: SeedRead = listed ? { _tag: "absent" } : yield* readSeed(input);
+      const readiness =
+        seed._tag === "valid" ? yield* seedReadiness(input, seed.snapshot) : undefined;
       const updated = stateOf(
         cache,
         evaluation,
         input.legacyAccess,
-        unavailable,
-        seed._tag === "absent" ? undefined : seed._tag === "valid" ? "waiting" : "invalid",
+        unavailable || seed._tag === "unavailable",
+        seed._tag === "valid" ? "waiting" : seed._tag === "invalid" ? "invalid" : undefined,
+        readiness === undefined || readiness.ready
+          ? undefined
+          : { machineIds: readiness.machineIds, adoptAt: readiness.adoptAt },
       );
       const previous = yield* SubscriptionRef.get(state);
       if (seed._tag === "invalid" && previous.seed !== "invalid")
@@ -516,7 +689,15 @@ const make = Effect.gen(function* () {
         );
       if (JSON.stringify(updated) !== JSON.stringify(previous))
         yield* SubscriptionRef.set(state, updated);
-      return { state: updated, directory, candidates, evaluation, unavailable, seed };
+      return {
+        state: updated,
+        directory,
+        candidates,
+        evaluation,
+        unavailable: unavailable || seed._tag === "unavailable",
+        seed,
+        readiness,
+      };
     },
     Effect.provideService(FileSystem.FileSystem, fs),
   );
@@ -703,7 +884,30 @@ const make = Effect.gen(function* () {
         Effect.logInfo("Adopted the fleet's starting access list.", {
           revision: adopted.revision,
           readOnly: snapshot.machines.map((machine) => machine.machineId),
+          ...(view.readiness === undefined || view.readiness.machineIds.length === 0
+            ? {}
+            : { notUpdatedAfterWaiting: view.readiness.machineIds }),
         }),
+      ),
+      // Once the share holds the list and gives it back, the starting list is spent. Removing it
+      // means a later loss of the share's list can never bring it in again.
+      Effect.tap(() =>
+        refreshUnlocked(input).pipe(
+          Effect.flatMap((back) =>
+            !back.unavailable &&
+            back.state.revision > 0 &&
+            back.candidates.some((entry) =>
+              back.evaluation.revisions.some((item) => item.digest === entryDigest(entry)),
+            )
+              ? fs.remove(path.join(input.root, SEED_FILE))
+              : Effect.void,
+          ),
+          Effect.catchCause((cause) =>
+            Effect.logWarning(`The spent starting access list (${SEED_FILE}) was not removed.`, {
+              cause,
+            }),
+          ),
+        ),
       ),
       Effect.catch((error) =>
         Effect.logWarning("The fleet's starting access list was not adopted this time.", {
@@ -720,9 +924,11 @@ const make = Effect.gen(function* () {
     mutex.withPermits(1)(
       refreshUnlocked(input).pipe(
         Effect.flatMap((view) =>
-          view.seed._tag === "valid"
-            ? adopt(input, view, view.seed.snapshot)
-            : endorse(input, view),
+          view.seed._tag !== "valid"
+            ? endorse(input, view)
+            : view.readiness?.ready === true
+              ? adopt(input, view, view.seed.snapshot)
+              : Effect.succeed(view.state),
         ),
       ),
     );

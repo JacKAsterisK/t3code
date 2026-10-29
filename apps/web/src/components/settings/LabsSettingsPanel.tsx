@@ -127,7 +127,7 @@ function LinkedEnvironmentsRow() {
       {...searchableSetting("linked-environments-beta")}
       settingKeys={["linkedEnvironmentsEnabled"]}
       description={
-        settings.fleetLinkedEnvironmentsEnabled ? (
+        settings.fleetLinkedEnvironmentsActive ? (
           <>
             Let agents here work on your other machines, and theirs here. Your LAN fleet keeps this
             on and links its machines for you, at the access set in{" "}
@@ -150,7 +150,7 @@ function LinkedEnvironmentsRow() {
       control={
         <ScopedSwitch
           settingKeys={["linkedEnvironmentsEnabled"]}
-          disabled={settings.fleetLinkedEnvironmentsEnabled}
+          disabled={settings.fleetLinkedEnvironmentsActive}
           checked={settings.linkedEnvironmentsEnabled}
           onCheckedChange={(checked) =>
             updateSettings({ linkedEnvironmentsEnabled: Boolean(checked) })

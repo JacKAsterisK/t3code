@@ -117,7 +117,13 @@ const makeMachine = (input: {
       defaultAccess: "standard",
       machines: [],
       machineId: input.identity.peer.machineId,
-      peers: [],
+      // An active member: linked environments count as on here while the adapter is.
+      peers: [
+        {
+          machineId: input.identity.peer.machineId,
+          environmentId: input.identity.peer.environmentId,
+        },
+      ],
     });
     const transportOrigin = yield* Ref.make<string | undefined>(undefined);
     const backendOrigin = yield* Ref.make<string | undefined>(undefined);
@@ -526,6 +532,45 @@ it.live(
             revision: 1,
           }));
         yield* grant(linked, cryoFrog, "read-only");
+        yield* round(fleet);
+        const link = yield* linking.links.get(pandaMedic.peer.environmentId);
+        expect(Option.getOrUndefined(link)?.access).toBe<AuthMcpClientAccess>("read-only");
+        expect(yield* callerAccess(fleet)).toBe("read-only");
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live(
+  "neither offers nor links before the fleet has a Machine access list, starting list or not",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+        const { cryoFrog, pandaMedic, linking, linked } = fleet;
+        // No list and no starting list, as a machine with no saved history reads a share whose
+        // fleet-access folder is not found. Each peer then has its setup access, here standard.
+        const noList = (machine: Machine) =>
+          Ref.update(machine.policy, (current) => ({ ...current, revision: 0 }));
+        const listed = (machine: Machine) =>
+          Ref.update(machine.policy, (current) => ({ ...current, revision: 1 }));
+        yield* grant(linked, cryoFrog, "standard");
+        yield* noList(linking);
+        yield* noList(linked);
+        yield* round(fleet);
+        expect(yield* shareSnapshot(fleet.share)).toEqual([]);
+        expect(yield* linked.auth.listPairingLinks()).toEqual([]);
+        expect(yield* linking.links.list).toEqual([]);
+        const settings = Context.get(linking.context, ServerSettings.ServerSettingsService);
+        expect((yield* settings.getSettings).linkedEnvironmentsEnabled).toBe(false);
+
+        // PandaMedic reads the list but CryoFrog does not yet: CryoFrog asks for and takes nothing.
+        yield* grant(linked, cryoFrog, "read-only");
+        yield* listed(linked);
+        yield* round(fleet);
+        expect(yield* linking.links.list).toEqual([]);
+
+        // CryoFrog reads it too: the link forms at the list's access.
+        yield* listed(linking);
         yield* round(fleet);
         const link = yield* linking.links.get(pandaMedic.peer.environmentId);
         expect(Option.getOrUndefined(link)?.access).toBe<AuthMcpClientAccess>("read-only");

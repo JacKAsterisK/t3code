@@ -20,12 +20,14 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import { HttpBody, HttpClient, HttpClientRequest, HttpRouter } from "effect/http";
 
 import * as ProjectService from "../project/ProjectService.ts";
 import * as PullRequestReviewGuideService from "../pullRequest/PullRequestReviewGuideService.ts";
 import * as ServerConfig from "../config.ts";
+import * as FleetAccessPolicy from "../lan/FleetAccessPolicy.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { advertisedJsonSchema } from "./advertisedJsonSchema.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
@@ -863,6 +865,7 @@ it.effect("admits provider and OAuth client credentials and points only clients 
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+// With the LAN fleet default on, until the fleet links this machine.
 it.effect("hides tools for links and refuses another environment while the beta is off", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -894,8 +897,27 @@ it.effect("hides tools for links and refuses another environment while the beta 
           failureMode: "return",
         }),
       );
-      const settingsContext = yield* Layer.build(ServerSettings.layerTest());
+      // The real defaults: the LAN fleet setting is on, but this install is in no fleet.
+      const noFleet: FleetAccessPolicy.FleetAccessState = {
+        revision: 0,
+        defaultAccess: "standard",
+        machines: [],
+        machineId: undefined,
+        peers: [],
+      };
+      const fleetState = yield* SubscriptionRef.make(noFleet);
+      const settingsContext = yield* Layer.build(
+        ServerSettings.layerTest().pipe(
+          Layer.provide(
+            Layer.mock(FleetAccessPolicy.FleetAccess)({
+              current: SubscriptionRef.get(fleetState),
+              changes: SubscriptionRef.changes(fleetState),
+            }),
+          ),
+        ),
+      );
       const settings = Context.get(settingsContext, ServerSettings.ServerSettingsService);
+      expect((yield* settings.getSettings).fleetLinkedEnvironmentsEnabled).toBe(true);
       const serverLayer = McpHttpServer.toolkitRegistration(
         LinksToolkit,
         McpToolAccess.toLayer(LinksToolkit, {
@@ -983,6 +1005,26 @@ it.effect("hides tools for links and refuses another environment while the beta 
         isError: true,
         content: [{ text: expect.stringContaining("cannot reach linked environments") }],
       });
+      // Labs can turn it off again here.
+      yield* settings.updateSettings({ linkedEnvironmentsEnabled: false });
+      expect(yield* listed()).toEqual(["where"]);
+
+      // A fleet member, but before the fleet has a Machine access list: still off.
+      const machine = { machineId: "machine-self", environmentId };
+      yield* SubscriptionRef.set(fleetState, {
+        ...noFleet,
+        machineId: machine.machineId,
+        peers: [machine],
+      });
+      expect(yield* listed()).toEqual(["where"]);
+      // Once it has one, the fleet keeps linked environments on here.
+      yield* SubscriptionRef.set(fleetState, {
+        ...noFleet,
+        revision: 1,
+        machineId: machine.machineId,
+        peers: [machine],
+      });
+      expect(yield* listed()).toEqual(["links", "where"]);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

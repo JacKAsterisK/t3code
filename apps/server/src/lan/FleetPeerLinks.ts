@@ -98,7 +98,8 @@ const codePrefix = (machineId: string) => `${SUBJECT_PREFIX}${machineId}:`;
 /**
  * Links this machine to each trusted fleet peer as a linked environment, renews and forgets those
  * links; the machine linked to mints each code at its policy's access and revokes the sessions it
- * replaces or narrows. Off unless `fleetLinkedEnvironmentsEnabled` is set.
+ * replaces or narrows. Off unless `fleetLinkedEnvironmentsEnabled` is set, and idle until the
+ * fleet has a Machine access list.
  */
 export class FleetPeerLinks extends Context.Service<
   FleetPeerLinks,
@@ -511,8 +512,9 @@ const make = Effect.gen(function* () {
         (machineId) => machineId,
         (machineId) => forgetServed(fleet, machineId),
       );
-      // Before the fleet's starting access list is in force, a code would carry the default.
-      if ((yield* fleetAccess.current).seed !== undefined) return;
+      // Until the fleet has a Machine access list, a code would carry each machine's setup access,
+      // normally standard, even for a machine the fleet means to make read-only.
+      if (!FleetAccessPolicy.policyApplies(yield* fleetAccess.current)) return;
       yield* forEachPeer(
         fleet.peers,
         ({ peer }) => peer.machineId,

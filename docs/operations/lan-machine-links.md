@@ -70,6 +70,26 @@ The list fails closed:
 - A change holds `fleet-access.lock` for a moment. A lock older than two minutes
   was left by a crash, and the next change clears it.
 
+A fleet with no list yet can start from `fleet-access-seed.json` beside the
+roster, which names the machines that start read-only:
+`{"version":1,"fleetId":"<fleetId from fleet-authority.json>","readOnly":["<machineId>"]}`.
+The first machine on LAN 1.0.26 or later that reads it, with no revision on the
+share or in its own copy, signs it in as revision 1 through the ordinary change
+path. Machines it doesn't name, and **Machines added later**, keep the default a
+first list saved in Settings would keep (the adopting machine's setup access). It
+only restricts. Once any list exists, here or on the share, it is ignored for
+good, so later changes go through Settings. A file that doesn't parse, names
+another fleet or an unknown machine, repeats a machine or leaves no machine
+standard is refused: Machine access shows it, the server logs it, and nothing
+links until it is fixed or removed or a list is saved. Machines adopting it at
+once serialize on the lock, and any competing first revisions merge as above.
+Older builds never read it. Write it with the checker, which reads the roster and
+authority, refuses once a list exists, and writes only with `--write`:
+
+```powershell
+node apps/server/scripts/lan-fleet-access-seed.ts \\fileserver\private-share\fleet-roster.json <machineId> <machineId> --write
+```
+
 The receiving side enforces it. Every machine issues each peer's credential at
 that peer's access. Every credential a fleet machine holds here is attributed to
 that machine by subjects this server sets: its fleet credential, its peer-link
@@ -185,6 +205,19 @@ connections. The owner can revoke a member to stop new links/deliveries. Existin
 sessions are deliberately preserved; withdraw existing access separately through
 Authorized clients. Restoring a lost owner/device key is an administrator recovery
 operation, not an automatic key rotation.
+
+## Agents on other machines
+
+From LAN 1.0.26 each server links itself to every trusted fleet peer as an
+upstream linked environment, so in-app agents use `t3_environment_links` and
+`environmentId` on the native tools. In-app threads no longer see the `t3_lan_*`
+tools, which only ever served outside task clients. Each link carries the access
+the destination's Machine access list gives this machine: standard is
+`full-access`, read-only is `read-only`. A machine opts out with
+`"fleetLinkedEnvironmentsEnabled": false` in its `userdata\settings.json`; on its
+next pass it forgets the links it made and revokes those it issued. While a
+starting list waits or is refused, no machine asks for or offers a link. Design,
+share files and the live proof: [native link adapter](../maintenance/native-link-adapter.md).
 
 ## Hub bootstrap contract
 

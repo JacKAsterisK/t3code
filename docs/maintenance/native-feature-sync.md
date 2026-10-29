@@ -108,16 +108,18 @@ approval before code or runtime changes.
 - **Decision:** adapt. Use native discovery for in-app agents as the first
   replacement (see Sequence). The fleet creates, renews and removes the links;
   see [Fleet-managed native link adapter](native-link-adapter.md) for the
-  design, answers and proof plan. The adapter is built and ships off
-  (`fleetLinkedEnvironmentsEnabled`); the live proof is next. Keep
+  design, answers and proof plan. From LAN 1.0.26 the adapter is on by default
+  on every machine (`fleetLinkedEnvironmentsEnabled`), and links wait until the
+  fleet has a Machine access list, adopted from `fleet-access-seed.json` when
+  one is placed. It has not yet run between two real servers. Keep
   `t3_lan_environments` for the gateway's grant path until rows 5, 6 and 10
   are settled.
 - **Tests:** `EnvironmentRegistry.test.ts`, `FleetPeerLinks.test.ts`,
-  `FleetPeerHttpClient.test.ts`; upstream `PeerLinks.test.ts` and
-  `PeerLinkRequests.test.ts`.
-- **Owner:** Dan. **Rollback:** set `fleetLinkedEnvironmentsEnabled` off,
-  **Forget** the link here and revoke it in the destination's **Sharing &
-  access**.
+  `FleetPeerHttpClient.test.ts`, `serverSettings.test.ts` (default on);
+  upstream `PeerLinks.test.ts` and `PeerLinkRequests.test.ts`.
+- **Owner:** Dan. **Rollback:** `"fleetLinkedEnvironmentsEnabled": false` in a
+  machine's `settings.json` (its next pass forgets and revokes what its adapter
+  made), or restore the `false` default in a release.
 - **Revisit:** when linked environments leave Labs or ship in a stable release,
   or when links become renewable.
 
@@ -129,8 +131,9 @@ approval before code or runtime changes.
   or to `RemoteTaskTransport.ts` (an OAuth MCP client that calls the same
   `t3_lan_*` tools on a fork destination). Receipts are stored by migration 070.
   These files total about 1.6k lines, plus 1.7k lines of tests. The only
-  intended caller is the unpublished gateway (row 10). In-app agents also see
-  the ten tools, but with no routing policy installed the tools deny every call.
+  intended caller is the unpublished gateway (row 10). Since LAN 1.0.26 in-app
+  threads don't see the ten tools, which refuse every thread caller
+  (`hiddenFromThreads`); outside clients still do.
 - **Upstream:** an `environmentId` parameter on `t3_thread_launch/list/read/send/wait/interrupt`,
   `t3_queue`, `t3_project_*` and scheduling (#16684). `delegate_task` can run in
   a linked environment, with a restart-safe follower that wakes the parent
@@ -153,8 +156,8 @@ approval before code or runtime changes.
   `RemoteTaskTransport.test.ts`; upstream `PeerForwarding.test.ts`,
   `RemoteDelegation.test.ts`, `linkOrigin.test.ts` and
   `OrchestratorMcpToolkit.integration.test.ts`.
-- **Owner:** Dan. **Rollback:** restore the in-app `LanToolkit` registration and
-  turn Labs off.
+- **Owner:** Dan. **Rollback:** drop the `hiddenFromThreads` annotations in
+  `toolkits/lan/tools.ts` and turn the fleet adapter off.
 - **Revisit (gateway):** when upstream offers project- or thread-scoped link
   access, or when the gateway can accept a link-scoped client.
 
@@ -374,15 +377,17 @@ approval before code or runtime changes.
   connection saw while standard stay usable after it is downgraded, until rotated.
   Owner-approval fleets get no automatic credential replacement. Software forging
   share files is out of scope (shared-folder trust).
-- **Data:** signed revisions in `fleet-access` on the share and the accepted chain
+- **Data:** signed revisions in `fleet-access` on the share, an optional one-time
+  starting list `fleet-access-seed.json` beside the roster, the accepted chain
   in `userdata\lan-fleet-access.json`; trust-check misses in
   `lan-fleet-members.json` and `lan-fleet-trusted.json`. No database migration.
 - **Decision:** keep. A fleet adapter that creates native peer links must take
   each link's access from `FleetAccess.accessFor` and follow `FleetAccess.changes`
   instead of choosing one itself.
-- **Tests:** `FleetAccessPolicy.test.ts` (competing and orphaned revisions,
-  departed signers, locks, floods), `FleetCredentialAccess.test.ts` (receiver
-  caps, revocation, unreadable policy, holder attribution),
+- **Tests:** `FleetAccessPolicy.test.ts` (competing and orphaned revisions, the
+  starting list, departed signers, locks, floods),
+  `FleetCredentialAccess.test.ts` (receiver caps, revocation, unreadable
+  policy, holder attribution),
   `RpcAuthorization.test.ts` (per-call scopes), `ws.test.ts` (webhook URLs),
   `FleetEnrollment.test.ts` (sync, refused lifts, departure grace),
   `LanFleet.test.ts` (replacement, renewal, stale sync lock),
@@ -406,8 +411,8 @@ Proposed; each step needs Dan's approval.
    3. Exercise the mutations on a disposable project: launch, a queued send,
       wait, interrupt by run, `t3_pending_request`, and a remote
       `delegate_task` that survives a restart.
-   4. Stop registering `LanToolkit` for in-app sessions, and keep it for
-      task-only grants.
+   4. Done in LAN 1.0.26: in-app threads no longer see `LanToolkit`; outside
+      clients, task-only grants included, keep it. Steps 2 and 3 are still owed.
 2. **Gateway on native tools (rows 3, 5, 6, 10)**, after gateway activation is
    approved. Then retire `NativeTaskService`, `EnvironmentRouting`,
    `RemoteTaskTransport`, `EnvironmentRegistry` and the routing half of the LAN

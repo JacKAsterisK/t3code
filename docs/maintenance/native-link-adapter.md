@@ -4,9 +4,10 @@ Design for letting in-app agents work on other fleet machines through
 upstream's linked environments (peer links), with the fleet doing the pairing,
 renewal and removal. It replaces the in-app use of the `t3_lan_*` tools
 ([native feature sync](native-feature-sync.md) rows 2–4 and 7). Status: the
-adapter (waves 1 and 2) is built and ships off; turn it on per machine with
-`fleetLinkedEnvironmentsEnabled` (see [How to run the proof](#how-to-run-the-proof)).
-The fleet status UI (wave 3) and tool coexistence (wave 4) are not built.
+adapter (waves 1 and 2) and tool coexistence (wave 4) are built, and from LAN
+1.0.26 `fleetLinkedEnvironmentsEnabled` is on by default on every machine. The
+fleet status UI (wave 3) is not built, and the adapter has only run in the test
+runner, not yet between two real servers (see [How to run the proof](#how-to-run-the-proof)).
 Evidence is from fork `main` at `bb224f99b` (upstream `9826dbb99`);
 `apps/server/src/peer` is unmodified from upstream.
 
@@ -207,6 +208,11 @@ A policy change takes effect without approval:
   L holds no live session here (revoked by hand, for example), and re-offers
   after each code expires until L takes one.
 - When access is widened, the old session stays until L's relink succeeds.
+- Before the fleet has a list, `accessFor` gives every peer the default, so a
+  code would carry standard. While a starting list (`fleet-access-seed.json`)
+  waits to be adopted or is refused, `FleetAccessState.seed` is set and neither
+  side asks for or offers a code; once the list exists, links form at its access
+  ([LAN machine links](../operations/lan-machine-links.md#machine-access)).
 - L's adapter consumes the offer on its next pass. `PeerLinks.link` then
   replaces the row with the new `access`.
 - Neither machine shows a prompt.
@@ -222,8 +228,9 @@ A policy change takes effect without approval:
   `McpOAuth.register`, the `/mcp` middleware, `hiddenWhileLinksOff` (which hides
   the link tools), `McpToolAccess` (which refuses forwarded calls) and the
   client's `offersLinkedEnvironments`.
-- **Built.** A fork server setting, `fleetLinkedEnvironmentsEnabled`, off by
-  default, turns the adapter on for one machine. While it is on, settings
+- **Built.** A fork server setting, `fleetLinkedEnvironmentsEnabled`, on by
+  default since LAN 1.0.26, runs the adapter. An explicit `false` in a machine's
+  `settings.json` turns it off there. While it is on, settings
   readers see `linkedEnvironmentsEnabled` as on
   (`resolveReadSettings` in `apps/server/src/serverSettings.ts`), so every
   upstream read site, both machines' sign-in gates and the client follow
@@ -239,10 +246,8 @@ A policy change takes effect without approval:
     settings read error changes nothing.
   - The origin hook (answer 3) also applies only while the fleet setting is
     on, so an off machine behaves exactly as before.
-  - **To turn the adapter on everywhere later,** change the
-    `withDecodingDefault(Effect.succeed(false))` of
-    `fleetLinkedEnvironmentsEnabled` in `packages/contracts/src/settings.ts`
-    to `true`. An explicit `false` in a machine's `settings.json` still wins.
+  - `ServerSettings.layerTest` starts with the fleet setting off, so upstream's
+    tests keep upstream's off default; fork tests opt in.
 - **Rejected.** A LAN-build default of on for `linkedEnvironmentsEnabled`
   (it would turn links on for every machine in the next release). Having the
   adapter write the setting (it would fight a user's explicit off). Bypassing
@@ -265,12 +270,9 @@ A policy change takes effect without approval:
     the link.
   - D's pairing-link list briefly shows the minted code. The existing fleet
     codes already appear there too.
-- **Tools: yes, until coexistence is handled.** In-app sessions on every
-  machine get both the ten `t3_lan_*` tools (registered beside upstream's in
-  `McpHttpServer.ts`) and, once links are on, `t3_environment_*` and
-  `environmentId` on the native tools. Without `lan-routing.json`, every
-  `t3_lan_*` call is denied, so agents see working native tools next to dead
-  LAN tools.
+- **Tools: no.** The ten `t3_lan_*` tools are registered beside upstream's in
+  `McpHttpServer.ts`, but in-app threads don't see them (below), so they see
+  only `t3_environment_*` and `environmentId` on the native tools.
 
 Coexistence until retirement:
 
@@ -281,11 +283,11 @@ Coexistence until retirement:
    on D is not attributed, so the fleet never revokes it; revoke it in D's
    **Sharing & access**. The adapter never touches links to machines outside
    the fleet.
-2. After the proof, hide `LanToolkit` from sessions that aren't task-only
-   (Part H). Use an `EnabledWhen` annotation like upstream's
-   `hiddenWhileLinksOff`. Task-only grants (the deferred gateway) keep the
+2. `LanToolkit` is hidden from in-app threads (Part H), by an `EnabledWhen`
+   annotation (`hiddenFromThreads` in `McpInvocationContext.ts`). Routing
+   refuses every thread caller anyway (`principal` in `EnvironmentRouting.ts`).
+   Outside clients, task-only grants (the deferred gateway) included, keep the
    tools, and the `taskOnlyTools` gate in `McpToolAccess.ts` is unchanged.
-   This avoids running two sources of truth for in-app agents.
 3. `lan-routing.json`, `EnvironmentRouting` and `RemoteTaskTransport` stay
    for the gateway only, with no in-app caller.
 
@@ -315,9 +317,10 @@ are gateway concerns (rows 5, 6 and 10) and stay with the deferred gateway.
 read-only in the planned policy, so the mutating steps can run. AnvilToad (and
 SPDevMachine) appear only in the optional read-only step. Prerequisites:
 
-- A LAN release with the adapter is installed on CryoFrog and PandaMedic.
-- `fleetLinkedEnvironmentsEnabled` is on for those two machines only.
-- The policy grants each of them standard toward the other.
+- LAN 1.0.26 or later is installed on CryoFrog and PandaMedic. The adapter is
+  on by default there and on every other machine that has it.
+- The fleet has a Machine access list (adopted from the starting list) that
+  grants each of them standard toward the other.
 - A test-only override shortens the renewal window
   (`T3CODE_LAN_PEER_LINK_RENEW_WITHIN`, a duration such as `31 days`).
 
@@ -331,7 +334,7 @@ SPDevMachine) appear only in the optional read-only step. Prerequisites:
 | 5   | Set the renewal override on CryoFrog and sync                                                                                                                                                                                                                                  | New `linkedAt` and `expiresAt`. PandaMedic has exactly one CryoFrog session; the old one is revoked (answer 2)                                                                                                                   |
 | 6   | Change PandaMedic's policy for CryoFrog to read-only, then back to standard                                                                                                                                                                                                    | Narrowing: the old session is revoked at once, the relinked access is `read-only`, `t3_thread_send` is denied and `t3_thread_read` works. Widening returns to `full-access`. No prompts (answer 4)                               |
 | 7   | Compare with step 0                                                                                                                                                                                                                                                            | Fleet client connections, their deliveries, the journal and the settings are unchanged (answer 6, and no existing fleet link touched)                                                                                            |
-| 8   | Optional: install on AnvilToad and sync                                                                                                                                                                                                                                        | Links that involve AnvilToad have the access its policy says (`read-only`), and writes are denied                                                                                                                                |
+| 8   | On AnvilToad (1.0.26), sync                                                                                                                                                                                                                                                    | Links that involve AnvilToad have the access its policy says (`read-only`), and writes are denied                                                                                                                                |
 
 Removal (a machine leaves the fleet) is proven by the adapter's integration
 tests. A live check means disabling a roster entry, which pauses that
@@ -339,34 +342,32 @@ machine's fleet deliveries. Do it only with Dan's approval.
 
 **Undo**, in order:
 
-1. Set `fleetLinkedEnvironmentsEnabled` back off on CryoFrog and PandaMedic.
-   This turns Linked environments back to its own Labs value, and on its next
+1. Add `"fleetLinkedEnvironmentsEnabled": false` to the server's
+   `settings.json` on CryoFrog and PandaMedic (or on every machine to stop the
+   adapter fleet-wide). This turns Linked environments back to its own Labs
+   value, and on its next
    pass each machine forgets the link its adapter made and revokes the
    peer-link sessions and codes it issued ("T3 Code · CryoFrog" on PandaMedic).
 2. Delete the throwaway threads and project (`t3_project_delete` with
    `environmentId`) and the clone folder.
 3. Check that no `*.peer-link*.json` files for the pair remain on the share;
    delete any that do.
-4. Reinstall the current release if needed, and remove
-   `fleetLinkedEnvironmentsEnabled` from `settings.json`.
+4. Remove that `false` again once the fleet should link.
 5. Re-run step 0 and compare.
 
 ### How to run the proof
 
-1. Ship a LAN release containing the adapter. Install it on CryoFrog and
-   PandaMedic; other machines may have it too, since it stays off.
-2. On each of the two machines, add `"fleetLinkedEnvironmentsEnabled": true`
-   to the server's `settings.json` in its userdata directory. The server
-   reloads the file and runs a pass at once; no restart is needed. Nothing
-   else is written to `settings.json`.
-3. Run the table above. **Sync now** requests a pass after it finishes;
+1. Place `fleet-access-seed.json` before publishing 1.0.26 (older builds
+   ignore it), then install 1.0.26. The first machine to read it adopts it;
+   Machine access shows the list. Nothing is added to `settings.json`.
+2. Run the table above. **Sync now** requests a pass after it finishes;
    otherwise passes run every 10 minutes, at startup, and on every policy or
    settings change. A first link takes two passes on each machine.
-4. For step 5, start CryoFrog's server with
+3. For step 5, start CryoFrog's server with
    `T3CODE_LAN_PEER_LINK_RENEW_WITHIN="31 days"`, sync both machines twice,
    then restart it without the variable. With the variable left set, the link
    renews on every pass.
-5. Undo as listed above.
+4. Undo as listed above.
 
 ## Design
 
@@ -529,10 +530,10 @@ access-policy work also touches (`LanFleet.ts`, `packages/contracts/src/lanFleet
 - **Docs.** Update `docs/operations/lan-machine-links.md` and
   `docs/maintenance/native-feature-sync.md` rows 2, 3 and 7.
 
-**Wave 4 (after the proof and Dan's approval):**
+**Wave 4 (built in 1.0.26):**
 
 - **H. Tool coexistence.** `apps/server/src/mcp/toolkits/lan/tools.ts`: show
-  the LAN tools only to task-only clients, via `EnabledWhen` and a helper in
+  the LAN tools only to callers outside a thread, via `EnabledWhen` and a helper in
   `McpInvocationContext.ts`. `McpToolAccess.ts` ⚠ keeps its `taskOnlyTools`
   gate unchanged.
 - Check `AgentContextBudget.test.ts`, which measures the advertised tool set.

@@ -117,6 +117,16 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
     machineId: self.peer.machineId,
     access: "read-only" as const,
   });
+  const writeSeed = (seed: unknown) =>
+    fs.writeFileString(
+      path.join(root, FleetAccessPolicy.SEED_FILE),
+      typeof seed === "string" ? seed : JSON.stringify(seed),
+    );
+  const seedOf = (...machines: ReadonlyArray<Machine>) => ({
+    version: 1,
+    fleetId: FLEET_ID,
+    readOnly: machines.map((machine) => machine.peer.machineId),
+  });
   return {
     fs,
     path,
@@ -133,6 +143,8 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
     change,
     accessOf,
     readOnly,
+    writeSeed,
+    seedOf,
     setPeers: (next: ReadonlyArray<FleetPeer>) => {
       peers = next;
     },
@@ -245,6 +257,115 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
       const state = yield* (yield* f.machine()).refresh(f.input(f.panda));
       expect(state.revision).toBe(0);
       expect(FleetAccessPolicy.selfAccess(state)).toBe("standard");
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect(
+    "adopts the starting list as the first revision, which every machine then follows",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fleet();
+        yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
+        // A machine that cannot sign leaves it waiting.
+        const { signingPrivateKey: _, ...unsigned } = f.input(f.cryo);
+        const waiting = yield* (yield* f.machine()).refresh(unsigned);
+        expect(waiting).toMatchObject({ revision: 0, seed: "waiting" });
+        expect(yield* f.fs.exists(f.directory)).toBe(false);
+
+        // A machine the list makes read-only may adopt it: it only restricts.
+        const adopted = yield* (yield* f.machine()).refresh(f.input(f.anvil));
+        expect(adopted.revision).toBe(1);
+        expect(adopted.seed).toBeUndefined();
+        expect(adopted.defaultAccess).toBe("standard");
+        expect(f.accessOf(adopted, f.anvil)).toBe("read-only");
+        expect(f.accessOf(adopted, f.spd)).toBe("read-only");
+        expect(f.accessOf(adopted, f.cryo)).toBe("standard");
+        expect(f.accessOf(adopted, f.panda)).toBe("standard");
+        const other = yield* (yield* f.machine()).refresh(f.input(f.panda));
+        expect(other.seed).toBeUndefined();
+        expect(other).toMatchObject({ revision: 1, machines: adopted.machines });
+        expect(yield* f.fs.readDirectory(f.directory)).toHaveLength(1);
+      }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("lets only one of the machines adopting the starting list at once write it", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
+      const machines = [
+        [yield* f.machine(), f.cryo],
+        [yield* f.machine(), f.panda],
+        [yield* f.machine(), f.anvil],
+      ] as const;
+      yield* Effect.forEach(machines, ([service, self]) => service.refresh(f.input(self)), {
+        concurrency: "unbounded",
+      });
+      for (const [service, self] of machines) {
+        const state = yield* service.refresh(f.input(self));
+        expect(state).toMatchObject({ revision: 1, defaultAccess: "standard" });
+        expect(state.seed).toBeUndefined();
+        expect(f.accessOf(state, f.anvil)).toBe("read-only");
+        expect(f.accessOf(state, f.spd)).toBe("read-only");
+        expect(f.accessOf(state, f.cryo)).toBe("standard");
+      }
+      expect(yield* f.fs.readDirectory(f.directory)).toHaveLength(1);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("ignores the starting list once any list exists, on the share or only here", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const cryo = yield* f.machine();
+      yield* f.change(cryo, f.cryo, 0, [f.readOnly(f.spd)]);
+      yield* f.writeSeed(f.seedOf(f.anvil));
+      const fresh = yield* (yield* f.machine()).refresh(f.input(f.panda));
+      expect(fresh.revision).toBe(1);
+      expect(fresh.seed).toBeUndefined();
+      expect(f.accessOf(fresh, f.anvil)).toBe("standard");
+
+      // The share loses its list; the copy this machine accepted still counts.
+      yield* f.fs.remove(f.directory, { recursive: true });
+      const cached = yield* cryo.refresh(f.input(f.cryo));
+      expect(cached.revision).toBe(1);
+      expect(cached.seed).toBeUndefined();
+      expect(f.accessOf(cached, f.anvil)).toBe("standard");
+      expect(f.accessOf(cached, f.spd)).toBe("read-only");
+
+      // So does history on the share that cannot be followed.
+      const lost = f.sign(f.cryo, 1, null, []);
+      yield* f.writeEntry(f.sign(f.cryo, 2, FleetAccessPolicy.entryDigest(lost), []));
+      const unfollowed = yield* (yield* f.machine()).refresh(f.input(f.panda));
+      expect(unfollowed.revision).toBe(0);
+      expect(unfollowed.seed).toBeUndefined();
+      expect(yield* f.fs.readDirectory(f.directory)).toHaveLength(1);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("reports a starting list it cannot use and writes nothing", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const ids = (...machines: ReadonlyArray<Machine>) =>
+        machines.map((machine) => machine.peer.machineId);
+      for (const seed of [
+        "{not json",
+        { ...f.seedOf(f.anvil), version: 2 },
+        { ...f.seedOf(f.anvil), fleetId: "another-fleet" },
+        { ...f.seedOf(f.anvil), standard: ids(f.cryo) },
+        f.seedOf(),
+        { ...f.seedOf(), readOnly: ["machine-not-in-this-fleet"] },
+        f.seedOf(f.anvil, f.anvil),
+        f.seedOf(f.cryo, f.panda, f.anvil, f.spd),
+      ]) {
+        yield* f.writeSeed(seed);
+        const state = yield* (yield* f.machine()).refresh(f.input(f.cryo));
+        expect(state).toMatchObject({ revision: 0, seed: "invalid" });
+        expect(yield* f.fs.exists(f.directory)).toBe(false);
+      }
+      // Without the file, nothing changes.
+      yield* f.fs.remove(f.path.join(f.root, FleetAccessPolicy.SEED_FILE));
+      const none = yield* (yield* f.machine()).refresh(f.input(f.cryo));
+      expect(none.revision).toBe(0);
+      expect(none.seed).toBeUndefined();
     }).pipe(Effect.provide(configLayer)),
   );
 

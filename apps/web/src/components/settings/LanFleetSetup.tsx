@@ -401,6 +401,17 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
           ? "One setting for the whole fleet. A read-only machine can view threads and tasks on the other machines but cannot start, send to, stop or approve them."
           : "This machine has read-only access to the other machines. Only a machine with standard access can change this."}
       </p>
+      {policy.seed === "waiting" ? (
+        <p className="text-xs text-muted-foreground">
+          Applying this fleet's starting access list. Machines link to each other once it is in
+          place.
+        </p>
+      ) : policy.seed === "invalid" ? (
+        <p className="text-xs text-destructive">
+          The starting access list on the shared folder can't be used, so machines don't link to
+          each other yet. Fix or remove fleet-access-seed.json, or change access here.
+        </p>
+      ) : null}
       {machines.map((peer) => (
         <div key={peer.machineId} className="flex items-center justify-between gap-3 text-xs">
           <span>

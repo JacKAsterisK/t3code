@@ -169,6 +169,8 @@ export const LanFleetSetupState = Schema.Struct({
       selfAccess: FleetAccess,
       // Read-only machines may only restrict themselves.
       canChange: Schema.Boolean,
+      // A starting list on the share, before any list exists: not adopted yet, or unusable.
+      seed: Schema.optionalKey(Schema.Literals(["waiting", "invalid"])),
     }),
   ),
   peers: Schema.Array(

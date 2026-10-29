@@ -292,6 +292,7 @@ const make = Effect.gen(function* () {
               selfAccess: FleetAccessPolicy.selfAccess(policy),
               canChange:
                 FleetAccessPolicy.selfAccess(policy) === "standard" && policy.unavailable !== true,
+              ...(policy.seed === undefined ? {} : { seed: policy.seed }),
             },
           }),
       stage:

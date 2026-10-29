@@ -111,6 +111,14 @@ const makeMachine = (input: {
   Effect.gen(function* () {
     const fleet = yield* Ref.make<FleetContext.FleetLinkContext | undefined>(undefined);
     const levels = yield* Ref.make<Record<string, FleetAccessLevel>>({});
+    // The levels above come from this policy, just read from the share.
+    const policy = yield* Ref.make<FleetAccessPolicy.FleetAccessState>({
+      revision: 1,
+      defaultAccess: "standard",
+      machines: [],
+      machineId: input.identity.peer.machineId,
+      peers: [],
+    });
     const transportOrigin = yield* Ref.make<string | undefined>(undefined);
     const backendOrigin = yield* Ref.make<string | undefined>(undefined);
     const descriptor = descriptorOf(input.identity.peer.environmentId, input.identity.peer.label);
@@ -128,14 +136,7 @@ const makeMachine = (input: {
         Layer.mock(FleetAccessPolicy.FleetAccess)({
           accessFor: (environmentId) =>
             Ref.get(levels).pipe(Effect.map((current) => current[environmentId])),
-          // The levels above come from a policy just read from the share.
-          current: Effect.succeed({
-            revision: 1,
-            defaultAccess: "standard",
-            machines: [],
-            machineId: input.identity.peer.machineId,
-            peers: [],
-          }),
+          current: Ref.get(policy),
         }),
       ),
       Layer.provide(
@@ -166,6 +167,7 @@ const makeMachine = (input: {
       context,
       fleet,
       levels,
+      policy,
       transportOrigin,
       backendOrigin,
       adapter: Context.get(context, FleetPeerLinks.FleetPeerLinks),
@@ -496,10 +498,46 @@ it.live(
     ).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.live(
+  "links nothing while the fleet's starting access list waits, then links at the list's access",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+        const { cryoFrog, pandaMedic, linking, linked } = fleet;
+        const waiting = (machine: Machine) =>
+          Ref.update(machine.policy, (current) => ({
+            ...current,
+            revision: 0,
+            seed: "waiting" as const,
+          }));
+        yield* waiting(linking);
+        yield* waiting(linked);
+        // Before the list, PandaMedic would give CryoFrog the default, standard.
+        yield* round(fleet);
+        expect(yield* shareSnapshot(fleet.share)).toEqual([]);
+        expect(yield* linked.auth.listPairingLinks()).toEqual([]);
+        expect(yield* linking.links.list).toEqual([]);
+
+        // The list makes CryoFrog read-only; links form at that access.
+        for (const machine of [linking, linked])
+          yield* Ref.update(machine.policy, ({ seed: _, ...current }) => ({
+            ...current,
+            revision: 1,
+          }));
+        yield* grant(linked, cryoFrog, "read-only");
+        yield* round(fleet);
+        const link = yield* linking.links.get(pandaMedic.peer.environmentId);
+        expect(Option.getOrUndefined(link)?.access).toBe<AuthMcpClientAccess>("read-only");
+        expect(yield* callerAccess(fleet)).toBe("read-only");
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.live("does nothing on either machine while the adapter is off", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const fleet = yield* makeFleet({});
+      const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: false });
       const path = yield* Path.Path;
       const { cryoFrog, pandaMedic, linking, linked } = fleet;
       // A peer asks this machine for a code; it does not answer while off.

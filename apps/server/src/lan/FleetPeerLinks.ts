@@ -511,6 +511,8 @@ const make = Effect.gen(function* () {
         (machineId) => machineId,
         (machineId) => forgetServed(fleet, machineId),
       );
+      // Before the fleet's starting access list is in force, a code would carry the default.
+      if ((yield* fleetAccess.current).seed !== undefined) return;
       yield* forEachPeer(
         fleet.peers,
         ({ peer }) => peer.machineId,

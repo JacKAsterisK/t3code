@@ -55,6 +55,18 @@ export const FleetAccessEntry = Schema.Union([
 export type FleetAccessEntry = typeof FleetAccessEntry.Type;
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
+/**
+ * `fleet-access-seed.json` beside the roster: machines that start read-only, for a fleet with no
+ * list yet. It only restricts, and the first machine to read it signs it in as revision 1.
+ */
+export const SEED_FILE = "fleet-access-seed.json";
+export const FleetAccessSeed = Schema.Struct({
+  version: Schema.Literal(1),
+  fleetId: Schema.String.check(Schema.isMaxLength(256)),
+  readOnly: Schema.Array(FleetMachineId).check(Schema.isMinLength(1), Schema.isMaxLength(100)),
+});
+export type FleetAccessSeed = typeof FleetAccessSeed.Type;
+
 export interface FleetAccessSnapshot {
   readonly defaultAccess: Level;
   readonly machines: ReadonlyArray<typeof MachineAccess.Type>;
@@ -284,6 +296,11 @@ export interface FleetAccessState {
    * with none nothing changes. Nothing is revoked or replaced for access until a read succeeds.
    */
   readonly unavailable?: boolean;
+  /**
+   * No list exists yet, but the share holds a starting list: one not adopted yet, or one that
+   * cannot be used. Until a list exists nothing may be linked.
+   */
+  readonly seed?: "waiting" | "invalid";
 }
 
 export const machineAccess = (state: FleetAccessState, machineId: string) =>
@@ -365,6 +382,7 @@ const make = Effect.gen(function* () {
     evaluation: AccessEvaluation | undefined,
     legacyAccess: Level,
     unavailable: boolean,
+    seed?: FleetAccessState["seed"],
   ): FleetAccessState => ({
     revision: evaluation?.revision ?? 0,
     defaultAccess: evaluation?.snapshot?.defaultAccess ?? legacyAccess,
@@ -372,6 +390,7 @@ const make = Effect.gen(function* () {
     machineId: value?.machineId,
     peers: value?.peers ?? [],
     ...(unavailable ? { unavailable: true } : {}),
+    ...(seed === undefined ? {} : { seed }),
   });
   const startup =
     cache === undefined
@@ -398,6 +417,41 @@ const make = Effect.gen(function* () {
       if (entry !== undefined && entryFileName(entry) === name) entries.push(entry);
     }
     return entries;
+  });
+
+  type SeedRead =
+    | { readonly _tag: "absent" }
+    | { readonly _tag: "invalid"; readonly reason: string }
+    | { readonly _tag: "valid"; readonly snapshot: FleetAccessSnapshot };
+  const invalidSeed = (reason: string): SeedRead => ({ _tag: "invalid", reason });
+  /** The share's starting list as a first revision; anything doubtful refuses it. */
+  const readSeed = Effect.fn("FleetAccess.readSeed")(function* (input: FleetAccessInput) {
+    const file = path.join(input.root, SEED_FILE);
+    const exists = yield* Effect.result(fs.exists(file));
+    if (exists._tag === "Failure") return invalidSeed("unreadable");
+    if (!exists.success) return { _tag: "absent" } satisfies SeedRead;
+    const seed = yield* readFleetJson(file, FleetAccessSeed).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.option,
+    );
+    if (Option.isNone(seed)) return invalidSeed("malformed");
+    const named = seed.value.readOnly;
+    if (seed.value.fleetId !== input.fleetId) return invalidSeed("another fleet");
+    if (
+      new Set(named).size !== named.length ||
+      named.some((machineId) => !input.peers.some((peer) => peer.machineId === machineId))
+    )
+      return invalidSeed("a machine it names is not in the fleet");
+    // Unnamed machines keep the default a first list saved in Settings would keep.
+    const snapshot: FleetAccessSnapshot = {
+      defaultAccess: input.legacyAccess,
+      machines: normalize(named.map((machineId) => ({ machineId, access: "read-only" }))),
+    };
+    if (
+      !input.peers.some((peer) => peer.enabled && accessOf(snapshot, peer.machineId) === "standard")
+    )
+      return invalidSeed("it leaves no machine standard");
+    return { _tag: "valid", snapshot } satisfies SeedRead;
   });
 
   const refreshUnlocked = Effect.fn("FleetAccess.refresh")(
@@ -439,10 +493,28 @@ const make = Effect.gen(function* () {
         );
         cache = next;
       }
-      const updated = stateOf(cache, evaluation, input.legacyAccess, unavailable);
-      if (JSON.stringify(updated) !== JSON.stringify(yield* SubscriptionRef.get(state)))
+      // Any history here or on the share, even history that cannot be followed, is a list.
+      const listed =
+        accepted.length > 0 ||
+        kept.length > 0 ||
+        candidates.some((entry) => entry.fleetId === input.fleetId);
+      const seed: SeedRead = listed ? { _tag: "absent" } : yield* readSeed(input);
+      const updated = stateOf(
+        cache,
+        evaluation,
+        input.legacyAccess,
+        unavailable,
+        seed._tag === "absent" ? undefined : seed._tag === "valid" ? "waiting" : "invalid",
+      );
+      const previous = yield* SubscriptionRef.get(state);
+      if (seed._tag === "invalid" && previous.seed !== "invalid")
+        yield* Effect.logWarning(
+          `The fleet's starting access list (${SEED_FILE}) cannot be used; nothing links until it is fixed or removed, or a list is saved.`,
+          { reason: seed.reason },
+        );
+      if (JSON.stringify(updated) !== JSON.stringify(previous))
         yield* SubscriptionRef.set(state, updated);
-      return { state: updated, directory, candidates, evaluation, unavailable };
+      return { state: updated, directory, candidates, evaluation, unavailable, seed };
     },
     Effect.provideService(FileSystem.FileSystem, fs),
   );
@@ -558,59 +630,103 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const changeUnlocked = (input: Parameters<FleetAccess["Service"]["change"]>[0]) =>
+    withShareLock(
+      input.root,
+      Effect.gen(function* () {
+        const view = yield* refreshUnlocked(input);
+        if (view.unavailable) return yield* new LanFleetError({ reason: "unavailable" });
+        if (view.state.revision !== input.expectedRevision) return yield* configurationError();
+        const current = view.evaluation.snapshot;
+        // Entries are kept for machines that are not enabled peers right now, so a restricted
+        // machine that drops out and comes back is still restricted.
+        const next: FleetAccessSnapshot = {
+          defaultAccess: input.next.defaultAccess,
+          machines: normalize(input.next.machines),
+        };
+        if (
+          next.machines.length > 100 ||
+          !authorizeAccessChange(current, next, input.machineId) ||
+          // Someone must remain able to change the policy, or no one could lift it.
+          !input.peers.some((peer) => peer.enabled && accessOf(next, peer.machineId) === "standard")
+        )
+          return yield* configurationError();
+        if (
+          current !== undefined &&
+          view.evaluation.heads.length === 1 &&
+          sameSnapshot(current, next)
+        )
+          return view.state;
+        const entry = yield* publish(input, view, next);
+        const written = yield* refreshUnlocked(input);
+        // A competing head that restricts more still applies; report it rather than succeed.
+        if (
+          !written.evaluation.revisions.some((item) => item.digest === entryDigest(entry)) ||
+          written.evaluation.snapshot === undefined ||
+          !sameSnapshot(written.evaluation.snapshot, next)
+        )
+          return yield* configurationError();
+        return written.state;
+      }),
+    ).pipe(
+      Effect.mapError((error) =>
+        isFleetError(error) ? error : new LanFleetError({ reason: "unavailable" }),
+      ),
+      Effect.provideService(FileSystem.FileSystem, fs),
+    );
+
+  /**
+   * Signs the starting list in as revision 1 through the ordinary change path. A machine that
+   * loses the race sees the winner's revision and stops; two that both write merge restrictively.
+   */
+  const adopt = Effect.fn("FleetAccess.adopt")(function* (
+    input: FleetAccessInput,
+    view: View,
+    snapshot: FleetAccessSnapshot,
+  ) {
+    const key = input.signingPrivateKey;
+    if (
+      key === undefined ||
+      view.unavailable ||
+      !input.peers.some((peer) => peer.enabled && peer.machineId === input.machineId)
+    )
+      return view.state;
+    return yield* changeUnlocked({
+      ...input,
+      signingPrivateKey: key,
+      expectedRevision: 0,
+      next: snapshot,
+    }).pipe(
+      Effect.tap((adopted) =>
+        Effect.logInfo("Adopted the fleet's starting access list.", {
+          revision: adopted.revision,
+          readOnly: snapshot.machines.map((machine) => machine.machineId),
+        }),
+      ),
+      Effect.catch((error) =>
+        Effect.logWarning("The fleet's starting access list was not adopted this time.", {
+          reason: error.reason,
+        }).pipe(
+          Effect.andThen(refreshUnlocked(input)),
+          Effect.map((fresh) => fresh.state),
+        ),
+      ),
+    );
+  });
+
   const refresh = (input: FleetAccessInput) =>
     mutex.withPermits(1)(
-      refreshUnlocked(input).pipe(Effect.flatMap((view) => endorse(input, view))),
+      refreshUnlocked(input).pipe(
+        Effect.flatMap((view) =>
+          view.seed._tag === "valid"
+            ? adopt(input, view, view.seed.snapshot)
+            : endorse(input, view),
+        ),
+      ),
     );
 
   const change: FleetAccess["Service"]["change"] = (input) =>
-    mutex.withPermits(1)(
-      withShareLock(
-        input.root,
-        Effect.gen(function* () {
-          const view = yield* refreshUnlocked(input);
-          if (view.unavailable) return yield* new LanFleetError({ reason: "unavailable" });
-          if (view.state.revision !== input.expectedRevision) return yield* configurationError();
-          const current = view.evaluation.snapshot;
-          // Entries are kept for machines that are not enabled peers right now, so a restricted
-          // machine that drops out and comes back is still restricted.
-          const next: FleetAccessSnapshot = {
-            defaultAccess: input.next.defaultAccess,
-            machines: normalize(input.next.machines),
-          };
-          if (
-            next.machines.length > 100 ||
-            !authorizeAccessChange(current, next, input.machineId) ||
-            // Someone must remain able to change the policy, or no one could lift it.
-            !input.peers.some(
-              (peer) => peer.enabled && accessOf(next, peer.machineId) === "standard",
-            )
-          )
-            return yield* configurationError();
-          if (
-            current !== undefined &&
-            view.evaluation.heads.length === 1 &&
-            sameSnapshot(current, next)
-          )
-            return view.state;
-          const entry = yield* publish(input, view, next);
-          const written = yield* refreshUnlocked(input);
-          // A competing head that restricts more still applies; report it rather than succeed.
-          if (
-            !written.evaluation.revisions.some((item) => item.digest === entryDigest(entry)) ||
-            written.evaluation.snapshot === undefined ||
-            !sameSnapshot(written.evaluation.snapshot, next)
-          )
-            return yield* configurationError();
-          return written.state;
-        }),
-      ).pipe(
-        Effect.mapError((error) =>
-          isFleetError(error) ? error : new LanFleetError({ reason: "unavailable" }),
-        ),
-        Effect.provideService(FileSystem.FileSystem, fs),
-      ),
-    );
+    mutex.withPermits(1)(changeUnlocked(input));
 
   const accessFor: FleetAccess["Service"]["accessFor"] = (environmentId) =>
     SubscriptionRef.get(state).pipe(

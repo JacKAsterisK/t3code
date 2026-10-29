@@ -8,9 +8,10 @@ approval before code or runtime changes.
 
 ## Baseline
 
-- Upstream: `pingdotgg/t3code` `main` at `9826dbb99` (2026-10-28), fully merged
-  into fork `main` at `e8f65e9fe`. Latest stable is v0.1.3 (2026-10-27), which
-  predates linked environments. Nightlies from `0.1.4-nightly.20261027.3796` on include them.
+- Upstream: `pingdotgg/t3code` `main` at `dd1484815` (2026-10-29), merged by
+  `a7bd75470` on `lan/upstream-sync-2026-10-29` for LAN 1.0.26 (previous sync
+  `9826dbb99` at `e8f65e9fe`). Latest stable is v0.1.5. Linked environments
+  first shipped in nightlies from `0.1.4-nightly.20261027.3796`.
 - Shipping release: T3 Code LAN 1.0.23, fork `b428bda9d`, upstream `40d335a7b`,
   app and server version 0.1.3, installed by Hub 0.5.114
   (`%LOCALAPPDATA%\Programs\T3CodeLAN\active.json`, `app\t3code-lan-package.json`).
@@ -24,11 +25,20 @@ approval before code or runtime changes.
 
 - **Migration IDs diverge.** The fork puts LAN migrations at 68–71
   (`McpOAuthGrants`, `LanRouting`, `LanTaskMutations`,
-  `LanObservationGenerations`) and moves upstream's 68–72 to 72–76. Upstream
-  and the fork mean different things by IDs 68–76, so a database must never
-  move between a stock build and a fork build. Retiring a LAN table keeps its
-  migration file. Dropping the table takes a new forward migration plus
+  `LanObservationGenerations`) and moves upstream's 68–73 to 72–77 (upstream
+  `073_ActiveTurnItemIndexes` is the fork's 77, from the 2026-10-29 sync).
+  Upstream and the fork mean different things by IDs 68–77, so a database must
+  never move between a stock build and a fork build. Retiring a LAN table keeps
+  its migration file. Dropping the table takes a new forward migration plus
   home-repair support.
+- Upstream now compares migration numbers across builds: the environment
+  descriptor carries `databaseMigration`, the npm `t3` manifest carries the
+  release's head, and a Stable/Nightly switch refuses a target whose head is
+  lower than the database's (`trackSwitchBlockReason` in `cloud/selfUpdate.ts`).
+  A fork head is not comparable with a stock one. This stays inert while LAN
+  builds report no self-update capability (`resolveServerSelfUpdateCapability`
+  returns null when native updates are off), so they never offer or accept a
+  track switch.
 - Every upstream migration must also be added to `supportedMigrationIds` in
   `scripts/lan/home-repair.ts` and to the release audits' current schema (see
   `b428bda9d`).
@@ -211,7 +221,10 @@ approval before code or runtime changes.
   `GatewayT3OAuthClient.ts` uses PKCE and a pinned issuer.
 - **Upstream:** outside-agent OAuth and peer links both use a fixed 30-day
   session with no refresh (`docs/user/outside-agents.md`). Scope is an access
-  mode, narrowed per call by `T3-Mode-Limit`.
+  mode, narrowed per call by `T3-Mode-Limit`. Since #25222 (synced 2026-10-29)
+  an approval code is checked for the requested scopes before it is consumed,
+  so a refused code stays usable; the fork's `consumeMcpApprovalCode` still
+  returns the grant subject for credential attribution.
 - **Gaps:** upstream has no renewal and no task-only scope, and its lifetimes
   differ. Never swap one kind of grant for the other silently.
 - **Data:** grant tables, refresh-token hashes and the server secret store.
@@ -284,9 +297,16 @@ approval before code or runtime changes.
   and history; replacing the stock app; and the fleet roster variable.
 - **Upstream:** the Electron updater pulls from GitHub releases, the "update
   everything" button updates every machine, and servers update through npm. The
-  LAN profile sets `nativeUpdater: "disabled"`.
+  LAN profile sets `nativeUpdater: "disabled"`. Since #26288 (synced
+  2026-10-29) Settings → About → Update track switches this app and every
+  connected machine between Stable and Nightly in one step, after checking each
+  database's migration head against the target release.
 - **Decision:** keep. The independent identity and offline BuildShare are
   product requirements. Retire Hub's import pieces only together with row 12.
+  The fleet track switch overlaps Hub's fleet updates but relies on GitHub and
+  npm releases and upstream migration numbering, so LAN builds hide it:
+  the track select renders only with native updates on, the app never counts
+  itself as off-track, and servers advertise no self-update capability.
 - **Owner:** Dan. **Rollback:** not applicable.
 - **Revisit:** if upstream supports a custom update feed with stopped-state
   gates, or if Hub no longer needs a side-by-side home.
@@ -332,7 +352,13 @@ approval before code or runtime changes.
 - **Upstream:** `DatabaseMaintenance.ts`, and "Continue threads after restarts"
   (`docs/user/updating.md`). Open: #16731 (`t3_thread_import`, conversation only)
   and #25494 (nightly starts on databases a preview build migrated). Upstream
-  has no offline repair across homes.
+  has no offline repair across homes. Synced 2026-10-29: startup removes
+  abandoned `.v2-import-*` copies beside the database (#25301), and
+  `databaseMigrationHead.ts` reads the migration history read-only. Upstream
+  changed no table, column or status that `NativeMaintenance.ts` or
+  `nativeWorkStates.ts` read; its migration 77 only adds two partial indexes on
+  `orchestration_v2_projection_turn_items` over the same `pending`, `running`
+  and `waiting` states.
 - **Gaps:** the proposed import works per thread, not per home. Resuming threads
   is not the same as cancelling work offline.
 - **Data:** `statev2.sqlite` and recovery receipts under `T3CodeLAN\recovery`.

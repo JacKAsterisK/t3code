@@ -3,6 +3,7 @@
 // stay pending so nothing retries on timers. Everything above the wire is the app's own.
 import {
   AuthStandardClientScopes,
+  type AuthEnvironmentScope,
   EnvironmentId,
   EventId,
   ExecutionEnvironmentDescriptor,
@@ -36,6 +37,7 @@ import type { WsRpcProtocolClient } from "@t3tools/client-runtime/rpc";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { APP_VERSION } from "~/branding";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import type * as Scope from "effect/Scope";
@@ -58,6 +60,17 @@ const descriptor = {
   orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
   capabilities: { repositoryIdentity: true },
 };
+
+/** A second machine the app pairs with, served in-process under its own origin. */
+export const REMOTE_ORIGIN = "https://remote-machine.test";
+export const REMOTE_ENVIRONMENT_ID = EnvironmentId.make("environment-remote");
+export const REMOTE_PROJECT_TITLE = "remote-render";
+const REMOTE_PROJECT_ID = ProjectId.make("project-remote");
+const remoteDescriptor = {
+  ...descriptor,
+  environmentId: REMOTE_ENVIRONMENT_ID,
+  label: "Remote machine",
+};
 const auth = {
   policy: "loopback-browser",
   bootstrapMethods: ["one-time-token"],
@@ -65,9 +78,10 @@ const auth = {
   sessionCookieName: "t3_session",
 };
 
-const serverConfig: ServerConfig = {
-  ...Schema.decodeUnknownSync(ServerConfig)({
-    environment: descriptor,
+const decodeServerConfig = Schema.decodeUnknownSync(ServerConfig);
+const configFor = (environment: typeof descriptor): ServerConfig => ({
+  ...decodeServerConfig({
+    environment,
     auth,
     cwd: "/workspace/render",
     keybindingsConfigPath: "/workspace/.t3/keybindings.json",
@@ -99,18 +113,22 @@ const serverConfig: ServerConfig = {
     shellResumeCompletionMarker: true,
   }),
   keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
-};
+});
+const serverConfig = configFor(descriptor);
+const remoteServerConfig = configFor(remoteDescriptor);
 
-const project: OrchestrationProjectShell = {
-  id: PROJECT_ID,
-  title: "render",
-  workspaceRoot: "/workspace/render",
+const projectShell = (id: ProjectId, title: string): OrchestrationProjectShell => ({
+  id,
+  title,
+  workspaceRoot: `/workspace/${title}`,
   repositoryIdentity: null,
   defaultModelSelection: null,
   scripts: [],
   createdAt: "2026-03-17T19:12:28.000Z",
   updatedAt: "2026-03-17T19:12:28.000Z",
-};
+});
+const project = projectShell(PROJECT_ID, "render");
+const remoteProject = projectShell(REMOTE_PROJECT_ID, REMOTE_PROJECT_TITLE);
 
 const base = (threadId: ThreadId, runId: RunId, id: string, ordinal: number) => ({
   id: TurnItemId.make(id),
@@ -210,11 +228,11 @@ export function threadWithHistory(name: string, turns: number): FakeThread {
   return { id, title: `Thread ${name}`, runs, items };
 }
 
-function shellOf(thread: FakeThread): OrchestrationV2ThreadShell {
+function shellOf(thread: FakeThread, projectId = PROJECT_ID): OrchestrationV2ThreadShell {
   const latest = thread.runs.at(-1);
   return {
     id: thread.id,
-    projectId: PROJECT_ID,
+    projectId,
     title: thread.title,
     providerInstanceId: CODEX,
     modelSelection: MODEL,
@@ -247,8 +265,8 @@ function shellOf(thread: FakeThread): OrchestrationV2ThreadShell {
   };
 }
 
-function projectionOf(thread: FakeThread): OrchestrationV2ThreadProjection {
-  const shell = shellOf(thread);
+function projectionOf(thread: FakeThread, projectId = PROJECT_ID): OrchestrationV2ThreadProjection {
+  const shell = shellOf(thread, projectId);
   const visibleTurnItems: OrchestrationV2ProjectedTurnItem[] = thread.items.map(
     (item, position) => ({
       position,
@@ -323,95 +341,149 @@ const subscribe = <A>(first: ReadonlyArray<A>, register?: (queue: Queue.Queue<A>
     }),
   );
 
-const handlers: Record<string, (input: never) => unknown> = {
-  [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: () =>
-    subscribe<OrchestrationV2ShellStreamItem>([
-      {
-        kind: "snapshot",
-        snapshot: {
-          schemaVersion: 1,
-          snapshotSequence: sequence,
-          projects: [project],
-          threads: threads.map(shellOf),
-          archivedThreads: [],
+// One machine: the app's own environment, whose thread events tests can push, or the remote.
+function sessionFor(
+  config: ServerConfig,
+  machineProject: OrchestrationProjectShell,
+  live: boolean,
+): EnvironmentConnectionLease["session"] {
+  const handlers: Record<string, (input: never) => unknown> = {
+    [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: () =>
+      subscribe<OrchestrationV2ShellStreamItem>([
+        {
+          kind: "snapshot",
+          snapshot: {
+            schemaVersion: 1,
+            snapshotSequence: sequence,
+            projects: [machineProject],
+            threads: threads.map((thread) => shellOf(thread, machineProject.id)),
+            archivedThreads: [],
+          },
         },
-      },
-      { kind: "synchronized" },
-    ]),
-  [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input: { readonly threadId: ThreadId }) => {
-    const thread = threads.find((candidate) => candidate.id === input.threadId);
-    if (!thread) return Stream.never;
-    return subscribe<OrchestrationV2ThreadStreamItem>(
-      [
-        { kind: "snapshot", snapshotSequence: sequence, projection: projectionOf(thread) },
         { kind: "synchronized" },
-      ],
-      (queue) => {
-        threadSubscribers.set(thread.id, queue);
+      ]),
+    [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input: { readonly threadId: ThreadId }) => {
+      const thread = threads.find((candidate) => candidate.id === input.threadId);
+      if (!thread) return Stream.never;
+      return subscribe<OrchestrationV2ThreadStreamItem>(
+        [
+          {
+            kind: "snapshot",
+            snapshotSequence: sequence,
+            projection: projectionOf(thread, machineProject.id),
+          },
+          { kind: "synchronized" },
+        ],
+        live
+          ? (queue) => {
+              threadSubscribers.set(thread.id, queue);
 
-        // A replaced subscription closes after its successor registers.
-        return () => {
-          if (threadSubscribers.get(thread.id) === queue) threadSubscribers.delete(thread.id);
-        };
-      },
-    );
-  },
-  [WS_METHODS.subscribeServerConfig]: () =>
-    subscribe([{ version: 1 as const, type: "snapshot" as const, config: serverConfig }]),
-};
+              // A replaced subscription closes after its successor registers.
+              return () => {
+                if (threadSubscribers.get(thread.id) === queue) threadSubscribers.delete(thread.id);
+              };
+            }
+          : undefined,
+      );
+    },
+    [WS_METHODS.subscribeServerConfig]: () =>
+      subscribe([{ version: 1 as const, type: "snapshot" as const, config }]),
+  };
 
-// Unanswered calls stay pending, like a server that has not replied yet.
-const client = new Proxy(handlers, {
-  get: (target, method: string) =>
-    target[method] ??
-    (() => {
-      const rpc = WsRpcGroup.requests.get(method);
-      return rpc && RpcSchema.isStreamSchema(rpc.successSchema) ? Stream.never : Effect.never;
-    }),
-});
+  // Unanswered calls stay pending, like a server that has not replied yet.
+  const client = new Proxy(handlers, {
+    get: (target, method: string) =>
+      target[method] ??
+      (() => {
+        const rpc = WsRpcGroup.requests.get(method);
+        return rpc && RpcSchema.isStreamSchema(rpc.successSchema) ? Stream.never : Effect.never;
+      }),
+  });
 
-const session: EnvironmentConnectionLease["session"] = {
-  client: client as unknown as WsRpcProtocolClient,
-  initialConfig: Effect.succeed(serverConfig),
-  subscribeServerConfig: () =>
-    subscribe([{ version: 1 as const, type: "snapshot" as const, config: serverConfig }]),
-  ready: Effect.void,
-  probe: Effect.void,
-  inboundFrames: Effect.succeed(0),
-  closed: Effect.never,
-};
+  return {
+    client: client as unknown as WsRpcProtocolClient,
+    initialConfig: Effect.succeed(config),
+    subscribeServerConfig: () =>
+      subscribe([{ version: 1 as const, type: "snapshot" as const, config }]),
+    ready: Effect.void,
+    probe: Effect.void,
+    inboundFrames: Effect.succeed(0),
+    closed: Effect.never,
+  };
+}
+const session = sessionFor(serverConfig, project, true);
+const remoteSession = sessionFor(remoteServerConfig, remoteProject, false);
 
-/** Stands in for client-runtime's ConnectionDriver: every connection opens the session above. */
+/** Stands in for client-runtime's ConnectionDriver: each connection opens its machine's session. */
 export const fakeDriver = {
   connect: (
     entry: ConnectionCatalogEntry,
-  ): Effect.Effect<EnvironmentConnectionLease, ConnectionAttemptError, Scope.Scope> =>
-    Effect.succeed({
+  ): Effect.Effect<EnvironmentConnectionLease, ConnectionAttemptError, Scope.Scope> => {
+    const remote = entry.target.environmentId === REMOTE_ENVIRONMENT_ID;
+    const profile = Option.getOrUndefined(entry.profile);
+    const httpBaseUrl =
+      remote && profile !== undefined && "httpBaseUrl" in profile
+        ? profile.httpBaseUrl
+        : window.location.origin;
+    return Effect.succeed({
       prepared: {
-        environmentId: ENVIRONMENT_ID,
-        label: descriptor.label,
-        httpBaseUrl: window.location.origin,
-        socketUrl: window.location.origin.replace(/^http/, "ws"),
+        environmentId: remote ? REMOTE_ENVIRONMENT_ID : ENVIRONMENT_ID,
+        label: remote ? remoteDescriptor.label : descriptor.label,
+        httpBaseUrl,
+        socketUrl: httpBaseUrl.replace(/^http/, "ws"),
         httpAuthorization: null,
         target: entry.target,
       },
-      session,
-    }),
+      session: remote ? remoteSession : session,
+    });
+  },
   preflight: () => Effect.succeed(true),
   checkHost: () => Effect.succeed<RouteCheck>("unchecked"),
 };
 export type FakeDriver = typeof fakeDriver;
 
 const realFetch = globalThis.fetch;
-const encodedDescriptor = Schema.encodeSync(ExecutionEnvironmentDescriptor)(
-  Schema.decodeUnknownSync(ExecutionEnvironmentDescriptor)(descriptor),
-);
+const decodeDescriptor = Schema.decodeUnknownSync(ExecutionEnvironmentDescriptor);
+const encodeDescriptorValue = Schema.encodeSync(ExecutionEnvironmentDescriptor);
+const encodeDescriptor = (value: typeof descriptor) =>
+  encodeDescriptorValue(decodeDescriptor(value));
+const encodedDescriptor = encodeDescriptor(descriptor);
 
-/** Serves the environment's HTTP API and these threads until disposed. */
-export function installFakeEnvironment(fixtures: ReadonlyArray<FakeThread>): Disposable {
+/** The remote machine's pairing and session endpoints; its session grants only `scopes`. */
+function remoteResponse(pathname: string, scopes: ReadonlyArray<AuthEnvironmentScope>) {
+  if (pathname === "/.well-known/t3/environment") return json(encodeDescriptor(remoteDescriptor));
+  if (pathname === "/oauth/token")
+    return json({
+      access_token: "remote-bearer-token",
+      issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+      token_type: "Bearer",
+      expires_in: 2_592_000,
+      scope: scopes.join(" "),
+    });
+  if (pathname === "/api/auth/session")
+    return json({
+      authenticated: true,
+      auth: { ...auth, policy: "remote-reachable", sessionMethods: ["bearer-access-token"] },
+      scopes,
+      sessionMethod: "bearer-access-token",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    });
+  return json({}, 404);
+}
+
+/**
+ * Serves the environment's HTTP API and these threads until disposed. With `remoteScopes`,
+ * a second machine at REMOTE_ORIGIN accepts any pairing code and grants those scopes.
+ */
+export function installFakeEnvironment(
+  fixtures: ReadonlyArray<FakeThread>,
+  options: { readonly remoteScopes?: ReadonlyArray<AuthEnvironmentScope> } = {},
+): Disposable {
   threads = fixtures;
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
+    if (url.origin === REMOTE_ORIGIN && options.remoteScopes !== undefined)
+      return remoteResponse(url.pathname, options.remoteScopes);
     if (url.origin !== window.location.origin) return realFetch(input, init);
     if (url.pathname === "/.well-known/t3/environment") return json(encodedDescriptor);
     if (url.pathname === "/api/auth/session") {

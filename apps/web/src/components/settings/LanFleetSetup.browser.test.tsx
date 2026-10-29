@@ -167,3 +167,80 @@ it("hides codes and approval controls for shared-folder members", async () => {
   await expect.element(page.getByText(/Needs verification/i)).not.toBeInTheDocument();
   await expect.element(page.getByRole("button", { name: "Review" })).not.toBeInTheDocument();
 });
+
+const accessPeers: LanFleetSetupState["peers"] = [
+  {
+    machineId: "self",
+    environmentId: EnvironmentId.make("environment-synthetic"),
+    label: "Synthetic device",
+    origin: "https://192.168.40.10:4443",
+    verificationCode: "abcdef123456",
+    status: "approved",
+  },
+  {
+    machineId: "other",
+    environmentId: EnvironmentId.make("environment-other"),
+    label: "Other machine",
+    origin: "https://192.168.40.11:4443",
+    verificationCode: "123456abcdef",
+    status: "approved",
+  },
+];
+
+it("changes one machine's fleet access after confirmation", async () => {
+  const { configure } = setup({
+    stage: "active",
+    sharedFolderTrust: true,
+    peers: accessPeers,
+    accessPolicy: {
+      revision: 0,
+      defaultAccess: "standard",
+      machines: [],
+      selfAccess: "standard",
+      canChange: true,
+    },
+  });
+  await using screen = await render(<LanFleetSetup />);
+  await expect.element(screen.getByText("Synthetic device · This machine")).toBeVisible();
+  await expect
+    .element(screen.getByRole("combobox", { name: "Access for machines added later" }))
+    .toHaveTextContent("Standard");
+  await screen.getByRole("combobox", { name: "Access for Other machine" }).click();
+  await page.getByRole("option", { name: "Read only" }).click();
+  await expect.element(page.getByText("Make Other machine read only?")).toBeVisible();
+  expect(configure).not.toHaveBeenCalled();
+  await page.getByRole("button", { name: "Change access" }).click();
+  expect(configure).toHaveBeenCalledExactlyOnceWith({
+    operation: "access",
+    confirmed: true,
+    revision: 0,
+    defaultAccess: "standard",
+    machines: [{ machineId: "other", access: "read-only" }],
+  });
+  await expect.element(page.getByText("Make Other machine read only?")).not.toBeInTheDocument();
+});
+
+it("locks machine access on a read-only machine", async () => {
+  setup({
+    stage: "active",
+    sharedFolderTrust: true,
+    peers: accessPeers,
+    accessPolicy: {
+      revision: 3,
+      defaultAccess: "standard",
+      machines: [{ machineId: "self", access: "read-only" }],
+      selfAccess: "read-only",
+      canChange: false,
+    },
+  });
+  await using screen = await render(<LanFleetSetup />);
+  await expect
+    .element(screen.getByText(/This machine has read-only access to the other machines/))
+    .toBeVisible();
+  const own = screen.getByRole("combobox", { name: "Access for Synthetic device" });
+  await expect.element(own).toHaveTextContent("Read only");
+  await expect.element(own).toBeDisabled();
+  await expect
+    .element(screen.getByRole("combobox", { name: "Access for Other machine" }))
+    .toBeDisabled();
+});

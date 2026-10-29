@@ -106,6 +106,9 @@ const make = Effect.gen(function* () {
   // Tells this server's own syncs, which only ever wait, from a lock a killed process left.
   const instance = NodeCrypto.randomUUID();
   const lockOwner = path.join(lock, "owner.json");
+  // Set while one of this server's syncs holds the lock. Its own lock without it is one a failed
+  // release left behind.
+  let holding = false;
   const busy = () => new LanFleetError({ reason: "busy" });
 
   /** The sync lock, cleared first if a process that died holding it left it behind. */
@@ -113,6 +116,7 @@ const make = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     const claim = Effect.gen(function* () {
       yield* fs.makeDirectory(lock);
+      holding = true;
       yield* writeFleetJson(lockOwner, { pid: process.pid, instance, createdAt: now }).pipe(
         Effect.ignore,
       );
@@ -124,10 +128,12 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => undefined),
     );
     const stale = Option.match(owner, {
-      // Its owner is gone, or so old that its process ID now names another process.
+      // Its owner is gone, or so old that its process ID now names another process; or it is
+      // this server's own, which none of its syncs holds.
       onSome: (held) =>
-        held.instance !== instance &&
-        (!isProcessAlive(held.pid) || now - held.createdAt > STALE_SYNC_LOCK_MS),
+        held.instance === instance
+          ? !holding
+          : !isProcessAlive(held.pid) || now - held.createdAt > STALE_SYNC_LOCK_MS,
       // Killed before it recorded an owner.
       onNone: () => modified !== undefined && now - modified > STALE_SYNC_LOCK_MS,
     });
@@ -660,7 +666,16 @@ const make = Effect.gen(function* () {
               incoming,
             } satisfies LanFleetSyncResult;
           }),
-        () => fs.remove(lock, { recursive: true }).pipe(Effect.ignore),
+        () =>
+          Effect.sync(() => {
+            holding = false;
+          }).pipe(
+            Effect.andThen(fs.remove(lock, { recursive: true })),
+            // The next sync clears it as this server's own.
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not release the LAN fleet sync lock.", { cause }),
+            ),
+          ),
       );
     },
     Effect.mapError((error) =>

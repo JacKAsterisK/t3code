@@ -50,6 +50,7 @@ import {
 
 const SIGNING_SECRET_NAME = "mcp-oauth-signing-key";
 const AUTHORIZATION_CODE_TTL_MS = 60_000;
+const GRANT_ATTRIBUTION_TIMEOUT_MS = 5_000;
 const MAX_CLIENT_NAME_LENGTH = 100;
 const MAX_REDIRECT_URIS = 5;
 const MAX_REDIRECT_URI_LENGTH = 512;
@@ -606,10 +607,25 @@ const make = Effect.gen(function* () {
           );
         }
         // An unattributed grant's fleet holder signs for it; any other claim changes nothing.
+        // Holders sign every refresh, so the share is read only for a grant that still needs it,
+        // and a share too slow to answer only leaves the grant unattributed this time.
         const holder =
-          token.fleet_assertion === undefined || Option.isNone(grantAttribution)
+          token.fleet_assertion === undefined ||
+          Option.isNone(grantAttribution) ||
+          !(yield* grants
+            .unattributed({
+              clientId: token.client_id,
+              resource: urls.resource,
+              token: token.refresh_token,
+            })
+            .pipe(Effect.orElseSucceed(() => false)))
             ? undefined
-            : yield* grantAttribution.value.verify(token.fleet_assertion);
+            : yield* grantAttribution.value
+                .verify(token.fleet_assertion)
+                .pipe(
+                  Effect.timeoutOption(GRANT_ATTRIBUTION_TIMEOUT_MS),
+                  Effect.map(Option.getOrUndefined),
+                );
         return yield* grants
           .refresh({
             clientId: token.client_id,

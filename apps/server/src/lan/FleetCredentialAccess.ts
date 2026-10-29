@@ -114,9 +114,10 @@ export const layerCap = Layer.effect(
 ).pipe(Layer.provide(layer));
 
 /**
- * Revokes the sessions and pairing codes fleet machines hold here above their access, and all of a
- * departed or untrusted machine's. A trusted machine's own fleet credential is left to the fleet
- * sync, which replaces it with one at its access; until then it is capped where it is used.
+ * Revokes the unused pairing codes fleet machines hold here above their access, and every session
+ * and code of a departed or untrusted machine. A trusted machine's sessions are only capped where
+ * they are used: revoking a downgraded machine's task grant would leave it unable to read until
+ * someone approved it again. Its own fleet credential is replaced by the fleet sync.
  */
 export const revokeExcess = Effect.fn("FleetCredentialAccess.revokeExcess")(function* () {
   const access = yield* FleetCredentialAccess;
@@ -134,23 +135,24 @@ export const revokeExcess = Effect.fn("FleetCredentialAccess.revokeExcess")(func
     credential: { readonly subject: string } & Parameters<
       typeof FleetAccessPolicy.credentialAccess
     >[0],
+    kind: "session" | "pairing-link",
   ) {
     const root = CredentialAttribution.attributionRoot(credential.subject);
     if (root === undefined) return false;
     const allowed = yield* access.limit(credential.subject, false);
     if (allowed === undefined) return false;
     if (allowed === "none") return true;
-    if (credential.subject === root && root.startsWith(FLEET_CREDENTIAL_PREFIX)) return false;
     return (
+      kind === "pairing-link" &&
       forAccess &&
       allowed === "read-only" &&
       FleetAccessPolicy.credentialAccess(credential) === "standard"
     );
   });
   for (const session of yield* auth.listSessions())
-    if (yield* excess(session)) yield* auth.revokeSession(session.sessionId);
+    if (yield* excess(session, "session")) yield* auth.revokeSession(session.sessionId);
   for (const link of yield* auth.listPairingLinks())
-    if (yield* excess(link)) yield* auth.revokePairingLink(link.id);
+    if (yield* excess(link, "pairing-link")) yield* auth.revokePairingLink(link.id);
 });
 
 /** Revocation at startup, every ten minutes, and whenever the fleet policy or peers change. */

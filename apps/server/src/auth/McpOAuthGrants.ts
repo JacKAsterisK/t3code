@@ -101,6 +101,12 @@ export class McpOAuthGrants extends Context.Service<
        */
       readonly holder?: { readonly grantId: string; readonly subject: string };
     }) => Effect.Effect<IssuedGrant, McpOAuthGrantError>;
+    /** Whether a refresh token names a live grant from before grants recorded their approver. */
+    readonly unattributed: (input: {
+      readonly clientId: string;
+      readonly resource: string;
+      readonly token: string;
+    }) => Effect.Effect<boolean, McpOAuthGrantError>;
     readonly revoke: (input: {
       readonly clientId: string;
       readonly resource: string;
@@ -335,7 +341,23 @@ const make = Effect.gen(function* () {
       )
       .pipe(Effect.mapError(storageError));
   });
-  return McpOAuthGrants.of({ issue, binding, refresh, revoke, revokeSession });
+  const unattributed: McpOAuthGrants["Service"]["unattributed"] = Effect.fn(
+    "McpOAuthGrants.unattributed",
+  )(function* (input) {
+    const found = yield* findToken(input.token);
+    if (Option.isNone(found)) return false;
+    const grant = found.value;
+    return (
+      grant.clientId === input.clientId &&
+      grant.resource === input.resource &&
+      grant.spent === 0 &&
+      grant.revokedAt === null &&
+      grant.sessionRevokedAt === null &&
+      grant.subject === CredentialAttribution.MCP_CLIENT_SUBJECT
+    );
+  });
+
+  return McpOAuthGrants.of({ issue, binding, refresh, unattributed, revoke, revokeSession });
 });
 
 export const layer = Layer.effect(McpOAuthGrants, make);

@@ -86,9 +86,10 @@ Each machine records this in `lan-fleet-members.json` and `lan-fleet-trusted.jso
 in its userdata, so a restart does not reset it.
 
 Revocation follows on the issuer at startup, every ten minutes and whenever the
-list or the fleet's machines change. It revokes sessions, grants and codes
-attributed to a downgraded machine above its access, and everything attributed
-to a departed or untrusted one. In shared-folder fleets each sync also replaces a
+list or the fleet's machines change. It revokes unused pairing codes attributed
+to a downgraded machine above its access, and everything attributed to a departed
+or untrusted one. A downgraded machine's sessions and task grants are only
+capped, so they keep reading and refreshing without a new approval. In shared-folder fleets each sync also replaces a
 peer's own fleet credential at its access; the peer's desktop swaps it in for its
 saved connection. Gained access waits until the peer is online. A read-only
 machine's own server also refuses to forward LAN task changes. Until a list is

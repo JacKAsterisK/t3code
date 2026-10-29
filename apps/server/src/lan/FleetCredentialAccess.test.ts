@@ -247,18 +247,19 @@ const approveTaskGrant = (handler: Handler, code: string) =>
         }),
       ),
     ).pipe(Effect.flatMap(json<{ access_token: string; refresh_token: string }>));
-    const refresh = handler(
-      at(
-        "/oauth/mcp/token",
-        form({
-          grant_type: "refresh_token",
-          client_id: client.client_id,
-          refresh_token: issued.refresh_token,
-          resource: `${ORIGIN}/mcp`,
-        }),
-      ),
-    );
-    return { ...issued, refresh };
+    const refreshWith = (refreshToken: string) =>
+      handler(
+        at(
+          "/oauth/mcp/token",
+          form({
+            grant_type: "refresh_token",
+            client_id: client.client_id,
+            refresh_token: refreshToken,
+            resource: `${ORIGIN}/mcp`,
+          }),
+        ),
+      );
+    return { ...issued, refresh: refreshWith(issued.refresh_token), refreshWith };
   });
 
 /** AnvilToad's own fleet credential here, as the fleet sync issues it. */
@@ -277,58 +278,59 @@ const mintCode = (handler: Handler, token: string) =>
     ),
   );
 
-it.live("refuses a downgraded machine's existing task grant at the receiver, then revokes it", () =>
-  withRoutes((handler, { auth, revoke }) =>
-    Effect.gen(function* () {
-      const anvil = yield* anvilFleetSession(auth);
-      // AnvilToad's fleet session mints the code that approves its gateway's task grant.
-      const minted = yield* mintCode(handler, anvil.token);
-      expect(minted.status).toBe(200);
-      const code = (yield* json<{ credential: string }>(minted)).credential;
-      const grant = yield* approveTaskGrant(handler, code);
-      expect((yield* auth.authenticateMcpClient(mcpRequest(grant.access_token))).access).toBe(
-        "auto",
-      );
+it.live(
+  "refuses a downgraded machine's existing task grant at the receiver, and keeps it reading",
+  () =>
+    withRoutes((handler, { auth, revoke }) =>
+      Effect.gen(function* () {
+        const anvil = yield* anvilFleetSession(auth);
+        // AnvilToad's fleet session mints the code that approves its gateway's task grant.
+        const minted = yield* mintCode(handler, anvil.token);
+        expect(minted.status).toBe(200);
+        const code = (yield* json<{ credential: string }>(minted)).credential;
+        const grant = yield* approveTaskGrant(handler, code);
+        expect((yield* auth.authenticateMcpClient(mcpRequest(grant.access_token))).access).toBe(
+          "auto",
+        );
 
-      restrict(ANVIL);
-      // Before anything is revoked, the grant can no longer launch, send, interrupt or respond.
-      const capped = yield* auth.authenticateMcpClient(mcpRequest(grant.access_token));
-      expect(capped).toMatchObject({ taskOnly: true, access: "read-only" });
-      const refreshed = yield* grant.refresh.pipe(
-        Effect.flatMap(json<{ access_token: string; refresh_token: string }>),
-      );
-      expect((yield* auth.authenticateMcpClient(mcpRequest(refreshed.access_token))).access).toBe(
-        "read-only",
-      );
-      // Nor can its still-standard fleet session mint codes or change this machine's settings.
-      expect((yield* mintCode(handler, anvil.token)).status).toBe(403);
+        restrict(ANVIL);
+        // Before anything is revoked, the grant can no longer launch, send, interrupt or respond.
+        const capped = yield* auth.authenticateMcpClient(mcpRequest(grant.access_token));
+        expect(capped).toMatchObject({ taskOnly: true, access: "read-only" });
+        const refreshed = yield* grant.refresh.pipe(
+          Effect.flatMap(json<{ access_token: string; refresh_token: string }>),
+        );
+        expect((yield* auth.authenticateMcpClient(mcpRequest(refreshed.access_token))).access).toBe(
+          "read-only",
+        );
+        // Nor can its still-standard fleet session mint codes or change this machine's settings.
+        expect((yield* mintCode(handler, anvil.token)).status).toBe(403);
 
-      // A policy the share could not just give only caps: nothing is revoked until it reads.
-      policy = { ...policy, unavailable: true };
-      yield* revoke;
-      expect((yield* auth.authenticateMcpClient(mcpRequest(refreshed.access_token))).access).toBe(
-        "read-only",
-      );
-      const { unavailable: _unavailable, ...readable } = policy;
-      policy = readable;
-      yield* revoke;
-      expect(
-        yield* auth
-          .authenticateMcpClient(mcpRequest(refreshed.access_token))
-          .pipe(Effect.isFailure),
-      ).toBe(true);
-      // Its own fleet credential is left for the fleet sync to replace, capped meanwhile.
-      const sessions = yield* auth.listSessions();
-      expect(sessions.some((session) => session.sessionId === anvil.sessionId)).toBe(true);
-      expect(
-        sessions.some(
-          (session) =>
-            CredentialAttribution.attributionRoot(session.subject) !== undefined &&
-            session.sessionId !== anvil.sessionId,
-        ),
-      ).toBe(false);
-    }),
-  ),
+        // A policy the share could not just give only caps: nothing is revoked until it reads.
+        policy = { ...policy, unavailable: true };
+        yield* revoke;
+        expect((yield* auth.authenticateMcpClient(mcpRequest(refreshed.access_token))).access).toBe(
+          "read-only",
+        );
+        const { unavailable: _unavailable, ...readable } = policy;
+        policy = readable;
+        yield* revoke;
+        // Once it reads, the grant is still only capped: it keeps reading and refreshing, with no
+        // new approval, as long as AnvilToad stays in the fleet.
+        expect((yield* auth.authenticateMcpClient(mcpRequest(refreshed.access_token))).access).toBe(
+          "read-only",
+        );
+        const again = yield* grant
+          .refreshWith(refreshed.refresh_token)
+          .pipe(Effect.flatMap(json<{ access_token: string; refresh_token: string }>));
+        expect((yield* auth.authenticateMcpClient(mcpRequest(again.access_token))).access).toBe(
+          "read-only",
+        );
+        // Its own fleet credential is left for the fleet sync to replace, capped meanwhile.
+        const sessions = yield* auth.listSessions();
+        expect(sessions.some((session) => session.sessionId === anvil.sessionId)).toBe(true);
+      }),
+    ),
 );
 
 it.live(
@@ -375,7 +377,7 @@ it.live(
 it.live(
   "attributes an unattributed task grant to the fleet machine holding it at its next refresh",
   () =>
-    withRoutes((handler, { auth, grants }) =>
+    withRoutes((handler, { auth, grants, revoke }) =>
       Effect.gen(function* () {
         // Grants from before grants recorded who approved them, each held by one machine's server.
         const legacy = () =>
@@ -429,6 +431,12 @@ it.live(
         // Once attributed, no claim moves it to another machine.
         const moved = yield* refresh(anvilRefreshed.refresh_token, claim(PANDA, anvil.grantId));
         expect(yield* accessOf(moved.access_token)).toBe("read-only");
+        // Being AnvilToad's now does not get it revoked: it keeps reading and refreshing.
+        yield* revoke;
+        expect(yield* accessOf(moved.access_token)).toBe("read-only");
+        expect(yield* accessOf((yield* refresh(moved.refresh_token)).access_token)).toBe(
+          "read-only",
+        );
 
         // Claiming PandaMedic with its own key, or reusing PandaMedic's claim, changes nothing.
         const forged = yield* legacy();

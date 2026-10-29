@@ -1,6 +1,7 @@
 // Loopback-only hubs expose shell execution or unauthenticated actions.
 // Proxy with environment read scope for streams and operate scope for input and tuning.
 import { AuthOrchestrationReadScope, AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { FLEET_TLS_FORWARD_HEADER } from "@t3tools/shared/fleetTlsProxy";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -60,6 +61,8 @@ const DROPPED_REQUEST_HEADERS = new Set([
   "accept-encoding",
   // The client's HTTPS hop makes the hub reject our loopback Origin over T3 Connect.
   "x-forwarded-proto",
+  // The fleet TLS endpoint's secret mark for requests it forwarded.
+  FLEET_TLS_FORWARD_HEADER,
 ]);
 
 const isWebSocketUpgrade = (request: HttpServerRequest.HttpServerRequest) =>

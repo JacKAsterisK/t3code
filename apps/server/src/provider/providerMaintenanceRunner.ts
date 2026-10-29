@@ -239,18 +239,44 @@ function commandOutput(result: ProviderMaintenanceCommandResult): string | null 
   return truncateText(output, UPDATE_OUTPUT_MAX_BYTES);
 }
 
-// Updaters print their reason last, usually on stderr.
-function lastOutputLine(result: ProviderMaintenanceCommandResult): string | null {
-  for (const output of [result.stderr, result.stdout]) {
-    const line = output
-      .split(/\r\n|\r|\n/)
-      .map(toProgressLine)
-      .findLast(Boolean);
-    if (line) {
-      return line;
-    }
+// Codex ends a failed install.ps1 run with "Error: `powershell …` failed with status exit code: 1".
+const EXIT_STATUS_LINE = /\b(?:failed|exited) with (?:status |exit )*code\b/i;
+const POWERSHELL_ERROR_POSITION = /^At (?:line:\d+|.+:\d+) char:\d+$/;
+
+// PowerShell prints an error as its wrapped message, "At line:N char:M", then "+ …" details.
+// Write-Error prefixes the message with the invoking command line.
+function lastReasonInOutput(output: string): string | null {
+  const lines = output.split(/\r\n|\r|\n/).map((line) => toProgressLine(line) ?? "");
+  const lastIndex = lines.findLastIndex(Boolean);
+  const reasonIndex = lines.findLastIndex((line) => line !== "" && !EXIT_STATUS_LINE.test(line));
+  if (reasonIndex < 0) {
+    return lastIndex < 0 ? null : lines[lastIndex]!;
   }
-  return null;
+  let positionIndex = reasonIndex;
+  while (
+    positionIndex > 0 &&
+    (lines[positionIndex] === "" || lines[positionIndex]!.startsWith("+"))
+  ) {
+    positionIndex--;
+  }
+  if (positionIndex === 0 || !POWERSHELL_ERROR_POSITION.test(lines[positionIndex]!)) {
+    return lines[reasonIndex]!;
+  }
+  let start = positionIndex;
+  while (start > 0 && lines[start - 1] !== "") {
+    start--;
+  }
+  const message = lines.slice(start, positionIndex).join(" ");
+  const separator = message.indexOf(" : ");
+  const fromWriteError = lines
+    .slice(positionIndex, reasonIndex + 1)
+    .some((line) => line.includes("WriteErrorException"));
+  return toProgressLine(fromWriteError && separator >= 0 ? message.slice(separator + 3) : message);
+}
+
+// Updaters print their reason last, usually on stderr.
+function lastOutputReason(result: ProviderMaintenanceCommandResult): string | null {
+  return lastReasonInOutput(result.stderr) ?? lastReasonInOutput(result.stdout);
 }
 
 function failureMessage(result: ProviderMaintenanceCommandResult): string {
@@ -261,7 +287,7 @@ function failureMessage(result: ProviderMaintenanceCommandResult): string {
     result.exitCode !== null && result.exitCode !== 0
       ? `Update command exited with code ${result.exitCode}`
       : "Update command failed";
-  const reason = lastOutputLine(result);
+  const reason = lastOutputReason(result);
   return reason ? `${summary}: ${reason}` : `${summary}.`;
 }
 

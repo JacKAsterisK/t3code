@@ -471,6 +471,63 @@ describe("providerMaintenanceRunner", () => {
     ),
   );
 
+  it.effect("reports the PowerShell installer error behind Codex's exit status line", () => {
+    const codexWrapper =
+      "Error: `powershell -ExecutionPolicy Bypass -c '$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex'` failed with status exit code: 1\n";
+    const installerFailures = [
+      [
+        "$env:CODEX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex : install.ps1 supports Windows only. Use \r\n",
+        "install.sh on macOS or Linux.\r\n",
+        "At line:935 char:5\r\n",
+        '+     Write-Error "install.ps1 supports Windows only. Use install.sh on ...\r\n',
+        "+     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\r\n",
+        "    + CategoryInfo          : NotSpecified: (:) [Write-Error], WriteErrorException\r\n",
+        "    + FullyQualifiedErrorId : Microsoft.PowerShell.Commands.WriteErrorException\r\n",
+        " \r\n",
+        codexWrapper,
+      ].join(""),
+      [
+        "iex : The term 'tar' is not recognized as the name of a cmdlet. Check the \r\n",
+        "spelling of the name.\r\n",
+        "At line:1 char:75\r\n",
+        "+ ... EX_NON_INTERACTIVE=1; irm https://chatgpt.com/codex/install.ps1 | iex\r\n",
+        "    + CategoryInfo          : ObjectNotFound: (tar:String) [Invoke-Expression], CommandNotFoundException\r\n",
+        " \r\n",
+        codexWrapper,
+      ].join(""),
+      ["Refusing to retarget junction.\r\n", " \r\n", codexWrapper].join(""),
+    ];
+    let attempt = 0;
+    return Effect.gen(function* () {
+      const { registry } = yield* makeRegistry();
+      const updater = yield* makeTestRunner(registry);
+
+      const messages = yield* Effect.forEach(installerFailures, () =>
+        updater
+          .updateProvider(CODEX_DRIVER)
+          .pipe(Effect.map((result) => result.providers[0]?.updateState?.message)),
+      );
+
+      assert.deepStrictEqual(messages, [
+        "Update command exited with code 1: install.ps1 supports Windows only. Use install.sh on macOS or Linux.",
+        "Update command exited with code 1: iex : The term 'tar' is not recognized as the name of a cmdlet. Check the spelling of the name.",
+        "Update command exited with code 1: Refusing to retarget junction.",
+      ]);
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          layerNonWindowsPlatform,
+          layerLatestVersionHttpClient("0.0.0"),
+          layerMockSpawner(() => ({
+            stdout: "Updating Codex via `powershell …`...\n",
+            stderr: installerFailures[attempt++] ?? "",
+            code: 1,
+          })),
+        ),
+      ),
+    );
+  });
+
   it.effect("keeps the exit code message when a failed command prints nothing", () =>
     Effect.gen(function* () {
       const { registry } = yield* makeRegistry();

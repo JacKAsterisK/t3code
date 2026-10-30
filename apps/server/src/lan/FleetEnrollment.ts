@@ -115,9 +115,6 @@ const make = Effect.gen(function* () {
         if (
           name === `${peer.machineId}.json` &&
           peer.enabled &&
-          // A new machine never takes an ID that could read as an access-list exception.
-          (!FleetAccessPolicy.reservedMachineId(peer.machineId) ||
-            peers.some((existing) => existing.machineId === peer.machineId)) &&
           roster.machines.some(
             (machine) =>
               machine.machineId === peer.machineId &&
@@ -161,12 +158,19 @@ const make = Effect.gen(function* () {
         )
       )
         peers.push(peer);
+    // The machines LAN 1.0.26 admits, whose keys verify access-list revisions on both versions.
+    // This version trusts none whose ID could read as an access-list exception: only forged share
+    // files could bring one in, and nothing here gives it access.
+    const fleetPeers = peers;
+    const trustedPeers = fleetPeers.filter(
+      (peer) => !FleetAccessPolicy.reservedMachineId(peer.machineId),
+    );
     // Whether the fleet links this machine: its own enrollment checks out and its roster row is
     // enabled. The policy's peers keep a machine whose row was just disabled, so they can't say.
     const ownPeer =
       record === undefined
         ? undefined
-        : peers.find(
+        : trustedPeers.find(
             (peer) =>
               peer.enabled &&
               peer.machineId === record.machineId &&
@@ -198,7 +202,7 @@ const make = Effect.gen(function* () {
             root,
             fleetId: record.fleetId,
             machineId: record.machineId,
-            peers,
+            peers: fleetPeers,
             legacyAccess: record.access,
             member,
             signingPrivateKey: record.signingPrivateKey,
@@ -217,7 +221,8 @@ const make = Effect.gen(function* () {
       authority,
       roster,
       sharedFolderTrust,
-      peers,
+      peers: trustedPeers,
+      fleetPeers,
     };
   });
 
@@ -411,7 +416,7 @@ const make = Effect.gen(function* () {
                 root: current.root,
                 fleetId: record.fleetId,
                 machineId: record.machineId,
-                peers: current.peers,
+                peers: current.fleetPeers,
                 legacyAccess: record.access,
                 member: current.member,
                 signingPrivateKey: record.signingPrivateKey,
@@ -604,9 +609,8 @@ const make = Effect.gen(function* () {
                     if (
                       Authority.peerVerificationCode(request.peer) !== input.verificationCode ||
                       request.peer.machineId !== input.machineId ||
-                      // A new machine never takes an ID that could read as an exception.
-                      (FleetAccessPolicy.reservedMachineId(input.machineId) &&
-                        !authority.peers.some((peer) => peer.machineId === input.machineId))
+                      // No machine takes an ID that could read as an access-list exception.
+                      FleetAccessPolicy.reservedMachineId(input.machineId)
                     )
                       return yield* configurationError();
                     const metadata = fresh.roster.machines.find(

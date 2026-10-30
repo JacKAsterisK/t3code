@@ -126,16 +126,21 @@ const callerPrefix = (caller: string) =>
 export const pairEntryId = (caller: string, receiver: string) =>
   `${callerPrefix(caller)}${hashOf(["fleet-access-pair", caller, receiver], 16)}`;
 const isPairEntryOf = (caller: string, id: string) => id.startsWith(callerPrefix(caller));
+/**
+ * An entry that encodes an exception or a writer's mark, by its ID alone: what the fleet's
+ * membership looks like never changes how a revision reads.
+ */
 const encodedEntry = (machineId: string) =>
   PAIR_ENTRY.test(machineId) || WRITER_ENTRY.test(machineId);
 /**
- * An entry that encodes an exception or a writer's mark. One whose ID belongs to a fleet machine is
- * that machine's own entry, read exactly as 1.0.26 reads it, never an exception.
+ * Machine IDs this version never admits, trusts or gives access to, as they could read as an
+ * exception's entry. Every ID this version generates is `machine-<hex>`: only forged share files
+ * could bring one in, and whoever can write the share can join the fleet anyway.
  */
-const encodedFor = (machineIds: ReadonlySet<string>) => (machineId: string) =>
-  encodedEntry(machineId) && !machineIds.has(machineId);
-/** Machine IDs this version never enrolls: they could be read as an exception's entry. */
 export const reservedMachineId = (machineId: string) => machineId.startsWith(PAIR_PREFIX);
+/** The peers this version trusts: never one whose ID is reserved. */
+const trustedPeers = <P extends { readonly machineId: string }>(peers: ReadonlyArray<P>) =>
+  peers.filter((peer) => !reservedMachineId(peer.machineId));
 const writerEntryId = (header: {
   readonly fleetId: string;
   readonly revision: number;
@@ -258,26 +263,20 @@ export const replaceExceptions = (
 
 /**
  * The exceptions a revision grants, read from its entries: when its writer marked it, those it
- * lists. Unmarked, only those it lists that every revision it follows grants. An entry whose ID
- * belongs to a fleet machine is never one.
+ * lists. Unmarked, only those it lists that every revision it follows grants. It depends on the
+ * revision and its parents alone, never on which machines the fleet has.
  */
 const pairsOf = (
   entry: FleetAccessEntry,
   parents: ReadonlyArray<FleetAccessSnapshot>,
-  machineIds: ReadonlySet<string>,
 ): ReadonlyArray<string> => {
   const listed = entry.machines
-    .filter(
-      (machine) =>
-        PAIR_ENTRY.test(machine.machineId) &&
-        machine.access === "standard" &&
-        !machineIds.has(machine.machineId),
-    )
+    .filter((machine) => PAIR_ENTRY.test(machine.machineId) && machine.access === "standard")
     .map((machine) => machine.machineId);
   const mark = writerEntryId(entry);
-  const marked =
-    !machineIds.has(mark) &&
-    entry.machines.some((machine) => machine.machineId === mark && machine.access === "standard");
+  const marked = entry.machines.some(
+    (machine) => machine.machineId === mark && machine.access === "standard",
+  );
   return marked
     ? normalizePairs(listed)
     : parents.length === 0
@@ -415,21 +414,18 @@ export interface AccessEvaluation {
 }
 
 /**
- * Which revisions count is LAN 1.0.26's rule alone, so both versions follow the same chain. One no
- * current key verifies only restricts; competing heads combine most restrictively. `machineIds` are
- * fleet machines besides `peers` (disabled ones), whose entries are never exceptions.
+ * Which revisions count is LAN 1.0.26's rule alone, verified against the same `peers`. One no current
+ * key verifies only restricts; competing heads combine most restrictively. What a counted revision
+ * grants depends on its entries alone, never on which machines the fleet has.
  */
 export function evaluateAccess(input: {
   readonly fleetId: string;
   readonly accepted: ReadonlyArray<FleetAccessEntry>;
   readonly candidates: ReadonlyArray<FleetAccessEntry>;
   readonly peers: ReadonlyArray<FleetPeer>;
-  readonly machineIds?: ReadonlyArray<string>;
 }): AccessEvaluation {
   const sticky = new Set(input.accepted.map(entryDigest));
   const known = input.peers.map((peer) => peer.machineId);
-  const machineIds = new Set([...known, ...(input.machineIds ?? [])]);
-  const encoded = encodedFor(machineIds);
   const entries = new Map<string, FleetAccessEntry>();
   for (const entry of [...input.accepted, ...input.candidates])
     if (entry.fleetId === input.fleetId) entries.set(entryDigest(entry), entry);
@@ -463,7 +459,6 @@ export function evaluateAccess(input: {
     const pairs = pairsOf(
       entry,
       resolved.map((parent) => parent.effective),
-      machineIds,
     );
     revisions.set(digest, {
       entry,
@@ -473,7 +468,7 @@ export function evaluateAccess(input: {
       // Each machine at exactly its 1.0.26 level; only the encoded entries become exceptions.
       effective: {
         defaultAccess: legacy.defaultAccess,
-        machines: legacy.machines.filter((machine) => !encoded(machine.machineId)),
+        machines: legacy.machines.filter((machine) => !encodedEntry(machine.machineId)),
         pairs: verified
           ? pairs
           : intersectPairs([pairs, ...resolved.map((parent) => parent.effective.pairs)]),
@@ -588,6 +583,11 @@ interface FleetAccessInput {
   readonly root: string;
   readonly fleetId: string;
   readonly machineId: string;
+  /**
+   * The fleet's machines as LAN 1.0.26 admits them. Revisions are verified against all of them, so
+   * both versions count the same ones; this version trusts and governs only those whose ID is not
+   * reserved.
+   */
   readonly peers: ReadonlyArray<FleetPeer>;
   readonly legacyAccess: Level;
   /** This machine's enrollment is valid and its roster row enabled; see `FleetAccessState.member`. */
@@ -664,7 +664,8 @@ const make = Effect.gen(function* () {
     machines: evaluation?.snapshot?.machines ?? [],
     pairs: evaluation?.snapshot?.pairs ?? [],
     machineId: value?.machineId,
-    peers: value?.peers ?? [],
+    // A cache from before this version may name one whose ID is reserved; it is never a peer.
+    peers: trustedPeers(value?.peers ?? []),
     member: value?.member === true,
     ...(unavailable ? { unavailable: true } : {}),
     ...(seed === undefined ? {} : { seed }),
@@ -679,7 +680,6 @@ const make = Effect.gen(function* () {
             cachedEntries(cache),
           ),
           peers: [],
-          machineIds: cache.peers.map((peer) => peer.machineId),
         });
   const state = yield* SubscriptionRef.make(stateOf(cache, startup, "standard", false));
 
@@ -725,7 +725,7 @@ const make = Effect.gen(function* () {
       new Set(named).size !== named.length ||
       named.some(
         (machineId) =>
-          !input.peers.some((peer) => peer.machineId === machineId) &&
+          !trustedPeers(input.peers).some((peer) => peer.machineId === machineId) &&
           !input.rosterDisabled?.includes(machineId),
       )
     )
@@ -735,7 +735,9 @@ const make = Effect.gen(function* () {
       machines: normalize(named.map((machineId) => ({ machineId, access: "read-only" }))),
     };
     if (
-      !input.peers.some((peer) => peer.enabled && accessOf(snapshot, peer.machineId) === "standard")
+      !trustedPeers(input.peers).some(
+        (peer) => peer.enabled && accessOf(snapshot, peer.machineId) === "standard",
+      )
     )
       return invalidSeed("it leaves no machine standard");
     return { _tag: "valid", snapshot } satisfies SeedRead;
@@ -802,7 +804,7 @@ const make = Effect.gen(function* () {
    */
   const seedReadiness = Effect.fn("FleetAccess.seedReadiness")(function* (input: FleetAccessInput) {
     const machineIds: Array<string> = [];
-    for (const peer of input.peers.filter(
+    for (const peer of trustedPeers(input.peers).filter(
       (item) => item.enabled && !input.rosterDisabled?.includes(item.machineId),
     )) {
       if (verifiedReady(yield* readReady(input.root, peer.machineId), input.fleetId, peer))
@@ -834,13 +836,12 @@ const make = Effect.gen(function* () {
         accepted,
         candidates: [...kept, ...candidates],
         peers: input.peers,
-        machineIds: input.rosterDisabled ?? [],
       });
       const next: LocalCache = {
         version: 1,
         fleetId: input.fleetId,
         machineId: input.machineId,
-        peers: input.peers
+        peers: trustedPeers(input.peers)
           .filter((peer) => peer.enabled)
           .map((peer) => ({ machineId: peer.machineId, environmentId: peer.environmentId })),
         entries: evaluation.revisions.map((item) => item.entry),
@@ -1029,6 +1030,7 @@ const make = Effect.gen(function* () {
       key === undefined ||
       view.unavailable ||
       snapshot === undefined ||
+      reservedMachineId(input.machineId) ||
       accessOf(snapshot, input.machineId) !== "standard" ||
       !view.evaluation.heads.some(
         (head) => head.verified && !verifiedSigner(head.entry, input.peers),
@@ -1074,26 +1076,24 @@ const make = Effect.gen(function* () {
         // A change that does not name exceptions keeps the ones the list has.
         const pairs = normalizePairs(input.next.pairs ?? current?.pairs);
         // Entries are kept for machines that are not enabled peers right now, so a restricted
-        // machine that drops out and comes back is still restricted. A fleet machine's entry is
-        // its own whatever its ID looks like.
-        const fleetMachines = new Set([
-          ...input.peers.map((peer) => peer.machineId),
-          ...(input.rosterDisabled ?? []),
-        ]);
-        const encoded = encodedFor(fleetMachines);
+        // machine that drops out and comes back is still restricted. Exceptions and marks are
+        // written from `pairs` alone, however the entries given were read.
         const next: FleetAccessSnapshot = {
           defaultAccess: input.next.defaultAccess,
-          machines: normalize(input.next.machines.filter((machine) => !encoded(machine.machineId))),
+          machines: normalize(
+            input.next.machines.filter((machine) => !encodedEntry(machine.machineId)),
+          ),
           pairs,
         };
         if (
+          reservedMachineId(input.machineId) ||
           // Exceptions share the 100 entries with the machines, and need their writer's mark.
           next.machines.length + (pairs.length === 0 ? 0 : pairs.length + 1) > 100 ||
-          // An exception never takes the place of a fleet machine's own entry.
-          pairs.some((id) => fleetMachines.has(id)) ||
           !authorizeAccessChange(current, next, input.machineId) ||
           // Someone must remain able to change the policy, or no one could lift it.
-          !input.peers.some((peer) => peer.enabled && accessOf(next, peer.machineId) === "standard")
+          !trustedPeers(input.peers).some(
+            (peer) => peer.enabled && accessOf(next, peer.machineId) === "standard",
+          )
         )
           return yield* configurationError();
         if (
@@ -1133,7 +1133,7 @@ const make = Effect.gen(function* () {
     if (
       key === undefined ||
       view.unavailable ||
-      !input.peers.some((peer) => peer.enabled && peer.machineId === input.machineId)
+      !trustedPeers(input.peers).some((peer) => peer.enabled && peer.machineId === input.machineId)
     )
       return view.state;
     return yield* changeUnlocked(

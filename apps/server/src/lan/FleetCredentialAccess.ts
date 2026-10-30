@@ -33,6 +33,7 @@ export class FleetCredentialAccess extends Context.Service<
     /** The limit for a credential's subject; undefined when no fleet machine is behind it. */
     readonly limit: (subject: string, taskGrant: boolean) => Effect.Effect<Limit | undefined>;
     readonly scopes: CredentialAttribution.CredentialAccessCap["Service"]["scopes"];
+    readonly administersFleet: CredentialAttribution.CredentialAccessCap["Service"]["administersFleet"];
     /** The machines a full trust check last found; anything outside them is refused. */
     readonly setTrusted: (machineIds: ReadonlySet<string>) => Effect.Effect<void>;
   }
@@ -55,31 +56,60 @@ const make = Effect.gen(function* () {
     )?.machineId;
   };
 
-  const limit: FleetCredentialAccess["Service"]["limit"] = Effect.fn("FleetCredentialAccess.limit")(
-    function* (subject, taskGrant) {
-      const state = yield* fleetAccess.current;
-      if (state.machineId === undefined) return undefined;
-      const root = CredentialAttribution.attributionRoot(subject);
-      if (root === undefined)
-        // A task grant from before grants recorded their approver could be any machine's.
-        return taskGrant &&
+  /** The machine behind a credential here, and what it may do now. */
+  const attribution = Effect.fn("FleetCredentialAccess.attribution")(function* (
+    subject: string,
+    taskGrant: boolean,
+  ) {
+    const state = yield* fleetAccess.current;
+    if (state.machineId === undefined) return { state, level: undefined };
+    const root = CredentialAttribution.attributionRoot(subject);
+    if (root === undefined)
+      // A task grant from before grants recorded their approver could be any machine's.
+      return {
+        state,
+        level:
+          taskGrant &&
           subject === CredentialAttribution.MCP_CLIENT_SUBJECT &&
           restrictsAnyone(state)
-          ? "read-only"
-          : undefined;
-      const machineId = machineOf(root, state);
-      const trust = yield* Ref.get(trusted);
-      if (
-        machineId === undefined ||
-        !state.peers.some((peer) => peer.machineId === machineId) ||
-        (trust !== undefined && !trust.has(machineId))
-      )
-        return "none";
-      return FleetAccessPolicy.policyApplies(state)
+            ? ("read-only" as const)
+            : undefined,
+      };
+    const machineId = machineOf(root, state);
+    const trust = yield* Ref.get(trusted);
+    if (
+      machineId === undefined ||
+      // An ID an access-list exception could take is never a machine here, whatever the share says.
+      FleetAccessPolicy.reservedMachineId(machineId) ||
+      !state.peers.some((peer) => peer.machineId === machineId) ||
+      (trust !== undefined && !trust.has(machineId))
+    )
+      return { state, level: "none" as const };
+    return {
+      state,
+      machineId,
+      level: FleetAccessPolicy.policyApplies(state)
         ? FleetAccessPolicy.callerAccess(state, machineId)
-        : "standard";
-    },
-  );
+        : ("standard" as const),
+    };
+  });
+
+  const limit: FleetCredentialAccess["Service"]["limit"] = (subject, taskGrant) =>
+    attribution(subject, taskGrant).pipe(Effect.map(({ level }) => level));
+
+  const administersFleet: FleetCredentialAccess["Service"]["administersFleet"] = (credential) =>
+    attribution(credential.subject, credential.taskGrant === true).pipe(
+      Effect.map(({ state, machineId, level }) =>
+        level === undefined
+          ? true
+          : level === "standard" &&
+            machineId !== undefined &&
+            // Its own level, before any exception: an exception lets it work here, never
+            // administer the fleet as this machine.
+            (!FleetAccessPolicy.policyApplies(state) ||
+              FleetAccessPolicy.machineAccess(state, machineId) === "standard"),
+      ),
+    );
 
   const readOnly = FleetAccessPolicy.fleetCredentialScopes("read-only");
   const scopes: FleetCredentialAccess["Service"]["scopes"] = (credential) =>
@@ -96,6 +126,7 @@ const make = Effect.gen(function* () {
   return FleetCredentialAccess.of({
     limit,
     scopes,
+    administersFleet,
     setTrusted: Effect.fn("FleetCredentialAccess.setTrusted")((machineIds) =>
       Ref.set(trusted, machineIds),
     ),
@@ -109,7 +140,12 @@ const layer = layerServices.pipe(Layer.provide(FleetAccessPolicy.layer));
 export const layerCap = Layer.effect(
   CredentialAttribution.CredentialAccessCap,
   FleetCredentialAccess.pipe(
-    Effect.map((access) => CredentialAttribution.CredentialAccessCap.of({ scopes: access.scopes })),
+    Effect.map((access) =>
+      CredentialAttribution.CredentialAccessCap.of({
+        scopes: access.scopes,
+        administersFleet: access.administersFleet,
+      }),
+    ),
   ),
 ).pipe(Layer.provide(layer));
 

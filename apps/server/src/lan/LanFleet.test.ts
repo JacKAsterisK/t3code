@@ -979,4 +979,28 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
       assert.equal((yield* during.sync(during.recipient.service)).incoming.length, 1);
     }).pipe(Effect.provide(testConfig)),
   );
+  it.effect("never offers a standard code once the fleet's first list restricts mid-sync", () =>
+    Effect.gen(function* () {
+      // No list when the sync starts; revision 1 restricts the recipient before the code exists.
+      const first = {
+        revision: 1,
+        machines: [{ machineId: "beta", access: "read-only" as const }],
+      };
+      const before = yield* setup(true, false, true);
+      yield* before.sync(before.recipient.service, { mode: "status" });
+      before.onceListingLinks(() => before.setPolicy(first));
+      yield* before.sync(before.sender.service, { sendMachineIds: ["beta"] });
+      assert.deepEqual(before.issuedScopes, [FleetAccessPolicy.fleetCredentialScopes("read-only")]);
+
+      // Adopted while it mints: the standard code is withdrawn instead of offered.
+      const during = yield* setup(true, false, true);
+      yield* during.sync(during.recipient.service, { mode: "status" });
+      during.onceIssuing(() => during.setPolicy(first));
+      const withdrawn = yield* during.sync(during.sender.service, { sendMachineIds: ["beta"] });
+      assert.deepEqual(during.issuedScopes, [FleetAccessPolicy.fleetCredentialScopes("standard")]);
+      assert.deepEqual(during.revoked, ["synthetic-1"]);
+      assert.equal(withdrawn.machines[1]?.status, "pending");
+      assert.equal((yield* during.sync(during.recipient.service)).incoming.length, 0);
+    }).pipe(Effect.provide(testConfig)),
+  );
 });

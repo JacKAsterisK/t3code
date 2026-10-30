@@ -40,10 +40,37 @@ export class PeerMcpClient extends Context.Service<
       readonly tool: string;
       readonly arguments: Record<string, unknown>;
       readonly limits: PeerCallLimits;
+      /**
+       * Whether the call changes anything there, as the tool's declaration says
+       * (`McpToolAccess.writesOf`): the rule the peer applies to a read-only link.
+       */
+      readonly writes: boolean;
       readonly success: S;
     }) => Effect.Effect<S["Type"], OrchestratorMcpFailure>;
   }
 >()("t3/peer/PeerMcpClient") {}
+
+/**
+ * Whether this environment's own rules let it change anything in a linked
+ * environment now, read on every call. The peer caps a link only once its own
+ * view agrees, so a narrowing seen here first is enforced here: the link keeps
+ * reading, and its writes stop at once.
+ */
+export class PeerWriteCeiling extends Context.Service<
+  PeerWriteCeiling,
+  { readonly writable: (environmentId: EnvironmentId) => Effect.Effect<boolean> }
+>()("t3/peer/PeerMcpClient/PeerWriteCeiling") {}
+
+/** No rule here narrows a link: the peer alone decides. */
+export const layerUnrestricted = Layer.succeed(PeerWriteCeiling, {
+  writable: Effect.fn("PeerWriteCeiling.unrestricted")(() => Effect.succeed(true)),
+});
+
+const writeRefused = new OrchestratorMcpFailure({
+  code: "capability_denied",
+  message:
+    "This tool changes the linked environment, and this machine's Machine access list makes it read-only there. Reading there still works.",
+});
 
 const ToolCallResponse = Schema.Struct({
   result: Schema.optional(
@@ -95,6 +122,7 @@ const responseJson = (contentType: string | undefined, text: string) =>
 
 const make = Effect.gen(function* () {
   const links = yield* PeerLinks.PeerLinks;
+  const ceiling = yield* PeerWriteCeiling;
   const httpClient = yield* HttpClient.HttpClient;
   // One MCP session per peer and address, reused across calls. The peer keeps
   // sessions in memory, so a restart there answers 404 and we start a new one.
@@ -238,21 +266,27 @@ const make = Effect.gen(function* () {
       );
     },
     (effect, input) =>
-      effect.pipe(
-        Effect.tapError((error) =>
-          links.recordOutcome(input.environmentId, { error: error.message }),
-        ),
-        Effect.tap(() => links.recordOutcome(input.environmentId, { error: null })),
-        // Recorded above with the transport's own message; the agent hears it plainly.
-        Effect.catchTags({
-          HttpClientError: () =>
-            Effect.fail(
-              new OrchestratorMcpFailure({
-                code: "orchestration_error",
-                message: "The linked environment stopped answering.",
-              }),
+      // Refused here, before the token goes anywhere; the link itself is fine, so not recorded.
+      (input.writes ? ceiling.writable(input.environmentId) : Effect.succeed(true)).pipe(
+        Effect.flatMap((writable) => (writable ? Effect.void : Effect.fail(writeRefused))),
+        Effect.andThen(
+          effect.pipe(
+            Effect.tapError((error) =>
+              links.recordOutcome(input.environmentId, { error: error.message }),
             ),
-        }),
+            Effect.tap(() => links.recordOutcome(input.environmentId, { error: null })),
+            // Recorded above with the transport's own message; the agent hears it plainly.
+            Effect.catchTags({
+              HttpClientError: () =>
+                Effect.fail(
+                  new OrchestratorMcpFailure({
+                    code: "orchestration_error",
+                    message: "The linked environment stopped answering.",
+                  }),
+                ),
+            }),
+          ),
+        ),
       ),
   );
 

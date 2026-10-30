@@ -157,6 +157,7 @@ export const layerLinkingEnvironment = (
   secrets: typeof ServerSecretStore.layer = ServerSecretStore.layer,
 ) =>
   PeerMcpClient.layer.pipe(
+    Layer.provide(PeerMcpClient.layerUnrestricted),
     Layer.provideMerge(PeerLinks.layer),
     Layer.provideMerge(ServerSettings.layerTest({ linkedEnvironmentsEnabled: true })),
     Layer.provideMerge(Sqlite.layerMemory),

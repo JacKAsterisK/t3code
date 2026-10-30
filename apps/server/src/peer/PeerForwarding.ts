@@ -48,12 +48,15 @@ export class PeerForwarding extends Context.Service<
     /**
      * Runs `tool` in the linked environment `environmentId` with `params`. A
      * `t3_thread_wait` goes in pieces short enough to survive any route.
+     * `writes` is whether the call changes anything there, as the tool's
+     * declaration says (`McpToolAccess`).
      */
     readonly call: <T extends Tool.Any>(
       scope: Scope,
       tool: T,
       environmentId: EnvironmentId,
       params: Tool.Parameters<T>,
+      writes: boolean,
     ) => Effect.Effect<Tool.Success<T>, OrchestratorMcpFailure>;
     /** `t3_thread_read` there. */
     readonly readThread: (
@@ -130,6 +133,7 @@ const make = Effect.gen(function* () {
     success: Schema.Top,
     environmentId: EnvironmentId,
     params: unknown,
+    writes: boolean,
   ) {
     const limits = yield* callerLimits(scope);
     const encoded = (yield* Schema.encodeUnknownEffect(parameters as Schema.Encoder<unknown>)(
@@ -151,10 +155,13 @@ const make = Effect.gen(function* () {
       tool: toolName,
       arguments: args,
       limits,
+      writes,
       success: success as Schema.Decoder<A>,
     });
   });
 
+  // These name their tools, so each says what the tool's declaration says: reading and waiting
+  // read, interrupting writes.
   const readThread: PeerForwarding["Service"]["readThread"] = (scope, environmentId, input) =>
     forward<OrchestratorMcpThreadReadResult>(
       scope,
@@ -163,6 +170,7 @@ const make = Effect.gen(function* () {
       OrchestratorMcpThreadReadResult,
       environmentId,
       input,
+      false,
     );
 
   const interruptThread: PeerForwarding["Service"]["interruptThread"] = (
@@ -177,6 +185,7 @@ const make = Effect.gen(function* () {
       OrchestratorMcpThreadInterruptResult,
       environmentId,
       input,
+      true,
     );
 
   const waitForThread: PeerForwarding["Service"]["waitForThread"] = Effect.fn(
@@ -203,6 +212,7 @@ const make = Effect.gen(function* () {
             ? {}
             : { untilDelegatedWorkSettled: input.untilDelegatedWorkSettled }),
         },
+        false,
       );
       remaining -= chunk;
       if (!result.timedOut || remaining <= 0) return result;
@@ -217,7 +227,7 @@ const make = Effect.gen(function* () {
     Effect.flatMap((enabled) => (enabled ? Effect.void : Effect.fail(linkedEnvironmentsOff))),
   );
 
-  const call: PeerForwarding["Service"]["call"] = (scope, tool, environmentId, params) => {
+  const call: PeerForwarding["Service"]["call"] = (scope, tool, environmentId, params, writes) => {
     const forwarded: Effect.Effect<
       Tool.Success<typeof tool>,
       OrchestratorMcpFailure
@@ -227,7 +237,15 @@ const make = Effect.gen(function* () {
           environmentId,
           params as OrchestratorMcpThreadWaitInput,
         ) as Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure>)
-      : forward(scope, tool.name, tool.parametersSchema, tool.successSchema, environmentId, params);
+      : forward(
+          scope,
+          tool.name,
+          tool.parametersSchema,
+          tool.successSchema,
+          environmentId,
+          params,
+          writes,
+        );
     return Effect.andThen(requireEnabled, forwarded);
   };
 

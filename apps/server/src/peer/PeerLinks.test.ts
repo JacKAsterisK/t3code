@@ -101,6 +101,7 @@ const probe = (
     tool,
     arguments: {},
     limits,
+    writes: false,
     success: Probe,
   });
 

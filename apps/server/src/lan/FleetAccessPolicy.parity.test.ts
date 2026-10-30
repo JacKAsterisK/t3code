@@ -92,8 +92,9 @@ function parity(
       ? undefined
       : { defaultAccess: current.legacy.defaultAccess, machines: current.legacy.machines },
   ).toEqual(legacy.snapshot);
-  // Every fleet machine's own level is exactly 1.0.26's.
-  for (const peer of peers)
+  // Every fleet machine's own level is exactly 1.0.26's. One whose ID is reserved is no machine to
+  // this version, which gives it nothing.
+  for (const peer of peers.filter((item) => !FleetAccessPolicy.reservedMachineId(item.machineId)))
     expect(FleetAccessPolicy.machineAccess(asState(current.snapshot), peer.machineId)).toBe(
       legacy.snapshot === undefined ? "standard" : V1026.accessOf(legacy.snapshot, peer.machineId),
     );
@@ -300,31 +301,30 @@ describe("fleet access revisions count the same in LAN 1.0.26 and this version",
     expect(parity([r1, r2, nobody]).counts(nobody)).toBe(false);
   });
 
-  it("reads a fleet machine whose ID looks like an exception exactly as 1.0.26 does", () => {
-    // Enrolled under 1.0.26, which allowed this ID: it is that pair's exception entry.
+  it("counts the same revisions beside a forged machine whose ID is an exception's entry", () => {
+    // Only forged share files could admit this ID, and 1.0.26 would admit it: revisions still
+    // verify against its key exactly as 1.0.26 verifies them. Its entry is always the exception.
     const odd = syntheticFleetPeer(pair(anvil, spd));
     const peers = [...fleet, odd].map((machine) => machine.peer);
     const r1 = sign(cryo, [], [readOnly(anvil), readOnly(spd), readOnly(odd)]);
     const restricted = parity([r1], peers);
-    expect(FleetAccessPolicy.machineAccess(asState(restricted.current.snapshot), id(odd))).toBe(
-      "read-only",
-    );
-    // Read-only, it cannot write its way out.
+    expect(restricted.access(anvil, spd)).toBe("read-only");
+    // Read-only to 1.0.26, its own revision counts on neither.
     const lift = sign(odd, [r1], edit(r1, without(id(odd))));
     expect(parity([r1, lift], peers).counts(lift)).toBe(false);
-    // Standard in a marked revision, it is still that machine's own entry, never an exception.
+    // Standard in a marked revision, the entry is AnvilToad's exception on SPDevMachine, as it is
+    // on every machine whatever the fleet's membership.
     const r2 = sign(
       cryo,
       [r1],
       [readOnly(anvil), readOnly(spd), { machineId: id(odd), access: "standard" }],
-      {
-        pairs: [pair(spd, anvil)],
-      },
+      { pairs: [pair(spd, anvil)] },
     );
     const standard = parity([r1, r2], peers);
-    expect(standard.access(anvil, spd)).toBe("read-only");
+    expect(standard.access(anvil, spd)).toBe("standard");
     expect(standard.access(spd, anvil)).toBe("standard");
-    // And it changes the list as 1.0.26 lets it.
+    expect(parity([r1, r2]).access(anvil, spd)).toBe("standard");
+    // A revision its key signs counts exactly as 1.0.26 counts it.
     const byOdd = sign(
       odd,
       [r2],

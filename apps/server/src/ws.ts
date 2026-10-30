@@ -26,6 +26,7 @@ import {
   authScopeResponse,
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
+  AuthEnvironmentMaintainScope,
   AuthOrchestrationOperateScope,
   type AuthEnvironmentScope,
   type ScheduledTaskListResult,
@@ -1234,6 +1235,9 @@ export const layerWsRpc = (
   currentScopes: Effect.Effect<ReadonlyArray<AuthEnvironmentScope>> = Effect.succeed(
     currentSession.scopes,
   ),
+  // Whether the connection may administer the fleet now; a fleet machine needs its own standard
+  // access, not an exception's (`CredentialAccessCap.administersFleet`).
+  administersFleet: Effect.Effect<boolean> = Effect.succeed(true),
 ) =>
   Layer.effectContext(
     Effect.gen(function* () {
@@ -1432,6 +1436,16 @@ export const layerWsRpc = (
             scopes.includes(requiredScope)
               ? effect
               : Effect.fail(rpcAuthorizationError(requiredScope)),
+        );
+      // Every fleet-administration call: the access list and its exceptions, enrollment, approval,
+      // setup and the sync that issues and collects this machine's fleet credentials.
+      const administeringFleet = <A, E, R>(
+        effect: Effect.Effect<A, E, R>,
+      ): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
+        Effect.flatMap(
+          administersFleet,
+          (allowed): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
+            allowed ? effect : Effect.fail(rpcAuthorizationError(AuthEnvironmentMaintainScope)),
         );
 
       const acpRegistryProject = Effect.fn("ws.acpRegistry.project")(function* (
@@ -2226,9 +2240,10 @@ export const layerWsRpc = (
             workspaceSnapshotsOnDemand: false,
           });
         }),
-        [WS_METHODS.serverSyncLanFleet]: (input) => lanFleet.sync(input),
-        [WS_METHODS.serverGetLanFleetSetup]: () => lanFleet.setup,
-        [WS_METHODS.serverConfigureLanFleet]: (input) => lanFleet.configure(input),
+        [WS_METHODS.serverSyncLanFleet]: (input) => administeringFleet(lanFleet.sync(input)),
+        [WS_METHODS.serverGetLanFleetSetup]: () => administeringFleet(lanFleet.setup),
+        [WS_METHODS.serverConfigureLanFleet]: (input) =>
+          administeringFleet(lanFleet.configure(input)),
         [WS_METHODS.serverSearchAcpRegistry]: (input) =>
           acpRegistryCatalog
             .search(input)
@@ -3405,6 +3420,7 @@ export const layer = Layer.unwrap(
                       ),
                     )
                 : undefined,
+              Option.isSome(accessCap) ? accessCap.value.administersFleet(session) : undefined,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Handler-context reporters see only request defects, not server-wide defects.

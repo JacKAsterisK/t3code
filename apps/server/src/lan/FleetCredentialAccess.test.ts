@@ -89,7 +89,12 @@ const layerAccess = FleetCredentialAccess.layerServices.pipe(Layer.provideMerge(
 const layerCap = Layer.effect(
   CredentialAttribution.CredentialAccessCap,
   FleetCredentialAccess.FleetCredentialAccess.pipe(
-    Effect.map((access) => CredentialAttribution.CredentialAccessCap.of({ scopes: access.scopes })),
+    Effect.map((access) =>
+      CredentialAttribution.CredentialAccessCap.of({
+        scopes: access.scopes,
+        administersFleet: access.administersFleet,
+      }),
+    ),
   ),
 ).pipe(Layer.provide(layerAccess));
 const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
@@ -542,4 +547,62 @@ it.live(
         );
       }),
     ),
+);
+
+it.effect(
+  "lets a machine standard here only by exception work here but never administer the fleet",
+  () =>
+    Effect.gen(function* () {
+      resetFleet();
+      const access = yield* FleetCredentialAccess.FleetCredentialAccess;
+      const fleetSubject = (machineId: string) =>
+        `lan-fleet:${Delivery.deliveryFileName(CRYO, machineId)}`;
+      const anvil = { subject: fleetSubject(ANVIL) };
+      // What AnvilToad's fleet session minted here, and an MCP client it approved.
+      const derived = [
+        { subject: `lan-fleet-by:${fleetSubject(ANVIL)}` },
+        { subject: `mcp-client:${fleetSubject(ANVIL)}` },
+      ];
+      const list = (pairs: ReadonlyArray<string>) => {
+        policy = {
+          ...policy,
+          revision: policy.revision + 1,
+          machines: [{ machineId: ANVIL, access: "read-only" }],
+          pairs,
+        };
+      };
+      // Before any list, and as a standard machine, it administers the fleet as it always has.
+      policy = { ...policy, revision: 0 };
+      expect(yield* access.administersFleet(anvil)).toBe(true);
+      list([FleetAccessPolicy.pairEntryId(ANVIL, CRYO)]);
+      expect(yield* access.limit(anvil.subject, false)).toBe("standard");
+      expect(yield* access.administersFleet(anvil)).toBe(false);
+      for (const credential of derived)
+        expect(yield* access.administersFleet(credential)).toBe(false);
+      expect(yield* access.administersFleet({ subject: fleetSubject(PANDA) })).toBe(true);
+      // A credential no fleet machine is behind keeps what its own scopes allow.
+      expect(yield* access.administersFleet({ subject: "browser-session" })).toBe(true);
+      list([]);
+      expect(yield* access.administersFleet(anvil)).toBe(false);
+    }).pipe(Effect.provide(layerAccess)),
+);
+
+it.effect("refuses every credential of a machine whose ID an exception could take", () =>
+  Effect.gen(function* () {
+    resetFleet();
+    const access = yield* FleetCredentialAccess.FleetCredentialAccess;
+    // Only forged share files could make such a machine a peer; it is still never one here.
+    const forged = FleetAccessPolicy.pairEntryId(ANVIL, CRYO);
+    policy = {
+      ...policy,
+      peers: [...policy.peers, { machineId: forged, environmentId: "environment:forged" }],
+    };
+    for (const subject of [
+      `lan-fleet:${Delivery.deliveryFileName(CRYO, forged)}`,
+      `lan-fleet-peer-link:${forged}:00000000-0000-4000-8000-000000000001`,
+    ]) {
+      expect(yield* access.limit(subject, false)).toBe("none");
+      expect(yield* access.administersFleet({ subject })).toBe(false);
+    }
+  }).pipe(Effect.provide(layerAccess)),
 );

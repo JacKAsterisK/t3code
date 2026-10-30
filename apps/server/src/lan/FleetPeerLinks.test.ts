@@ -160,7 +160,10 @@ const makeMachine = (input: {
       CredentialAttribution.CredentialAccessCap,
       FleetCredentialAccess.FleetCredentialAccess.pipe(
         Effect.map((access) =>
-          CredentialAttribution.CredentialAccessCap.of({ scopes: access.scopes }),
+          CredentialAttribution.CredentialAccessCap.of({
+            scopes: access.scopes,
+            administersFleet: access.administersFleet,
+          }),
         ),
       ),
     ).pipe(
@@ -176,7 +179,8 @@ const makeMachine = (input: {
     const descriptor = descriptorOf(input.identity.peer.environmentId, input.identity.peer.label);
     const context = yield* FleetPeerLinks.layerServices.pipe(
       Layer.provideMerge(FleetMcpOrigin.layer),
-      Layer.provideMerge(PeerMcpClient.layer),
+      // This machine's own list caps every write it sends over a link.
+      Layer.provideMerge(PeerMcpClient.layer.pipe(Layer.provide(FleetPeerLinks.layerWriteCeiling))),
       Layer.provideMerge(PeerLinks.layer),
       Layer.provide(FleetPeerHttpClient.layer),
       Layer.provideMerge(FleetPeerHttpClient.layerTrust),
@@ -362,6 +366,15 @@ const makeFleet = (settings: DeepPartial<ServerSettingsShape>) =>
     });
     yield* Ref.set(linking.fleet, contextFor(cryoFrog, cryoFrog.peer, pandaPeer));
     yield* Ref.set(linked.fleet, contextFor(pandaMedic, pandaPeer, cryoFrog.peer));
+    // Each machine's list governs both, as every enabled fleet machine's does.
+    for (const machine of [linking, linked])
+      yield* Ref.update(machine.policy, (current) => ({
+        ...current,
+        peers: [cryoFrog.peer, pandaMedic.peer].map((peer) => ({
+          machineId: peer.machineId,
+          environmentId: peer.environmentId,
+        })),
+      }));
     yield* grant(linking, pandaMedic, "standard");
     yield* grant(linked, cryoFrog, "standard");
     return { share, cryoFrog, pandaMedic, pandaPeer, linking, linked, launchEnvironment, endpoint };
@@ -383,6 +396,27 @@ const callerAccess = (fleet: Effect.Success<ReturnType<typeof makeFleet>>) =>
       tool: "caller",
       arguments: {},
       limits: { runtimeMode: "full-access", interactionMode: "default" },
+      writes: false,
+      success: Caller,
+    })
+    .pipe(
+      Effect.map((caller) => caller.access),
+      Effect.catchTags({ OrchestratorMcpFailure: (failure) => Effect.succeed(failure.code) }),
+    );
+
+/**
+ * The same call as one that writes: refused on the linking machine once its own list makes it
+ * read-only there, whatever the linked machine still allows. The linked machine answers it as a
+ * read, so any refusal is the linking machine's.
+ */
+const writeAccess = (fleet: Effect.Success<ReturnType<typeof makeFleet>>) =>
+  fleet.linking.mcp
+    .call({
+      environmentId: fleet.pandaMedic.peer.environmentId,
+      tool: "caller",
+      arguments: {},
+      limits: { runtimeMode: "full-access", interactionMode: "default" },
+      writes: true,
       success: Caller,
     })
     .pipe(
@@ -712,14 +746,16 @@ it.live(
         yield* round(fleet);
         expect(yield* callerAccess(fleet)).toBe("full-access");
 
+        expect(yield* writeAccess(fleet)).toBe("full-access");
         // Restricted again, it keeps the full-access link, so it never stops reading, even while
-        // the share does not answer. What the link may do there is PandaMedic's list's to say,
-        // as for any credential PandaMedic issued.
+        // the share does not answer. PandaMedic's list still allows writes, but CryoFrog's own
+        // refuses every one at once.
         yield* ownAccess("read-only");
         yield* Ref.set(linking.shareDown, true);
         yield* linking.adapter.pass;
         expect((yield* linkOf)?.access).toBe<AuthMcpClientAccess>("full-access");
         expect(yield* callerAccess(fleet)).toBe("full-access");
+        expect(yield* writeAccess(fleet)).toBe("capability_denied");
         // Once the share answers it asks again, and links only at its own access.
         yield* Ref.set(linking.shareDown, false);
         yield* round(fleet);
@@ -868,12 +904,16 @@ it.live("widens and narrows one pair's link through an exception, with no prompt
       expect(yield* callerAccess(fleet)).toBe("full-access");
       expect(yield* linkedSessions).toHaveLength(1);
 
+      expect(yield* writeAccess(fleet)).toBe("full-access");
       // The requester reads the removal first: it keeps the standard link, so it never stops
-      // reading, and asks for a narrower one. PandaMedic's list still grants the exception.
+      // reading, and asks for a narrower one. PandaMedic's list still grants the exception, but
+      // the requester refuses every write at once, before any pass.
       const [standardSession] = yield* linkedSessions;
       yield* Ref.update(linking.policy, (current) => ({ ...current, revision: 4, pairs: [] }));
+      expect(yield* writeAccess(fleet)).toBe("capability_denied");
       yield* linking.adapter.pass;
       expect(yield* callerAccess(fleet)).toBe("full-access");
+      expect(yield* writeAccess(fleet)).toBe("capability_denied");
       // PandaMedic reads it too: writes stop at once, reads go on, and nothing is revoked yet.
       yield* read(4, []);
       expect(yield* callerAccess(fleet)).toBe("read-only");
@@ -944,6 +984,49 @@ it.live("keeps reading through an exception's removal that the receiver reads fi
       expect(
         codes.filter((code) => FleetAccessPolicy.credentialAccess(code) === "standard"),
       ).toEqual([]);
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("drops a first link that signed in above a list that narrowed meanwhile, and relinks", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+      const { cryoFrog, pandaMedic, linking, linked } = fleet;
+      const linkOf = linking.links
+        .get(pandaMedic.peer.environmentId)
+        .pipe(Effect.map(Option.getOrUndefined));
+      // CryoFrog asks; PandaMedic offers full access.
+      yield* linking.adapter.pass;
+      yield* linked.adapter.pass;
+      // CryoFrog's own list makes it read-only while it signs in with that code: after its check
+      // before signing in, before the link is in use.
+      const link = linking.links.link;
+      let narrowOnce = true;
+      Object.assign(linking.links, {
+        link: (...args: Parameters<typeof link>) =>
+          link(...args).pipe(
+            Effect.tap(() => {
+              if (!narrowOnce) return Effect.void;
+              narrowOnce = false;
+              return Ref.update(linking.policy, (current) => ({
+                ...current,
+                revision: 2,
+                machines: [{ machineId: cryoFrog.peer.machineId, access: "read-only" as const }],
+              }));
+            }),
+          ),
+      });
+      yield* linking.adapter.pass;
+      // With no link before it, none is kept above the list; a narrower one is asked for.
+      expect(yield* linkOf).toBeUndefined();
+      expect(yield* callerAccess(fleet)).toBe("invalid_request");
+      // PandaMedic's list still gives standard, so it offers that; CryoFrog takes it read-only.
+      yield* round(fleet);
+      expect((yield* linkOf)?.access).toBe<AuthMcpClientAccess>("read-only");
+      expect(yield* callerAccess(fleet)).toBe("read-only");
+      expect(yield* writeAccess(fleet)).toBe("capability_denied");
+      expect(yield* linked.linkSessions(cryoFrog)).toHaveLength(1);
     }),
   ).pipe(Effect.provide(NodeServices.layer)),
 );

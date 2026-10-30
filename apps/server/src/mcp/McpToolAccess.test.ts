@@ -408,11 +408,14 @@ const linkedProbeServer = McpHttpServer.toolkitRegistration(
       getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
     }),
   ),
-  // Stands in for the linked environment, answering with where the call went.
+  // Stands in for the linked environment, answering with where the call went and whether the
+  // declaration called it a write.
   Layer.provide(
     Layer.mock(PeerForwarding.PeerForwarding)({
-      call: (_scope, tool, environmentId) =>
-        Effect.succeed({ ran: `${tool.name} in ${environmentId}` } as never),
+      call: (_scope, tool, environmentId, _params, writes) =>
+        Effect.succeed({
+          ran: `${tool.name} in ${environmentId}${writes ? ", writing" : ""}`,
+        } as never),
     }),
   ),
 );
@@ -425,7 +428,7 @@ it.effect.each([
   // The caller is checked here before anything goes.
   ["writes", readOnlyClient, { environmentId: box }, "capability_denied"],
   ["writes", ended, { environmentId: box }, "parent_not_active"],
-  ["writes", supervised, { environmentId: box }, "writes in environment-box"],
+  ["writes", supervised, { environmentId: box }, "writes in environment-box, writing"],
   ["writes_with_capability", readOnlyClient, { environmentId: box }, "capability_denied"],
   [
     "starts_threads",
@@ -433,13 +436,13 @@ it.effect.each([
     { environmentId: box, interactionMode: "default" },
     "interaction_mode_escalation_denied",
   ],
-  ["starts_threads", plan, { environmentId: box }, "starts_threads in environment-box"],
+  ["starts_threads", plan, { environmentId: box }, "starts_threads in environment-box, writing"],
   ["writes_environment", supervised, { environmentId: box }, "capability_denied"],
   [
     "writes_environment",
     fullAccess,
     { environmentId: box },
-    "writes_environment in environment-box",
+    "writes_environment in environment-box, writing",
   ],
   ["writes_environment", fullAccess, { environmentId: here }, "here"],
   ["reads", taskOnlyClient, { environmentId: box }, "capability_denied"],
@@ -455,7 +458,7 @@ it.effect.each([
     "writes_threads",
     supervised,
     { environmentId: box, threadId: fullAccessThreadId },
-    "writes_threads in environment-box",
+    "writes_threads in environment-box, writing",
   ],
   [
     "writes_threads",

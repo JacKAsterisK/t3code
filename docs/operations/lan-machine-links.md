@@ -224,8 +224,14 @@ made read-only again.
   Otherwise it has its listed level. This applies everywhere access applies:
   the cap on each use, revocation, the credentials and peer links each machine
   issues and replaces, the caller's own ceiling on the links it keeps, and its
-  refusal to forward task changes. An exception never lets a read-only machine
-  change the list.
+  refusal to forward task changes.
+- An exception is for working on that machine: threads, agents, the shell,
+  files and that machine's own settings. It never makes the caller a fleet
+  administrator there. Changing the list or its exceptions, fleet setup,
+  enrollment and approval, and fleet sync on that machine's behalf all need the
+  caller's own standard access, whatever exceptions it has. So a read-only
+  machine cannot lift its restriction or grant an exception through a standard
+  machine's Settings either.
 - The list's rules apply unchanged, and which revisions count is decided
   exactly as LAN 1.0.26 decides it, over every entry as signed. A revision that
   adds or removes an exception counts only if its writer had standard access
@@ -238,11 +244,18 @@ made read-only again.
   the exceptions the revisions it follows grant. An exception naming a machine
   the fleet does not know yet is kept, hidden, and applies once that machine
   joins.
-- A fleet machine's own entry is never an exception, whatever its ID looks like:
-  each machine has exactly the level 1.0.26 gives it, and only entries that
-  belong to no fleet machine can grant one. A save never adds an exception that
-  would be a fleet machine's entry, and this version enrolls no new machine
-  whose ID starts with `pair-access-`.
+- An entry whose ID has the form of an exception or a writer's mark is always
+  read as one. The reading depends on the list alone, never on which machines
+  the fleet has, so it is the same on every machine: at startup, before any
+  fleet read; with a machine disabled in the roster; and in a save.
+- This version never admits, trusts or gives access to a machine whose ID
+  starts with `pair-access-`, and refuses every credential such a machine
+  holds. No real machine has one, because every ID T3 Code generates is
+  `machine-<hex>`. Only forged roster, enrollment or authority files on the
+  share could bring one in, and whatever can write the share can already join
+  the fleet. That is the shared-folder trust boundary described above.
+  Which revisions count still treats such a machine's key exactly as 1.0.26
+  does, so the two versions never follow different chains.
 - Adding one needs nothing more: within a few minutes the receiver replaces the
   read-only fleet credential and peer link it gave the caller with standard
   ones. No approval, pickup or relink.
@@ -251,11 +264,17 @@ made read-only again.
   receiver reads the change, writes stop at once on each use of every fleet
   connection, task grant and peer link the caller holds there, which keep
   reading, capped. The receiver offers read-only replacements unasked and
-  retires each old session only once its replacement is in use. A caller that
-  reads the change first keeps its link and asks for a read-only one. A code
-  being minted as the list narrows carries only what the list says right before
-  minting, and is withdrawn rather than offered if the list narrows before it
-  is published.
+  retires each old session only once its replacement is in use.
+- A caller that reads the change first enforces it on itself at once. Its peer
+  link keeps reading, but the caller refuses every write over it: in
+  `environmentId` tools, `delegate_task` and forwarded task calls alike. It
+  then asks for a read-only link. A link that finishes signing in after the
+  caller's list narrowed is dropped, and a read-only one is asked for, unless
+  it replaced an earlier link. A replacement stays for its reads, and the caller
+  still refuses its writes.
+- A code being minted as the list narrows carries only what the live list says
+  right before minting, including the first list a fleet adopts mid-sync. It is
+  withdrawn rather than offered if the list narrows before it is published.
 
 With versions mixed, exceptions take effect pair by pair as both machines
 update: the receiver must run a release with exceptions to grant one, and the
@@ -267,6 +286,11 @@ still verifies and applies every revision and ignores the exception:
   exceptions say, and a 1.0.26 AnvilToad links read-only to an updated
   SPDevMachine. No machine loses reads, or the links and writes the list
   without exceptions gives it.
+- A 1.0.26 machine still handles a narrowed peer link as 1.0.26 does: as the
+  receiver it revokes the link's session, and as the caller it unlinks. That
+  link stops reading until it relinks by itself at the narrower access. 1.0.26
+  never grants an exception, so only ordinary downgrades reach it, and this ends
+  once every machine is updated.
 - A save from a 1.0.26 machine keeps the exceptions, because its Settings
   signs every entry it was shown. It can never add one: a revision without its
   writer's own mark keeps only the exceptions the revisions it follows grant.

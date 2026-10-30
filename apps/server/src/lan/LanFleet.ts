@@ -498,12 +498,11 @@ const make = Effect.gen(function* () {
                   journal[`sent:${outgoingKey}`] = sent;
                   // Reserve durably before minting. An interrupted issue needs review, never rotation.
                   yield* writeFleetJson(journalFile, journal);
-                  // The list may narrow while this sync waits on the share or the auth store, and
-                  // a revocation pass may finish before this code exists: it carries only what
-                  // the list says right before minting, and is withdrawn if that narrows before
-                  // it is offered.
+                  // The list may narrow, or first apply, while this sync waits, and a revocation
+                  // pass may finish before this code exists: it carries only what the live list
+                  // says right before minting, and is withdrawn if that narrows before it is offered.
                   const liveAccess = (granted: FleetAccessLevel) =>
-                    policyActive
+                    config.managed
                       ? fleetAccess.current.pipe(
                           Effect.map((live) =>
                             FleetAccessPolicy.policyApplies(live) &&

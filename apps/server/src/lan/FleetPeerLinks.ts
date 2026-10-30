@@ -29,6 +29,7 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as McpOAuth from "../auth/McpOAuth.ts";
 import * as ServerConfig from "../config.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
+import * as PeerMcpClient from "../peer/PeerMcpClient.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import * as FleetContext from "./FleetContext.ts";
@@ -251,6 +252,9 @@ const make = Effect.gen(function* () {
       Option.isSome(request) &&
       request.value.requestId !== answeredRequestId &&
       Delivery.verifyPeerLinkRequest(request.value, peer, fleet.self, now);
+    // A new request means the peer will not use the code offered before, such as one it signed in
+    // with as its own list narrowed: that code goes, and a new one is offered.
+    if (asked) yield* dropOffer;
     // A linked peer whose access changed, or whose session ended here, gets a code unasked.
     const stale = linked !== undefined && (linked.level !== level || live.length === 0);
     // The list may narrow while this pass waits on the share or the auth store, so every step that
@@ -389,6 +393,7 @@ const make = Effect.gen(function* () {
           (yield* ownCeiling(peer.environmentId)) === "read-only"
             ? "read-only"
             : payload.value.access;
+        const prior = yield* peerLinks.get(peer.environmentId);
         const linked = yield* peerLinks
           .link({
             url: origin,
@@ -398,7 +403,21 @@ const make = Effect.gen(function* () {
             access,
           })
           .pipe(Effect.timeout(LINK_TIMEOUT), Effect.result);
-        if (linked._tag === "Success") {
+        // The list may narrow while this machine signs in. With no link before, none is kept above
+        // it: the new one goes, the code is spent, and a narrower one is asked for below. One that
+        // replaced an earlier link stays for its reads; every write on it is refused here.
+        const narrowedMeanwhile =
+          linked._tag === "Success" &&
+          Option.isNone(prior) &&
+          access !== "read-only" &&
+          (yield* ownCeiling(peer.environmentId)) === "read-only";
+        if (narrowedMeanwhile) {
+          yield* peerLinks.unlink(peer.environmentId);
+          entry = {
+            environmentId: peer.environmentId,
+            consumedDeliveryId: delivery.header.deliveryId,
+          };
+        } else if (linked._tag === "Success") {
           // The new link is in use: the receipt lets the peer retire the one it replaced.
           yield* writeShare(
             shareFile(fleet.deliveryDirectory, files.receipt),
@@ -441,7 +460,8 @@ const make = Effect.gen(function* () {
       DateTime.formatIso(current.value.linkedAt) !== recorded.linkedAt ||
       current.value.urls[0] !== origin ||
       // Above this machine's access there, as its own list now reads: the link stays, for its
-      // reads, until a narrower one replaces it. The peer caps its writes once its list agrees.
+      // reads, until a narrower one replaces it. Its writes are refused here on every use
+      // (`layerWriteCeiling`), and by the peer too once its list agrees.
       (ceiling === "read-only" && current.value.access !== "read-only") ||
       // Linked below the offer while this machine was read-only, and it no longer is.
       (recorded.clamped === true && ceiling !== "read-only") ||
@@ -646,6 +666,32 @@ const make = Effect.gen(function* () {
 
 /** The adapter alone, for tests that drive passes themselves. */
 export const layerServices = Layer.effect(FleetPeerLinks, make);
+
+/**
+ * Whether this machine's own list lets it write on a linked environment now. Only a fleet
+ * peer's environment is the list's to say; any other link is its issuer's alone.
+ */
+const writableOn = (policy: FleetAccessPolicy.FleetAccessState, environmentId: string) => {
+  const peer = policy.peers.find((item) => item.environmentId === environmentId);
+  return peer === undefined || FleetAccessPolicy.accessOn(policy, peer.machineId) === "standard";
+};
+
+/**
+ * Every use of a link, whoever made it: a call that writes is refused here once this machine's
+ * own list makes it read-only on that peer, whatever the peer's copy of the list still allows.
+ */
+export const layerWriteCeiling = Layer.effect(
+  PeerMcpClient.PeerWriteCeiling,
+  FleetAccessPolicy.FleetAccess.pipe(
+    Effect.map((fleetAccess) =>
+      PeerMcpClient.PeerWriteCeiling.of({
+        writable: Effect.fn("FleetPeerLinks.writable")(function* (environmentId) {
+          return writableOn(yield* fleetAccess.current, environmentId);
+        }),
+      }),
+    ),
+  ),
+);
 
 /** Passes at startup, every ten minutes, and whenever the fleet policy or settings change. */
 const layerWorker = Layer.effectDiscard(

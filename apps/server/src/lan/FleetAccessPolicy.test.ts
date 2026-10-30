@@ -965,56 +965,76 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
     }).pipe(Effect.provide(configLayer)),
   );
 
-  it.effect("never reads a fleet machine whose ID looks like an exception as one", () =>
-    Effect.gen(function* () {
-      const f = yield* fleet();
-      const anvil = f.anvil.peer.machineId;
-      const spd = f.spd.peer.machineId;
-      // Enrolled under 1.0.26, which allowed this ID: AnvilToad's exception entry on SPDevMachine.
-      const odd = syntheticFleetPeer(FleetAccessPolicy.pairEntryId(anvil, spd));
-      expect(FleetAccessPolicy.reservedMachineId(odd.peer.machineId)).toBe(true);
-      expect(FleetAccessPolicy.reservedMachineId("machine-0123456789abcdef01234567")).toBe(false);
-      f.setPeers([f.cryo.peer, f.panda.peer, f.anvil.peer, f.spd.peer, odd.peer]);
-      const cryo = yield* f.machine();
-      // Default standard with it read-only, as 1.0.26 reads the list.
-      const listed = yield* f.change(cryo, f.cryo, 0, [f.readOnly(f.anvil), f.readOnly(odd)]);
-      for (const state of [listed, yield* (yield* f.machine()).refresh(f.input(f.spd))]) {
-        expect(f.accessOf(state, odd)).toBe("read-only");
-        expect(FleetAccessPolicy.callerAccess(state, odd.peer.machineId)).toBe("read-only");
-        expect(state.pairs).toEqual([]);
-        expect(FleetAccessPolicy.pairAccess(state, anvil, spd)).toBe("read-only");
-      }
-      // Its own server sees it read-only, so it cannot change the list.
-      const oddService = yield* f.machine();
-      const own = yield* oddService.refresh(f.input(odd));
-      expect(FleetAccessPolicy.selfAccess(own)).toBe("read-only");
-      expect((yield* f.change(oddService, odd, own.revision, []).pipe(Effect.flip)).reason).toBe(
-        "configuration",
-      );
-      // Made standard, it stays its own entry: AnvilToad gets nothing on SPDevMachine.
-      const lifted = yield* f.change(cryo, f.cryo, 1, [f.readOnly(f.anvil)]);
-      expect(f.accessOf(lifted, odd)).toBe("standard");
-      const afterLift = yield* (yield* f.machine()).refresh(f.input(f.spd));
-      expect(FleetAccessPolicy.callerAccess(afterLift, anvil)).toBe("read-only");
-      // An exception that would be that machine's entry is refused.
-      const colliding = cryo.change({
-        ...f.input(f.cryo),
-        expectedRevision: 2,
-        next: {
-          defaultAccess: "standard",
-          machines: [f.readOnly(f.anvil), f.readOnly(odd)],
-          pairs: FleetAccessPolicy.replaceExceptions([], [{ machineId: anvil, standardOn: [spd] }]),
-        },
-      });
-      expect((yield* Effect.flip(colliding)).reason).toBe("configuration");
-      // A save that names it keeps its entry, read-only or not.
-      const saved = yield* f.change(cryo, f.cryo, 2, [
-        f.readOnly(f.anvil),
-        f.readOnly(odd),
-        f.readOnly(f.panda),
-      ]);
-      expect(saved.revision).toBe(3);
-      expect(f.accessOf(saved, odd)).toBe("read-only");
-    }).pipe(Effect.provide(configLayer)),
+  it.effect(
+    "reads exceptions the same whatever machines the fleet has: from cache, disabled, after a save",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fleet();
+        const anvil = f.anvil.peer.machineId;
+        const spd = f.spd.peer.machineId;
+        const standardOnSpd = FleetAccessPolicy.replaceExceptions(
+          [],
+          [{ machineId: anvil, standardOn: [spd] }],
+        );
+        // Only forged share files could bring in a machine whose ID is AnvilToad's exception entry.
+        const odd = syntheticFleetPeer(FleetAccessPolicy.pairEntryId(anvil, spd));
+        expect(FleetAccessPolicy.reservedMachineId(odd.peer.machineId)).toBe(true);
+        expect(FleetAccessPolicy.reservedMachineId("machine-0123456789abcdef01234567")).toBe(false);
+        const stateDir = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-state-" });
+        const cryo = yield* f.machine(stateDir);
+        const saved = yield* cryo.change({
+          ...f.input(f.cryo),
+          expectedRevision: 0,
+          next: {
+            defaultAccess: "standard",
+            machines: [f.readOnly(f.anvil)],
+            pairs: standardOnSpd,
+          },
+        });
+        expect(saved.pairs).toEqual(standardOnSpd);
+        const reads = (state: FleetAccessPolicy.FleetAccessState) => {
+          expect(state.revision).toBe(saved.revision);
+          expect(FleetAccessPolicy.pairAccess(state, anvil, spd)).toBe("standard");
+          expect(FleetAccessPolicy.pairAccess(state, anvil, f.panda.peer.machineId)).toBe(
+            "read-only",
+          );
+          // The forged machine is never a peer here, so nothing it holds is honoured.
+          expect(state.peers.map((peer) => peer.machineId)).not.toContain(odd.peer.machineId);
+        };
+        // The forged machine enabled, disabled in the roster, or absent: the same reading.
+        f.setPeers([f.cryo.peer, f.panda.peer, f.anvil.peer, f.spd.peer, odd.peer]);
+        reads(yield* cryo.refresh(f.input(f.cryo)));
+        reads(yield* (yield* f.machine()).refresh(f.input(f.spd)));
+        f.setPeers([
+          f.cryo.peer,
+          f.panda.peer,
+          f.anvil.peer,
+          f.spd.peer,
+          { ...odd.peer, enabled: false },
+        ]);
+        reads(yield* cryo.refresh({ ...f.input(f.cryo), rosterDisabled: [odd.peer.machineId] }));
+        // A restart reads its cache before any fleet read, which knows only enabled peers.
+        reads(yield* (yield* f.machine(stateDir)).current);
+        // An access save passes no roster: it keeps the exception and reads it the same.
+        f.setPeers([f.cryo.peer, f.panda.peer, f.anvil.peer, f.spd.peer, odd.peer]);
+        const resaved = yield* cryo.change({
+          ...f.input(f.cryo),
+          expectedRevision: saved.revision,
+          next: { defaultAccess: "standard", machines: [f.readOnly(f.anvil), f.readOnly(f.panda)] },
+        });
+        expect(resaved.revision).toBe(saved.revision + 1);
+        expect(FleetAccessPolicy.pairAccess(resaved, anvil, spd)).toBe("standard");
+        f.setPeers([f.cryo.peer, f.panda.peer, f.anvil.peer, f.spd.peer]);
+        const after = yield* (yield* f.machine()).refresh(f.input(f.spd));
+        expect(after.revision).toBe(resaved.revision);
+        expect(FleetAccessPolicy.pairAccess(after, anvil, spd)).toBe("standard");
+        // The forged machine's own server signs nothing: its ID is reserved.
+        f.setPeers([f.cryo.peer, f.panda.peer, f.anvil.peer, f.spd.peer, odd.peer]);
+        const oddService = yield* f.machine();
+        const own = yield* oddService.refresh(f.input(odd));
+        expect((yield* f.change(oddService, odd, own.revision, []).pipe(Effect.flip)).reason).toBe(
+          "configuration",
+        );
+      }).pipe(Effect.provide(configLayer)),
   );
 });

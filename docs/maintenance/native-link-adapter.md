@@ -238,8 +238,15 @@ A policy change takes effect without approval:
     before it mints, and withdraws a code the list narrowed before it was
     offered.
   - A link L holds above its own access is kept, so L never stops reading, and
-    requested again at L's access; the new link replaces it. D's cap governs
-    what the old link may do meanwhile.
+    requested again at L's access; the new link replaces it. Meanwhile L refuses
+    every write over it itself, on each call (`PeerWriteCeiling`, read live in
+    `PeerMcpClient.call`), as each MCP tool's `McpToolAccess` declaration
+    classifies it. That covers `environmentId` tools, `delegate_task` and
+    forwarded thread calls; the link's token is used nowhere else.
+  - L reads its list again once a sign-in succeeds. A first link above it is
+    dropped and asked for again; one that replaced an earlier link stays for its
+    reads under L's write refusal. D answers a new request by withdrawing the
+    code it offered before and offering another.
   - D's cap on every call stays authoritative.
 - Everything above is local to one machine. A list change made in Settings
   reaches each other machine at its next fleet read, within a sync interval

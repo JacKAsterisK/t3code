@@ -221,6 +221,16 @@ A policy change takes effect without approval:
   ([LAN machine links](../operations/lan-machine-links.md#machine-access)).
 - L's adapter consumes the offer on its next pass. `PeerLinks.link` then
   replaces the row with the new `access`.
+- L also holds itself to its own accepted list (`selfAccess`), since D's copy
+  may lag or be missing:
+  - An offer must carry the list revision D minted it under
+    (`policyRevision`). LAN 1.0.25 offers carry none: its adapter, turned on by
+    hand, offers its setup access even with no list. L never uses such an offer.
+  - L links at no more than its own access. A code minted for `full-access`
+    also signs in at `read-only`, and the session gets only that. A link made
+    this way is marked `clamped` and relinked once L's own access widens.
+  - A link L holds above its own access is unlinked at once and requested again.
+  - D's cap on every call stays authoritative.
 - Neither machine shows a prompt.
 
 ### 5. Gating
@@ -242,7 +252,11 @@ A policy change takes effect without approval:
   upstream read site, both machines' sign-in gates and the client follow
   without changes. The derived value is never written to `settings.json`.
   - "The fleet links this machine" is `fleetLinksApply`: as of its last fleet
-    read it is an enabled member, and a list exists. Settings reads it from an
+    read its own enrollment checks out (record enabled, identity matching its
+    signed authority entry and the running environment) and its roster row is
+    enabled (`FleetAccessState.member`), and a list exists. The policy's peer set
+    is not used for this: it keeps a machine whose roster row was just disabled,
+    for credential enforcement. Settings reads it from an
     optional `FleetAccess` (which depends only on the server config, so there is
     no cycle); `server.ts` provides the same instance the rest of the server
     uses, and a flip re-emits settings. Readers see it as the read-only
@@ -376,9 +390,13 @@ machine's fleet deliveries. Do it only with Dan's approval.
 ### How to run the proof
 
 1. Place `fleet-access-seed.json` at any time (older builds ignore it), then
-   install 1.0.26. It is adopted once AnvilToad and SPDevMachine run 1.0.26, or
-   24 hours after a 1.0.26 machine first saw it; until then Machine access says
-   which machines it waits for. Nothing is added to `settings.json`.
+   install 1.0.26. It is adopted once every enabled machine runs 1.0.26. A day
+   after a 1.0.26 machine first saw it, machines that have published no signed
+   summary for a day are no longer waited for; running ones always are. Until
+   then Machine access says which machines it waits for, as running an older
+   version or offline. Nothing is added to `settings.json`. What each machine
+   sees during the rollout:
+   [LAN machine links](../operations/lan-machine-links.md#rolling-out-1026-with-a-starting-list).
 2. Run the table above. **Sync now** requests a pass after it finishes;
    otherwise passes run every 10 minutes, at startup, and on every policy or
    settings change. A first link takes two passes on each machine.
@@ -419,8 +437,8 @@ machine's fleet deliveries. Do it only with Dan's approval.
   - `<L>-><D>.peer-link-request.json`, signed by L: request ID, `createdAt`
     and `expiresAt` (one hour). D decides the access, so L sends none.
   - `<D>-><L>.peer-link.json`: a `Delivery` whose header carries
-    `purpose: "peer-link"` and whose payload carries the code and the
-    `access` D granted.
+    `purpose: "peer-link"` and whose payload carries the code, the `access` D
+    granted and, from 1.0.26, the `policyRevision` it granted it under.
   - `<D>-><L>.peer-link.receipt.json`, signed by L.
 
   `FleetCatalog` isn't extended. Its signature covers a fixed field list
@@ -437,16 +455,18 @@ machine's fleet deliveries. Do it only with Dan's approval.
 ### Pass on L (for each trusted peer D with a TLS identity)
 
 1. If `<D>-><L>.peer-link.json` exists, opens with L's key, verifies, has
-   `purpose: "peer-link"`, isn't expired and wasn't already used, call
-   `PeerLinks.link` with `url: D.tls.origin`,
+   `purpose: "peer-link"` and a `policyRevision`, isn't expired and wasn't
+   already used, call `PeerLinks.link` with `url: D.tls.origin`,
    `expectedEnvironmentId: D.environmentId`, `expectedLabel`, `pairingCode`
-   and the granted `access`. On success, write the receipt, delete the request
-   and record the link. Any refusal is recorded and the code isn't retried;
-   an unreachable peer is retried on the next pass.
-2. Want a link when it is missing, expired, unfenced, inside the renewal
-   window, at a URL that isn't D's current `tls.origin`, or not the link the
-   adapter recorded (a hand-made one). If so, write a request file, unless a
-   fresh one is outstanding.
+   and the granted `access`, lowered to L's own access if that is less. On
+   success, write the receipt, delete the request and record the link. Any
+   refusal, and an offer without a `policyRevision`, is recorded and the code
+   isn't retried; an unreachable peer is retried on the next pass.
+2. Unlink at once a link above L's own access. Want a link when it is missing,
+   expired, unfenced, inside the renewal window, at a URL that isn't D's
+   current `tls.origin`, not the link the adapter recorded (a hand-made one), or
+   lowered to L's access when L's access has since widened. If so, write a
+   request file, unless a fresh one is outstanding.
 3. For each recorded link whose machine is no longer trusted, or whose roster
    entry is gone or disabled, call `PeerLinks.unlink`. Links the adapter
    didn't record and that aren't to fleet machines are never touched.
@@ -567,10 +587,12 @@ access-policy work also touches (`LanFleet.ts`, `packages/contracts/src/lanFleet
   default. Re-check them on each upstream sync, under row 2.
 - **Mixed versions.** A machine without the adapter ignores the new files,
   and its peers show `peer needs update`. Nothing in today's catalog or
-  delivery formats changes. A starting list waits for the machines it makes
-  read-only to run 1.0.26, since 1.0.24 cannot take the replaced credentials
-  that adopting it makes 1.0.25 and later issuers send
+  delivery formats changes. A starting list waits until no running machine
+  could still be on 1.0.25, which revokes a downgraded peer's fleet session at
+  once, while 1.0.24 cannot take the replacement. 1.0.26 issuers keep that
+  session, capped, until the peer uses its replacement
   ([LAN machine links](../operations/lan-machine-links.md#machine-access)).
+  Offers from a 1.0.25 adapter, which carry no list revision, are never used.
 - **Revocation depends on Part C.** Without it, each renewal leaves the
   superseded session valid on D until it expires (up to about 30 days). Its
   token is deleted on L, but a narrowed policy wouldn't be enforced on D

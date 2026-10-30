@@ -122,9 +122,11 @@ approval before code or runtime changes.
   on every machine (`fleetLinkedEnvironmentsEnabled`). It neither offers nor
   links until the fleet has a Machine access list, adopted from
   `fleet-access-seed.json` or saved in Settings, and linked environments count
-  as on only for an active member with a list; elsewhere Labs decides. A
-  starting list waits for the machines it makes read-only to run 1.0.26, at
-  most 24 hours. It has not yet run between two real servers. Keep
+  as on only for an enrolled member with an enabled roster row and a list;
+  elsewhere Labs decides. A starting list waits for every enabled machine to
+  run 1.0.26; after 24 hours it stops waiting only for machines silent for a
+  day. A machine never links above its own access, and ignores 1.0.25 offers.
+  It has not yet run between two real servers. Keep
   `t3_lan_environments` for the gateway's grant path until rows 5, 6 and 10
   are settled.
 - **Tests:** `EnvironmentRegistry.test.ts`, `FleetPeerLinks.test.ts`,

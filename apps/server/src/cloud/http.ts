@@ -10,11 +10,13 @@ import {
   EnvironmentHttpUnauthorizedError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as HttpEffect from "effect/http/HttpEffect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
-import { requireEnvironmentScope } from "../auth/http.ts";
+import * as CredentialAttribution from "../auth/CredentialAttribution.ts";
+import { failEnvironmentScopeRequired, requireEnvironmentScope } from "../auth/http.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as CloudLink from "./CloudLink.ts";
 import * as ConnectReachability from "./ConnectReachability.ts";
@@ -109,10 +111,20 @@ export const layer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const cloudLink = yield* CloudLink.CloudLink;
     const reachability = yield* ConnectReachability.ConnectReachability;
+    const accessCap = yield* Effect.serviceOption(CredentialAttribution.CredentialAccessCap);
+    // A linked T3 Connect account mints credentials here that no fleet machine is behind, and
+    // they outlive the access that linked it: a fleet machine needs its own standard access, never
+    // an exception's (`CredentialAccessCap.administersFleet`).
+    const requireLinkingScope = Effect.gen(function* () {
+      const session = yield* requireEnvironmentScope(AuthRelayWriteScope);
+      if (Option.isSome(accessCap) && !(yield* accessCap.value.administersFleet(session)))
+        return yield* failEnvironmentScopeRequired(AuthRelayWriteScope);
+      return session;
+    });
     return handlers
       .handle("linkProof", ({ payload }) =>
         Effect.gen(function* () {
-          yield* requireEnvironmentScope(AuthRelayWriteScope);
+          yield* requireLinkingScope;
           const request = yield* HttpServerRequest.HttpServerRequest;
           const proof = yield* toHttpError(cloudLink.linkProof(payload, request));
           yield* appendCloudCredentialResponseHeaders;
@@ -120,7 +132,7 @@ export const layer = HttpApiBuilder.group(
         }),
       )
       .handle("relayConfig", ({ payload }) =>
-        requireEnvironmentScope(AuthRelayWriteScope).pipe(
+        requireLinkingScope.pipe(
           Effect.andThen(toHttpErrorOrUnavailable(cloudLink.applyRelayConfig(payload))),
         ),
       )

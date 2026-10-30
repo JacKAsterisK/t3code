@@ -163,7 +163,8 @@ const make = Effect.gen(function* () {
     if (
       write &&
       route.origin !== null &&
-      FleetAccessPolicy.selfAccess(yield* fleetAccess.current) === "read-only"
+      FleetAccessPolicy.accessOnEnvironment(yield* fleetAccess.current, environmentId) ===
+        "read-only"
     )
       return yield* readOnlyMachine();
     const descriptor = yield* environment.getDescriptor;

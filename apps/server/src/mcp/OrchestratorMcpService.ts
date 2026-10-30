@@ -1776,7 +1776,8 @@ const make = Effect.gen(function* () {
   /**
    * Its webhook URL starts runs, so only a caller that may start one sees it: never a client
    * approved for read-only access, and a thread caller only with a live turn, at modes covering
-   * every mode the task runs at.
+   * every mode the task runs at. The URL outlives the access it was read with, so never a fleet
+   * machine standard here only through an exception, either.
    */
   const summarizeScheduledTask = Effect.fn("OrchestratorMcpService.summarizeScheduledTask")(
     function* (
@@ -1798,6 +1799,7 @@ const make = Effect.gen(function* () {
       return scheduledTaskSummary(
         task,
         live &&
+          scope.client?.sharesOutside !== false &&
           Option.isSome(modes) &&
           modes.value.every((mode) => withinLimits(caller.limits, mode)),
       );

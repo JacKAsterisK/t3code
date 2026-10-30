@@ -89,7 +89,12 @@ const layerAccess = FleetCredentialAccess.layerServices.pipe(Layer.provideMerge(
 const layerCap = Layer.effect(
   CredentialAttribution.CredentialAccessCap,
   FleetCredentialAccess.FleetCredentialAccess.pipe(
-    Effect.map((access) => CredentialAttribution.CredentialAccessCap.of({ scopes: access.scopes })),
+    Effect.map((access) =>
+      CredentialAttribution.CredentialAccessCap.of({
+        scopes: access.scopes,
+        administersFleet: access.administersFleet,
+      }),
+    ),
   ),
 ).pipe(Layer.provide(layerAccess));
 const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
@@ -473,4 +478,207 @@ it.live("refuses everything from a machine that left or is no longer trusted, an
       expect((yield* mintCode(handler, again.token)).status).toBe(401);
     }),
   ),
+);
+
+it.live(
+  "gives a read-only machine standard access here only through an exception naming this machine",
+  () =>
+    withRoutes((handler, { auth, revoke }) =>
+      Effect.gen(function* () {
+        const anvil = yield* anvilFleetSession(auth);
+        const grant = yield* approveTaskGrant(
+          handler,
+          (yield* json<{ credential: string }>(yield* mintCode(handler, anvil.token))).credential,
+        );
+        const panda = yield* auth.issueSession({
+          subject: `lan-fleet:${Delivery.deliveryFileName(CRYO, PANDA)}`,
+          scopes: AuthStandardClientScopes,
+        });
+        // AnvilToad's fleet peer link here, signed in with a standard peer-link code.
+        const peerLink = yield* auth.issueMcpClientSession({
+          label: "T3 Code · Test anviltoad",
+          access: "full-access",
+          peerLink: true,
+          client: { deviceType: "bot" },
+          approvalSubject: `lan-fleet-peer-link:${ANVIL}:00000000-0000-4000-8000-000000000001`,
+        });
+        const accessOf = (token: string) =>
+          auth.authenticateMcpClient(mcpRequest(token)).pipe(Effect.map((client) => client.access));
+        const list = (pairs: ReadonlyArray<string>) => {
+          policy = {
+            ...policy,
+            revision: policy.revision + 1,
+            machines: [
+              { machineId: ANVIL, access: "read-only" },
+              { machineId: PANDA, access: "read-only" },
+              // This machine is read-only too: an exception only applies on a read-only machine.
+              { machineId: CRYO, access: "read-only" },
+            ],
+            pairs,
+          };
+        };
+        // All three are read-only. AnvilToad is standard on CryoFrog; PandaMedic only on AnvilToad.
+        list([
+          FleetAccessPolicy.pairEntryId(ANVIL, CRYO),
+          FleetAccessPolicy.pairEntryId(PANDA, ANVIL),
+        ]);
+        expect(yield* accessOf(grant.access_token)).toBe("auto");
+        expect(yield* accessOf(peerLink.token)).toBe("full-access");
+        const minted = yield* mintCode(handler, anvil.token);
+        expect(minted.status).toBe(200);
+        expect((yield* mintCode(handler, panda.token)).status).toBe(403);
+        // The unused standard code AnvilToad minted here is within its access, so it stays.
+        const codes = (yield* auth.listPairingLinks()).length;
+        yield* revoke;
+        expect((yield* auth.listPairingLinks()).length).toBe(codes);
+
+        // The exception goes: writes stop at once, reads and sessions stay, the code goes.
+        list([FleetAccessPolicy.pairEntryId(PANDA, ANVIL)]);
+        expect(yield* accessOf(grant.access_token)).toBe("read-only");
+        expect((yield* mintCode(handler, anvil.token)).status).toBe(403);
+        yield* revoke;
+        expect((yield* auth.listPairingLinks()).length).toBe(codes - 1);
+        expect(yield* accessOf(grant.access_token)).toBe("read-only");
+        expect((yield* auth.listSessions()).some((s) => s.sessionId === anvil.sessionId)).toBe(
+          true,
+        );
+        // Its peer link session too: capped at each call, kept, so it never stops reading.
+        expect(yield* accessOf(peerLink.token)).toBe("read-only");
+        expect((yield* auth.listSessions()).some((s) => s.sessionId === peerLink.sessionId)).toBe(
+          true,
+        );
+      }),
+    ),
+);
+
+it.live(
+  "narrows an exception onto this machine while it is standard, keeping reads, and restores it",
+  () =>
+    withRoutes((handler, { auth, revoke }) =>
+      Effect.gen(function* () {
+        const anvil = yield* anvilFleetSession(auth);
+        const peerLink = yield* auth.issueMcpClientSession({
+          label: "T3 Code · Test anviltoad",
+          access: "full-access",
+          peerLink: true,
+          client: { deviceType: "bot" },
+          approvalSubject: `lan-fleet-peer-link:${ANVIL}:00000000-0000-4000-8000-000000000001`,
+        });
+        const accessOf = (token: string) =>
+          auth.authenticateMcpClient(mcpRequest(token)).pipe(Effect.map((client) => client.access));
+        // AnvilToad keeps its exception onto CryoFrog throughout; only CryoFrog's level changes.
+        const list = (cryo: "read-only" | "standard") => {
+          policy = {
+            ...policy,
+            revision: policy.revision + 1,
+            machines: [
+              { machineId: ANVIL, access: "read-only" },
+              { machineId: CRYO, access: cryo },
+            ],
+            pairs: [FleetAccessPolicy.pairEntryId(ANVIL, CRYO)],
+          };
+        };
+        list("read-only");
+        const grant = yield* approveTaskGrant(
+          handler,
+          (yield* json<{ credential: string }>(yield* mintCode(handler, anvil.token))).credential,
+        );
+        expect(yield* accessOf(grant.access_token)).toBe("auto");
+        expect(yield* accessOf(peerLink.token)).toBe("full-access");
+        // Standard here by an exception, it still sees nothing that hands access outside the
+        // fleet, such as a webhook URL; an MCP client no fleet machine approved does.
+        const sharesOutside = (token: string) =>
+          auth
+            .authenticateMcpClient(mcpRequest(token))
+            .pipe(Effect.map((client) => client.sharesOutside));
+        expect(yield* sharesOutside(grant.access_token)).toBe(false);
+        expect(yield* sharesOutside(peerLink.token)).toBe(false);
+        const local = yield* auth.issueMcpClientSession({
+          label: "Local client",
+          access: "full-access",
+          peerLink: false,
+          client: { deviceType: "bot" },
+        });
+        expect(yield* sharesOutside(local.token)).toBe(true);
+
+        // CryoFrog is made standard: standard here would reach every machine it writes to, so the
+        // exception stops applying. Writes stop at once; sessions and reads stay.
+        list("standard");
+        expect(yield* accessOf(grant.access_token)).toBe("read-only");
+        expect(yield* accessOf(peerLink.token)).toBe("read-only");
+        expect((yield* mintCode(handler, anvil.token)).status).toBe(403);
+        yield* revoke;
+        const sessions = (yield* auth.listSessions()).map((s) => s.sessionId);
+        expect(sessions).toContain(anvil.sessionId);
+        expect(sessions).toContain(peerLink.sessionId);
+        expect(yield* accessOf(grant.access_token)).toBe("read-only");
+
+        // Read-only again, the stored exception applies again.
+        list("read-only");
+        expect(yield* accessOf(grant.access_token)).toBe("auto");
+        expect(yield* accessOf(peerLink.token)).toBe("full-access");
+        expect((yield* mintCode(handler, anvil.token)).status).toBe(200);
+      }),
+    ),
+);
+
+it.effect(
+  "lets a machine standard here only by exception work here but never administer the fleet",
+  () =>
+    Effect.gen(function* () {
+      resetFleet();
+      const access = yield* FleetCredentialAccess.FleetCredentialAccess;
+      const fleetSubject = (machineId: string) =>
+        `lan-fleet:${Delivery.deliveryFileName(CRYO, machineId)}`;
+      const anvil = { subject: fleetSubject(ANVIL) };
+      // What AnvilToad's fleet session minted here, and an MCP client it approved.
+      const derived = [
+        { subject: `lan-fleet-by:${fleetSubject(ANVIL)}` },
+        { subject: `mcp-client:${fleetSubject(ANVIL)}` },
+      ];
+      const list = (pairs: ReadonlyArray<string>) => {
+        policy = {
+          ...policy,
+          revision: policy.revision + 1,
+          machines: [
+            { machineId: ANVIL, access: "read-only" },
+            { machineId: CRYO, access: "read-only" },
+          ],
+          pairs,
+        };
+      };
+      // Before any list, and as a standard machine, it administers the fleet as it always has.
+      policy = { ...policy, revision: 0 };
+      expect(yield* access.administersFleet(anvil)).toBe(true);
+      list([FleetAccessPolicy.pairEntryId(ANVIL, CRYO)]);
+      expect(yield* access.limit(anvil.subject, false)).toBe("standard");
+      expect(yield* access.administersFleet(anvil)).toBe(false);
+      for (const credential of derived)
+        expect(yield* access.administersFleet(credential)).toBe(false);
+      expect(yield* access.administersFleet({ subject: fleetSubject(PANDA) })).toBe(true);
+      // A credential no fleet machine is behind keeps what its own scopes allow.
+      expect(yield* access.administersFleet({ subject: "browser-session" })).toBe(true);
+      list([]);
+      expect(yield* access.administersFleet(anvil)).toBe(false);
+    }).pipe(Effect.provide(layerAccess)),
+);
+
+it.effect("refuses every credential of a machine whose ID an exception could take", () =>
+  Effect.gen(function* () {
+    resetFleet();
+    const access = yield* FleetCredentialAccess.FleetCredentialAccess;
+    // Only forged share files could make such a machine a peer; it is still never one here.
+    const forged = FleetAccessPolicy.pairEntryId(ANVIL, CRYO);
+    policy = {
+      ...policy,
+      peers: [...policy.peers, { machineId: forged, environmentId: "environment:forged" }],
+    };
+    for (const subject of [
+      `lan-fleet:${Delivery.deliveryFileName(CRYO, forged)}`,
+      `lan-fleet-peer-link:${forged}:00000000-0000-4000-8000-000000000001`,
+    ]) {
+      expect(yield* access.limit(subject, false)).toBe("none");
+      expect(yield* access.administersFleet({ subject })).toBe(false);
+    }
+  }).pipe(Effect.provide(layerAccess)),
 );

@@ -50,6 +50,16 @@ export class CredentialAccessCap extends Context.Service<
       /** An MCP task grant, which a plain `mcp-client` subject cannot attribute. */
       readonly taskGrant?: boolean;
     }) => Effect.Effect<ReadonlyArray<AuthEnvironmentScope> | undefined>;
+    /**
+     * Whether the credential may administer the fleet from here now, or hand access outside it
+     * (guest shares, webhook URLs, T3 Connect linking), which outlives an exception: a fleet
+     * machine needs standard access of its own, never an exception's. True for a credential no
+     * fleet machine is behind.
+     */
+    readonly administersFleet: (credential: {
+      readonly subject: string;
+      readonly taskGrant?: boolean;
+    }) => Effect.Effect<boolean>;
   }
 >()("t3/auth/CredentialAttribution/CredentialAccessCap") {}
 

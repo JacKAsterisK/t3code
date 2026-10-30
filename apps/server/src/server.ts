@@ -820,6 +820,8 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(
     PeerForwarding.layer.pipe(
       Layer.provideMerge(PeerMcpClient.layer),
+      // T3 Code LAN: this machine's own list caps every write it sends over a link.
+      Layer.provide(FleetPeerLinks.layerWriteCeiling),
       Layer.provideMerge(PeerLinks.layer),
       Layer.provide(FleetPeerHttpClient.layer),
     ),

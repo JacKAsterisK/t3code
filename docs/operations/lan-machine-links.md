@@ -208,6 +208,158 @@ calls. They do not stop software on that machine that deliberately forges fleet
 files on the share. Keep write access to the share to the fleet's machines and
 their administrators.
 
+### Exceptions
+
+An exception gives a read-only machine standard access on the machines it
+names, while it stays read-only on every other one. In **Machine access**, a
+read-only machine's row shows **Standard on:** and **Choose**: tick the machines
+and **Save**. Only a machine with standard access can save. Each direction is
+its own exception, so for AnvilToad and SPDevMachine to have standard access on
+each other, choose SPDevMachine for AnvilToad and AnvilToad for SPDevMachine.
+A standard machine's own exceptions change nothing until it is made read-only
+again.
+
+An exception only applies on a machine that is itself read-only, so
+**Choose** offers only read-only machines. Standard access on a machine
+includes its reach: its agents and shell, and through them that machine's own
+credentials, its peer links to other machines, and its owner access to its own
+server, including `t3` on that host, which needs no sign-in and can configure
+the fleet as that machine. An exception onto a standard machine would reach
+every machine that one can change, and could administer the fleet through it.
+That would break both "not on the other machines" and the rule that a
+read-only machine cannot lift its own restriction.
+
+While it applies, an exception gives the caller full control of the receiver.
+Standard access includes the receiver's shell, so the caller can do there
+anything that machine's own user can. That is inherent to standard access, and
+no rule here can take it back afterwards:
+
+- Removing the exception, or making the receiver standard, stops every further
+  use of the fleet credentials and peer links the caller holds there. It does
+  not undo what the caller did there while the exception applied. A pairing
+  credential made in its shell with `t3 auth pairing create`, a scheduled task,
+  an SSH key or anything else it left behind stays. Such a credential is not
+  tied to the caller's fleet credential, so nothing narrows it.
+- Making the receiver standard extends the fleet's trust to whatever was done
+  on it, including credentials like that one, which then pass as that machine's
+  own. When a save would make a machine standard while exceptions onto it are
+  stored, **Machine access** names the machines that had full control of it and
+  asks before saving. Check that machine first, or reinstall it if a caller
+  could not be trusted.
+- The same goes for threads the caller starts there. A full-access thread on the
+  receiver can read its database, use its shell and list its scheduled tasks
+  with their webhook URLs, and anything it hands back to the caller outlives the
+  exception. The webhook rule below only stops the caller's own connection from
+  seeing those URLs.
+
+- A save that adds an exception onto a machine that is standard in the saved
+  list is refused, with a message saying why. So is one that does not name two
+  machines the fleet has; Settings offers only those.
+- When a machine named by an exception is made standard, the exception stays
+  saved but stops applying: that pair narrows as a downgrade does, writes stop
+  and reads are kept. Its row shows it as **Inactive on** that machine, **which
+  is standard**. Make the machine read-only again and the exception applies
+  again, with nothing to approve; or open **Choose** and untick it to remove
+  it.
+- The receiving machine decides, per pair: a caller has standard access there
+  if it is standard, or if the list names that caller and that receiver and the
+  receiver is itself read-only. Otherwise it has its listed level. This applies
+  everywhere access applies: the cap on each use, revocation, the credentials
+  and peer links each machine issues and replaces, the caller's own ceiling on
+  the links it keeps, its refusal to forward task changes, routing, and what
+  `t3_environment_links` reports.
+- An exception is for working on that machine: threads, agents, the shell,
+  files and that machine's own settings. It never makes the caller a fleet
+  administrator there. Changing the list or its exceptions, fleet setup,
+  enrollment and approval, and fleet sync on that machine's behalf all need the
+  caller's own standard access, whatever exceptions it has. So a read-only
+  machine cannot lift its restriction or grant an exception through a standard
+  machine's Settings either.
+- The same holds for handing access to someone outside the fleet, which would
+  outlive the exception: creating guest shares, seeing scheduled tasks' webhook
+  URLs (in Settings and from MCP clients), and linking the machine to a T3
+  Connect account. Every other credential a fleet machine can mint or approve
+  there stays tied to its own fleet credential and narrows with it: pairing
+  credentials, MCP client sign-ins and task grants it approves, and peer links.
+- The list's rules apply unchanged, and which revisions count is decided
+  exactly as LAN 1.0.26 decides it, over every entry as signed. A revision that
+  adds or removes an exception counts only if its writer had standard access
+  under what it follows. A read-only machine can grant no exception and remove
+  none, its own included: it may only restrict itself, every other entry left
+  as it was, or 1.0.26 would not count the revision, nor any after it, and the
+  two versions would stop on different lists. Exceptions change only what a
+  counted revision grants. Competing revisions keep an exception only if every
+  one of them grants it. A revision whose writer left or changed keys keeps only
+  the exceptions the revisions it follows grant. A stored exception naming a
+  machine the fleet does not know, such as one that left, is kept, hidden, and
+  applies once that machine is back, if it is read-only.
+- An entry whose ID has the form of an exception or a writer's mark is always
+  read as one. The reading depends on the list alone, never on which machines
+  the fleet has, so it is the same on every machine: at startup, before any
+  fleet read; with a machine disabled in the roster; and in a save.
+- This version never admits, trusts or gives access to a machine whose ID
+  starts with `pair-access-`, and refuses every credential such a machine
+  holds. No real machine has one, because every ID T3 Code generates is
+  `machine-<hex>`. Only forged roster, enrollment or authority files on the
+  share could bring one in, and whatever can write the share can already join
+  the fleet. That is the shared-folder trust boundary described above.
+  Which revisions count still treats such a machine's key exactly as 1.0.26
+  does, so the two versions never follow different chains.
+- Adding one needs nothing more: within a few minutes the receiver replaces the
+  read-only fleet credential and peer link it gave the caller with standard
+  ones. No approval, pickup or relink.
+- Removing one narrows that pair as a downgrade does, and nothing loses reads:
+  each replacement is made before the old credential is retired. Once the
+  receiver reads the change, writes stop at once on each use of every fleet
+  connection, task grant and peer link the caller holds there, which keep
+  reading, capped. The receiver offers read-only replacements unasked and
+  retires each old session only once its replacement is in use.
+- A caller that reads the change first enforces it on itself at once. Its peer
+  link keeps reading, but the caller refuses every write over it: in
+  `environmentId` tools, `delegate_task` and forwarded task calls alike. It
+  reads its list again right before each write is sent, a retry or a new
+  session included, so a list that narrows mid-call stops the write. That
+  re-check and the send are not one step: a list that narrows in the instant
+  between them lets that one write go, as if it had been sent a moment earlier.
+  It then asks for a read-only link. A link that finishes signing in after the caller's
+  list narrowed is kept for its reads, first link or not: the caller refuses
+  its writes, confirms it to the receiver as usual and asks for a read-only one.
+  Dropping it would leave a 1.0.26 receiver holding the spent code, ignoring
+  new requests until it expires an hour later.
+- Accepted propagation delay: the desktop app's own fleet connections to other
+  machines, and the codes fleet sync collects, are capped by the receiver, not
+  by the caller. After a narrowing they keep their old access until the
+  receiver reads the change, within its sync delay. Agents reach other machines
+  through peer links, on which the caller already refuses writes itself, so the
+  remaining window is only the receiver's sync delay.
+- A code being minted as the list narrows carries only what the live list says
+  right before minting, including the first list a fleet adopts mid-sync. The
+  list is read again once the code is published, for fleet credentials and peer
+  links alike: if it narrowed meanwhile, the code is revoked and its offer taken
+  back, and the next pass offers one at the narrower access.
+
+With versions mixed, exceptions take effect pair by pair as both machines
+update: the receiver must run a release with exceptions to grant one, and the
+caller to lift its own link ceiling. An exception is stored inside the signed
+list as an entry LAN 1.0.26 reads as a machine it does not know, so 1.0.26
+still verifies and applies every revision and ignores the exception:
+
+- A 1.0.26 machine keeps AnvilToad read-only toward itself whatever the list's
+  exceptions say, and a 1.0.26 AnvilToad links read-only to an updated
+  SPDevMachine. No machine loses reads, or the links and writes the list
+  without exceptions gives it.
+- A 1.0.26 machine still handles a narrowed peer link as 1.0.26 does: as the
+  receiver it revokes the link's session, and as the caller it unlinks. That
+  link stops reading until it relinks by itself at the narrower access. 1.0.26
+  never grants an exception, so only ordinary downgrades reach it, and this ends
+  once every machine is updated.
+- A save from a 1.0.26 machine keeps the exceptions, because its Settings
+  signs every entry it was shown. It can never add one: a revision without its
+  writer's own mark keeps only the exceptions the revisions it follows grant.
+- Nothing waits for machines to update. Revision files never gain a field:
+  1.0.26 skips such a file and every revision after it, which would leave it on
+  an old list.
+
 ### Rolling out 1.0.26 with a starting list
 
 Hub updates one machine at a time when T3 is idle, so versions mix for hours or
@@ -308,9 +460,13 @@ machine with no saved list that finds no `fleet-access` folder on the share.
 
 The linking machine also holds itself to its own list: it never links above the
 access its accepted list gives it, whatever the destination offers, reading its
-list again right before and after each sign-in, and drops at once a link above
-it when its list narrows, before reading the share, then relinks at its access.
-The destination likewise mints each code at what its list says at that moment.
+list again right before each sign-in. When its list narrows it keeps the link it
+has, so it never stops reading, and asks for one at its access; the new link
+replaces the old one, and only then does the destination retire the old session.
+The destination caps each call on the old link at what its own list says as soon
+as it reads the change, and offers the narrower code unasked. It mints each code
+at what its list says at that moment, and withdraws one the list narrowed before
+it was offered.
 Another machine applies a later change in Settings only once it reads it, within
 about five minutes; until then it may still offer the access the change took
 away, just as it still serves its fleet connections at the old access. It

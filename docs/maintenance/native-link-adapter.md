@@ -27,10 +27,10 @@ native tools through `environmentId`.
 Renewal is a re-link with a fresh fleet-delivered code, started a week before
 expiry. `PeerLinks.link` upserts by environment ID, so the link stays in place
 and only its token and dates change. D attributes each link session to the
-fleet machine that asked for it. That lets D revoke a replaced session, revoke
-at once when the policy is narrowed, and offer a new code when the policy
-changes. When a machine leaves the fleet, L forgets the link and D revokes the
-session.
+fleet machine that asked for it. That lets D cap it at once when the policy is
+narrowed, offer a new code when the policy changes, and revoke a session once
+its replacement is in use. When a machine leaves the fleet, L forgets the link
+and D revokes the session.
 
 The fork changes upstream in four small places, each an optional hook. None
 of them touches `apps/server/src/peer`:
@@ -205,8 +205,11 @@ A policy change takes effect without approval:
 
 - D's adapter runs a pass on each policy change notification. Every
   attributed session records the access of the code it came from.
-- When access is narrowed, D revokes L's sessions above the new access at
-  once (Part C). Calls fail until L relinks, never with the old access.
+- When access is narrowed, D keeps L's sessions and caps every call on them
+  at the new access (`FleetCredentialAccess`, through the `CredentialAccessCap`
+  on verified sessions), so writes stop at once and reads go on. Each is
+  revoked only once L's receipt shows the narrower link in use (Part C). Only a
+  peer that left the fleet loses its sessions at once.
 - D offers L a code unasked whenever L's last link is at another access, or
   L holds no live session here (revoked by hand, for example), and re-offers
   after each code expires until L takes one.
@@ -221,8 +224,9 @@ A policy change takes effect without approval:
   ([LAN machine links](../operations/lan-machine-links.md#machine-access)).
 - L's adapter consumes the offer on its next pass. `PeerLinks.link` then
   replaces the row with the new `access`.
-- L also holds itself to its own accepted list (`selfAccess`), since D's copy
-  may lag or be missing:
+- L also holds itself to its own accepted list (`accessOn`: its own level, or
+  standard on D where an exception names that pair and D is itself read-only),
+  since D's copy may lag or be missing:
   - An offer must carry the list revision D minted it under
     (`policyRevision`). LAN 1.0.25 offers carry none: its adapter, turned on by
     hand, offers its setup access even with no list. L never uses such an offer.
@@ -230,12 +234,19 @@ A policy change takes effect without approval:
     also signs in at `read-only`, and the session gets only that. A link made
     this way is marked `clamped` and relinked once L's own access widens.
   - L reads its own access from its live list, not a copy taken when the pass
-    started: right before each sign-in, and again right after it, unlinking at
-    once a link the list narrowed meanwhile. Each pass first unlinks every link
-    above L's access, before it reads the share or calls a peer, so a slow or
-    failing one never keeps it. D likewise reads L's access again right before
-    it mints.
-  - A link L holds above its own access is unlinked at once and requested again.
+    started, right before each sign-in. D likewise reads L's access again right
+    before it mints, and withdraws a code the list narrowed before it was
+    offered.
+  - A link L holds above its own access is kept, so L never stops reading, and
+    requested again at L's access; the new link replaces it. Meanwhile L refuses
+    every write over it itself, on each call (`PeerWriteCeiling`, read live in
+    `PeerMcpClient.call`), as each MCP tool's `McpToolAccess` declaration
+    classifies it. That covers `environmentId` tools, `delegate_task` and
+    forwarded thread calls; the link's token is used nowhere else.
+  - L reads its list again once a sign-in succeeds. A first link above it is
+    dropped and asked for again; one that replaced an earlier link stays for its
+    reads under L's write refusal. D answers a new request by withdrawing the
+    code it offered before and offering another.
   - D's cap on every call stays authoritative.
 - Everything above is local to one machine. A list change made in Settings
   reaches each other machine at its next fleet read, within a sync interval
@@ -377,7 +388,7 @@ SPDevMachine) appear only in the optional read-only step. Prerequisites:
 | 3   | A CryoFrog thread calls `t3_environment_links`, then `t3_project_clone` into a new throwaway folder on PandaMedic and `t3_project_create`, both with `environmentId`                                                                                                           | Native discovery and project setup over the link                                                                                                                                                                                 |
 | 4   | In that project: `t3_thread_launch` (cheapest model, "reply OK"), `t3_thread_wait`, a queued `t3_thread_send`, `t3_thread_interrupt` by `runId`, a question answered with `t3_pending_request`, then `delegate_task` to PandaMedic and a restart of CryoFrog's server mid-task | Parity for answer 7. The remote follower wakes the parent after the restart                                                                                                                                                      |
 | 5   | Set the renewal override on CryoFrog and sync                                                                                                                                                                                                                                  | New `linkedAt` and `expiresAt`. PandaMedic has exactly one CryoFrog session; the old one is revoked (answer 2)                                                                                                                   |
-| 6   | Change PandaMedic's policy for CryoFrog to read-only, then back to standard                                                                                                                                                                                                    | Narrowing: the old session is revoked at once, the relinked access is `read-only`, `t3_thread_send` is denied and `t3_thread_read` works. Widening returns to `full-access`. No prompts (answer 4)                               |
+| 6   | Change PandaMedic's policy for CryoFrog to read-only, then back to standard                                                                                                                                                                                                    | Narrowing: `t3_thread_send` is denied at once and `t3_thread_read` keeps working; the relinked access is `read-only` and the old session is revoked after that. Widening returns to `full-access`. No prompts (answer 4)         |
 | 7   | Compare with step 0                                                                                                                                                                                                                                                            | Fleet client connections, their deliveries, the journal and the settings are unchanged (answer 6, and no existing fleet link touched)                                                                                            |
 | 8   | On AnvilToad (1.0.26), sync                                                                                                                                                                                                                                                    | Links that involve AnvilToad have the access its policy says (`read-only`), and writes are denied                                                                                                                                |
 
@@ -433,8 +444,8 @@ machine's fleet deliveries. Do it only with Dan's approval.
     the fleet cannot be read, it removes nothing, and a machine only missing
     from the trust check keeps its links until it stays missing (see
     [LAN machine links](../operations/lan-machine-links.md#machine-access)).
-    A policy the share could not just give narrows no link; each call is
-    still capped.
+    No narrowing revokes a link session; each call is capped, including under
+    a policy the share could not just give.
   - Each share file has one writer (L writes requests and receipts, D writes
     offers), so there is no share lock. Passes are serialized in-process. A
     session attributed during a pass never waits for it: the two machines
@@ -485,8 +496,9 @@ machine's fleet deliveries. Do it only with Dan's approval.
 
 ### Pass on D (for each trusted peer L)
 
-1. Revoke L's attributed sessions whose code carried more than
-   `accessFor(L)` now allows.
+1. Revoke L's attributed sessions only when L is no longer a fleet peer
+   (`accessFor(L)` undefined). Sessions above L's access now stay, capped on
+   every call, until step 2 retires them.
 2. On L's receipt for the current offer, record the linked access, revoke L's
    other attributed sessions and delete the offer and receipt. Drop an offer
    that expired or is at another access, revoking its unused code.
@@ -609,8 +621,9 @@ access-policy work also touches (`LanFleet.ts`, `packages/contracts/src/lanFleet
   superseded session valid on D until it expires (up to about 30 days). Its
   token is deleted on L, but a narrowed policy wouldn't be enforced on D
   until then. Ship C with E.
-- **Gaps between revoke and relink.** A narrowed policy, or a link revoked by
-  hand, breaks calls until the next pass (at most 10 minutes; immediate on a
+- **Gaps between revoke and relink.** A narrowed policy breaks no call: the old
+  link keeps reading, capped, until the narrower one replaces it. A link revoked
+  by hand breaks calls until the next pass (at most 10 minutes; immediate on a
   notification). Calls report the link error. They never fall back to
   plaintext or the old access.
 - **Labs explicitly off** on either machine stops linking. That is

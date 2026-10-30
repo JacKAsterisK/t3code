@@ -158,12 +158,19 @@ const make = Effect.gen(function* () {
         )
       )
         peers.push(peer);
+    // The machines LAN 1.0.26 admits, whose keys verify access-list revisions on both versions.
+    // This version trusts none whose ID could read as an access-list exception: only forged share
+    // files could bring one in, and nothing here gives it access.
+    const fleetPeers = peers;
+    const trustedPeers = fleetPeers.filter(
+      (peer) => !FleetAccessPolicy.reservedMachineId(peer.machineId),
+    );
     // Whether the fleet links this machine: its own enrollment checks out and its roster row is
     // enabled. The policy's peers keep a machine whose row was just disabled, so they can't say.
     const ownPeer =
       record === undefined
         ? undefined
-        : peers.find(
+        : trustedPeers.find(
             (peer) =>
               peer.enabled &&
               peer.machineId === record.machineId &&
@@ -195,7 +202,7 @@ const make = Effect.gen(function* () {
             root,
             fleetId: record.fleetId,
             machineId: record.machineId,
-            peers,
+            peers: fleetPeers,
             legacyAccess: record.access,
             member,
             signingPrivateKey: record.signingPrivateKey,
@@ -214,7 +221,8 @@ const make = Effect.gen(function* () {
       authority,
       roster,
       sharedFolderTrust,
-      peers,
+      peers: trustedPeers,
+      fleetPeers,
     };
   });
 
@@ -322,6 +330,13 @@ const make = Effect.gen(function* () {
       }
     }
     const policy = current.accessPolicy;
+    const exceptions =
+      policy === undefined
+        ? []
+        : FleetAccessPolicy.exceptionsOf(policy, [
+            ...current.peers.map((peer) => peer.machineId),
+            ...policy.machines.map((machine) => machine.machineId),
+          ]);
     return {
       ...base,
       ...(policy === undefined
@@ -331,6 +346,7 @@ const make = Effect.gen(function* () {
               revision: policy.revision,
               defaultAccess: policy.defaultAccess,
               machines: policy.machines,
+              ...(exceptions.length === 0 ? {} : { exceptions }),
               selfAccess: FleetAccessPolicy.selfAccess(policy),
               canChange:
                 FleetAccessPolicy.selfAccess(policy) === "standard" && policy.unavailable !== true,
@@ -400,12 +416,23 @@ const make = Effect.gen(function* () {
                 root: current.root,
                 fleetId: record.fleetId,
                 machineId: record.machineId,
-                peers: current.peers,
+                peers: current.fleetPeers,
                 legacyAccess: record.access,
                 member: current.member,
                 signingPrivateKey: record.signingPrivateKey,
                 expectedRevision: input.revision,
-                next: { defaultAccess: input.defaultAccess, machines: input.machines },
+                next: {
+                  defaultAccess: input.defaultAccess,
+                  machines: input.machines,
+                  ...(input.exceptions === undefined
+                    ? {}
+                    : {
+                        pairs: FleetAccessPolicy.replaceExceptions(
+                          current.accessPolicy?.pairs,
+                          input.exceptions,
+                        ),
+                      }),
+                },
               });
               return;
             }
@@ -581,7 +608,9 @@ const make = Effect.gen(function* () {
                     });
                     if (
                       Authority.peerVerificationCode(request.peer) !== input.verificationCode ||
-                      request.peer.machineId !== input.machineId
+                      request.peer.machineId !== input.machineId ||
+                      // No machine takes an ID that could read as an access-list exception.
+                      FleetAccessPolicy.reservedMachineId(input.machineId)
                     )
                       return yield* configurationError();
                     const metadata = fresh.roster.machines.find(

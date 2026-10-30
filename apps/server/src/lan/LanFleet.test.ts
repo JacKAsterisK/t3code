@@ -76,6 +76,9 @@ const setup = Effect.fn("FleetTest.setup")(function* (
   const active = new Map<string, AuthPairingLink[]>();
   // Pairing links a peer spent, as the sessions the issuing machine then holds for it.
   const sessions = new Map<string, AuthClientSession[]>();
+  // One-shot hooks: the list changing after a sync read it, or while a code is minted.
+  let onListLinks: (() => void) | undefined;
+  let onIssue: (() => void) | undefined;
   let policy: FleetAccessPolicy.FleetAccessState = {
     revision: 0,
     defaultAccess: "standard",
@@ -137,6 +140,9 @@ const setup = Effect.fn("FleetTest.setup")(function* (
               createPairingLink: (input) =>
                 Effect.gen(function* () {
                   issued.push(identity.peer.machineId);
+                  const issuing = onIssue;
+                  onIssue = undefined;
+                  issuing?.();
                   issuedScopes.push(input?.scopes ?? AuthStandardClientScopes);
                   if (failIssue)
                     return yield* new EnvironmentAuth.ServerAuthPairingLinkCreationError({
@@ -159,7 +165,12 @@ const setup = Effect.fn("FleetTest.setup")(function* (
                 }),
               // Like the auth stores, an expired grant or session is gone unless its socket is open.
               listPairingLinks: () =>
-                unexpired(active.get(identity.peer.machineId) ?? [], () => false),
+                Effect.suspend(() => {
+                  const listing = onListLinks;
+                  onListLinks = undefined;
+                  listing?.();
+                  return unexpired(active.get(identity.peer.machineId) ?? [], () => false);
+                }),
               listSessions: () =>
                 unexpired(
                   sessions.get(identity.peer.machineId) ?? [],
@@ -233,6 +244,14 @@ const setup = Effect.fn("FleetTest.setup")(function* (
     issuedScopes,
     setPolicy: (next: Partial<FleetAccessPolicy.FleetAccessState>) => {
       policy = { ...policy, ...next };
+    },
+    /** Runs `hook` once, the next time a sync lists its pairing links, after it read the list. */
+    onceListingLinks: (hook: () => void) => {
+      onListLinks = hook;
+    },
+    /** Runs `hook` once, while the next pairing code is minted. */
+    onceIssuing: (hook: () => void) => {
+      onIssue = hook;
     },
     /** The peer redeems its grants; `used` false is a pickup whose saving then failed. */
     consume: (machineId: string, used = true) => {
@@ -924,6 +943,64 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
         "uncertain",
       );
       assert.deepEqual(f.issued, ["alpha"]);
+    }).pipe(Effect.provide(testConfig)),
+  );
+  it.effect("never offers a standard code once the list narrows during the sync minting it", () =>
+    Effect.gen(function* () {
+      const readOnly = {
+        revision: 2,
+        machines: [{ machineId: "beta", access: "read-only" as const }],
+      };
+      // Narrowed after the sync read the list, before it mints: the code carries only read scopes.
+      const before = yield* setup(true, false, true);
+      before.setPolicy({ revision: 1 });
+      yield* before.sync(before.recipient.service, { mode: "status" });
+      before.onceListingLinks(() => before.setPolicy(readOnly));
+      yield* before.sync(before.sender.service, { sendMachineIds: ["beta"] });
+      assert.deepEqual(before.issuedScopes, [FleetAccessPolicy.fleetCredentialScopes("read-only")]);
+      assert.equal((yield* before.sync(before.recipient.service)).incoming.length, 1);
+
+      // Narrowed while it mints: the standard code is withdrawn instead of offered.
+      const during = yield* setup(true, false, true);
+      during.setPolicy({ revision: 1 });
+      yield* during.sync(during.recipient.service, { mode: "status" });
+      during.onceIssuing(() => during.setPolicy(readOnly));
+      const withdrawn = yield* during.sync(during.sender.service, { sendMachineIds: ["beta"] });
+      assert.deepEqual(during.issuedScopes, [FleetAccessPolicy.fleetCredentialScopes("standard")]);
+      assert.deepEqual(during.revoked, ["synthetic-1"]);
+      assert.equal(withdrawn.machines[1]?.status, "pending");
+      assert.equal((yield* during.sync(during.recipient.service)).incoming.length, 0);
+      // The next sync offers one at the narrower access, with nothing approved by hand.
+      yield* during.sync(during.sender.service, { sendMachineIds: ["beta"] });
+      assert.deepEqual(
+        during.issuedScopes.at(-1),
+        FleetAccessPolicy.fleetCredentialScopes("read-only"),
+      );
+      assert.equal((yield* during.sync(during.recipient.service)).incoming.length, 1);
+    }).pipe(Effect.provide(testConfig)),
+  );
+  it.effect("never offers a standard code once the fleet's first list restricts mid-sync", () =>
+    Effect.gen(function* () {
+      // No list when the sync starts; revision 1 restricts the recipient before the code exists.
+      const first = {
+        revision: 1,
+        machines: [{ machineId: "beta", access: "read-only" as const }],
+      };
+      const before = yield* setup(true, false, true);
+      yield* before.sync(before.recipient.service, { mode: "status" });
+      before.onceListingLinks(() => before.setPolicy(first));
+      yield* before.sync(before.sender.service, { sendMachineIds: ["beta"] });
+      assert.deepEqual(before.issuedScopes, [FleetAccessPolicy.fleetCredentialScopes("read-only")]);
+
+      // Adopted while it mints: the standard code is withdrawn instead of offered.
+      const during = yield* setup(true, false, true);
+      yield* during.sync(during.recipient.service, { mode: "status" });
+      during.onceIssuing(() => during.setPolicy(first));
+      const withdrawn = yield* during.sync(during.sender.service, { sendMachineIds: ["beta"] });
+      assert.deepEqual(during.issuedScopes, [FleetAccessPolicy.fleetCredentialScopes("standard")]);
+      assert.deepEqual(during.revoked, ["synthetic-1"]);
+      assert.equal(withdrawn.machines[1]?.status, "pending");
+      assert.equal((yield* during.sync(during.recipient.service)).incoming.length, 0);
     }).pipe(Effect.provide(testConfig)),
   );
 });

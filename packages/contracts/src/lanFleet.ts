@@ -85,6 +85,11 @@ export type LanFleetSyncResult = typeof LanFleetSyncResult.Type;
 export const FleetAccess = Schema.Literals(["read-only", "standard"]);
 export type FleetAccess = typeof FleetAccess.Type;
 const FleetMachineAccess = Schema.Struct({ machineId: FleetMachineId, access: FleetAccess });
+// A read-only machine with standard access on the machines it names, whatever its own level.
+const FleetAccessException = Schema.Struct({
+  machineId: FleetMachineId,
+  standardOn: Schema.Array(FleetMachineId).check(Schema.isMaxLength(100)),
+});
 const VerificationCode = Schema.String.check(Schema.isPattern(/^[a-f0-9]{12}$/u));
 export const LanFleetSetupInput = Schema.Union([
   Schema.Struct({
@@ -134,6 +139,10 @@ export const LanFleetSetupInput = Schema.Union([
     revision: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
     defaultAccess: FleetAccess,
     machines: Schema.Array(FleetMachineAccess).check(Schema.isMaxLength(100)),
+    // Replaces the exceptions of each machine it names; without it, exceptions stay as they are.
+    exceptions: Schema.optionalKey(
+      Schema.Array(FleetAccessException).check(Schema.isMaxLength(100)),
+    ),
   }),
   Schema.Struct({
     operation: Schema.Literal("transport"),
@@ -166,6 +175,8 @@ export const LanFleetSetupState = Schema.Struct({
       revision: Schema.Number,
       defaultAccess: FleetAccess,
       machines: Schema.Array(FleetMachineAccess),
+      // Exceptions among the fleet's machines, by caller.
+      exceptions: Schema.optionalKey(Schema.Array(FleetAccessException)),
       selfAccess: FleetAccess,
       // Read-only machines may only restrict themselves.
       canChange: Schema.Boolean,
@@ -190,8 +201,15 @@ export type LanFleetSetupState = typeof LanFleetSetupState.Type;
 
 export class LanFleetError extends Schema.TaggedError<LanFleetError>()("LanFleetError", {
   reason: Schema.Literals(["configuration", "unavailable", "busy", "transport"]),
+  // Why a change was refused, when it has a clearer message than its reason. A string, so a
+  // client that does not know one shows the reason's message instead.
+  refusal: Schema.optionalKey(Schema.String),
 }) {
   override get message(): string {
+    if (this.refusal === "exception-onto-standard")
+      return "An exception only applies on a machine that is itself read-only. Standard access on a standard machine reaches every machine it can change, so choose only read-only machines.";
+    if (this.refusal === "exception-unknown-machine")
+      return "An exception must name two machines in this fleet. Reload Machine access and choose from its machines.";
     if (this.reason === "transport")
       return "The encrypted LAN endpoint could not start. Check that its selected address is local and its port is available; existing keys and connections were preserved.";
     return this.reason === "busy"

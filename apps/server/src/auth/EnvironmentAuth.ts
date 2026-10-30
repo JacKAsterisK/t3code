@@ -82,6 +82,12 @@ export interface McpClientSession {
   readonly access: AuthMcpClientAccess;
   /** Another T3 Code environment's link, whose work here stays within it. */
   readonly peerLink: boolean;
+  /**
+   * Whether it may see what hands access to someone outside the fleet, such as webhook URLs:
+   * false for a fleet machine standard here only through an exception
+   * (`CredentialAccessCap.administersFleet`).
+   */
+  readonly sharesOutside: boolean;
 }
 
 export interface AuthenticatedSession {
@@ -1331,12 +1337,18 @@ export const make = Effect.gen(function* () {
                       ? Effect.fail(
                           new McpOAuthGrants.McpOAuthGrantError({ reason: "invalid_grant" }),
                         )
-                      : Effect.succeed({ binding, scopes }),
+                      : (Option.isSome(accessCap)
+                          ? accessCap.value.administersFleet({
+                              subject: session.subject,
+                              taskGrant: Option.isSome(binding),
+                            })
+                          : Effect.succeed(true)
+                        ).pipe(Effect.map((sharesOutside) => ({ binding, scopes, sharesOutside }))),
                   ),
                 ),
               ),
               Effect.map(
-                ({ binding, scopes }) =>
+                ({ binding, scopes, sharesOutside }) =>
                   ({
                     sessionId: session.sessionId,
                     ...Option.getOrElse(binding, () => ({})),
@@ -1345,6 +1357,7 @@ export const make = Effect.gen(function* () {
                       ? (session.runtimeModeCeiling ?? "approval-required")
                       : "read-only",
                     peerLink: session.peerLink === true,
+                    sharesOutside,
                   }) satisfies McpClientSession,
               ),
               Effect.mapError(

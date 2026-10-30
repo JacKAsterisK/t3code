@@ -165,10 +165,16 @@ const make = Effect.gen(function* () {
     let cursor: number | null = 0;
     while (cursor !== null) {
       const listed: Tool.Success<typeof ProjectToolkit.tools.t3_project_list> =
-        yield* forwarding.call(scope, ProjectToolkit.tools.t3_project_list, environmentId, {
-          cursor,
-          limit: 100,
-        });
+        yield* forwarding.call(
+          scope,
+          ProjectToolkit.tools.t3_project_list,
+          environmentId,
+          {
+            cursor,
+            limit: 100,
+          },
+          false,
+        );
       matches.push(
         ...listed.projects.filter((project) => project.repositoryIdentity?.canonicalKey === key),
       );
@@ -277,6 +283,8 @@ const make = Effect.gen(function* () {
             title: parent.thread.title,
           },
         },
+        // Launching writes there; listing projects above only reads, as their declarations say.
+        true,
       );
       const link = yield* links.get(target.environmentId).pipe(
         Effect.map(Option.getOrUndefined),

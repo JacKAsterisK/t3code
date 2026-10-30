@@ -46,7 +46,18 @@ const refuseOutsideConstruction = (token: symbol) => {
 let declare: <P, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
   remote: RemoteCheck<P> | undefined,
+  writes: Writes<P>,
 ) => Declaration<(params: P) => Effect.Effect<A, E, R>>;
+
+/**
+ * Whether a call changes anything: exactly the calls a read-only client is
+ * refused. A linked environment applies it to a read-only link, and this one to
+ * its own calls there once its rules make it read-only on that environment.
+ */
+type Writes<P> = (params: P) => boolean;
+let writesOfDeclaration: <Handler>(declaration: Declaration<Handler>) => Writes<never>;
+const always = () => true;
+const never = () => false;
 
 /**
  * What a call bound for a linked environment checks here before it goes: the
@@ -74,19 +85,23 @@ let handlersLayer: <Tools extends Record<string, Tool.Any>, EX, RX>(
 export class Declaration<out Handler> {
   readonly #handle: Handler;
   readonly #remote: RemoteCheck<never> | undefined;
+  readonly #writes: Writes<never>;
   private constructor(
     token: typeof builtHere,
     handle: Handler,
     remote: RemoteCheck<never> | undefined,
+    writes: Writes<never>,
   ) {
     refuseOutsideConstruction(token);
     this.#handle = handle;
     this.#remote = remote;
+    this.#writes = writes;
   }
   static {
-    declare = (handle, remote) => new Declaration(builtHere, handle, remote);
+    declare = (handle, remote, writes) => new Declaration(builtHere, handle, remote, writes);
     checkedHandler = Struct.lambda<CheckedHandler>((declaration) => declaration.#handle);
     remoteCheckOf = (declaration) => declaration.#remote;
+    writesOfDeclaration = (declaration) => declaration.#writes;
   }
 }
 
@@ -122,10 +137,15 @@ export const reads = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>)
   declare(
     (params: P) => handle(params),
     () => Effect.void,
+    never,
   );
 
 export const readsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
-  declare((params: P) => requireThreadCaller.pipe(Effect.flatMap(() => handle(params))), undefined);
+  declare(
+    (params: P) => requireThreadCaller.pipe(Effect.flatMap(() => handle(params))),
+    undefined,
+    never,
+  );
 
 export const actsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
   declare(
@@ -135,6 +155,7 @@ export const actsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A,
         Effect.flatMap(() => handle(params)),
       ),
     undefined,
+    always,
   );
 
 /**
@@ -160,6 +181,7 @@ export const writes = <P, A, E, R>(
         Effect.flatMap(() => handle(params)),
       ),
     () => orchestratingCaller,
+    always,
   );
 
 /** Requires handler capability checks, not thread control; linked work is refused the same way. */
@@ -171,6 +193,7 @@ export const writesWithCapability = <P, A, E, R>(handle: (params: P) => Effect.E
         Effect.flatMap(() => handle(params)),
       ),
     () => writingCaller,
+    always,
   );
 
 export const writesThreads = <P, A, E, R>(
@@ -205,6 +228,7 @@ export const writesThreads = <P, A, E, R>(
         );
       }),
     () => writingCaller,
+    always,
   );
 
 const escalationDenied = (refusal: DispatchModeRefusal) =>
@@ -255,6 +279,7 @@ export const startsThreads = <P, A, E, R>(
         return yield* handle(params, yield* started(caller, params));
       }),
     (params: P) => Effect.flatMap(writingCaller, (caller) => started(caller, params)),
+    always,
   );
 };
 
@@ -267,6 +292,10 @@ export const either = <P, A, E, R, A2, E2, R2>(
   const remotes = [remoteCheckOf(first), remoteCheckOf(second)] as ReadonlyArray<
     RemoteCheck<P> | undefined
   >;
+  const writes = [
+    writesOfDeclaration(first),
+    writesOfDeclaration(second),
+  ] as unknown as ReadonlyArray<Writes<P>>;
   return declare(
     (params: P): Effect.Effect<A | A2, E | E2, R | R2> =>
       useFirst(params) ? checkedHandler(first)(params) : checkedHandler(second)(params),
@@ -278,6 +307,7 @@ export const either = <P, A, E, R, A2, E2, R2>(
           message: "This action acts as the calling thread, which is here. Omit environmentId.",
         }),
       ),
+    (params) => writes[useFirst(params) ? 0 : 1]!(params),
   );
 };
 
@@ -313,6 +343,7 @@ export const writesEnvironment = <P, A, E, R>(
       orchestratingCaller.pipe(
         Effect.tap((caller) => assertFullAccess(caller, fullAccessRequired)),
       ),
+    always,
   );
 };
 
@@ -443,7 +474,13 @@ const routed = Effect.fn("McpToolAccess.routed")(function* <Tools extends Record
         if (scope.linkedEnvironments === false) return yield* PeerForwarding.linkedEnvironmentsOff;
         yield* (remote as RemoteCheck<typeof params>)(params);
         if (Option.isNone(forwarding)) return yield* linksUnavailable;
-        return yield* forwarding.value.call(scope, tool, target, { ...params, environmentId });
+        return yield* forwarding.value.call(
+          scope,
+          tool,
+          target,
+          { ...params, environmentId },
+          (writesOfDeclaration(declaration) as Writes<typeof params>)(params),
+        );
       });
   }
   return handlers as Toolkit.HandlersFrom<Tools>;

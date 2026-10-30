@@ -60,6 +60,8 @@ Network isolation is available with the optional Windows Sandbox runner; the
 native-directory runner makes no OS or network isolation claim. All required
 tools and caches must still match their reviewed inventory.
 
+Every release starts by merging upstream `main` (pingdotgg/t3code) into the fork,
+so each release ships current upstream; see the release rule in `AGENTS.md`.
 Every release builds one candidate from the final pushed commit, whatever changed
 since the previous release. After an upstream merge or a dependency change,
 refresh the offline pnpm store and staging locks, then capture a new build lock

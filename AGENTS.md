@@ -236,3 +236,19 @@ and reliability with less maintenance.
 This grants no authority to deploy or publish, to delete data, to add
 credentials or access, or to change security settings. It also does not allow
 overwriting unrelated work or adding a recurring manual setup step.
+
+## Every LAN release merges upstream first
+
+Before building any LAN release, merge upstream `main` (pingdotgg/t3code) into
+the fork, so every release ships current upstream. No release skips this.
+
+- Merge on a branch, resolve conflicts against the tracker's decisions, and run
+  the targeted tests for every area the conflicts or upstream changes touch.
+- Upstream migrations take the next fork migration IDs after the fork's own;
+  register each in `scripts/lan/home-repair.ts` `supportedMigrationIds` and the
+  release audits' target schema.
+- Update [Native feature sync](docs/maintenance/native-feature-sync.md): the
+  Baseline commit and every row the merge affects.
+- If upstream changed dependencies, refresh the staging locks
+  (`scripts/lan/prepare-stage-locks.ts`), the offline store and the toolchain
+  manifest, per [LAN distribution](docs/operations/lan-distribution.md).

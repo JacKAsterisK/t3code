@@ -84,20 +84,23 @@ only once no machine still on LAN 1.0.25 could cut a read-only machine off:
   revokes for access, and 1.0.26 keeps a downgraded machine's session (below).
 - So every enabled machine says, when it sees the list on 1.0.26 or later, that
   it runs it: it signs `fleet-access-ready/<machineId>.json` beside the roster.
-  Once every enabled machine has one, the list is adopted at once.
-- 24 hours after a machine first saw the list, it stops waiting for machines
-  without a marker that have published no signed connection summary for 24
-  hours: they are off. It keeps waiting for any that published one, since that
-  is the only sign a machine runs, and 1.0.25 and 1.0.24 publish the same summary
-  (1.0.25 every five minutes from its server, 1.0.24 every five minutes while its
-  desktop is open with automatic pickup). A busy 1.0.24 machine therefore delays
-  the list until it updates. That delays the restriction, never anyone's access.
-- Each machine records when it first saw the list in
-  `userdata\lan-fleet-access-seed.json`, so a restart does not restart the wait.
-- While it waits, Machine access names each machine it waits for, as running an
-  older version or offline, and when offline ones stop being waited for; the
+  The list waits until every enabled machine has a marker signed with its own
+  fleet key, however long that takes, then is adopted at once. Nothing else
+  tells a 1.0.25 machine from one that is off, so a machine that is off delays
+  the list until it is turned on and updated, or is disabled in the roster. That
+  delays the restriction, never anyone's access. Hub never downgrades, so once
+  every enabled machine has run 1.0.26, no 1.0.25 issuer is left among them.
+- The machine that adopts it reads every marker again under the change lock,
+  right before it writes revision 1.
+- While it waits, Machine access names the machines not yet on 1.0.26, and the
   server logs the same. Placing the file early is safe: older builds never read
   it, and newer ones wait like this.
+- A machine disabled in the roster is not waited for. If it is enabled again
+  after the list is adopted while still on 1.0.25, it revokes a downgraded
+  machine's session at once, as 1.0.25 does. A downgraded machine on 1.0.26
+  collects the replacement within five minutes while its desktop is open, or
+  as it opens; one still on 1.0.24 cannot, and loses reads on that machine until
+  one of them updates. Let a disabled machine update before enabling it again.
 
 Machines it doesn't name, and **Machines added later**, get its `defaultAccess`,
 so the result doesn't depend on which machine adopts it; the command writes
@@ -140,10 +143,13 @@ or untrusted one. A downgraded machine's sessions and task grants are only
 capped, so they keep reading and refreshing without a new approval. In
 shared-folder fleets each sync also sends a peer whose access changed a
 replacement fleet credential at its access; the peer's desktop swaps it in for
-its saved connection. From LAN 1.0.26 the issuer keeps the peer's old fleet
-session, capped, until the peer uses a session at its new access, and only then
-retires it. So a peer that cannot take the replacement yet (LAN 1.0.24) keeps
-reading until it updates, then converges with no manual step. LAN 1.0.25 issuers
+its saved connection. From LAN 1.0.26 the issuer treats the session the peer
+used last, at any access, as the one it saved: it retires only sessions issued
+before that one, and when that one is not at the peer's current access it keeps
+it, capped, sends a replacement and waits until the peer uses it. So a peer that
+cannot take the replacement yet (LAN 1.0.24) keeps reading until it updates,
+then converges with no manual step, and a peer whose access changes back before
+the issuer's next pass keeps the session it just saved. LAN 1.0.25 issuers
 instead revoke the old session at once. Gained access waits until the peer is
 online. A read-only machine's own server also refuses to forward LAN task
 changes. Until a list is saved, each machine keeps the access chosen at setup.
@@ -213,36 +219,40 @@ days. With `fleet-access-seed.json` placed when 1.0.26 publishes:
 - **1.0.25** ignores the starting list. With no list it changes nothing. Once a
   list exists it revokes a downgraded peer's fleet session at once and sends a
   replacement. That is why adoption waits for it.
-- **1.0.26** signs its marker on first sight and shows, in Machine access, whom
-  it waits for. Nothing links and no access changes until the list is adopted.
-  After that it caps each downgraded peer's existing sessions on every use,
-  sends a replacement at the new access and retires the old session once the
-  replacement is in use. Links form within two adapter passes.
+- **1.0.26** signs its marker on its first fleet read and shows, in Machine
+  access, which machines are not yet on 1.0.26. Nothing links and no access
+  changes until the list is adopted. After that it caps each downgraded peer's
+  existing sessions on every use, sends a replacement at the new access and
+  retires the old session once the replacement is in use. Links form within two
+  adapter passes.
+
+The list waits until every enabled machine is on 1.0.26. There is no timeout: a
+machine that is off delays the restriction until it is turned on and updated,
+or is disabled in the roster. Until then every machine keeps the access it has
+today and nothing links.
 
 What the user sees:
 
-1. **Every machine updates within a day.** The first machine on 1.0.26 shows the
-   other four as waited for; the list shrinks as each updates. When the last one
-   signs, the next sync on any 1.0.26 machine (within five minutes) adopts it and
-   removes the starting list. From then on AnvilToad and SPDevMachine can read but
-   not launch, send, stop or approve on the others. Their open desktops collect
-   read-only replacements within five minutes, or as they open, with no prompt.
-   Linked environments turn on, locked, on all five, and links form at the
-   list's access within about 20 minutes.
-2. **AnvilToad stays busy on 1.0.24 for days.** With its desktop open and
-   automatic pickup on, it publishes a summary every five minutes, so the others
-   show it as running an older version and keep waiting past the day. Nothing
-   changes anywhere: it keeps standard access, and nothing links. Once it
-   updates and signs, the list is adopted as in 1. With automatic pickup off it
-   publishes nothing, so after the day it counts as offline and the list is
-   adopted without it. 1.0.26 issuers then keep its sessions, now read-only on
-   every use, and offer read-only replacements it ignores; it keeps reading.
-   When it updates, it collects them and its old sessions are retired.
-3. **SPDevMachine is off the whole time.** The others show it as offline. A day
-   after the first 1.0.26 machine saw the starting list, once every other machine
-   has signed (or been silent for a day), the list is adopted without it. When
-   it starts again on 1.0.26 it collects its read-only replacements. If it starts
-   on 1.0.24 first, it keeps reading everywhere and converges once updated.
+1. **SPDevMachine updates soon.** The first machine on 1.0.26 lists the other
+   four as not yet on 1.0.26; the list shrinks as each updates and starts. When
+   the last one signs, the next sync on any 1.0.26 machine (within five minutes)
+   adopts it and removes the starting list, and the others read it within five
+   minutes. From then on AnvilToad and SPDevMachine can read but not launch,
+   send, stop or approve on the other three: their existing connections lose
+   writes at once and keep reading. Their open desktops collect read-only
+   replacements within five minutes, or as they open, with no prompt, and the
+   old sessions are retired once the replacements are in use. Linked
+   environments turn on, locked, on all five, and links form at the list's
+   access within about 20 minutes. A machine that stays busy on an older
+   version delays all of this the same way until Hub updates it.
+2. **SPDevMachine stays off.** Every 1.0.26 machine lists SPDevMachine as not yet
+   on 1.0.26, and nothing changes anywhere: AnvilToad keeps standard access, and
+   nothing links. When SPDevMachine is turned on, Hub updates it once it is
+   idle; on 1.0.26 it signs, and the list is adopted as in 1. If it comes up
+   on 1.0.24 or 1.0.25 first, it changes nothing until then. To apply the
+   restriction sooner, disable SPDevMachine in the roster: the list is then
+   adopted without it, and it starts read-only. Let it update before enabling it
+   again (see [Machine access](#machine-access)).
 
 ## Link approved machines
 
@@ -297,8 +307,13 @@ a link would carry each machine's setup access, normally standard. That includes
 machine with no saved list that finds no `fleet-access` folder on the share.
 
 The linking machine also holds itself to its own list: it never links above the
-access its accepted list gives it, whatever the destination offers, and drops at
-once a link above it when its list narrows, then relinks at its access. It
+access its accepted list gives it, whatever the destination offers, reading its
+list again right before and after each sign-in, and drops at once a link above
+it when its list narrows, before reading the share, then relinks at its access.
+The destination likewise mints each code at what its list says at that moment.
+Another machine applies a later change in Settings only once it reads it, within
+about five minutes; until then it may still offer the access the change took
+away, just as it still serves its fleet connections at the old access. It
 ignores offers that carry no list revision, which is every offer from LAN 1.0.25
 (whose adapter, turned on by hand, offers its setup access even before a list
 exists). The destination's cap on every call stays authoritative.
@@ -306,7 +321,8 @@ exists). The destination's cap on every call stays authoritative.
 Linked environments count as on only while the fleet links this machine: as of
 its last fleet read its own enrollment checks out, its roster row is enabled,
 and a list exists. Labs then shows the switch on and locked. A machine whose
-roster row is disabled stops counting as linked, while the list it accepted keeps
+roster row is disabled, whose enrollment record is gone or whose fleet bootstrap
+is turned off stops counting as linked, while the list it accepted keeps
 governing credentials. Anywhere else, such as a development or unenrolled
 install, the Labs switch decides as upstream. A machine opts out with
 `"fleetLinkedEnvironmentsEnabled": false` in its `userdata\settings.json`; on its

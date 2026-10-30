@@ -412,8 +412,7 @@ approval before code or runtime changes.
 - **Data:** signed revisions in `fleet-access` on the share, an optional one-time
   starting list `fleet-access-seed.json` beside the roster (removed once
   adopted) with signed readiness markers in `fleet-access-ready`, the accepted
-  chain in `userdata\lan-fleet-access.json`, when the starting list was first
-  seen in `userdata\lan-fleet-access-seed.json`; trust-check misses in
+  chain in `userdata\lan-fleet-access.json`; trust-check misses in
   `lan-fleet-members.json` and `lan-fleet-trusted.json`. No database migration.
 - **Decision:** keep. A fleet adapter that creates native peer links must take
   each link's access from `FleetAccess.accessFor` and follow `FleetAccess.changes`

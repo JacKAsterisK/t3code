@@ -229,8 +229,21 @@ A policy change takes effect without approval:
   - L links at no more than its own access. A code minted for `full-access`
     also signs in at `read-only`, and the session gets only that. A link made
     this way is marked `clamped` and relinked once L's own access widens.
+  - L reads its own access from its live list, not a copy taken when the pass
+    started: right before each sign-in, and again right after it, unlinking at
+    once a link the list narrowed meanwhile. Each pass first unlinks every link
+    above L's access, before it reads the share or calls a peer, so a slow or
+    failing one never keeps it. D likewise reads L's access again right before
+    it mints.
   - A link L holds above its own access is unlinked at once and requested again.
   - D's cap on every call stays authoritative.
+- Everything above is local to one machine. A list change made in Settings
+  reaches each other machine at its next fleet read, within a sync interval
+  (about five minutes). Until then that machine still offers, mints and caps at
+  the revision it has, exactly as it still serves its ordinary fleet
+  connections. Each machine enforces its own copy of the list; nothing waits for
+  the others to agree. At first adoption no link exists yet (links need a list),
+  so the rollout itself never meets this.
 - Neither machine shows a prompt.
 
 ### 5. Gating
@@ -390,12 +403,11 @@ machine's fleet deliveries. Do it only with Dan's approval.
 ### How to run the proof
 
 1. Place `fleet-access-seed.json` at any time (older builds ignore it), then
-   install 1.0.26. It is adopted once every enabled machine runs 1.0.26. A day
-   after a 1.0.26 machine first saw it, machines that have published no signed
-   summary for a day are no longer waited for; running ones always are. Until
-   then Machine access says which machines it waits for, as running an older
-   version or offline. Nothing is added to `settings.json`. What each machine
-   sees during the rollout:
+   install 1.0.26. It is adopted once every enabled machine has signed its
+   1.0.26 marker, however long that takes; a machine that is off delays it
+   until it is turned on and updated, or disabled in the roster. Until then
+   Machine access lists the machines not yet on 1.0.26. Nothing is added to
+   `settings.json`. What each machine sees during the rollout:
    [LAN machine links](../operations/lan-machine-links.md#rolling-out-1026-with-a-starting-list).
 2. Run the table above. **Sync now** requests a pass after it finishes;
    otherwise passes run every 10 minutes, at startup, and on every policy or
@@ -587,9 +599,9 @@ access-policy work also touches (`LanFleet.ts`, `packages/contracts/src/lanFleet
   default. Re-check them on each upstream sync, under row 2.
 - **Mixed versions.** A machine without the adapter ignores the new files,
   and its peers show `peer needs update`. Nothing in today's catalog or
-  delivery formats changes. A starting list waits until no running machine
-  could still be on 1.0.25, which revokes a downgraded peer's fleet session at
-  once, while 1.0.24 cannot take the replacement. 1.0.26 issuers keep that
+  delivery formats changes. A starting list waits until every enabled machine
+  has said it runs 1.0.26, since 1.0.25 revokes a downgraded peer's fleet
+  session at once, while 1.0.24 cannot take the replacement. 1.0.26 issuers keep that
   session, capped, until the peer uses its replacement
   ([LAN machine links](../operations/lan-machine-links.md#machine-access)).
   Offers from a 1.0.25 adapter, which carry no list revision, are never used.

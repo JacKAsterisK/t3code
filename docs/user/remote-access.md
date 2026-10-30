@@ -54,9 +54,9 @@ read-only machine's agents can only read. Nothing needs turning on or approving.
 Links renew themselves, follow access changes within about ten minutes, and go
 away when a machine leaves the fleet. Machines link only once the fleet has a
 **Machine access** list. If an administrator placed a starting access list on the
-shared folder, an updated machine saves it as that list once the machines it makes
-read-only have updated too, or a day after it first saw the file; otherwise saving
-access in **Machine access** starts one. To keep one
+shared folder, an updated machine saves it as that list once every enabled machine
+has updated, however long that takes; **Machine access** names the ones it waits
+for. Otherwise saving access in **Machine access** starts one. To keep one
 machine out, add `"fleetLinkedEnvironmentsEnabled": false` to its server
 `settings.json`.
 

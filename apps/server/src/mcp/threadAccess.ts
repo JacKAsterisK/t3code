@@ -11,6 +11,7 @@ import {
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import { THREAD_ID_INPUT_FORMS } from "@t3tools/shared/threadLinks";
 
 import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -18,23 +19,29 @@ import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 
 /**
- * Threads an agent starts over MCP are `mcp:<uuid>`, and agents often paste the
- * bare uuid. The id is never rewritten, so permission checks keyed on it still
- * hold; the miss only names a live thread the caller could read by its full id.
+ * Only a deleted thread is "no longer available"; agents read that as gone. Agents often paste
+ * the bare uuid of an `mcp:<uuid>` thread; that id is never rewritten, so permission checks keyed
+ * on it hold, and the miss only names a live thread the caller could read by its full id.
  */
 export const threadNotFound = Effect.fn("OrchestratorMcpService.threadNotFound")(function* (
   threads: Pick<ThreadManagement.ThreadManagementService["Service"], "getThreadShell">,
   threadId: ThreadId,
-  message: string,
+  found: Pick<OrchestrationV2ThreadShell, "deletedAt"> | null,
 ) {
+  if (found !== null) {
+    return yield* new OrchestratorMcpFailure({
+      code: "thread_not_found",
+      message: `Thread ${threadId} was deleted and is no longer available.`,
+    });
+  }
   const prefixed = ThreadId.make(`mcp:${threadId}`);
   const shell = yield* threads.getThreadShell(prefixed).pipe(Effect.orElseSucceed(() => null));
   return yield* new OrchestratorMcpFailure({
     code: "thread_not_found",
     message:
       shell === null || shell.deletedAt !== null
-        ? message
-        : `${message} Did you mean \`${prefixed}\`?`,
+        ? `No thread ${threadId} exists here. ${THREAD_ID_INPUT_FORMS}`
+        : `No thread ${threadId} exists here. Did you mean \`${prefixed}\`?`,
   });
 });
 
@@ -185,7 +192,7 @@ export const readThread = Effect.fn("mcp.readThread")(function* <
   const targetId = yield* resolveThreadId(context, threadId);
   const shell = yield* context.threads.getThreadShell(targetId).pipe(Effect.mapError(unavailable));
   if (shell === null || shell.deletedAt !== null) {
-    return yield* threadNotFound(context.threads, targetId, "The thread was not found.");
+    return yield* threadNotFound(context.threads, targetId, shell);
   }
   const projection = yield* context.threads
     .getProjectThreadRecords({ projectId: shell.projectId, threadId: targetId }, fields, {

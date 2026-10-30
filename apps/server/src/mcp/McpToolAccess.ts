@@ -15,11 +15,13 @@ import * as Struct from "effect/Struct";
 import type * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
 import type { Tool, Toolkit } from "effect/ai";
+import { THREAD_ID_INPUT_FORMS, parseThreadIdInput } from "@t3tools/shared/threadLinks";
 
 import {
   DispatchModeLimit,
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import { assertNotLinked, assertSameLink, callerLinkOrigin } from "./linkOrigin.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -486,13 +488,101 @@ const routed = Effect.fn("McpToolAccess.routed")(function* <Tools extends Record
   return handlers as Toolkit.HandlersFrom<Tools>;
 });
 
+const THREAD_ID_FIELDS = ["threadId", "targetThreadId"] as const;
+
+const threadIdFields = (tool: Tool.Any) => {
+  const parameters: unknown = tool.parametersSchema;
+  if (!Predicate.hasProperty(parameters, "fields") || !Predicate.isObject(parameters.fields))
+    return [];
+  const fields = parameters.fields;
+  return THREAD_ID_FIELDS.filter((field) => Predicate.hasProperty(fields, field));
+};
+
+const invalidThreadId = (message: string) =>
+  new OrchestratorMcpFailure({ code: "invalid_request", message });
+
+/**
+ * Every tool gets a thread id however T3 showed it to the agent, before its checks and route;
+ * a v2 link's environment becomes `environmentId`. An id that could be either is looked up here,
+ * as written first; a linked environment does that itself.
+ */
+const resolvedThreadIds = Effect.fn("McpToolAccess.resolvedThreadIds")(function* <
+  Tools extends Record<string, Tool.Any>,
+>(toolkit: Toolkit.Toolkit<Tools>, handlers: Toolkit.HandlersFrom<Tools>) {
+  // Optional so toolkits that never name a thread build without it.
+  const threads = yield* Effect.serviceOption(ThreadManagement.ThreadManagementService);
+  const located = (candidates: ReadonlyArray<ThreadId>, likely: ThreadId) =>
+    Option.isNone(threads) || candidates.length < 2
+      ? Effect.succeed(likely)
+      : Effect.findFirst(candidates, (threadId) =>
+          threads.value.getThreadShell(threadId).pipe(
+            Effect.map((shell) => shell !== null),
+            Effect.orElseSucceed(() => false),
+          ),
+        ).pipe(Effect.map(Option.getOrElse(() => likely)));
+  const resolved: Record<string, unknown> = { ...handlers };
+  for (const [name, tool] of Object.entries(toolkit.tools)) {
+    const fields = threadIdFields(tool);
+    if (fields.length === 0) continue;
+    const takesEnvironment = takesLinkedEnvironment(tool);
+    const handle = resolved[name] as (
+      params: object,
+    ) => Effect.Effect<unknown, Tool.Failure<Tools[keyof Tools]>>;
+    resolved[name] = (params: Readonly<Record<string, unknown>>) =>
+      Effect.gen(function* () {
+        const written = fields.flatMap((field) => {
+          const value = params[field];
+          return typeof value === "string"
+            ? [{ field, value, input: parseThreadIdInput(value) }]
+            : [];
+        });
+        if (written.length === 0) return yield* handle(params);
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const linked = new Set<EnvironmentId>();
+        for (const { value, input } of written) {
+          if (input === null)
+            return yield* invalidThreadId(`\`${value}\` names no thread. ${THREAD_ID_INPUT_FORMS}`);
+          if (input.environmentId !== null) linked.add(input.environmentId);
+        }
+        const [link, ...others] = linked;
+        if (others.length > 0)
+          return yield* invalidThreadId("The thread links name different environments.");
+        const next: Record<string, unknown> = { ...params };
+        let environmentId = takesEnvironment
+          ? (params.environmentId as EnvironmentId | undefined)
+          : undefined;
+        if (link !== undefined) {
+          if (environmentId !== undefined && environmentId !== link)
+            return yield* invalidThreadId(
+              `The thread link names environment ${link}, but environmentId is ${environmentId}. Omit one or make them match.`,
+            );
+          if (!takesEnvironment && link !== scope.environmentId)
+            return yield* invalidThreadId(
+              `The thread link names environment ${link}; this tool acts only in this environment.`,
+            );
+          if (takesEnvironment) next.environmentId = environmentId = link;
+        }
+        const here = PeerForwarding.remoteTarget(scope, environmentId) === undefined;
+        for (const { field, input } of written) {
+          if (input === null) continue;
+          next[field] = here ? yield* located(input.candidates, input.likely) : input.likely;
+        }
+        return yield* handle(next);
+      });
+  }
+  return resolved as Toolkit.HandlersFrom<Tools>;
+});
+
 export const toLayer = <Tools extends Record<string, Tool.Any>, EX = never, RX = never>(
   toolkit: Toolkit.Toolkit<Tools>,
   build: Handlers<Tools> | Effect.Effect<Handlers<Tools>, EX, RX>,
 ): HandlersLayer<Tools, EX, Exclude<RX, Scope.Scope>> => {
   // Checked as soon as they are given, so a forged declaration fails here.
   const withDeclarations = (declarations: Handlers<Tools>) =>
-    routed(toolkit, declarations, checkedHandlers(declarations)).pipe(Effect.map(gateTaskOnly));
+    routed(toolkit, declarations, checkedHandlers(declarations)).pipe(
+      Effect.flatMap((handlers) => resolvedThreadIds(toolkit, handlers)),
+      Effect.map(gateTaskOnly),
+    );
   return handlersLayer(
     toolkit.toLayer(
       Effect.isEffect(build) ? Effect.flatMap(build, withDeclarations) : withDeclarations(build),

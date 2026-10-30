@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import { THREAD_ID_INPUT_FORMS } from "@t3tools/shared/threadLinks";
 import {
   CommandId,
   EnvironmentId,
@@ -2702,21 +2703,22 @@ describe("OrchestratorMcpService thread lookup", () => {
     }),
   );
 
-  it.effect("keeps the plain message for an id that matches nothing", () =>
+  it.effect("says an id that matches nothing names no thread, with the forms tools take", () =>
     Effect.gen(function* () {
       const { read, send } = yield* failuresFor([]);
-      assert.equal(read.code, "thread_not_found");
-      assert.equal(read.message, `Thread ${bareId} is no longer available.`);
-      assert.equal(send.code, "thread_not_found");
-      assert.equal(send.message, `Thread ${bareId} was not found.`);
+      for (const error of [read, send]) {
+        assert.equal(error.code, "thread_not_found");
+        assert.equal(error.message, `No thread ${bareId} exists here. ${THREAD_ID_INPUT_FORMS}`);
+      }
     }),
   );
 
   it.effect("does not name an mcp: thread that was deleted", () =>
     Effect.gen(function* () {
       const { read, send } = yield* failuresFor([deletedLaunched]);
-      assert.equal(read.message, `Thread ${bareId} is no longer available.`);
-      assert.equal(send.message, `Thread ${bareId} was not found.`);
+      for (const error of [read, send]) {
+        assert.equal(error.message, `No thread ${bareId} exists here. ${THREAD_ID_INPUT_FORMS}`);
+      }
     }),
   );
 });

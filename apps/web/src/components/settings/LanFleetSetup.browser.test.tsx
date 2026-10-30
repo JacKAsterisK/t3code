@@ -312,6 +312,45 @@ it("saves the machines a read-only machine is standard on, from a standard machi
   });
 });
 
+it("names the machines that had full control before making their target standard", async () => {
+  const { configure } = setup({
+    stage: "active",
+    sharedFolderTrust: true,
+    peers: [
+      ...accessPeers,
+      peerOf("third", "Third machine", 12, "fedcba654321"),
+      peerOf("fourth", "Fourth machine", 13, "0123456789ab"),
+    ],
+    accessPolicy: {
+      revision: 7,
+      defaultAccess: "standard",
+      machines: [
+        { machineId: "other", access: "read-only" },
+        { machineId: "third", access: "read-only" },
+        { machineId: "fourth", access: "read-only" },
+      ],
+      exceptions: [{ machineId: "other", standardOn: ["third"] }],
+      selfAccess: "standard",
+      canChange: true,
+    },
+  });
+  await using screen = await render(<LanFleetSetup />);
+  const warning = /Other machine has had full control of Third machine through an exception/;
+  // A machine no exception reaches gets no warning.
+  await screen.getByRole("combobox", { name: "Access for Fourth machine" }).click();
+  await page.getByRole("option", { name: "Standard" }).click();
+  await expect.element(page.getByText("Give Fourth machine standard access?")).toBeVisible();
+  await expect.element(page.getByText(/had full control of/)).not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await screen.getByRole("combobox", { name: "Access for Third machine" }).click();
+  await page.getByRole("option", { name: "Standard" }).click();
+  await expect.element(page.getByText("Give Third machine standard access?")).toBeVisible();
+  await expect.element(page.getByText(warning)).toBeVisible();
+  expect(configure).not.toHaveBeenCalled();
+  await page.getByRole("button", { name: "Change access" }).click();
+  expect(configure).toHaveBeenCalledOnce();
+});
+
 it("shows an exception onto a machine that is now standard as inactive, removable only", async () => {
   const { configure } = setup({
     stage: "active",

@@ -283,8 +283,9 @@ const make = Effect.gen(function* () {
           subject: `${codePrefix(peer.machineId)}${deliveryId}`,
           scopes: mcpClientScopes(linkAccess(granted)),
         });
+        const withdraw = revokeCodes(codePrefix(peer.machineId));
         // Narrowed while minting: withdraw the code instead of offering it.
-        if ((yield* narrowed(granted)) !== granted) yield* revokeCodes(codePrefix(peer.machineId));
+        if ((yield* narrowed(granted)) !== granted) yield* withdraw;
         else {
           const expiresAt = Math.min(
             DateTime.toEpochMillis(issued.expiresAt),
@@ -303,8 +304,15 @@ const make = Effect.gen(function* () {
               peerLink: { access: linkAccess(granted), policyRevision: mintPolicy.revision },
             }),
           );
-          offer = { deliveryId, level: granted, expiresAt };
-          if (asked) answeredRequestId = request.value.requestId;
+          // Narrowed while publishing: the code is revoked and the offer taken back, so the
+          // request stays unanswered and the next pass offers one at the narrower access.
+          if ((yield* narrowed(granted)) !== granted) {
+            yield* withdraw;
+            yield* removeShare(offerFile);
+          } else {
+            offer = { deliveryId, level: granted, expiresAt };
+            if (asked) answeredRequestId = request.value.requestId;
+          }
         }
       }
     } else if (servable === undefined) yield* revokeCodes(codePrefix(peer.machineId));
@@ -393,7 +401,6 @@ const make = Effect.gen(function* () {
           (yield* ownCeiling(peer.environmentId)) === "read-only"
             ? "read-only"
             : payload.value.access;
-        const prior = yield* peerLinks.get(peer.environmentId);
         const linked = yield* peerLinks
           .link({
             url: origin,
@@ -403,21 +410,11 @@ const make = Effect.gen(function* () {
             access,
           })
           .pipe(Effect.timeout(LINK_TIMEOUT), Effect.result);
-        // The list may narrow while this machine signs in. With no link before, none is kept above
-        // it: the new one goes, the code is spent, and a narrower one is asked for below. One that
-        // replaced an earlier link stays for its reads; every write on it is refused here.
-        const narrowedMeanwhile =
-          linked._tag === "Success" &&
-          Option.isNone(prior) &&
-          access !== "read-only" &&
-          (yield* ownCeiling(peer.environmentId)) === "read-only";
-        if (narrowedMeanwhile) {
-          yield* peerLinks.unlink(peer.environmentId);
-          entry = {
-            environmentId: peer.environmentId,
-            consumedDeliveryId: delivery.header.deliveryId,
-          };
-        } else if (linked._tag === "Success") {
+        // The list may narrow while this machine signs in. The link is kept and receipted all the
+        // same, first link or not: it reads, every write on it is refused here on every send
+        // (`layerWriteCeiling`), and a narrower one is asked for below. Dropping it instead would
+        // leave a 1.0.26 peer holding the spent offer, ignoring requests until it expires.
+        if (linked._tag === "Success") {
           // The new link is in use: the receipt lets the peer retire the one it replaced.
           yield* writeShare(
             shareFile(fleet.deliveryDirectory, files.receipt),

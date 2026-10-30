@@ -400,6 +400,20 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
             (exceptionApplies(peer.machineId) ||
               standardOn(exceptionChange.machineId).includes(peer.machineId)),
         );
+  // An exception gave its caller full control of a read-only machine, shell included. Making that
+  // machine standard extends trust to whatever was done on it, so the change names those callers.
+  const fullControlBy =
+    change === null || change.access !== "standard"
+      ? []
+      : machines
+          .map((peer) => peer.machineId)
+          .filter((caller) =>
+            standardOn(caller).some((receiver) =>
+              change.machineId === null
+                ? !policy.machines.some((machine) => machine.machineId === receiver)
+                : receiver === change.machineId,
+            ),
+          );
   const disabled = fleet.busy || !fleet.allowed || !policy.canChange;
   const select = (label: string, value: FleetAccess, machineId: string | null) => (
     <div className="w-36 shrink-0">
@@ -540,6 +554,18 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
                 one within a few minutes. Nothing needs approving on any machine.
               </DialogDescription>
             </DialogHeader>
+            {fullControlBy.length === 0 ? null : (
+              <DialogPanel>
+                <p className="text-xs text-warning">
+                  {fullControlBy.map(labelOf).join(", ")}{" "}
+                  {fullControlBy.length === 1 ? "has" : "have"} had full control of{" "}
+                  {change.machineId === null ? "machines that follow this setting" : change.label}{" "}
+                  through an exception. Making {change.machineId === null ? "them" : "it"} standard
+                  trusts whatever was done there, such as credentials or tasks left behind; removing
+                  an exception does not undo it.
+                </p>
+              </DialogPanel>
+            )}
             <DialogFooter>
               <DialogClose render={<Button variant="outline" disabled={fleet.busy} />}>
                 Cancel

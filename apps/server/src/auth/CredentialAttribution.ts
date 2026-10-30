@@ -51,10 +51,10 @@ export class CredentialAccessCap extends Context.Service<
       readonly taskGrant?: boolean;
     }) => Effect.Effect<ReadonlyArray<AuthEnvironmentScope> | undefined>;
     /**
-     * Whether the credential may administer the fleet from here now: change the access list or
-     * its exceptions, set up, enroll or approve, or sync on this machine's behalf. A fleet
-     * machine needs standard access of its own; an exception that makes it standard here lets
-     * it work here, never administer. True for a credential no fleet machine is behind.
+     * Whether the credential may administer the fleet from here now, or hand access outside it
+     * (guest shares, webhook URLs, T3 Connect linking), which outlives an exception: a fleet
+     * machine needs standard access of its own, never an exception's. True for a credential no
+     * fleet machine is behind.
      */
     readonly administersFleet: (credential: {
       readonly subject: string;

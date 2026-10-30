@@ -240,33 +240,25 @@ export const pairAccess = (
     : "read-only";
 
 /**
- * Whether `next` adds an exception that would not take effect, its receiver standard in `next`.
- * Receivers are found among `machineIds` and the lists' own machines; one not found is unlisted,
- * so it has `next`'s default.
+ * Why `next` may not add the exceptions it adds, if it may not: each must name a caller and a
+ * receiver that are both fleet machines (`machineIds`), and take effect, its receiver read-only in
+ * `next`. Exceptions the list already has are left as they are.
  */
-const addsInactiveException = (
+const newExceptionRefusal = (
   previous: FleetAccessSnapshot | undefined,
   next: FleetAccessSnapshot,
   machineIds: ReadonlyArray<string>,
-) => {
+): "exception-unknown-machine" | "exception-onto-standard" | undefined => {
   const before = new Set(previous?.pairs ?? []);
   const added = normalizePairs(next.pairs).filter((id) => !before.has(id));
-  if (added.length === 0) return false;
-  const ids = [
-    ...new Set([
-      ...machineIds,
-      ...next.machines.map((machine) => machine.machineId),
-      ...(previous?.machines ?? []).map((machine) => machine.machineId),
-    ]),
-  ];
-  return added.some((id) => {
-    const receiver = ids.find((candidate) =>
-      ids.some((caller) => pairEntryId(caller, candidate) === id),
-    );
-    return receiver === undefined
-      ? next.defaultAccess === "standard"
-      : !exceptionApplies(next, receiver);
-  });
+  const ids = [...new Set(machineIds.filter((id) => !reservedMachineId(id)))];
+  const receivers = added.map((id) =>
+    ids.find((receiver) => ids.some((caller) => pairEntryId(caller, receiver) === id)),
+  );
+  if (receivers.some((receiver) => receiver === undefined)) return "exception-unknown-machine";
+  return receivers.some((receiver) => !exceptionApplies(next, receiver!))
+    ? "exception-onto-standard"
+    : undefined;
 };
 
 /**
@@ -1138,19 +1130,16 @@ const make = Effect.gen(function* () {
           )
         )
           return yield* configurationError();
-        // A new exception onto a machine this list makes standard would do nothing. Stored ones
-        // stay, inactive, and apply again once their receiver is read-only.
-        if (
-          addsInactiveException(
-            current,
-            next,
-            input.peers.map((peer) => peer.machineId),
-          )
-        )
-          return yield* new LanFleetError({
-            reason: "configuration",
-            refusal: "exception-onto-standard",
-          });
+        // A new exception names two fleet machines, and one onto a machine this list makes
+        // standard would do nothing. Stored ones stay, inactive, and apply again once their
+        // receiver is read-only.
+        const refusal = newExceptionRefusal(
+          current,
+          next,
+          input.peers.map((peer) => peer.machineId),
+        );
+        if (refusal !== undefined)
+          return yield* new LanFleetError({ reason: "configuration", refusal });
         if (
           current !== undefined &&
           view.evaluation.heads.length === 1 &&

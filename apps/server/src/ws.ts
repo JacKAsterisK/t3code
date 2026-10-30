@@ -26,9 +26,11 @@ import {
   authScopeResponse,
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
+  AuthAccessWriteScope,
   AuthEnvironmentMaintainScope,
   AuthOrchestrationOperateScope,
   type AuthEnvironmentScope,
+  type ScheduledTask,
   type ScheduledTaskListResult,
   AuthSessionId,
   ClientConnectionMethod,
@@ -1235,8 +1237,9 @@ export const layerWsRpc = (
   currentScopes: Effect.Effect<ReadonlyArray<AuthEnvironmentScope>> = Effect.succeed(
     currentSession.scopes,
   ),
-  // Whether the connection may administer the fleet now; a fleet machine needs its own standard
-  // access, not an exception's (`CredentialAccessCap.administersFleet`).
+  // Whether the connection may administer the fleet, or hand access to someone outside it, now; a
+  // fleet machine needs its own standard access, not an exception's
+  // (`CredentialAccessCap.administersFleet`).
   administersFleet: Effect.Effect<boolean> = Effect.succeed(true),
 ) =>
   Layer.effectContext(
@@ -1418,13 +1421,28 @@ export const layerWsRpc = (
       const relayClient = yield* RelayClient.RelayClient;
       // Webhook URLs start agents; expose them only to operate-scoped sessions while keeping tasks
       // readable. Checked per list, so a connection whose fleet access narrowed stops seeing them.
+      // A URL outlives the access it was read with, so a fleet machine needs its own standard
+      // access to see one, never an exception's.
+      const webhookUrlsVisible = Effect.zipWith(
+        currentScopes,
+        administersFleet,
+        (scopes, administers) => administers && scopes.includes(AuthOrchestrationOperateScope),
+      );
       const withVisibleWebhookUrls = (result: ScheduledTaskListResult) =>
-        currentScopes.pipe(
-          Effect.map((scopes): ScheduledTaskListResult =>
-            scopes.includes(AuthOrchestrationOperateScope)
+        webhookUrlsVisible.pipe(
+          Effect.map((visible): ScheduledTaskListResult =>
+            visible
               ? result
               : { tasks: result.tasks.map(({ webhook: _webhook, ...task }) => task) },
           ),
+        );
+      const withVisibleWebhookUrl = <T extends { readonly task: ScheduledTask }>(result: T) =>
+        webhookUrlsVisible.pipe(
+          Effect.map((visible): T => {
+            if (visible) return result;
+            const { webhook: _webhook, ...task } = result.task;
+            return { ...result, task };
+          }),
         );
       const authorizeEffect = <A, E, R>(
         requiredScope: AuthEnvironmentScope,
@@ -1446,6 +1464,16 @@ export const layerWsRpc = (
           administersFleet,
           (allowed): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
             allowed ? effect : Effect.fail(rpcAuthorizationError(AuthEnvironmentMaintainScope)),
+        );
+      // Hands access to someone outside the fleet, which outlives the access it was made with:
+      // the same bar as administering the fleet, so nothing an exception allowed outlasts it.
+      const sharingOutside = <A, E, R>(
+        effect: Effect.Effect<A, E, R>,
+      ): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
+        Effect.flatMap(
+          administersFleet,
+          (allowed): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
+            allowed ? effect : Effect.fail(rpcAuthorizationError(AuthAccessWriteScope)),
         );
 
       const acpRegistryProject = Effect.fn("ws.acpRegistry.project")(function* (
@@ -2199,10 +2227,12 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
           scheduledTasks.subscribeList().pipe(Stream.mapEffect(withVisibleWebhookUrls)),
-        [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),
+        [WS_METHODS.scheduledTasksUpsert]: (input) =>
+          scheduledTasks.upsert(input).pipe(Effect.flatMap(withVisibleWebhookUrl)),
         [WS_METHODS.scheduledTasksSetEnabled]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.setEnabled(input)),
+            Effect.flatMap(withVisibleWebhookUrl),
           ),
         [WS_METHODS.scheduledTasksDelete]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
@@ -2211,14 +2241,16 @@ export const layerWsRpc = (
         [WS_METHODS.scheduledTasksRunNow]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.runNow(input)),
+            Effect.flatMap(withVisibleWebhookUrl),
           ),
         [WS_METHODS.scheduledTasksRotateWebhookToken]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.rotateWebhookToken(input)),
+            Effect.flatMap(withVisibleWebhookUrl),
           ),
         [WS_METHODS.guestShareCreate]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
-            Effect.andThen(guestShares.create(input)),
+            Effect.andThen(sharingOutside(guestShares.create(input))),
           ),
         [WS_METHODS.secretsAnswerRequest]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(

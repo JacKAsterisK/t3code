@@ -585,6 +585,21 @@ it.live(
         );
         expect(yield* accessOf(grant.access_token)).toBe("auto");
         expect(yield* accessOf(peerLink.token)).toBe("full-access");
+        // Standard here by an exception, it still sees nothing that hands access outside the
+        // fleet, such as a webhook URL; an MCP client no fleet machine approved does.
+        const sharesOutside = (token: string) =>
+          auth
+            .authenticateMcpClient(mcpRequest(token))
+            .pipe(Effect.map((client) => client.sharesOutside));
+        expect(yield* sharesOutside(grant.access_token)).toBe(false);
+        expect(yield* sharesOutside(peerLink.token)).toBe(false);
+        const local = yield* auth.issueMcpClientSession({
+          label: "Local client",
+          access: "full-access",
+          peerLink: false,
+          client: { deviceType: "bot" },
+        });
+        expect(yield* sharesOutside(local.token)).toBe(true);
 
         // CryoFrog is made standard: standard here would reach every machine it writes to, so the
         // exception stops applying. Writes stop at once; sessions and reads stay.

@@ -127,6 +127,16 @@ const make = Effect.gen(function* () {
   // One MCP session per peer and address, reused across calls. The peer keeps
   // sessions in memory, so a restart there answers 404 and we start a new one.
   const sessions = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
+  // A write goes only while this machine's own list lets it write there.
+  const writeAllowed = (input: {
+    readonly environmentId: EnvironmentId;
+    readonly writes: boolean;
+  }) =>
+    input.writes
+      ? ceiling
+          .writable(input.environmentId)
+          .pipe(Effect.flatMap((writable) => (writable ? Effect.void : Effect.fail(writeRefused))))
+      : Effect.void;
 
   const post = (url: string, token: string, body: unknown, headers: Record<string, string>) =>
     httpClient.execute(
@@ -189,17 +199,27 @@ const make = Effect.gen(function* () {
         [McpInvocationContext.MODE_LIMIT_HEADER]: `${input.limits.runtimeMode}/${input.limits.interactionMode}`,
       };
       const sessionKey = `${input.environmentId} ${resolved.url}`;
+      // Read again right before each send, the retry's included: the list may narrow while this
+      // call resolves the link or starts a session, and a write then never leaves this machine.
       const callOnce = (sessionId: string) =>
-        post(
-          resolved.url,
-          resolved.token,
-          {
-            jsonrpc: "2.0",
-            id: 1,
-            method: "tools/call",
-            params: { name: input.tool, arguments: input.arguments },
-          },
-          { ...limitHeader, "mcp-session-id": sessionId, "mcp-protocol-version": PROTOCOL_VERSION },
+        writeAllowed(input).pipe(
+          Effect.andThen(
+            post(
+              resolved.url,
+              resolved.token,
+              {
+                jsonrpc: "2.0",
+                id: 1,
+                method: "tools/call",
+                params: { name: input.tool, arguments: input.arguments },
+              },
+              {
+                ...limitHeader,
+                "mcp-session-id": sessionId,
+                "mcp-protocol-version": PROTOCOL_VERSION,
+              },
+            ),
+          ),
         );
       const existing = (yield* Ref.get(sessions)).get(sessionKey);
       const sessionId = existing ?? (yield* openSession(resolved.url, resolved.token, limitHeader));
@@ -267,12 +287,13 @@ const make = Effect.gen(function* () {
     },
     (effect, input) =>
       // Refused here, before the token goes anywhere; the link itself is fine, so not recorded.
-      (input.writes ? ceiling.writable(input.environmentId) : Effect.succeed(true)).pipe(
-        Effect.flatMap((writable) => (writable ? Effect.void : Effect.fail(writeRefused))),
+      writeAllowed(input).pipe(
         Effect.andThen(
           effect.pipe(
             Effect.tapError((error) =>
-              links.recordOutcome(input.environmentId, { error: error.message }),
+              error === writeRefused
+                ? Effect.void
+                : links.recordOutcome(input.environmentId, { error: error.message }),
             ),
             Effect.tap(() => links.recordOutcome(input.environmentId, { error: null })),
             // Recorded above with the transport's own message; the agent hears it plainly.

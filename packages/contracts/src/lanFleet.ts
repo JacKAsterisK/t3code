@@ -208,6 +208,8 @@ export class LanFleetError extends Schema.TaggedError<LanFleetError>()("LanFleet
   override get message(): string {
     if (this.refusal === "exception-onto-standard")
       return "An exception only applies on a machine that is itself read-only. Standard access on a standard machine reaches every machine it can change, so choose only read-only machines.";
+    if (this.refusal === "exception-unknown-machine")
+      return "An exception must name two machines in this fleet. Reload Machine access and choose from its machines.";
     if (this.reason === "transport")
       return "The encrypted LAN endpoint could not start. Check that its selected address is local and its port is available; existing keys and connections were preserved.";
     return this.reason === "busy"

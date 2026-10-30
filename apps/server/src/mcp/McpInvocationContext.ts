@@ -49,6 +49,11 @@ export interface McpClientCaller {
   readonly narrowedTo?: ClientModes | undefined;
   /** The origin an outside client reached; its thread links open the web app there. */
   readonly webOrigin?: string | undefined;
+  /**
+   * False for a fleet machine standard here only through an exception: it never sees what hands
+   * access to someone outside the fleet, such as a webhook URL, which would outlive it.
+   */
+  readonly sharesOutside?: boolean | undefined;
 }
 
 /**

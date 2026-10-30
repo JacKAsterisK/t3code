@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
+  AuthAccessWriteScope,
   AuthEnvironmentMaintainScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -1138,6 +1139,122 @@ it.effect("refuses fleet administration to a connection that may not administer 
     yield* request("allowed");
     assert.isTrue(Exit.isSuccess(yield* Queue.take(exits)));
     assert.equal(configured, 1);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+    Effect.scoped,
+  ),
+);
+
+it.effect("hands no outside access to a connection standard here only by an exception", () =>
+  Effect.gen(function* () {
+    const exits = yield* Queue.unbounded<Exit.Exit<unknown, unknown>>();
+    const scopes: ReadonlyArray<AuthEnvironmentScope> = [
+      AuthOrchestrationReadScope,
+      AuthOrchestrationOperateScope,
+      AuthAccessWriteScope,
+    ];
+    // A fleet machine read-only on the fleet, standard here only through an exception.
+    let administers = false;
+    let shared = 0;
+    const webhook = {
+      path: "/hooks/task",
+      url: "https://hooks.example.test/task",
+      hasSecret: true,
+    };
+    const methods = [WS_METHODS.guestShareCreate, WS_METHODS.scheduledTasksRotateWebhookToken].map(
+      (method) => WsRpcGroup.requests.get(method)!,
+    );
+    const server = yield* RpcServer.makeNoSerialization(RpcGroup.make(...methods), {
+      ...WS_RPC_SERVER_OPTIONS,
+      onFromServer: (response) =>
+        response._tag === "Exit"
+          ? Queue.offer(exits, response.exit as Exit.Exit<unknown, unknown>)
+          : Effect.void,
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          RpcAuthorization.layer(scopes),
+          layerWsRpc(
+            {
+              sessionId: AuthSessionId.make("fleet-peer"),
+              subject: "lan-fleet:fleet-peer",
+              method: "bearer-access-token",
+              scopes,
+            },
+            {},
+            yield* ServerBrowser.ServerBrowser,
+            Effect.succeed(scopes),
+            Effect.sync(() => administers),
+          ).pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                layerUnusedConfigRpcServices,
+                Layer.mock(GuestShareService.GuestShareService)({
+                  create: () =>
+                    Effect.sync(() => {
+                      shared += 1;
+                      return {} as never;
+                    }),
+                }),
+                Layer.mock(ScheduledTasks.ScheduledTaskService)({
+                  rotateWebhookToken: () =>
+                    Effect.succeed({ task: { id: "task", title: "Nightly", webhook } as never }),
+                }),
+                Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+                Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+                Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+                Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+                Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+                Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+                  scratchRoot: Effect.succeedNone,
+                  namedProjectsRoot: process.cwd(),
+                }),
+                Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+                Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+                Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    const request = (
+      id: string,
+      tag: typeof WS_METHODS.guestShareCreate | typeof WS_METHODS.scheduledTasksRotateWebhookToken,
+      payload: { readonly threadId: string } | { readonly id: string },
+    ) =>
+      server
+        .write(0, {
+          _tag: "Request",
+          id: RpcMessage.RequestId(id),
+          tag,
+          payload: payload as never,
+          headers: Headers.empty,
+        })
+        .pipe(Effect.andThen(Queue.take(exits)));
+    const share = (id: string) => request(id, WS_METHODS.guestShareCreate, { threadId: "thread" });
+    const rotatedWebhook = (id: string) =>
+      request(id, WS_METHODS.scheduledTasksRotateWebhookToken, { id: "task" }).pipe(
+        Effect.map((exit) =>
+          Exit.isSuccess(exit)
+            ? (exit.value as { task: { webhook?: unknown } }).task.webhook
+            : "failed",
+        ),
+      );
+    // A guest share and a webhook URL outlive the exception that made them, so neither is given.
+    assert.isTrue(Exit.isFailure(yield* share("refused")));
+    assert.equal(shared, 0);
+    assert.isUndefined(yield* rotatedWebhook("hidden"));
+    administers = true;
+    assert.isTrue(Exit.isSuccess(yield* share("allowed")));
+    assert.equal(shared, 1);
+    assert.deepEqual(yield* rotatedWebhook("shown"), webhook);
   }).pipe(
     Effect.provide(
       Layer.mergeAll(

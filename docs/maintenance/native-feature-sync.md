@@ -415,12 +415,31 @@ approval before code or runtime changes.
   machine that is or becomes standard stays stored and does nothing; it narrows
   that pair like any downgrade and applies again if the receiver turns
   read-only. A save that adds one onto a machine standard in the resulting list
-  is refused (`LanFleetError.refusal` `exception-onto-standard`). This is
-  evaluation only; revision acceptance is unchanged.
+  is refused (`LanFleetError.refusal` `exception-onto-standard`), and so is one
+  whose caller or receiver is not a fleet machine (`exception-unknown-machine`;
+  stored ones are kept). This is evaluation only; revision acceptance is
+  unchanged.
+  While it applies, an exception gives the caller full control of the receiver:
+  standard includes its shell. Removing it stops further use of the caller's
+  fleet credentials and peer links there, but not what the caller did there
+  meanwhile, such as an unattributed credential from `t3 auth pairing create`, a
+  scheduled task or a key. Making the receiver standard extends trust to all of
+  that, which passes as the receiver's own; Settings names the machines with
+  stored exceptions onto it and asks before such a save. This is inherent to
+  standard access and is documented, not prevented.
   An exception never grants fleet administration: `server.syncLanFleet`,
   `server.getLanFleetSetup` and `server.configureLanFleet` from a fleet-attributed
   credential need the caller's own standard level
   (`CredentialAccessCap.administersFleet`, checked per call in `layerWsRpc`).
+  The same bar holds for handing access outside the fleet, which would outlive
+  the exception: `guestShare.create` (`sharingOutside` in `layerWsRpc`),
+  webhook URLs in scheduled-task lists and mutation results over WebSocket and
+  in MCP summaries (`McpClientSession.sharesOutside`), and T3 Connect
+  `linkProof`/`relayConfig` (`cloud/http.ts`), the step that installs the key
+  the cloud then mints `cloud-connect` credentials with. Every other credential
+  a fleet credential mints or approves stays attributed and capped with it:
+  pairing credentials (`lan-fleet-by:`), MCP sign-ins and task grants
+  (`mcp-client:<root>`), peer-link and fleet codes (machine-issued).
   An entry with an exception's or writer mark's ID is always read as one,
   whatever the fleet's membership (no machine set enters evaluation); machine
   IDs starting `pair-access-` are never admitted, trusted, approved or given
@@ -431,10 +450,14 @@ approval before code or runtime changes.
   it only after its replacement is in use. The requester also holds every
   peer-link call to its own live list: writes, as each MCP tool's
   `McpToolAccess` declaration classifies them, are refused locally
-  (`PeerWriteCeiling` in `PeerMcpClient.call`), and a first link that signs in
-  above a list that narrowed meanwhile is dropped and requested again. A code is
-  re-checked against the live list before minting and after publishing, the
-  first list adopted mid-sync included, and withdrawn if it narrowed.
+  (`PeerWriteCeiling` in `PeerMcpClient.call`), read again right before every
+  `tools/call` send, retries and new sessions included. A link that signs in
+  above a list that narrowed meanwhile is kept for reads and receipted as usual,
+  first link or not, and a narrower one is requested; dropping it would leave a
+  1.0.26 receiver holding the spent offer for up to an hour. A code, fleet or
+  peer-link, is re-checked against the live list before minting and after
+  publishing, the first list adopted mid-sync included, and withdrawn (revoked,
+  offer removed) if it narrowed.
   Only a successful
   read revokes: an unreadable policy caps at the last accepted one and revokes
   nothing, and with none accepted changes nothing; a machine leaves only when
@@ -444,7 +467,9 @@ approval before code or runtime changes.
   is restricted until their holder's next refresh, and indefinitely for a holder
   that is not a fleet server. Sessions from codes minted before attribution keep
   their issued access until they expire (at most 30 days). Webhook URLs a
-  connection saw while standard stay usable after it is downgraded, until rotated.
+  connection saw while standard stay usable after it is downgraded, until rotated;
+  one standard only by an exception never sees them. Guest shares made before
+  this rule stay until they expire or are closed.
   Owner-approval fleets get no automatic credential replacement. Software forging
   share files is out of scope (shared-folder trust). Accepted propagation delay:
   the desktop client's own fleet connections to peers, and the codes fleet sync
@@ -467,18 +492,24 @@ approval before code or runtime changes.
   starting list and its readiness wait, departed signers, locks, floods,
   exceptions and their 1.0.26 encoding, the same reading from cache, with a
   machine disabled and after a save, forged exception-shaped IDs, exceptions
-  only onto read-only receivers and saves refused otherwise), `FleetAccessPolicy.parity.test.ts` (revision acceptance against
+  only onto read-only receivers and between fleet machines, saves refused
+  otherwise), `FleetAccessPolicy.parity.test.ts` (revision acceptance against
   `FleetAccessPolicy.v1026.fixtures.ts`, a frozen copy of 1.0.26's verifier
   that must never be edited to match newer code),
   `FleetCredentialAccess.test.ts` (receiver caps, revocation, unreadable
   policy, holder attribution, exceptions, capped peer-link sessions, fleet
-  administration by base level, reserved IDs refused),
+  administration and outside sharing by base level, reserved IDs refused),
   `FleetPeerLinks.test.ts` (per-pair widen and narrow, reads kept through
   narrowing whichever side reads it first, a receiver turning standard, writes refused by the requester at
-  once, a link signed in above a narrowed list dropped, under the real receiver
-  cap), `McpToolAccess.test.ts` (each linked call carries its declaration's
+  once, a link signed in above a narrowed list kept for reads and receipted
+  with a receiver that never sees the request, a peer-link code withdrawn when
+  the list narrows while it is published, under the real receiver cap),
+  `PeerMcpClient.test.ts` (writes re-checked at every send: narrowing during
+  resolve, session start and the 404 retry), `McpToolAccess.test.ts` (each linked call carries its declaration's
   write flag), `RpcAuthorization.test.ts` (per-call scopes), `ws.test.ts`
-  (webhook URLs, fleet administration refused),
+  (webhook URLs, fleet administration refused, guest shares and webhook URLs
+  withheld from a connection standard by an exception),
+  `OrchestratorMcpService.test.ts` (MCP webhook URLs withheld likewise),
   `FleetEnrollment.test.ts` (sync, refused lifts, departure grace, reserved
   IDs), `LanFleet.test.ts` (replacement, renewal, stale sync lock, codes
   withdrawn when the list narrows mid-sync, the first list included),

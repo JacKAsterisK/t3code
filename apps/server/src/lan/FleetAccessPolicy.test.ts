@@ -873,19 +873,23 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
     Effect.gen(function* () {
       const f = yield* fleet();
       const cryo = yield* f.machine();
-      const later = FleetAccessPolicy.pairEntryId(f.anvil.peer.machineId, "buildmachine");
+      const build = syntheticFleetPeer("buildmachine");
+      const later = FleetAccessPolicy.pairEntryId(f.anvil.peer.machineId, build.peer.machineId);
       const list = pairList(f);
+      const members = [f.cryo.peer, f.panda.peer, f.anvil.peer, f.spd.peer];
+      f.setPeers([...members, build.peer]);
       yield* cryo.change({
         ...f.input(f.cryo),
         expectedRevision: 0,
         // Read-only itself, or an exception onto it would not apply and could not be saved.
         next: {
           ...list,
-          machines: [...list.machines, { machineId: "buildmachine", access: "read-only" }],
+          machines: [...list.machines, { machineId: build.peer.machineId, access: "read-only" }],
           pairs: [...list.pairs, later],
         },
       });
-      // A level change, as Settings sends it, names no exceptions.
+      // It leaves the fleet. A level change, as Settings sends it, names no exceptions.
+      f.setPeers(members);
       const changed = yield* f.change(cryo, f.cryo, 1, [
         f.readOnly(f.anvil),
         f.readOnly(f.spd),
@@ -894,13 +898,32 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
       expect(changed.revision).toBe(2);
       expect(FleetAccessPolicy.callerAccess(changed, f.panda.peer.machineId)).toBe("read-only");
       expect(changed.pairs).toContain(later);
-      // A machine the fleet does not know yet is not shown, but its exception stays.
+      // A machine the fleet does not know now is not shown, but its exception stays.
       expect(FleetAccessPolicy.exceptionsOf(changed, ids(f))).toHaveLength(2);
       expect(
-        FleetAccessPolicy.exceptionsOf(changed, [...ids(f), "buildmachine"]).find(
+        FleetAccessPolicy.exceptionsOf(changed, [...ids(f), build.peer.machineId]).find(
           (exception) => exception.machineId === f.anvil.peer.machineId,
         )?.standardOn,
-      ).toEqual(["buildmachine", f.spd.peer.machineId]);
+      ).toEqual([build.peer.machineId, f.spd.peer.machineId].toSorted());
+      // A new exception must name two machines the fleet knows, whatever their levels.
+      for (const [caller, receiver] of [
+        [build.peer.machineId, f.spd.peer.machineId],
+        [f.spd.peer.machineId, build.peer.machineId],
+      ] as const) {
+        const refused = yield* Effect.flip(
+          cryo.change({
+            ...f.input(f.cryo),
+            expectedRevision: changed.revision,
+            next: {
+              defaultAccess: "read-only",
+              machines: [{ machineId: f.cryo.peer.machineId, access: "standard" }],
+              pairs: [...changed.pairs!, FleetAccessPolicy.pairEntryId(caller, receiver)],
+            },
+          }),
+        );
+        expect(refused.refusal).toBe("exception-unknown-machine");
+        expect(refused.message).toContain("two machines in this fleet");
+      }
     }).pipe(Effect.provide(configLayer)),
   );
 

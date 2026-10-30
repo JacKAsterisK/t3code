@@ -2335,6 +2335,23 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+    it.effect("never shows a webhook URL to a fleet machine standard here by an exception", () =>
+      Effect.gen(function* () {
+        const upserted = yield* Ref.make(0);
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(service([task({})], null, upserted)),
+        );
+        const as = (sharesOutside: boolean) =>
+          mcp.listScheduledTasks(
+            { ...supervisedClient, client: { ...supervisedClient.client!, sharesOutside } },
+            { projectId },
+          );
+        // The URL would outlive the exception, so only its own standard access shows it.
+        assert.equal((yield* as(false)).tasks[0]?.webhookUrl, undefined);
+        assert.equal((yield* as(true)).tasks[0]?.webhookUrl, "https://t3.example/hooks/secret");
+      }),
+    );
+
     it.effect("checks a bound task against its thread's current modes", () =>
       Effect.gen(function* () {
         const upserted = yield* Ref.make(0);

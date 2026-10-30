@@ -509,6 +509,7 @@ const startTurn = Effect.fnUntraced(function* (
   runOrdinal = 1,
   threadId = THREAD_ID,
   continuation = false,
+  taskOwnerName?: string,
 ) {
   const appThread = yield* makeAppThread(model, threadId);
   const runId = RunId.make(`run:${threadId}:${runOrdinal}`);
@@ -530,6 +531,7 @@ const startTurn = Effect.fnUntraced(function* (
     },
     modelSelection: selection ?? modelSelection(model),
     runtimePolicy,
+    ...(taskOwnerName === undefined ? {} : { taskOwnerName }),
   });
 });
 
@@ -1584,6 +1586,40 @@ describe("PiAdapterV2", () => {
       assert.equal(spawn.env.T3_MCP_URL, "http://127.0.0.1:43123/mcp");
       assert.equal(spawn.env.T3_MCP_BEARER_TOKEN, "secret-pi-token");
       assert.equal(spawn.env.T3_PI_RUNTIME_MODE, "full-access");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("writes who manages the thread where the extension reads it each turn", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      const ownerFile = fake.lastSpawn().env.T3_PI_TASK_OWNER_FILE;
+      assert.isDefined(ownerFile);
+      // A new session never inherits an earlier one's owner.
+      assert.equal(yield* fileSystem.readFileString(ownerFile!), "");
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(
+        runtime,
+        providerThread,
+        "default",
+        [],
+        "Hello pi",
+        undefined,
+        1,
+        THREAD_ID,
+        false,
+        "Gavin",
+      );
+      yield* fake.takeRequest("prompt");
+      assert.equal(
+        yield* fileSystem.readFileString(ownerFile!),
+        "<task_owner>This task is managed by Gavin.</task_owner>",
+      );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

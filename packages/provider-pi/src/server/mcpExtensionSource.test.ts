@@ -80,6 +80,48 @@ describe("Pi orchestration prompt section", () => {
   });
 });
 
+describe("Pi task owner", () => {
+  it("adds the owner line T3 wrote for this turn, and none without one", async () => {
+    const dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-pi-owner-"));
+    try {
+      const ownerFile = NodePath.join(dir, "owner.txt");
+      const bridge = await loadMcpBridge({ taskOwnerFile: ownerFile });
+      const hook = bridge.handlers.get("before_agent_start")!;
+      const ctx = { ui: { notify: assert.fail } };
+      // No file yet, then an empty one: no owner line.
+      for (const _turn of [1, 2]) {
+        const prompt = (await hook({ systemPrompt: "base" }, ctx))!.systemPrompt;
+        assert.notInclude(prompt, "<task_owner>");
+        await NodeFSP.writeFile(ownerFile, "");
+      }
+      const owner = "<task_owner>This task is managed by Gavin.</task_owner>";
+      await NodeFSP.writeFile(
+        ownerFile,
+        `${owner}
+`,
+      );
+      const prompt = (await hook({ systemPrompt: "base" }, ctx))!.systemPrompt;
+      assert.isTrue(
+        prompt.endsWith(`
+
+${owner}`),
+      );
+      assert.include(prompt, "orchestrator_capabilities");
+      // A reassignment reaches the next turn, in the prompt section too.
+      await NodeFSP.writeFile(ownerFile, owner.replace("Gavin", "Dan"));
+      const sections: Record<string, string> = {};
+      assert.isUndefined(
+        await hook({ systemPrompt: "base", systemPromptOptions: { sections } }, ctx),
+      );
+      assert.isTrue(
+        sections.t3_code_orchestration!.endsWith("This task is managed by Dan.</task_owner>"),
+      );
+    } finally {
+      await NodeFSP.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("Pi project trust", () => {
   it.each([
     { name: "a trusted folder", trusted: true, argv: [], notices: 0 },

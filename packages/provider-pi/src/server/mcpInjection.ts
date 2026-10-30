@@ -10,6 +10,7 @@ import {
   T3_MCP_URL_ENV,
   T3_PI_RUNTIME_MODE_ENV,
   T3_PI_MCP_EXTENSION_PATH_ENV,
+  T3_PI_TASK_OWNER_FILE_ENV,
 } from "./mcpExtensionSource.ts";
 
 const RESERVED_PI_LAUNCH_ARGUMENTS = new Set([
@@ -224,6 +225,12 @@ function piT3McpExtensionDestPath(cacheDir: string): string {
   return `${cacheDir.replace(/\\/g, "/")}/${PI_T3_MCP_EXTENSION_FILENAME}`;
 }
 
+/** T3 Code LAN: one session's owner line, beside the extension; see T3_PI_TASK_OWNER_FILE_ENV. */
+export function piTaskOwnerFilePath(cacheDir: string, providerSessionId: string): string {
+  const name = providerSessionId.replace(/[^A-Za-z0-9._-]/g, "_");
+  return `${cacheDir.replace(/\\/g, "/")}/pi-task-owner-${name}.txt`;
+}
+
 export const materializePiT3McpExtension = Effect.fn("materializePiT3McpExtension")(function* (
   cacheDir: string,
 ) {
@@ -247,6 +254,7 @@ export function buildPiRpcLaunch(input: {
   readonly disableExtensions?: boolean;
   readonly disableTools?: boolean;
   readonly runtimeMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+  readonly taskOwnerFile?: string | undefined;
 }): {
   readonly args: ReadonlyArray<string>;
   readonly env: NodeJS.ProcessEnv;
@@ -284,6 +292,7 @@ export function buildPiRpcLaunch(input: {
   delete environment[T3_MCP_URL_ENV];
   delete environment[T3_MCP_BEARER_ENV];
   delete environment[T3_PI_MCP_EXTENSION_PATH_ENV];
+  delete environment[T3_PI_TASK_OWNER_FILE_ENV];
 
   return {
     args,
@@ -297,6 +306,9 @@ export function buildPiRpcLaunch(input: {
             [T3_PI_RUNTIME_MODE_ENV]:
               input.runtimeMode === "auto" ? "approval-required" : input.runtimeMode,
           }
+        : {}),
+      ...(hasT3Extension && input.taskOwnerFile !== undefined
+        ? { [T3_PI_TASK_OWNER_FILE_ENV]: input.taskOwnerFile }
         : {}),
       ...(hasT3Mcp && input.mcpSession !== undefined
         ? {

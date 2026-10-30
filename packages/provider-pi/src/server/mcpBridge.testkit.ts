@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Executes the shipped Pi extension at its native JavaScript boundary.
+import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
 import * as NodeVM from "node:vm";
@@ -48,6 +49,7 @@ export async function loadMcpBridge(
     readonly allowsTool?: (name: string) => boolean;
     readonly runtimeMode?: string;
     readonly inputSchema?: Record<string, unknown>;
+    readonly taskOwnerFile?: string;
   } = {},
 ) {
   const handlers = new Map<string, AgentStartHook>();
@@ -92,9 +94,11 @@ export async function loadMcpBridge(
         T3_MCP_BEARER_TOKEN: "fixture-token",
         T3_PI_MCP_EXTENSION_PATH: "/fixture/pi-t3-extension.ts",
         T3_PI_RUNTIME_MODE: options.runtimeMode,
+        T3_PI_TASK_OWNER_FILE: options.taskOwnerFile,
       },
     },
     AbortSignal,
+    NodeFSP,
     NodePath,
     Type: { Unsafe: (schema: unknown) => schema },
     fetch: async (

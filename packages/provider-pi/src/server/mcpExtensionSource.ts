@@ -7,6 +7,11 @@ export const T3_MCP_URL_ENV = "T3_MCP_URL";
 export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
 export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
 export const T3_PI_MCP_EXTENSION_PATH_ENV = "T3_PI_MCP_EXTENSION_PATH";
+/**
+ * T3 Code LAN: a file T3 rewrites before each prompt with the line naming who manages the thread,
+ * empty without an owner. Pi outlives a turn, so an owner chosen later reaches the next turn.
+ */
+export const T3_PI_TASK_OWNER_FILE_ENV = "T3_PI_TASK_OWNER_FILE";
 
 // These tools trigger file-change approvals, bypassed by Auto-accept edits.
 export const PI_FILE_CHANGE_TOOLS = ["edit", "write"] as const;
@@ -21,6 +26,7 @@ const URL_ENV = ${JSON.stringify(T3_MCP_URL_ENV)};
 const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
 const EXTENSION_PATH_ENV = ${JSON.stringify(T3_PI_MCP_EXTENSION_PATH_ENV)};
+const TASK_OWNER_FILE_ENV = ${JSON.stringify(T3_PI_TASK_OWNER_FILE_ENV)};
 const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -47,6 +53,17 @@ type McpTool = {
 function env(name: string): string | undefined {
   const value = process.env[name];
   return value && value.length > 0 ? value : undefined;
+}
+
+// Read each turn: T3 rewrites the file before it sends a prompt.
+async function taskOwnerGuidance(): Promise<string> {
+  const file = env(TASK_OWNER_FILE_ENV);
+  if (file === undefined) return "";
+  try {
+    return (await NodeFSP.readFile(file, "utf8")).trim();
+  } catch {
+    return "";
+  }
 }
 
 function runtimeMode(): RuntimeMode {
@@ -463,15 +480,17 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   });
 
   // Keep guidance in the system prompt so leading slash commands still expand.
-  pi.on("before_agent_start", (event, ctx) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     reconcileDiscovery(ctx);
+    const owner = await taskOwnerGuidance();
+    const guidance = owner === "" ? ORCHESTRATION_INSTRUCTIONS : ORCHESTRATION_INSTRUCTIONS + "\\n\\n" + owner;
     const sections = event.systemPromptOptions?.sections;
     if (sections && typeof sections === "object" && event.systemPromptOptions?.forceSystemPrompt === undefined) {
       // A full prompt override bypasses Pi's later section rendering.
-      sections.t3_code_orchestration = ORCHESTRATION_INSTRUCTIONS;
+      sections.t3_code_orchestration = guidance;
       return undefined;
     }
-    return { systemPrompt: event.systemPrompt + "\\n\\n" + ORCHESTRATION_INSTRUCTIONS };
+    return { systemPrompt: event.systemPrompt + "\\n\\n" + guidance };
   });
 }
 `;

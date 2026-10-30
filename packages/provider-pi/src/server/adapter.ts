@@ -68,9 +68,11 @@ import {
 import {
   buildPiRpcLaunch,
   materializePiT3McpExtension,
+  piTaskOwnerFilePath,
   resolvePiLaunchArgs,
 } from "./mcpInjection.ts";
 import { PI_FILE_CHANGE_TOOLS } from "./mcpExtensionSource.ts";
+import { taskOwnerInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
 const PI_DRIVER_KIND = PI_PROVIDER;
@@ -461,12 +463,28 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
       }
+      // T3 Code LAN: Pi outlives a turn, so who manages the thread goes in a file the extension
+      // reads at each agent start; startTurn rewrites it. It starts empty, never a stale owner.
+      const taskOwnerFile = piTaskOwnerFilePath(
+        host.paths.providerStatusCacheDir,
+        input.providerSessionId,
+      );
+      const writeTaskOwner = (ownerName: string | undefined) =>
+        fileSystem.writeFileString(taskOwnerFile, taskOwnerInstructions(ownerName)).pipe(
+          Effect.tapError((cause) =>
+            Effect.logWarning("Pi task owner instruction could not be written.", { cause }),
+          ),
+          Effect.ignore,
+        );
+      yield* writeTaskOwner(undefined);
+      yield* Effect.addFinalizer(() => fileSystem.remove(taskOwnerFile).pipe(Effect.ignore));
       const launch = buildPiRpcLaunch({
         launchArgs: resolvedLaunchArgs.args,
         environment: options.environment,
         mcpSession,
         extensionPath,
         runtimeMode: input.runtimePolicy.runtimeMode,
+        taskOwnerFile,
       });
       const scopedLaunch = yield* agentScope.wrap({
         command: options.settings.binaryPath || "pi",
@@ -2478,6 +2496,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 Effect.ignore,
               );
             }
+            yield* writeTaskOwner(turnInput.taskOwnerName);
             // Resolve attachments before turn installation so failures cannot strand activeTurn.
             // Inject instructions through before_agent_start; wrapping user text breaks slash-command expansion.
             const compactCommand = continuation

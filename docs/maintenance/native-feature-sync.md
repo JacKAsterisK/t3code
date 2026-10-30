@@ -8,9 +8,10 @@ approval before code or runtime changes.
 
 ## Baseline
 
-- Upstream: `pingdotgg/t3code` `main` at `dd1484815` (2026-10-29), merged by
-  `a7bd75470` on `lan/upstream-sync-2026-10-29` for LAN 1.0.26 (previous sync
-  `9826dbb99` at `e8f65e9fe`). Latest stable is v0.1.5. Linked environments
+- Upstream: `pingdotgg/t3code` `main` at `1854e14d0` (2026-10-30), merged by
+  `3695ee964` on `lan/upstream-sync-2026-10-31`, not yet released (previous
+  sync `dd1484815` at `a7bd75470`, shipped in LAN 1.0.26). Latest stable is
+  v0.1.5; latest nightly `0.1.6-nightly.20261030.3917`. Linked environments
   first shipped in nightlies from `0.1.4-nightly.20261027.3796`.
 - Shipping release: T3 Code LAN 1.0.26, fork `80a58cfc2`, upstream `dd1484815`,
   app and server version 0.1.5, installed by Hub 0.5.115
@@ -25,9 +26,13 @@ approval before code or runtime changes.
 
 - **Migration IDs diverge.** The fork puts LAN migrations at 68–71
   (`McpOAuthGrants`, `LanRouting`, `LanTaskMutations`,
-  `LanObservationGenerations`) and moves upstream's 68–73 to 72–77 (upstream
-  `073_ActiveTurnItemIndexes` is the fork's 77, from the 2026-10-29 sync).
-  Upstream and the fork mean different things by IDs 68–77, so a database must
+  `LanObservationGenerations`) and moves upstream's 68–75 to 72–79 (upstream
+  `073_ActiveTurnItemIndexes` is the fork's 77, from the 2026-10-29 sync;
+  `074_ExcludeAttachmentPlaceholdersFromSearch` and `075_SubagentDeliveryState`
+  are the fork's 78 and 79, from the 2026-10-31 sync). Upstream also edited its
+  `069_ThreadMessageSearch` (the fork's 73) in place to share
+  `createMessageSearchTriggers` with 78.
+  Upstream and the fork mean different things by IDs 68–79, so a database must
   never move between a stock build and a fork build. Retiring a LAN table keeps
   its migration file. Dropping the table takes a new forward migration plus
   home-repair support.
@@ -44,7 +49,11 @@ approval before code or runtime changes.
   `b428bda9d`).
 - `apps/server/src/lan/NativeMaintenance.ts` and `nativeWorkStates.ts` read a
   closed `statev2.sqlite` by table and status names. An upstream projection
-  change can break them without causing a type error.
+  change can break them without causing a type error. Their `workGeneration`
+  hashes whole rows except the columns migrations derive from `payload_json`
+  (`derivedColumns`); an upstream migration that adds such a column must join
+  that list, or verifying a home across candidate migrations reports its work
+  as changed (fork 79's `completion_delivery_state` did, fixed in `be56dd16c`).
 
 ## Summary
 
@@ -99,8 +108,10 @@ approval before code or runtime changes.
   from a hint such as "my vps") and `t3_environment_unlink`, in
   `apps/server/src/peer/PeerLinks.ts` and `PeerLinkRequests.ts`. Merged PRs:
   #16684, #16695, #16698 and #17130. Nightly only, behind the Labs beta
-  `linkedEnvironmentsEnabled`, which is off by default on both machines. Open:
-  #26475 (Tailscale 100.x addresses), #26551 and #26567 (performance).
+  `linkedEnvironmentsEnabled`, which is off by default on both machines. Open
+  at `1854e14d0`: #26475 (Tailscale 100.x addresses), #26551 and #26567
+  (performance). The 2026-10-31 sync changed no peer-link code; #27313 only
+  makes the dev-database copy script drop links.
 - **Must preserve:** explicit selection by environment ID, and denial reported
   separately from an absent or offline machine.
 - **Gaps:**
@@ -155,8 +166,11 @@ approval before code or runtime changes.
   a linked environment, with a restart-safe follower that wakes the parent
   (#16719, `RemoteDelegation.ts`). `clientRequestId` retries are hashed per
   caller. `T3-Mode-Limit` caps a link at the caller's modes. The `linkOrigin`
-  fence keeps work below full access inside its link (#16695). Open: #16751
-  (hand a thread off), #16758 (Continue on…) and #26625.
+  fence keeps work below full access inside its link (#16695). Synced
+  2026-10-31: Stop always completes and a thread that ignores it can be force
+  stopped (#27252, WebSocket `orchestration.forceStopThread`, operate scope),
+  and a task cancelled as its usage limit lands no longer resumes (#24634).
+  Still open: #16751 (hand a thread off), #16758 (Continue on…) and #26625.
 - **Must preserve:** a task keeps the destination's environment, thread and run
   IDs; project and model options; queueing; interrupting a specific run; retry
   safety.
@@ -247,7 +261,9 @@ approval before code or runtime changes.
 - **Upstream:** no pinned-TLS LAN endpoint. The supported routes are T3 Connect
   (cloud, disabled here), Tailscale HTTPS and plain HTTP pairing on a private
   LAN. The background service runs only on Linux and macOS. "Continue threads
-  after restarts" resumes threads but does not restore endpoints.
+  after restarts" resumes threads but does not restore endpoints. Since #24474
+  (synced 2026-10-31) desktop LAN pairing links follow the current network
+  address; they are still plain HTTP.
 - **Must preserve:** automatic restore with no recurring manual step, offline
   and reconnect behavior, and no plaintext fallback.
 - **Gaps:** there is no native replacement. This row also blocks native links
@@ -272,8 +288,12 @@ approval before code or runtime changes.
 - **Upstream:** the boring sidebar (Labs, `boringSidebarEnabled`; nightly only,
   not in v0.1.3) puts threads in project folders
   (`SidebarProjectFolderHeader`). Upstream `main` at
-  `9826dbb99` has no grouping by machine or environment. The fork turns machine
-  grouping off while the boring sidebar is on (`canGroupByMachine`).
+  `1854e14d0` has no grouping by machine or environment. The fork turns machine
+  grouping off while the boring sidebar is on (`canGroupByMachine`). Synced
+  2026-10-31: #26803 moves a folder row's remote-machine icon onto the title
+  line instead of a third line. The fork's compact card row keeps its own icon,
+  which machine grouping hides (`showEnvironmentMachine`); the sidebar logo
+  keeps the fork's build-version label rather than #24209's "T3 Code home".
 - **Must preserve:** a group is an environment ID; a thread belongs to the
   group of the environment it runs on; groups are ordered by the device's saved
   order, otherwise primary first and then by label; the setting persists across
@@ -341,6 +361,13 @@ approval before code or runtime changes.
   no offline build and no independent app identity.
 - **Decision:** keep. The fork's idle and draft gate is stricter than upstream's
   interrupt-then-resume approach.
+- **Synced 2026-10-31:** upstream's new `secret-provider-*` workspace packages
+  (#27115) are bundled into the server, so the refreshed stage locks gain only
+  the `micromark` and `mdast-util-to-hast` overrides; Electron is unchanged.
+  `check:changed` is now upstream's Effect CLI (#26122, #27227) with the fork's
+  `--defer-test` allowlist, generated-input hashing and Windows `vp` launch
+  kept on top. #24434's `copyDesktopBuildArtifacts` copies directories only for
+  the `dir` target, so the LAN ZIP is unaffected.
 - **Owner:** Dan. **Rollback:** not applicable.
 - **Revisit:** when upstream changes the desktop updater APIs these modules wrap.
 
@@ -360,7 +387,13 @@ approval before code or runtime changes.
   changed no table, column or status that `NativeMaintenance.ts` or
   `nativeWorkStates.ts` read; its migration 77 only adds two partial indexes on
   `orchestration_v2_projection_turn_items` over the same `pending`, `running`
-  and `waiting` states.
+  and `waiting` states. Synced 2026-10-31: fork 79 (#27711) adds
+  `completion_delivery_state` to `orchestration_v2_projection_subagents`,
+  filled from `payload_json.completionDelivery.state`, plus a settled-subagent
+  index; `NativeMaintenance.ts` still reads the payload and leaves the column
+  out of `workGeneration` (`be56dd16c`). Fork 78 (#27383) recreates the
+  message-search triggers to skip attachment placeholders; maintenance still
+  skips `orchestration_v2_message_search_*`. #16731 and #25494 are still open.
 - **Gaps:** the proposed import works per thread, not per home. Resuming threads
   is not the same as cancelling work offline.
 - **Data:** `statev2.sqlite` and recovery receipts under `T3CodeLAN\recovery`.
@@ -394,7 +427,11 @@ approval before code or runtime changes.
   `AuthMcpClientAccess` mode, set by whoever approves it on the destination.
   There is no fleet-wide policy and no way to change a link's mode without
   relinking. Enforcement reuses upstream's read scopes, `refuseReadOnlyClient`
-  and the `orchestration:operate` checks on RPCs and in the web client.
+  and the `orchestration:operate` checks on RPCs and in the web client. The
+  2026-10-31 sync added two WebSocket methods, both scoped in
+  `RPC_REQUIRED_SCOPES` and so capped per call with no fork change:
+  `orchestration.forceStopThread` (operate; also client-guarded) and
+  `review.getBranchCommits` (filesystem read). It added no MCP tools.
 - **Must preserve:** the receiving machine enforces; one signed, synced policy; a
   read-only machine cannot lift its own restriction; changes need no approval or
   relink; links between unaffected machines are untouched. Exceptions (a
@@ -578,4 +615,4 @@ Proposed; each step needs Dan's approval.
     as `:`, gets a hashed context ID, which still names no thread. The error
     points agents at `threadId`.
   - **Next:** ships in the next release. Worth offering upstream; upstream
-    `main` has the same lookup.
+    `main` at `1854e14d0` still has the same lookup.

@@ -1,9 +1,11 @@
 /**
  * T3 Code LAN: once this machine knows its default owner from fleet-users.json, it gives every
- * thread it hosts that has no owner that default, exactly once. A marker in userdata records the
- * pass, so a later read never reassigns a thread. Owners only change by a person's choice after it.
+ * thread it hosts that has no owner that default, once. A marker in userdata records a pass that
+ * covered every thread, so a later read never reassigns one. A pass that could not label a thread
+ * writes no marker and runs again at next start. Owners only change by a person's choice after it.
  */
 import { CommandId, ThreadId } from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -26,7 +28,22 @@ const Marker = Schema.Struct({
   completedAt: Schema.String,
 });
 
+/** Some threads could not be labelled; the pass leaves no marker so the next start retries. */
+export class TaskOwnerBackfillIncompleteError extends Schema.TaggedError<TaskOwnerBackfillIncompleteError>()(
+  "TaskOwnerBackfillIncompleteError",
+  {
+    ownerId: Schema.String,
+    assigned: Schema.Number,
+    failed: Schema.Number,
+  },
+) {
+  override get message(): string {
+    return `Task owner backfill could not label ${this.failed} thread(s); it runs again at next start.`;
+  }
+}
+
 export const make = Effect.gen(function* () {
+  const crypto = yield* Crypto.Crypto;
   const fleetUsers = yield* FleetUsers.FleetUsers;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const sql = yield* SqlClient.SqlClient;
@@ -56,25 +73,39 @@ export const make = Effect.gen(function* () {
       WHERE deleted_at IS NULL AND json_extract(payload_json, '$.ownerId') IS NULL
       ORDER BY thread_id
     `;
+    // Fresh ids each pass, so a thread a failed pass left is tried again instead of replayed.
+    const pass = yield* crypto.randomUUIDv4();
     let assigned = 0;
+    let failed = 0;
     for (const row of rows) {
       yield* orchestrator
         .dispatch({
-          type: "thread.owner.set",
-          // One per thread: a pass cut short and run again replays what it already did.
-          commandId: CommandId.make(`server:owner-backfill:${row.thread_id}`),
+          // Conditional: an owner someone chose since the read above stays.
+          type: "thread.owner.assign-default",
+          commandId: CommandId.make(`server:owner-backfill:${pass}:${row.thread_id}`),
           threadId: ThreadId.make(row.thread_id),
           ownerId,
         })
         .pipe(
-          Effect.tap(() => Effect.sync(() => (assigned += 1))),
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Task owner backfill skipped a thread.", {
-              threadId: row.thread_id,
-              cause,
+          Effect.tap((result) =>
+            Effect.sync(() => {
+              if (result.storedEvents.length > 0) assigned += 1;
             }),
           ),
+          Effect.catchCause((cause) =>
+            Effect.sync(() => (failed += 1)).pipe(
+              Effect.andThen(
+                Effect.logWarning("Task owner backfill could not label a thread.", {
+                  threadId: row.thread_id,
+                  cause,
+                }),
+              ),
+            ),
+          ),
         );
+    }
+    if (failed > 0) {
+      return yield* new TaskOwnerBackfillIncompleteError({ ownerId, assigned, failed });
     }
     yield* writeFleetJson(markerFile, {
       version: 1,

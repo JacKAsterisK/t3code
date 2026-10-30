@@ -35,6 +35,7 @@ import {
   type OrchestrationV2InternalCommand,
   type OrchestrationV2LimitRecoveryUpdate,
   type OrchestrationV2ServerCommand,
+  THREAD_OWNER_COMMAND_TYPE,
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
   type OrchestrationV2AppThread,
@@ -482,6 +483,37 @@ export function threadHasUnfinishedWork(records: {
   );
 }
 
+// T3 Code LAN: a read-only session may dispatch thread.owner.set with any command id it likes.
+// Its receipts therefore live under their own prefix, which no other command may use. Otherwise
+// it could record a receipt first under an id a server or operate-scoped command will use (such
+// as server:settle-after-run:<runId>), and that command would then replay it instead of running.
+const THREAD_OWNER_RECEIPT_PREFIX = "thread-owner:";
+
+const isolateOwnerCommandReceipt = (
+  command: OrchestrationV2ServerCommand,
+): Effect.Effect<OrchestrationV2ServerCommand, OrchestratorDispatchError> => {
+  const reserved = command.commandId.startsWith(THREAD_OWNER_RECEIPT_PREFIX);
+  if (command.type === THREAD_OWNER_COMMAND_TYPE) {
+    return Effect.succeed(
+      reserved
+        ? command
+        : {
+            ...command,
+            commandId: CommandId.make(`${THREAD_OWNER_RECEIPT_PREFIX}${command.commandId}`),
+          },
+    );
+  }
+  return reserved
+    ? Effect.fail(
+        new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Command ids starting ${THREAD_OWNER_RECEIPT_PREFIX} belong to ${THREAD_OWNER_COMMAND_TYPE}.`,
+        }),
+      )
+    : Effect.succeed(command);
+};
+
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.create":
@@ -504,6 +536,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.pin.reorder":
     case "thread.active.reorder":
     case "thread.owner.set":
+    case "thread.owner.assign-default":
     case "thread.visit":
     case "thread.mark-unread":
     case "thread.metadata.update":
@@ -2633,9 +2666,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
   // A label only: archived, settled and read-only child threads take an owner too. It is not
-  // activity, so the thread keeps its place and updatedAt.
+  // activity, so the thread keeps its place and updatedAt. The default-owner backfill labels only
+  // a thread that is still unowned under this lock, and passes over a deleted one.
   const dispatchThreadOwnerSet = Effect.fn("orchestrationV2.dispatch.threadOwnerSet")(function* (
-    command: Extract<OrchestrationV2Command, { readonly type: "thread.owner.set" }>,
+    command: Extract<
+      OrchestrationV2ServerCommand,
+      { readonly type: "thread.owner.set" | "thread.owner.assign-default" }
+    >,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
     const thread = yield* projectionStore
@@ -2645,7 +2682,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
         ),
       );
-    if (thread.deletedAt !== null) {
+    if (command.type === "thread.owner.assign-default") {
+      if (thread.deletedAt !== null || (thread.ownerId ?? null) !== null) return;
+    } else if (thread.deletedAt !== null) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
         commandType: command.type,
@@ -12851,6 +12890,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* dispatchThreadMutation(command, events, effects);
         break;
       case "thread.owner.set":
+      case "thread.owner.assign-default":
         yield* dispatchThreadOwnerSet(command, events);
         break;
       case "thread.pull-request-watch.sync":
@@ -13115,8 +13155,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   const dispatchWithReceiptEffect = Effect.fn("orchestrationV2.dispatch.withReceipt")(function* (
-    command: OrchestrationV2ServerCommand,
+    requested: OrchestrationV2ServerCommand,
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
+    const command = yield* isolateOwnerCommandReceipt(requested);
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.command_id": command.commandId,
       "orchestration_v2.command_type": command.type,
@@ -13201,8 +13242,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "subagent.stop" ||
           // Closing a share again, or after it ended, is not an error.
           command.type === "thread.guest-share.close" ||
-          // Nor is choosing the owner a thread already has.
-          command.type === "thread.owner.set",
+          // Nor is choosing the owner a thread already has, or a backfill finding one.
+          command.type === "thread.owner.set" ||
+          command.type === "thread.owner.assign-default",
         (_planned) =>
           new OrchestratorDispatchError({
             commandId: command.commandId,

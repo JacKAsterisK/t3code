@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import type { OrchestrationV2Command } from "@t3tools/contracts";
+import type { OrchestrationV2ServerCommand } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -15,7 +15,10 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as FleetUsers from "./FleetUsers.ts";
 import * as TaskOwnerBackfill from "./TaskOwnerBackfill.ts";
 
-type OwnerSet = Extract<OrchestrationV2Command, { readonly type: "thread.owner.set" }>;
+type OwnerSet = Extract<
+  OrchestrationV2ServerCommand,
+  { readonly type: "thread.owner.assign-default" }
+>;
 
 const insertThread = (
   sql: SqlClient.SqlClient,
@@ -35,8 +38,11 @@ const insertThread = (
   `;
 };
 
-/** A backfill whose orchestrator records each owner it is asked to set. */
-const harness = (defaultOwnerId: string | null) =>
+/**
+ * A backfill whose orchestrator records each owner it is asked to set, labelling each thread
+ * (one stored event) unless `fails` names it.
+ */
+const harness = (defaultOwnerId: string | null, fails: ReadonlySet<string> = new Set()) =>
   Effect.gen(function* () {
     const dispatched = yield* Ref.make<ReadonlyArray<OwnerSet>>([]);
     const firstDispatch = yield* Deferred.make<void>();
@@ -46,7 +52,17 @@ const harness = (defaultOwnerId: string | null) =>
         dispatch: (command) =>
           Ref.update(dispatched, (all) => [...all, command as OwnerSet]).pipe(
             Effect.andThen(Deferred.succeed(firstDispatch, undefined)),
-            Effect.as({ sequence: 0, storedEvents: [] } as never),
+            Effect.andThen(
+              fails.has((command as OwnerSet).threadId)
+                ? Effect.fail(
+                    new Orchestrator.OrchestratorDispatchError({
+                      commandId: command.commandId,
+                      commandType: command.type,
+                      cause: "injected",
+                    }),
+                  )
+                : Effect.succeed({ sequence: 0, storedEvents: [{}] } as never),
+            ),
           ),
       }),
     );
@@ -78,18 +94,21 @@ it.effect(
         Effect.provide(layer),
       );
       assert.equal(assigned, 2);
+      const commands = yield* Ref.get(dispatched);
       assert.deepEqual(
-        (yield* Ref.get(dispatched)).map((command) => [
-          command.type,
-          command.threadId,
-          command.ownerId,
-          command.commandId,
-        ]),
+        commands.map((command) => [command.type, command.threadId, command.ownerId]),
         [
-          ["thread.owner.set", "thread:unowned-a", "dan", "server:owner-backfill:thread:unowned-a"],
-          ["thread.owner.set", "thread:unowned-b", "dan", "server:owner-backfill:thread:unowned-b"],
+          ["thread.owner.assign-default", "thread:unowned-a", "dan"],
+          ["thread.owner.assign-default", "thread:unowned-b", "dan"],
         ],
       );
+      // Server ids, outside the namespace a read-only session's owner commands get.
+      for (const command of commands) {
+        assert.match(
+          command.commandId,
+          /^server:owner-backfill:[0-9a-f-]{36}:thread:unowned-[ab]$/,
+        );
+      }
       const written = JSON.parse(yield* fs.readFileString(marker)) as Record<string, unknown>;
       assert.include(written, { version: 1, ownerId: "dan", assigned: 2 });
 
@@ -146,4 +165,47 @@ it.effect("starts once this machine knows its default owner", () =>
       );
     }).pipe(Effect.provide(layerBase)),
   ),
+);
+
+it.effect(
+  "a pass that could not label a thread writes no marker, and the next start retries it",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { stateDir } = yield* ServerConfig.ServerConfig;
+      const marker = path.join(stateDir, TaskOwnerBackfill.TASK_OWNER_BACKFILL_FILE);
+      yield* insertThread(sql, "thread:retry-fails");
+      yield* insertThread(sql, "thread:retry-labels");
+
+      const first = yield* harness("dan", new Set(["thread:retry-fails"]));
+      const incomplete = yield* TaskOwnerBackfill.make.pipe(
+        Effect.flatMap((backfill) => backfill.backfill("dan")),
+        Effect.provide(first.layer),
+        Effect.flip,
+      );
+      assert.instanceOf(incomplete, TaskOwnerBackfill.TaskOwnerBackfillIncompleteError);
+      assert.include(incomplete, { ownerId: "dan", assigned: 1, failed: 1 });
+      assert.isFalse(yield* fs.exists(marker));
+
+      // The next start: the projection still shows the failed thread unowned, and only it.
+      yield* sql`
+      UPDATE orchestration_v2_projection_threads
+      SET payload_json = json_set(payload_json, '$.ownerId', 'dan')
+      WHERE thread_id = 'thread:retry-labels'
+    `;
+      const second = yield* harness("dan");
+      const assigned = yield* TaskOwnerBackfill.make.pipe(
+        Effect.flatMap((backfill) => backfill.backfill("dan")),
+        Effect.provide(second.layer),
+      );
+      assert.equal(assigned, 1);
+      const [retried] = yield* Ref.get(second.dispatched);
+      assert.equal(retried?.threadId, "thread:retry-fails");
+      // A fresh pass id: the first pass's rejected receipt is not replayed.
+      assert.notEqual(retried?.commandId, (yield* Ref.get(first.dispatched))[0]?.commandId);
+      const written = JSON.parse(yield* fs.readFileString(marker)) as Record<string, unknown>;
+      assert.include(written, { version: 1, ownerId: "dan", assigned: 1 });
+    }).pipe(Effect.provide(layerBase)),
 );

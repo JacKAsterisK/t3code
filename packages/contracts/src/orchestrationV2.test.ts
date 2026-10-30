@@ -556,6 +556,18 @@ describe("thread owners", () => {
     const { ownerId: _ownerId, ...withoutOwner } = command;
     expect(() => decode(withoutOwner)).toThrow();
   });
+
+  it("refuses the backfill's conditional owner command from a client", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2Command);
+    expect(() =>
+      decode({
+        type: "thread.owner.assign-default",
+        commandId: "server:owner-backfill:pass:thread-test",
+        threadId: "thread-test",
+        ownerId: "dan",
+      }),
+    ).toThrow();
+  });
 });
 
 describe("background work kinds from older or newer servers", () => {

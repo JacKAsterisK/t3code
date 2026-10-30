@@ -30,7 +30,10 @@ import {
   orchestrationCommandDuration,
   orchestrationCommandsTotal,
 } from "../observability/Metrics.ts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as ServerConfig from "../config.ts";
 import * as FleetUsers from "../lan/FleetUsers.ts";
+import * as TaskOwnerBackfill from "../lan/TaskOwnerBackfill.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts";
@@ -1560,7 +1563,10 @@ it.effect("thread.owner.set records the owner as a label without bumping activit
       threadId,
       ownerId: "dan",
     });
-    const committed = yield* events.readByCommandId({ commandId: setDan }).pipe(Stream.runCollect);
+    // Owner receipts and events live under their own command id prefix.
+    const committed = yield* events
+      .readByCommandId({ commandId: CommandId.make(`thread-owner:${setDan}`) })
+      .pipe(Stream.runCollect);
     assert.lengthOf(committed, 1);
     assert.equal(committed[0]?.event.type, "thread.owner-set");
     assert.deepEqual(committed[0]?.event.payload, { ...before, ownerId: "dan" });
@@ -1611,6 +1617,138 @@ it.effect("thread.owner.set with the thread's current owner succeeds without an 
     );
     assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
     assert.deepEqual(yield* projections.getThread(threadId), before);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("a read-only owner command cannot take a server command's id and so suppress it", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const events = yield* EventSink.EventSinkV2;
+    const create = ownerThreadCreate("owner-reserves-settle", "dan");
+    const threadId = create.threadId;
+    yield* orchestrator.dispatch(create);
+    // The review's reproduction: re-select the current owner under the id settleAfterRun uses.
+    const settleId = CommandId.make("server:settle-after-run:run:owner-reserves-settle");
+    yield* orchestrator.dispatch({
+      type: "thread.owner.set",
+      commandId: settleId,
+      threadId,
+      ownerId: "dan",
+    });
+    const settled = yield* orchestrator.dispatch({
+      type: "thread.settle",
+      commandId: settleId,
+      threadId,
+    });
+    assert.isUndefined(settled.replayed);
+    assert.lengthOf(settled.storedEvents, 1);
+    assert.equal(settled.storedEvents[0]?.event.type, "thread.settled");
+    assert.isNotNull((yield* projections.getThread(threadId)).settledAt);
+    assert.lengthOf(
+      yield* events.readByCommandId({ commandId: settleId }).pipe(Stream.runCollect),
+      1,
+    );
+
+    // The owner namespace is the owner command's alone: no other command may claim it.
+    const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+    const refused = yield* orchestrator
+      .dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("thread-owner:unsettle"),
+        threadId,
+        reason: "user",
+      })
+      .pipe(Effect.flip);
+    assert.equal(refused._tag, "OrchestratorDispatchError");
+    assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+    // An owner command already carrying the prefix keeps its id, so a retry still replays.
+    const prefixed = CommandId.make("thread-owner:client-retry");
+    yield* orchestrator.dispatch({
+      type: "thread.owner.set",
+      commandId: prefixed,
+      threadId,
+      ownerId: "gavin",
+    });
+    const retried = yield* orchestrator.dispatch({
+      type: "thread.owner.set",
+      commandId: prefixed,
+      threadId,
+      ownerId: "gavin",
+    });
+    assert.isTrue(retried.replayed);
+    assert.equal((yield* projections.getThread(threadId)).ownerId, "gavin");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("thread.owner.assign-default labels only a thread still unowned", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const owned = ownerThreadCreate("assign-default-owned", "gavin");
+    const unowned = ownerThreadCreate("assign-default-unowned");
+    const deleted = ownerThreadCreate("assign-default-deleted");
+    for (const create of [owned, unowned, deleted]) yield* orchestrator.dispatch(create);
+    yield* orchestrator.dispatch({
+      type: "thread.delete",
+      commandId: CommandId.make("delete-assign-default-deleted"),
+      threadId: deleted.threadId,
+    });
+    for (const create of [owned, unowned, deleted]) {
+      yield* orchestrator.dispatch({
+        type: "thread.owner.assign-default",
+        commandId: CommandId.make(`server:owner-backfill:test:${create.threadId}`),
+        threadId: create.threadId,
+        ownerId: "dan",
+      });
+    }
+    assert.equal((yield* projections.getThread(owned.threadId)).ownerId, "gavin");
+    assert.equal((yield* projections.getThread(unowned.threadId)).ownerId, "dan");
+    assert.isUndefined((yield* projections.getThread(deleted.threadId)).ownerId);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("the backfill keeps an owner someone chose while its pass ran", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const first = ownerThreadCreate("backfill-race-a");
+    const second = ownerThreadCreate("backfill-race-b");
+    yield* orchestrator.dispatch(first);
+    yield* orchestrator.dispatch(second);
+    // The review's reproduction: the pass has read both threads as unowned; before it reaches
+    // the second, a person gives that one to Gavin.
+    let raced = false;
+    const racing: typeof orchestrator = {
+      ...orchestrator,
+      dispatch: (command) =>
+        Effect.gen(function* () {
+          if (!raced && command.type === "thread.owner.assign-default") {
+            raced = true;
+            yield* orchestrator.dispatch({
+              type: "thread.owner.set",
+              commandId: CommandId.make("owner-set-during-backfill"),
+              threadId: second.threadId,
+              ownerId: "gavin",
+            });
+          }
+          return yield* orchestrator.dispatch(command);
+        }),
+    };
+    const assigned = yield* TaskOwnerBackfill.make.pipe(
+      Effect.flatMap((backfill) => backfill.backfill("dan")),
+      Effect.provideService(Orchestrator.OrchestratorV2, racing),
+      Effect.provide(
+        Layer.mergeAll(
+          FleetUsers.layerStatic({ users: [], machineId: "m", defaultOwnerId: "dan" }),
+          ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-owner-race-" }),
+        ).pipe(Layer.provideMerge(NodeServices.layer)),
+      ),
+    );
+    assert.isTrue(raced);
+    assert.equal(assigned, 1);
+    assert.equal((yield* projections.getThread(first.threadId)).ownerId, "dan");
+    assert.equal((yield* projections.getThread(second.threadId)).ownerId, "gavin");
   }).pipe(Effect.provide(layerTest)),
 );
 

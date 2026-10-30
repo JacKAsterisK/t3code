@@ -3541,6 +3541,16 @@ const OrchestrationV2InternalCommand = Schema.Union([
       }),
     ),
   }),
+  /**
+   * T3 Code LAN: the one-time default-owner backfill. Conditional, so an owner a person chose
+   * while the pass ran stays; internal, so no client can take the command ids it uses.
+   */
+  Schema.Struct({
+    type: Schema.Literal("thread.owner.assign-default"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    ownerId: FleetUserId,
+  }),
 ]);
 export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalCommand.Type;
 

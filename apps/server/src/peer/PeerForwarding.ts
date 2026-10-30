@@ -36,6 +36,8 @@ const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
 
 type Scope = McpInvocationContext.McpInvocationScope;
 
+const LAUNCH_TOOL = "t3_thread_launch";
+
 /**
  * Runs T3 MCP tools in a linked environment for an agent here. The tool's own
  * declaration checks the agent here first; the linked environment then holds
@@ -106,13 +108,14 @@ const make = Effect.gen(function* () {
    * link started never uses this environment's links, since the peer would see this
    * environment's session instead of that link, and its fence could not hold.
    */
-  const callerLimits = (scope: Scope) =>
+  const checkedCaller = (scope: Scope) =>
     readCaller().pipe(
       Effect.tap((caller) => assertNotLinked(caller, "use this environment's links")),
-      Effect.map((caller) => caller.limits),
       Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
       Effect.provideService(ThreadManagement.ThreadManagementService, threads),
     );
+  const callerLimits = (scope: Scope) =>
+    checkedCaller(scope).pipe(Effect.map((caller) => caller.limits));
 
   /**
    * Every caller here reaches the peer as the one link session, so a retry
@@ -135,7 +138,7 @@ const make = Effect.gen(function* () {
     params: unknown,
     writes: boolean,
   ) {
-    const limits = yield* callerLimits(scope);
+    const { limits, caller } = yield* checkedCaller(scope);
     const encoded = (yield* Schema.encodeUnknownEffect(parameters as Schema.Encoder<unknown>)(
       params,
     ).pipe(Effect.mapError(unavailable))) as Record<string, unknown>;
@@ -149,6 +152,12 @@ const make = Effect.gen(function* () {
     }
     if (typeof args.clientRequestId === "string") {
       args.clientRequestId = yield* scopedRequestId(scope.requestNamespace, args.clientRequestId);
+    }
+    // T3 Code LAN: the peer sees a link session with no calling thread, so a thread launched
+    // there would get its machine's default owner. It takes the caller's owner here, as a
+    // delegated task does, unless the call names one.
+    if (toolName === LAUNCH_TOOL && args.ownerId === undefined && caller?.ownerId != null) {
+      args.ownerId = caller.ownerId;
     }
     return yield* peers.call({
       environmentId,

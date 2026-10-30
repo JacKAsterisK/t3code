@@ -290,12 +290,14 @@ const makeLaptop = Effect.gen(function* () {
                   // Work another environment's link started on this laptop.
                   linkOrigin: { sessionId: "session:desk", label: "T3 Code · Desk" },
                 }
-              : liveThreadShell(
-                  threadId,
-                  threadId === ThreadId.make("thread:laptop-plan")
-                    ? { runtimeMode: "full-access", interactionMode: "plan" }
-                    : { runtimeMode: "full-access" },
-                ),
+              : threadId === ThreadId.make("thread:laptop-gavin")
+                ? { ...liveThreadShell(threadId, { runtimeMode: "full-access" }), ownerId: "gavin" }
+                : liveThreadShell(
+                    threadId,
+                    threadId === ThreadId.make("thread:laptop-plan")
+                      ? { runtimeMode: "full-access", interactionMode: "plan" }
+                      : { runtimeMode: "full-access" },
+                  ),
           ),
         getProjectThreadRecords: ({ threadId }) =>
           Effect.succeed({
@@ -529,6 +531,47 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
       expect(failureOf(withUpload)).toMatchObject({ code: "invalid_request" });
       expect(yield* Ref.get(b.bearers)).toEqual([]);
       expect((yield* Ref.get(seen)).launches).toHaveLength(2);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("a launch in a linked environment keeps the calling thread's owner", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const seen = yield* Ref.make<Seen>(nothingSeen);
+      const linkSession = yield* Ref.make("");
+      const b = yield* serveBox(seen, linkSession);
+      const a = yield* makeLaptop;
+      yield* linkTo(a.links, b, "full-access");
+      yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
+      const launch = (
+        caller: string,
+        clientRequestId: string,
+        args: Record<string, unknown> = {},
+      ) =>
+        a.call(caller, "t3_thread_launch", {
+          environmentId: box.environmentId,
+          projectId: boxProject,
+          title: "Owned there",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+          message: "Run it.",
+          clientRequestId,
+          ...args,
+        });
+
+      // The review's reproduction: a Gavin-owned thread here launches on a machine whose default
+      // is Dan. The box sees only the link session, which has no thread to inherit from.
+      expect((yield* launch("thread:laptop-gavin", "owner-inherited")).isError).toBe(false);
+      // A named owner still wins, and an unowned caller names none.
+      expect(
+        (yield* launch("thread:laptop-gavin", "owner-named", { ownerId: "dan" })).isError,
+      ).toBe(false);
+      expect((yield* launch("thread:laptop-full", "owner-none")).isError).toBe(false);
+      const [inherited, named, none] = (yield* Ref.get(seen)).launches;
+      expect(inherited?.ownerId).toBe("gavin");
+      expect(named?.ownerId).toBe("dan");
+      expect(none).toBeDefined();
+      expect(none?.ownerId).toBeUndefined();
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

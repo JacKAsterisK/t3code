@@ -62,6 +62,8 @@ const Linking = Schema.Struct({
       access: AuthMcpClientAccess,
       deliveryId: Schema.String,
       linkedAt: Schema.String,
+      // Linked below what the issuer offered, at this machine's own access at the time.
+      clamped: Schema.optionalKey(Schema.Boolean),
     }),
   ),
   request: Schema.optionalKey(
@@ -208,7 +210,8 @@ const make = Effect.gen(function* () {
         .pipe(Effect.tap(() => Effect.sync(() => revoked.add(sessionId))));
     // Narrowed access ends at once; calls fail until the peer relinks, never with the old access.
     // A policy the share could not just give only caps each call.
-    const narrows = FleetAccessPolicy.mayRevokeForAccess(yield* fleetAccess.current);
+    const policy = yield* fleetAccess.current;
+    const narrows = FleetAccessPolicy.mayRevokeForAccess(policy);
     for (const session of entry.sessions)
       if (
         active.has(session.sessionId) &&
@@ -275,7 +278,8 @@ const make = Effect.gen(function* () {
           deliveryId,
           expiresAt,
           credential: issued.credential,
-          peerLink: { access: linkAccess(level) },
+          // Tells the peer this code follows a Machine access list, unlike a 1.0.25 offer.
+          peerLink: { access: linkAccess(level), policyRevision: policy.revision },
         }),
       );
       offer = { deliveryId, level, expiresAt };
@@ -311,12 +315,17 @@ const make = Effect.gen(function* () {
     yield* updateServing(machineId, () => undefined);
   });
 
-  /** As the linking machine: links to `peer` with the code it offered, and asks for one when due. */
+  /**
+   * As the linking machine: links to `peer` with the code it offered, and asks for one when due.
+   * `ceiling` is what this machine's own accepted list lets it do on its peers; no link it makes
+   * or keeps goes above it, whatever an issuer with another view of the list offers.
+   */
   const link = Effect.fn("FleetPeerLinks.link")(function* (
     fleet: FleetContext.FleetLinkContext,
     peer: Delivery.FleetPeer,
     origin: string,
     now: number,
+    ceiling: AuthMcpClientAccess,
   ) {
     const files = Delivery.peerLinkFileNames(peer.machineId, fleet.self.machineId);
     const requestFile = shareFile(fleet.deliveryDirectory, files.request);
@@ -332,8 +341,25 @@ const make = Effect.gen(function* () {
       const payload = yield* Effect.try(() =>
         Delivery.openDelivery(delivery, fleet.config, peer, fleet.self, now, "peer-link"),
       ).pipe(Effect.option);
-      if (Option.isSome(payload) && payload.value.access !== undefined) {
-        const access = payload.value.access;
+      if (
+        Option.isSome(payload) &&
+        payload.value.access !== undefined &&
+        payload.value.policyRevision === undefined
+      ) {
+        // A 1.0.25 issuer offers without a list at its setup access, normally full access, even
+        // to a machine the fleet made read-only. Such an offer is never used.
+        yield* Effect.logWarning(
+          "Ignored a fleet peer link offer from a machine that does not follow the access list yet.",
+          { peer: peer.machineId },
+        );
+        entry = {
+          ...entry,
+          lastError: "peer_needs_update",
+          consumedDeliveryId: delivery.header.deliveryId,
+        };
+      } else if (Option.isSome(payload) && payload.value.access !== undefined) {
+        // A code at a wider access also signs in at a narrower one, and the session gets only that.
+        const access = ceiling === "read-only" ? ceiling : payload.value.access;
         const linked = yield* peerLinks
           .link({
             url: origin,
@@ -355,6 +381,7 @@ const make = Effect.gen(function* () {
               access,
               deliveryId: delivery.header.deliveryId,
               linkedAt: DateTime.formatIso(linked.success.linkedAt),
+              ...(access === payload.value.access ? {} : { clamped: true }),
             },
             consumedDeliveryId: delivery.header.deliveryId,
           };
@@ -374,7 +401,15 @@ const make = Effect.gen(function* () {
         }
       }
     }
-    const current = yield* peerLinks.get(peer.environmentId);
+    let current = yield* peerLinks.get(peer.environmentId);
+    // A link above this machine's own access is dropped at once, not kept until a relink: its
+    // issuer may not know the list that narrowed it.
+    if (Option.isSome(current) && ceiling === "read-only" && current.value.access !== "read-only") {
+      yield* peerLinks.unlink(peer.environmentId);
+      const { link: _dropped, ...rest } = entry;
+      entry = rest;
+      current = Option.none();
+    }
     const recorded = entry.link;
     const due =
       recorded === undefined ||
@@ -382,6 +417,8 @@ const make = Effect.gen(function* () {
       current.value.access !== recorded.access ||
       DateTime.formatIso(current.value.linkedAt) !== recorded.linkedAt ||
       current.value.urls[0] !== origin ||
+      // Linked below the offer while this machine was read-only, and it no longer is.
+      (recorded.clamped === true && ceiling !== "read-only") ||
       DateTime.toEpochMillis(current.value.expiresAt) - now <= Duration.toMillis(renewWithin());
     const outstanding =
       entry.request !== undefined &&
@@ -514,7 +551,9 @@ const make = Effect.gen(function* () {
       );
       // Until the fleet has a Machine access list, a code would carry each machine's setup access,
       // normally standard, even for a machine the fleet means to make read-only.
-      if (!FleetAccessPolicy.policyApplies(yield* fleetAccess.current)) return;
+      const policy = yield* fleetAccess.current;
+      if (!FleetAccessPolicy.policyApplies(policy)) return;
+      const ceiling = linkAccess(FleetAccessPolicy.selfAccess(policy));
       yield* forEachPeer(
         fleet.peers,
         ({ peer }) => peer.machineId,
@@ -530,7 +569,7 @@ const make = Effect.gen(function* () {
         fleet.peers,
         ({ peer }) => peer.machineId,
         ({ peer }) =>
-          peer.tls === undefined ? Effect.void : link(fleet, peer, peer.tls.origin, now),
+          peer.tls === undefined ? Effect.void : link(fleet, peer, peer.tls.origin, now, ceiling),
       );
     }).pipe(
       Effect.catchCause((cause) => Effect.logWarning("Fleet peer link pass failed.", { cause })),

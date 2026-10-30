@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -24,6 +25,7 @@ import * as Semaphore from "effect/Semaphore";
 import type * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as ServerConfig from "../config.ts";
+import * as Delivery from "./FleetDelivery.ts";
 import type { FleetPeer } from "./FleetDelivery.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 
@@ -71,9 +73,10 @@ export const FleetAccessSeed = Schema.Struct({
 export type FleetAccessSeed = typeof FleetAccessSeed.Type;
 
 /**
- * `fleet-access-ready/<machineId>.json` beside the roster, signed by that machine: it runs a build
- * that swaps in a replaced fleet credential. LAN 1.0.24 cannot, so adopting the starting list while
- * a machine it makes read-only still runs it would cut that machine's connections off.
+ * `fleet-access-ready/<machineId>.json` beside the roster, signed by that machine: it runs LAN
+ * 1.0.26 or later, which never cuts a downgraded peer's connection off. LAN 1.0.25 revokes such a
+ * peer's fleet session at once, and LAN 1.0.24 cannot take the replacement, so adopting the
+ * starting list while any machine still runs 1.0.25 could leave a 1.0.24 machine unable to read.
  */
 export const SEED_READY_DIRECTORY = "fleet-access-ready";
 const SeedReady = Schema.Struct({
@@ -92,8 +95,17 @@ const seedReadyData = (marker: SeedReady) =>
     marker.machineId,
     marker.createdAt,
   ]);
-/** How long a machine waits for those machines before adopting the starting list anyway. */
+/**
+ * How long a machine waits for those markers before adopting the starting list without one from a
+ * machine that is not running.
+ */
 export const SEED_READY_WAIT_MS = 24 * 60 * 60 * 1000;
+/**
+ * A machine without a marker whose signed connection summary is younger than this may be running
+ * 1.0.25, which publishes one every five minutes while it runs; the list waits for it to update.
+ * 1.0.24 with automatic pickup publishes the same summary, so it is waited for too.
+ */
+export const SEED_RUNNING_WITHIN_MS = 24 * 60 * 60 * 1000;
 // When this machine first saw the fleet's starting list.
 const SeedSeen = Schema.Struct({
   version: Schema.Literal(1),
@@ -114,6 +126,7 @@ const LocalCache = Schema.Struct({
   entries: Schema.Array(FleetAccessEntry).check(Schema.isMaxLength(10_000)),
   // Entries kept only so later ones still have their parents; they never count as verified.
   unverified: Schema.optionalKey(Schema.Array(Digest).check(Schema.isMaxLength(10_000))),
+  member: Schema.optionalKey(Schema.Boolean),
 });
 type LocalCache = typeof LocalCache.Type;
 
@@ -324,7 +337,13 @@ export interface FleetAccessState {
   readonly defaultAccess: Level;
   readonly machines: FleetAccessSnapshot["machines"];
   readonly machineId: string | undefined;
+  /** The enabled machines whose credentials this policy governs, this one included while enrolled. */
   readonly peers: ReadonlyArray<{ readonly machineId: string; readonly environmentId: string }>;
+  /**
+   * This machine, as of its last fleet read, is a validated enrolled member with an enabled roster
+   * row. Only then does the fleet link it. Separate from `peers`, which keeps governing credentials.
+   */
+  readonly member?: boolean;
   /**
    * The share's policy could not be read. The last accepted policy still caps credentials, and
    * with none nothing changes. Nothing is revoked or replaced for access until a read succeeds.
@@ -336,11 +355,13 @@ export interface FleetAccessState {
    */
   readonly seed?: "waiting" | "invalid";
   /**
-   * While a usable starting list waits for machines it makes read-only to run a build that can
-   * take a replaced credential: those machines, and when it is adopted anyway.
+   * While a usable starting list waits for enabled machines to run LAN 1.0.26 or later: those
+   * machines, which of them have been running lately (waited for until they update), and when the
+   * others, offline, stop being waited for.
    */
   readonly seedPending?: {
     readonly machineIds: ReadonlyArray<string>;
+    readonly running: ReadonlyArray<string>;
     readonly adoptAt: number;
   };
 }
@@ -355,13 +376,12 @@ export const selfAccess = (state: FleetAccessState): Level =>
 /** Whether access follows a saved policy; before one, each credential keeps its access. */
 export const policyApplies = (state: FleetAccessState) => state.revision > 0;
 /**
- * Whether the fleet would link this machine to its peers: it was an enabled member at its last
- * fleet read, and a list exists. Only then do linked environments count as on here.
+ * Whether the fleet would link this machine to its peers: at its last fleet read its enrollment
+ * was valid and its roster row enabled, and a list exists. Only then do linked environments count
+ * as on here.
  */
 export const fleetLinksApply = (state: FleetAccessState) =>
-  policyApplies(state) &&
-  state.machineId !== undefined &&
-  state.peers.some((peer) => peer.machineId === state.machineId);
+  policyApplies(state) && state.member === true;
 /**
  * Whether the policy was just read from the share. Only then may access revoke or replace
  * anything: a read error only caps, at the last accepted policy, so it never costs a machine a
@@ -375,6 +395,10 @@ interface FleetAccessInput {
   readonly machineId: string;
   readonly peers: ReadonlyArray<FleetPeer>;
   readonly legacyAccess: Level;
+  /** Where the fleet's signed connection summaries are, to tell which machines are running. */
+  readonly deliveryDirectory: string;
+  /** This machine's enrollment is valid and its roster row enabled; see `FleetAccessState.member`. */
+  readonly member: boolean;
   /** When given, a read may re-sign a head whose writer's key no longer verifies. */
   readonly signingPrivateKey?: string;
 }
@@ -440,6 +464,7 @@ const make = Effect.gen(function* () {
     machines: evaluation?.snapshot?.machines ?? [],
     machineId: value?.machineId,
     peers: value?.peers ?? [],
+    member: value?.member === true,
     ...(unavailable ? { unavailable: true } : {}),
     ...(seed === undefined ? {} : { seed }),
     ...(seedPending === undefined ? {} : { seedPending }),
@@ -597,31 +622,56 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * Adopting the list replaces the fleet credentials of the machines it makes read-only. It waits
-   * until each of them runs a build that takes the replacement, or a day after this machine first
-   * saw the list: a machine that has not updated by then is off or not updating, and recovers
-   * through the replacement once it does.
+   * Whether `peer` published a signed connection summary lately. LAN 1.0.25 and 1.0.24 publish the
+   * same format, so this cannot tell them apart; anything the share cannot answer counts as yes.
    */
-  const seedReadiness = Effect.fn("FleetAccess.seedReadiness")(function* (
+  const recentlyRunning = Effect.fn("FleetAccess.recentlyRunning")(function* (
     input: FleetAccessInput,
-    snapshot: FleetAccessSnapshot,
+    peer: FleetPeer,
+    now: number,
   ) {
+    const file = path.join(
+      input.deliveryDirectory,
+      `${Delivery.deliveryFileName(peer.machineId, peer.machineId)}.catalog.json`,
+    );
+    const exists = yield* Effect.result(fs.exists(file));
+    if (exists._tag === "Failure") return true;
+    if (!exists.success) return false;
+    const catalog = yield* readFleetJson(file, Delivery.FleetCatalog).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.option,
+    );
+    if (Option.isNone(catalog)) return true;
+    // Its signature as of when it was written; a forged or foreign one says nothing.
+    const signed = yield* Effect.try(() =>
+      Delivery.verifyFleetCatalog(catalog.value, peer, catalog.value.createdAt),
+    ).pipe(Effect.orElseSucceed(() => false));
+    return signed && now - catalog.value.createdAt < SEED_RUNNING_WITHIN_MS;
+  });
+
+  /**
+   * 1.0.25 revokes a downgraded peer's session at once and 1.0.24 cannot take the replacement, so
+   * the list waits for every enabled machine's 1.0.26 marker. A day after first sight it stops
+   * waiting for machines silent for a day, never for one running: 1.0.25 looks like 1.0.24.
+   */
+  const seedReadiness = Effect.fn("FleetAccess.seedReadiness")(function* (input: FleetAccessInput) {
     const now = yield* Clock.currentTimeMillis;
-    const named = snapshot.machines
-      .filter((machine) => machine.access === "read-only")
-      .map((machine) => machine.machineId);
-    if (named.includes(input.machineId)) yield* markReady(input, now);
+    yield* markReady(input, now);
     const adoptAt = (yield* firstSeen(input.fleetId, now)) + SEED_READY_WAIT_MS;
     const machineIds: Array<string> = [];
-    for (const machineId of named) {
-      const peer = input.peers.find((item) => item.machineId === machineId && item.enabled);
-      if (
-        peer !== undefined &&
-        !verifiedReady(yield* readReady(input.root, machineId), input.fleetId, peer)
-      )
-        machineIds.push(machineId);
+    const running: Array<string> = [];
+    for (const peer of input.peers.filter((item) => item.enabled)) {
+      if (verifiedReady(yield* readReady(input.root, peer.machineId), input.fleetId, peer))
+        continue;
+      machineIds.push(peer.machineId);
+      if (yield* recentlyRunning(input, peer, now)) running.push(peer.machineId);
     }
-    return { machineIds, adoptAt, ready: machineIds.length === 0 || now >= adoptAt };
+    return {
+      machineIds,
+      running,
+      adoptAt,
+      ready: machineIds.length === 0 || (now >= adoptAt && running.length === 0),
+    };
   });
 
   const refreshUnlocked = Effect.fn("FleetAccess.refresh")(
@@ -653,6 +703,7 @@ const make = Effect.gen(function* () {
         unverified: evaluation.revisions
           .filter((item) => !item.verified)
           .map((item) => item.digest),
+        member: input.member,
       };
       if (JSON.stringify(next) !== JSON.stringify(cache)) {
         yield* writeFleetJson(cacheFile, next).pipe(
@@ -669,8 +720,7 @@ const make = Effect.gen(function* () {
         kept.length > 0 ||
         candidates.some((entry) => entry.fleetId === input.fleetId);
       const seed: SeedRead = listed ? { _tag: "absent" } : yield* readSeed(input);
-      const readiness =
-        seed._tag === "valid" ? yield* seedReadiness(input, seed.snapshot) : undefined;
+      const readiness = seed._tag === "valid" ? yield* seedReadiness(input) : undefined;
       const updated = stateOf(
         cache,
         evaluation,
@@ -679,13 +729,31 @@ const make = Effect.gen(function* () {
         seed._tag === "valid" ? "waiting" : seed._tag === "invalid" ? "invalid" : undefined,
         readiness === undefined || readiness.ready
           ? undefined
-          : { machineIds: readiness.machineIds, adoptAt: readiness.adoptAt },
+          : {
+              machineIds: readiness.machineIds,
+              running: readiness.running,
+              adoptAt: readiness.adoptAt,
+            },
       );
       const previous = yield* SubscriptionRef.get(state);
       if (seed._tag === "invalid" && previous.seed !== "invalid")
         yield* Effect.logWarning(
           `The fleet's starting access list (${SEED_FILE}) cannot be used; nothing links until it is fixed or removed, or a list is saved.`,
           { reason: seed.reason },
+        );
+      if (
+        updated.seedPending !== undefined &&
+        JSON.stringify(updated.seedPending) !== JSON.stringify(previous.seedPending)
+      )
+        yield* Effect.logInfo(
+          "The fleet's starting access list waits for machines to run LAN 1.0.26 or later.",
+          {
+            waitingFor: updated.seedPending.machineIds,
+            // Waited for until they update: they may run 1.0.25, which would cut a 1.0.24 machine off.
+            running: updated.seedPending.running,
+            // When the others, which published nothing for a day, stop being waited for.
+            offlineUntil: DateTime.formatIso(DateTime.makeUnsafe(updated.seedPending.adoptAt)),
+          },
         );
       if (JSON.stringify(updated) !== JSON.stringify(previous))
         yield* SubscriptionRef.set(state, updated);
@@ -886,7 +954,7 @@ const make = Effect.gen(function* () {
           readOnly: snapshot.machines.map((machine) => machine.machineId),
           ...(view.readiness === undefined || view.readiness.machineIds.length === 0
             ? {}
-            : { notUpdatedAfterWaiting: view.readiness.machineIds }),
+            : { offlineAfterWaiting: view.readiness.machineIds }),
         }),
       ),
       // Once the share holds the list and gives it back, the starting list is spent. Removing it

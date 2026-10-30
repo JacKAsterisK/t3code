@@ -151,6 +151,33 @@ const make = Effect.gen(function* () {
         )
       )
         peers.push(peer);
+    // Whether the fleet links this machine: its own enrollment checks out and its roster row is
+    // enabled. The policy's peers keep a machine whose row was just disabled, so they can't say.
+    const ownPeer =
+      record === undefined
+        ? undefined
+        : peers.find(
+            (peer) =>
+              peer.enabled &&
+              peer.machineId === record.machineId &&
+              peer.environmentId === record.environmentId,
+          );
+    const member =
+      record !== undefined &&
+      record.enabled &&
+      ownPeer !== undefined &&
+      record.environmentId === (yield* environment.getEnvironmentId) &&
+      Authority.peerVerificationCode(ownPeer) ===
+        Authority.peerVerificationCode(
+          Authority.identityPeer(record, ownPeer.label, ownPeer.origin),
+        ) &&
+      roster.machines.some(
+        (machine) =>
+          machine.enabled &&
+          machine.machineId === ownPeer.machineId &&
+          machine.environmentId === ownPeer.environmentId &&
+          machine.origin === ownPeer.origin,
+      );
     const accessPolicy =
       record === undefined || authority === undefined || record.fleetId !== authority.fleetId
         ? undefined
@@ -160,10 +187,13 @@ const make = Effect.gen(function* () {
             machineId: record.machineId,
             peers,
             legacyAccess: record.access,
+            deliveryDirectory: paths.deliveryDirectory,
+            member,
             signingPrivateKey: record.signingPrivateKey,
           });
     return {
       accessPolicy,
+      member,
       ...paths,
       root,
       authorityFile,
@@ -360,6 +390,8 @@ const make = Effect.gen(function* () {
                 machineId: record.machineId,
                 peers: current.peers,
                 legacyAccess: record.access,
+                deliveryDirectory: current.deliveryDirectory,
+                member: current.member,
                 signingPrivateKey: record.signingPrivateKey,
                 expectedRevision: input.revision,
                 next: { defaultAccess: input.defaultAccess, machines: input.machines },

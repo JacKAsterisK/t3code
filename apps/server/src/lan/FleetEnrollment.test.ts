@@ -201,7 +201,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
             ),
           ),
         );
-        return { enrollment, links };
+        return { enrollment, links, fleetAccess };
       },
       (effect) => Effect.provideService(effect, Scope.Scope, serverScope),
     );
@@ -213,6 +213,9 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
       },
       get links() {
         return services.links;
+      },
+      get fleetAccess() {
+        return services.fleetAccess;
       },
       restart: Effect.gen(function* () {
         yield* Scope.close(serverScope, Exit.succeed(undefined));
@@ -844,6 +847,57 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         // A machine may always restrict itself.
         yield* change(f.b, 2, [{ machineId: beta, access: "read-only" }]);
         assert.equal((yield* f.a.enrollment.status).accessPolicy?.revision, 3);
+      }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect(
+    "stops linking a machine whose roster row is disabled, while its list still governs credentials",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false, "accessible");
+        yield* f.a.enrollment.configure({
+          operation: "start",
+          confirmed: true,
+          origin: "https://alpha.example.test",
+          autoPickup: true,
+          access: "standard",
+        });
+        yield* f.join("");
+        const alpha = f.a.record()!.machineId;
+        const beta = f.b.record()!.machineId;
+        yield* f.a.enrollment.configure({
+          operation: "access",
+          confirmed: true,
+          revision: 0,
+          defaultAccess: "standard",
+          machines: [{ machineId: beta, access: "read-only" }],
+        });
+        yield* f.a.enrollment.status;
+        assert.isTrue(FleetAccessPolicy.fleetLinksApply(yield* f.a.fleetAccess.current));
+
+        // The owner's roster row is disabled; its signed authority entry stays enabled.
+        const roster = yield* readFleetJson(f.rosterPath, FleetRoster).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        yield* writeFleetJson(f.rosterPath, {
+          ...roster,
+          machines: roster.machines.map((machine) =>
+            machine.machineId === alpha ? { ...machine, enabled: false } : machine,
+          ),
+        }).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+        yield* f.a.enrollment.status;
+        const state = yield* f.a.fleetAccess.current;
+        assert.isFalse(FleetAccessPolicy.fleetLinksApply(state));
+        // The list it accepted is kept for credential enforcement.
+        assert.equal(state.revision, 1);
+        assert.isTrue(state.peers.some((peer) => peer.machineId === alpha));
+        assert.equal(FleetAccessPolicy.machineAccess(state, beta), "read-only");
+
+        // Enabled again, the fleet links it again.
+        yield* writeFleetJson(f.rosterPath, roster).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        yield* f.a.enrollment.status;
+        assert.isTrue(FleetAccessPolicy.fleetLinksApply(yield* f.a.fleetAccess.current));
       }).pipe(Effect.provide(configLayer)),
   );
   it.effect(

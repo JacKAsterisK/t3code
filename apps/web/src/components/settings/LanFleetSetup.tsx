@@ -403,16 +403,20 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
       </p>
       {policy.seed === "waiting" && policy.seedPending !== undefined ? (
         <p className="text-xs text-muted-foreground">
-          This fleet's starting access list applies once{" "}
+          This fleet's starting access list applies once every machine runs T3 Code LAN 1.0.26 or
+          later, so no machine loses its connections on the way. Waiting for{" "}
           {policy.seedPending.machineIds
-            .map(
-              (machineId) =>
-                setup.peers.find((peer) => peer.machineId === machineId)?.label ?? machineId,
-            )
-            .join(" and ")}{" "}
-          {policy.seedPending.machineIds.length === 1 ? "has" : "have"} updated, or at{" "}
-          {new Date(policy.seedPending.adoptAt).toLocaleString()} if not. Machines link to each
-          other once it is in place.
+            .map((machineId) => {
+              const label =
+                setup.peers.find((peer) => peer.machineId === machineId)?.label ?? machineId;
+              return policy.seedPending?.running.includes(machineId)
+                ? `${label} (running an older version)`
+                : `${label} (offline)`;
+            })
+            .join(", ")}
+          . Running machines are waited for until they update; offline ones only until{" "}
+          {new Date(policy.seedPending.adoptAt).toLocaleString()}. Machines link to each other once
+          it is in place.
         </p>
       ) : policy.seed === "waiting" ? (
         <p className="text-xs text-muted-foreground">

@@ -6,6 +6,7 @@ import {
   type AuthMcpClientAccess,
   EnvironmentHttpApi,
   type FleetAccess as FleetAccessLevel,
+  mcpClientScopes,
   OrchestratorMcpFailure,
   type ServerSettings as ServerSettingsShape,
 } from "@t3tools/contracts";
@@ -124,6 +125,7 @@ const makeMachine = (input: {
           environmentId: input.identity.peer.environmentId,
         },
       ],
+      member: true,
     });
     const transportOrigin = yield* Ref.make<string | undefined>(undefined);
     const backendOrigin = yield* Ref.make<string | undefined>(undefined);
@@ -574,6 +576,78 @@ it.live(
         yield* round(fleet);
         const link = yield* linking.links.get(pandaMedic.peer.environmentId);
         expect(Option.getOrUndefined(link)?.access).toBe<AuthMcpClientAccess>("read-only");
+        expect(yield* callerAccess(fleet)).toBe("read-only");
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live(
+  "never links above its own access, ignoring 1.0.25 offers and narrowing an out-of-date issuer's",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+        const path = yield* Path.Path;
+        const { cryoFrog, pandaMedic, pandaPeer, linking, linked } = fleet;
+        const linkOf = linking.links
+          .get(pandaMedic.peer.environmentId)
+          .pipe(Effect.map(Option.getOrUndefined));
+        const ownAccess = (access: FleetAccessLevel) =>
+          Ref.update(linking.policy, (current) => ({
+            ...current,
+            machines: [{ machineId: cryoFrog.peer.machineId, access }],
+          }));
+        // CryoFrog's accepted list makes it read-only.
+        yield* ownAccess("read-only");
+
+        // PandaMedic on 1.0.25, its adapter turned on by hand and no list read, offers its setup
+        // access: full access, with no list revision.
+        const files = Delivery.peerLinkFileNames(
+          pandaMedic.peer.machineId,
+          cryoFrog.peer.machineId,
+        );
+        const deliveryId = "00000000-0000-4000-8000-000000000002";
+        const code = yield* linked.auth.createPairingLink({
+          ttl: Duration.hours(1),
+          subject: `lan-fleet-peer-link:${cryoFrog.peer.machineId}:${deliveryId}`,
+          scopes: mcpClientScopes("full-access"),
+        });
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        yield* writeFleetJson(
+          path.join(fleet.share, files.offer),
+          Delivery.sealDelivery({
+            config: privateConfig(pandaMedic, fleet.share, [cryoFrog.peer, pandaPeer]),
+            sender: pandaPeer,
+            recipient: cryoFrog.peer,
+            deliveryId,
+            expiresAt: now + 60 * 60 * 1000,
+            credential: code.credential,
+            peerLink: { access: "full-access" },
+          }),
+        );
+        yield* linking.adapter.pass;
+        expect(yield* linking.links.list).toEqual([]);
+        expect(yield* linked.linkSessions(cryoFrog)).toEqual([]);
+
+        // PandaMedic updates but its copy of the list misses the revision that restricted
+        // CryoFrog, so it still grants standard. CryoFrog links only at its own access.
+        yield* grant(linked, cryoFrog, "standard");
+        yield* round(fleet);
+        expect((yield* linkOf)?.access).toBe<AuthMcpClientAccess>("read-only");
+        expect(yield* callerAccess(fleet)).toBe("read-only");
+
+        // Lifted, CryoFrog asks again and takes the access PandaMedic offers.
+        yield* ownAccess("standard");
+        yield* round(fleet);
+        expect(yield* callerAccess(fleet)).toBe("full-access");
+
+        // Restricted again, it drops the full-access link at once, before any issuer acts.
+        yield* ownAccess("read-only");
+        yield* linking.adapter.pass;
+        expect(yield* linkOf).toBeUndefined();
+        expect(yield* callerAccess(fleet)).not.toBe("full-access");
+        yield* linked.adapter.pass;
+        yield* linking.adapter.pass;
         expect(yield* callerAccess(fleet)).toBe("read-only");
       }),
     ).pipe(Effect.provide(NodeServices.layer)),

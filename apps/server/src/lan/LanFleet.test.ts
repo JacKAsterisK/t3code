@@ -458,8 +458,9 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
         f.setPolicy({ revision: 2, machines: [{ machineId: "beta", access: "read-only" }] });
         yield* TestClock.adjust("1 second");
         assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "pending");
-        // The standard session ends at once, and the replacement carries only read scopes.
-        assert.deepEqual(f.revoked, ["session-synthetic-1"]);
+        // The standard session stays, capped where it is used, and the replacement carries only
+        // read scopes.
+        assert.deepEqual(f.revoked, []);
         assert.deepEqual(
           f.issuedScopes.at(-1),
           FleetAccessPolicy.fleetCredentialScopes("read-only"),
@@ -479,6 +480,56 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
         assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
         assert.deepEqual(f.issued, ["alpha", "alpha"]);
         assert.deepEqual(f.revoked, ["session-synthetic-1"]);
+      }).pipe(Effect.provide(testConfig)),
+  );
+  it.effect(
+    "keeps a downgraded peer reading until it uses its replacement, however long that takes",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* setup(true, false, true);
+        f.setPolicy({ revision: 1 });
+        const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        yield* f.sync(f.recipient.service);
+        f.consume("alpha");
+        yield* f.sync(f.recipient.service, connected);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+
+        // Made read-only while it runs a build that never collects a replacement (LAN 1.0.24):
+        // its standard session stays, and each lapsed replacement is offered again.
+        f.setPolicy({ revision: 2, machines: [{ machineId: "beta", access: "read-only" }] });
+        for (let day = 0; day < 3; day++) {
+          if (day > 0) yield* TestClock.adjust("25 hours");
+          yield* f.sync(f.recipient.service, connected);
+          yield* f.sync(f.sender.service);
+        }
+        assert.deepEqual(f.revoked, []);
+        assert.deepEqual(f.issuedScopes.slice(1), [
+          FleetAccessPolicy.fleetCredentialScopes("read-only"),
+          FleetAccessPolicy.fleetCredentialScopes("read-only"),
+          FleetAccessPolicy.fleetCredentialScopes("read-only"),
+        ]);
+
+        // Widened again before it collected: the read-only grant is withdrawn and the standard
+        // session is current again, with nothing new to send.
+        f.setPolicy({ revision: 3, machines: [] });
+        yield* f.sync(f.recipient.service, connected);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+        assert.deepEqual(f.revoked, ["synthetic-4"]);
+        assert.equal(f.issued.length, 4);
+
+        // Read-only once more, and this time it has updated: it collects and uses the
+        // replacement, and only then is the standard session retired.
+        f.setPolicy({ revision: 4, machines: [{ machineId: "beta", access: "read-only" }] });
+        yield* f.sync(f.recipient.service, connected);
+        yield* f.sync(f.sender.service);
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+        assert.equal(f.revoked.includes("session-synthetic-1"), false);
+        f.consume("alpha");
+        yield* f.sync(f.recipient.service, connected);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+        assert.equal(f.revoked.includes("session-synthetic-1"), true);
       }).pipe(Effect.provide(testConfig)),
   );
   it.effect.each([0, 1])(
@@ -599,11 +650,15 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
       yield* f.sender.service.backgroundSync;
       assert.deepEqual(f.revoked, ["session-synthetic-1"]);
 
-      // A change to read-only revokes the standard session at once.
+      // A change to read-only sends a read-only replacement; the standard session is only capped
+      // until the peer uses it.
       f.setPolicy({ revision: 1, machines: [{ machineId: "beta", access: "read-only" }] });
       yield* f.sender.service.backgroundSync;
-      assert.deepEqual(f.revoked, ["session-synthetic-1", "session-synthetic-2"]);
+      assert.deepEqual(f.revoked, ["session-synthetic-1"]);
       assert.deepEqual(f.issuedScopes.at(-1), FleetAccessPolicy.fleetCredentialScopes("read-only"));
+      f.consume("alpha");
+      yield* f.sender.service.backgroundSync;
+      assert.deepEqual(f.revoked, ["session-synthetic-1", "session-synthetic-2"]);
     }).pipe(Effect.provide(testConfig)),
   );
   it.effect(

@@ -350,12 +350,16 @@ const make = Effect.gen(function* () {
                         link,
                       })),
                   ];
-                  // Lost access ends at once; gained access waits until the peer can collect it.
+                  // Unspent grants at another access go: lost access at once, gained access once
+                  // the peer can collect. Sessions stay, capped at its access on every use, until
+                  // it uses one at its access, so a peer that cannot take a replacement (1.0.24)
+                  // keeps reading.
                   if (enforcePolicy && (access === "read-only" || recipientReady))
-                    for (const credential of held.filter((item) => item.access !== access)) {
+                    for (const credential of held.filter(
+                      (item) => item.link !== undefined && item.access !== access,
+                    )) {
                       yield* credential.revoke;
-                      if (credential.link !== undefined)
-                        activeLinks.splice(activeLinks.indexOf(credential.link), 1);
+                      activeLinks.splice(activeLinks.indexOf(credential.link!), 1);
                     }
                   // Before the first saved policy, a credential keeps the access it was issued at.
                   const current = (item: (typeof held)[number]) =>
@@ -378,14 +382,18 @@ const make = Effect.gen(function* () {
                   if (renewable)
                     recipientConnected =
                       recipientConnected && held.some((item) => item.session && fresh(item));
-                  // Once the peer uses its renewed session, the ones issued before it are retired.
-                  // A later one it has not used yet may be what it saved, so that one stays.
+                  // Once the peer uses its renewed or replaced session, the ones issued before it
+                  // are retired, and so is any at another access. A later one at its access that
+                  // it has not used yet may be what it saved, so that one stays.
                   const inUse = held
                     .filter((item) => item.session && item.used && fresh(item))
                     .toSorted((left, right) => right.issuedAt - left.issuedAt)[0];
                   if (inUse !== undefined)
                     for (const credential of held.filter(
-                      (item) => item.session && current(item) && item.issuedAt < inUse.issuedAt,
+                      (item) =>
+                        item.session &&
+                        item !== inUse &&
+                        (item.issuedAt < inUse.issuedAt || !current(item)),
                     ))
                       yield* credential.revoke;
                   if (catalogConnected && recipientReady && renewable && !held.some(fresh)) {

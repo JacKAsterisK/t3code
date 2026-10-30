@@ -64,6 +64,11 @@ const Payload = Schema.Struct({
   credential: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
   /** The access the sender granted a peer link; only peer-link deliveries carry it. */
   access: Schema.optionalKey(AuthMcpClientAccess),
+  /**
+   * The sender's Machine access list revision when it granted that access. LAN 1.0.25 peer-link
+   * offers lack it: they may come from a sender with no list, at its setup access.
+   */
+  policyRevision: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
 });
 const decodePayload = Schema.decodeSync(Schema.fromJsonString(Payload));
 const isConnectHost = Schema.is(FleetConnectHost);
@@ -212,7 +217,7 @@ export function sealDelivery(input: {
   expiresAt: number;
   credential: string;
   /** A peer-link code and the access it grants; absent for a desktop client delivery. */
-  peerLink?: { readonly access: AuthMcpClientAccess };
+  peerLink?: { readonly access: AuthMcpClientAccess; readonly policyRevision?: number };
 }): Delivery {
   const ephemeral = NodeCrypto.generateKeyPairSync("x25519");
   const header = {
@@ -237,6 +242,9 @@ export function sealDelivery(input: {
     origin: input.sender.origin,
     credential: input.credential,
     ...(input.peerLink === undefined ? {} : { access: input.peerLink.access }),
+    ...(input.peerLink?.policyRevision === undefined
+      ? {}
+      : { policyRevision: input.peerLink.policyRevision }),
   };
   const delivery: Delivery = {
     header,
@@ -310,7 +318,8 @@ export function openDelivery(
     payload.senderEnvironmentId !== sender.environmentId ||
     payload.recipientEnvironmentId !== self.environmentId ||
     payload.origin !== sender.origin ||
-    (payload.access !== undefined) !== (purpose === "peer-link")
+    (payload.access !== undefined) !== (purpose === "peer-link") ||
+    (payload.policyRevision !== undefined && purpose !== "peer-link")
   )
     throw new Error("Fleet environment identity mismatch");
   return payload;

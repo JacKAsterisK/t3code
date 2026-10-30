@@ -1008,6 +1008,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
             revision: 1,
             machineId: "machine-self",
             peers: [{ machineId: "machine-self", environmentId: "environment-self" }],
+            member: true,
           };
           const fleetState = yield* SubscriptionRef.make(noFleet);
           const fleetAccess = Layer.mock(FleetAccessPolicy.FleetAccess)({
@@ -1062,9 +1063,11 @@ it.layer(NodeServices.layer)("server settings", (it) => {
             assert.isUndefined(saved.fleetLinkedEnvironmentsActive);
             assert.isUndefined(saved.linkedEnvironmentsEnabled);
 
-            // Disabled in the fleet, it falls back to the Labs setting again.
-            yield* SubscriptionRef.set(fleetState, { ...member, peers: [] });
+            // Its roster row disabled, it falls back to the Labs setting again, even while the
+            // list it accepted still governs its credentials.
+            yield* SubscriptionRef.set(fleetState, { ...member, member: false });
             assert.isFalse((yield* serverSettings.getSettings).linkedEnvironmentsEnabled);
+            assert.isFalse((yield* serverSettings.getSettings).fleetLinkedEnvironmentsActive);
           }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provide(fleetAccess))));
         }),
       ),

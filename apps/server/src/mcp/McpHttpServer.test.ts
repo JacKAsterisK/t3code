@@ -1015,6 +1015,7 @@ it.effect("hides tools for links and refuses another environment while the beta 
         ...noFleet,
         machineId: machine.machineId,
         peers: [machine],
+        member: true,
       });
       expect(yield* listed()).toEqual(["where"]);
       // Once it has one, the fleet keeps linked environments on here.
@@ -1023,6 +1024,7 @@ it.effect("hides tools for links and refuses another environment while the beta 
         revision: 1,
         machineId: machine.machineId,
         peers: [machine],
+        member: true,
       });
       expect(yield* listed()).toEqual(["links", "where"]);
     }),

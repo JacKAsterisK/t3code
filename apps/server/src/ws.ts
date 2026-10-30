@@ -29,6 +29,7 @@ import {
   AuthAccessWriteScope,
   AuthEnvironmentMaintainScope,
   AuthOrchestrationOperateScope,
+  AuthProvidersManageScope,
   type AuthEnvironmentScope,
   type ScheduledTask,
   type ScheduledTaskListResult,
@@ -2379,6 +2380,10 @@ export const layerWsRpc = (
         [WS_METHODS.serverRefreshProviders]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* (input) {
+            // A plain refresh only reads. Reloading secrets unlocks the host's vault and can
+            // rebuild provider instances, so it needs the scope that manages providers.
+            if (input.reloadSecrets === true)
+              yield* authorizeEffect(AuthProvidersManageScope, Effect.void);
             if (input.refreshModels) {
               yield* modelManifest.forceRefresh;
               const instances = yield* providerInstances.listInstances;

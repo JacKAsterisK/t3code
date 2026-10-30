@@ -5,6 +5,7 @@ import {
   AuthEnvironmentMaintainScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  AuthProvidersManageScope,
   AuthSessionId,
   type AuthEnvironmentScope,
   type ScheduledTaskListResult,
@@ -1046,6 +1047,99 @@ it.effect("stops showing webhook URLs once a connection's access narrows after i
     yield* Queue.offer(lists, list);
     assert.isUndefined((yield* Queue.take(responses)).tasks[0]?.webhook);
     yield* server.write(0, { _tag: "Interrupt", requestId, interruptors: [] });
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+    Effect.scoped,
+  ),
+);
+
+it.effect("reloads provider secrets only for a connection that manages providers", () =>
+  Effect.gen(function* () {
+    const exits = yield* Queue.unbounded<Exit.Exit<unknown, unknown>>();
+    const instanceId = ProviderInstanceId.make("claudeAgent");
+    // A read-only fleet connection, later widened and then narrowed again.
+    let current: ReadonlyArray<AuthEnvironmentScope> = [AuthOrchestrationReadScope];
+    let reloads = 0;
+    let refreshes = 0;
+    const server = yield* RpcServer.makeNoSerialization(
+      RpcGroup.make(WsServerRefreshProvidersRpc),
+      {
+        ...WS_RPC_SERVER_OPTIONS,
+        onFromServer: (response) =>
+          response._tag === "Exit"
+            ? Queue.offer(exits, response.exit as Exit.Exit<unknown, unknown>)
+            : Effect.void,
+      },
+    ).pipe(
+      Effect.provide(
+        layerWsRpc(
+          {
+            sessionId: AuthSessionId.make("fleet-peer"),
+            subject: "lan-fleet:fleet-peer",
+            method: "bearer-access-token",
+            scopes: current,
+          },
+          {},
+          yield* ServerBrowser.ServerBrowser,
+          () => Effect.void,
+          Effect.sync(() => current),
+        ).pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              layerUnusedConfigRpcServices,
+              Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({
+                reloadSecretsAndRefresh: () =>
+                  Effect.sync(() => {
+                    reloads += 1;
+                    return [];
+                  }),
+                refreshInstance: () =>
+                  Effect.sync(() => {
+                    refreshes += 1;
+                    return [];
+                  }),
+              }),
+              Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+              Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+              Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+              Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+                scratchRoot: Effect.succeedNone,
+                namedProjectsRoot: process.cwd(),
+              }),
+              Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+              Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+              Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+            ),
+          ),
+        ),
+      ),
+    );
+    const refresh = (id: string, reloadSecrets?: true) =>
+      server
+        .write(0, {
+          _tag: "Request",
+          id: RpcMessage.RequestId(id),
+          tag: WS_METHODS.serverRefreshProviders,
+          payload: reloadSecrets ? { instanceId, reloadSecrets } : { instanceId },
+          headers: Headers.empty,
+        })
+        .pipe(Effect.andThen(Queue.take(exits)));
+
+    assert.isTrue(Exit.isFailure(yield* refresh("read-only-reload", true)));
+    assert.isTrue(Exit.isSuccess(yield* refresh("read-only-refresh")));
+    assert.deepEqual([reloads, refreshes], [0, 1]);
+    current = [AuthOrchestrationReadScope, AuthProvidersManageScope];
+    assert.isTrue(Exit.isSuccess(yield* refresh("manager-reload", true)));
+    current = [AuthOrchestrationReadScope];
+    assert.isTrue(Exit.isFailure(yield* refresh("narrowed-reload", true)));
+    assert.deepEqual([reloads, refreshes], [1, 1]);
   }).pipe(
     Effect.provide(
       Layer.mergeAll(

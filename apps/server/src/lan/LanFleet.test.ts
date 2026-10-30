@@ -532,6 +532,50 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
         assert.equal(f.revoked.includes("session-synthetic-1"), true);
       }).pipe(Effect.provide(testConfig)),
   );
+  it.effect(
+    "keeps the session a downgraded peer saved when access widens again, and replaces it",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* setup(true, false, true);
+        f.setPolicy({ revision: 1 });
+        const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        yield* f.sync(f.recipient.service);
+        f.consume("alpha");
+        yield* f.sync(f.recipient.service, connected);
+        yield* f.sync(f.sender.service);
+        let revision = 1;
+        let access: "read-only" | "standard" = "standard";
+        const flip = () => {
+          access = access === "standard" ? "read-only" : "standard";
+          f.setPolicy({
+            revision: ++revision,
+            machines: access === "standard" ? [] : [{ machineId: "beta", access }],
+          });
+        };
+        // Read-only, standard, read-only, standard: each time the peer has saved and used the
+        // last replacement, at the access it just lost, before the issuer passes again.
+        for (let round = 0; round < 4; round++) {
+          yield* TestClock.adjust("1 second");
+          flip();
+          yield* f.sync(f.sender.service);
+          // The session it saved stays until it uses one at the new access; every older one goes.
+          const saved = f.issued.length - 1;
+          for (let index = 1; index <= saved; index++)
+            assert.equal(f.revoked.includes(`session-synthetic-${index}`), index < saved);
+          assert.equal(f.issuedScopes.length, saved + 1);
+          assert.deepEqual(f.issuedScopes.at(-1), FleetAccessPolicy.fleetCredentialScopes(access));
+          assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+          f.consume("alpha");
+          yield* f.sync(f.recipient.service, connected);
+        }
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+        // Only the session in use is left.
+        for (let index = 1; index <= f.issued.length; index++)
+          assert.equal(f.revoked.includes(`session-synthetic-${index}`), index < f.issued.length);
+      }).pipe(Effect.provide(testConfig)),
+  );
   it.effect.each([0, 1])(
     "renews a fleet credential a week before it expires, at access policy revision %i",
     (revision) =>
@@ -652,6 +696,7 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
 
       // A change to read-only sends a read-only replacement; the standard session is only capped
       // until the peer uses it.
+      yield* TestClock.adjust("1 second");
       f.setPolicy({ revision: 1, machines: [{ machineId: "beta", access: "read-only" }] });
       yield* f.sender.service.backgroundSync;
       assert.deepEqual(f.revoked, ["session-synthetic-1"]);

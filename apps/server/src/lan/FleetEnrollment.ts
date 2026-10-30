@@ -61,7 +61,10 @@ const make = Effect.gen(function* () {
     Effect.try({ try: () => resolveFleetBootstrap(processEnvironment), catch: configurationError });
   const load = Effect.fn("FleetEnrollment.load")(function* () {
     const paths = yield* bootstrap();
-    if (paths === undefined) return undefined;
+    if (paths === undefined) {
+      yield* fleetAccess.leave;
+      return undefined;
+    }
     const shareRoot = platform === "win32" ? trustedFleetShareRoot(paths.rosterPath) : undefined;
     const sharedFolderTrust =
       shareRoot === undefined
@@ -178,6 +181,9 @@ const make = Effect.gen(function* () {
           machine.environmentId === ownPeer.environmentId &&
           machine.origin === ownPeer.origin,
       );
+    // With no enrollment here the fleet no longer links this machine. A missing authority file may
+    // only be a share blip, so it changes nothing.
+    if (record === undefined) yield* fleetAccess.leave;
     const accessPolicy =
       record === undefined || authority === undefined || record.fleetId !== authority.fleetId
         ? undefined
@@ -187,7 +193,6 @@ const make = Effect.gen(function* () {
             machineId: record.machineId,
             peers,
             legacyAccess: record.access,
-            deliveryDirectory: paths.deliveryDirectory,
             member,
             signingPrivateKey: record.signingPrivateKey,
           });
@@ -390,7 +395,6 @@ const make = Effect.gen(function* () {
                 machineId: record.machineId,
                 peers: current.peers,
                 legacyAccess: record.access,
-                deliveryDirectory: current.deliveryDirectory,
                 member: current.member,
                 signingPrivateKey: record.signingPrivateKey,
                 expectedRevision: input.revision,

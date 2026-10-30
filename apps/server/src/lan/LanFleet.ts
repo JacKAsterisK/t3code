@@ -334,6 +334,11 @@ const make = Effect.gen(function* () {
                         session: true,
                         expiresAt: DateTime.toEpochMillis(session.expiresAt),
                         used: session.connected || session.lastConnectedAt !== null,
+                        lastUsedAt: session.connected
+                          ? now
+                          : session.lastConnectedAt === null
+                            ? 0
+                            : DateTime.toEpochMillis(session.lastConnectedAt),
                         issuedAt: DateTime.toEpochMillis(session.issuedAt),
                         revoke: auth.revokeSession(session.sessionId),
                         link: undefined,
@@ -345,6 +350,7 @@ const make = Effect.gen(function* () {
                         session: false,
                         expiresAt: DateTime.toEpochMillis(link.expiresAt),
                         used: false,
+                        lastUsedAt: 0,
                         issuedAt: DateTime.toEpochMillis(link.createdAt),
                         revoke: auth.revokePairingLink(link.id),
                         link,
@@ -378,25 +384,26 @@ const make = Effect.gen(function* () {
                     enforcePolicy ||
                     held.some((item) => item.session) ||
                     (sent !== undefined && sent.deliveryId !== EXISTING_CONNECTION);
+                  // The session the peer used last, at any access, is the one it saved: those
+                  // issued before it are retired. A later one it has not used yet may be what it
+                  // is saving, so it stays. One not at its access stays until a replacement is.
+                  const newest = held
+                    .filter((item) => item.session && item.used)
+                    .toSorted(
+                      (left, right) =>
+                        right.lastUsedAt - left.lastUsedAt || right.issuedAt - left.issuedAt,
+                    )[0];
+                  const retired = held.filter(
+                    (item) =>
+                      item.session && newest !== undefined && item.issuedAt < newest.issuedAt,
+                  );
+                  for (const credential of retired) yield* credential.revoke;
+                  const live = held.filter((item) => !retired.includes(item));
                   const catalogConnected = recipientConnected;
                   if (renewable)
                     recipientConnected =
-                      recipientConnected && held.some((item) => item.session && fresh(item));
-                  // Once the peer uses its renewed or replaced session, the ones issued before it
-                  // are retired, and so is any at another access. A later one at its access that
-                  // it has not used yet may be what it saved, so that one stays.
-                  const inUse = held
-                    .filter((item) => item.session && item.used && fresh(item))
-                    .toSorted((left, right) => right.issuedAt - left.issuedAt)[0];
-                  if (inUse !== undefined)
-                    for (const credential of held.filter(
-                      (item) =>
-                        item.session &&
-                        item !== inUse &&
-                        (item.issuedAt < inUse.issuedAt || !current(item)),
-                    ))
-                      yield* credential.revoke;
-                  if (catalogConnected && recipientReady && renewable && !held.some(fresh)) {
+                      recipientConnected && live.some((item) => item.session && fresh(item));
+                  if (catalogConnected && recipientReady && renewable && !live.some(fresh)) {
                     // The peer keeps a connection here with no credential at its access, or one
                     // that is about to expire or already has: replace it.
                     if (outgoingExists) {

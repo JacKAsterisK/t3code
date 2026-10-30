@@ -898,6 +898,18 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         );
         yield* f.a.enrollment.status;
         assert.isTrue(FleetAccessPolicy.fleetLinksApply(yield* f.a.fleetAccess.current));
+
+        // Its enrollment record goes: it stops linking, and the list still governs credentials.
+        const record = f.a.record();
+        f.a.replaceRecord(undefined);
+        assert.isUndefined(yield* f.a.enrollment.resolve);
+        const absent = yield* f.a.fleetAccess.current;
+        assert.isFalse(FleetAccessPolicy.fleetLinksApply(absent));
+        assert.equal(absent.revision, 1);
+        assert.equal(FleetAccessPolicy.machineAccess(absent, beta), "read-only");
+        f.a.replaceRecord(record);
+        yield* f.a.enrollment.status;
+        assert.isTrue(FleetAccessPolicy.fleetLinksApply(yield* f.a.fleetAccess.current));
       }).pipe(Effect.provide(configLayer)),
   );
   it.effect(

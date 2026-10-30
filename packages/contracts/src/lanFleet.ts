@@ -171,15 +171,8 @@ export const LanFleetSetupState = Schema.Struct({
       canChange: Schema.Boolean,
       // A starting list on the share, before any list exists: not adopted yet, or unusable.
       seed: Schema.optionalKey(Schema.Literals(["waiting", "invalid"])),
-      // While it waits for machines to run LAN 1.0.26 or later: all of them, those running lately
-      // (waited for until they update), and when the offline ones stop being waited for.
-      seedPending: Schema.optionalKey(
-        Schema.Struct({
-          machineIds: Schema.Array(FleetMachineId),
-          running: Schema.Array(FleetMachineId),
-          adoptAt: Schema.Number,
-        }),
-      ),
+      // While it waits for every enabled machine to run LAN 1.0.26 or later: those not confirmed.
+      seedPending: Schema.optionalKey(Schema.Struct({ machineIds: Schema.Array(FleetMachineId) })),
     }),
   ),
   peers: Schema.Array(

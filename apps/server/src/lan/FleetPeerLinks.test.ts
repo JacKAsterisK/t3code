@@ -6,6 +6,7 @@ import {
   type AuthMcpClientAccess,
   EnvironmentHttpApi,
   type FleetAccess as FleetAccessLevel,
+  LanFleetError,
   mcpClientScopes,
   OrchestratorMcpFailure,
   type ServerSettings as ServerSettingsShape,
@@ -127,6 +128,10 @@ const makeMachine = (input: {
       ],
       member: true,
     });
+    // Runs once, right after the next access read, as a list change landing mid-pass.
+    const afterAccessRead = yield* Ref.make<Effect.Effect<void> | undefined>(undefined);
+    // The share stops answering: loading the fleet fails.
+    const shareDown = yield* Ref.make(false);
     const transportOrigin = yield* Ref.make<string | undefined>(undefined);
     const backendOrigin = yield* Ref.make<string | undefined>(undefined);
     const descriptor = descriptorOf(input.identity.peer.environmentId, input.identity.peer.label);
@@ -139,11 +144,26 @@ const makeMachine = (input: {
       Layer.provide(FetchHttpClient.layer),
       Layer.provideMerge(EnvironmentAuth.layer),
       Layer.provideMerge(ServerSettings.layerTest(input.settings)),
-      Layer.provide(Layer.succeed(FleetContext.FleetContext, { load: Ref.get(fleet) })),
+      Layer.provide(
+        Layer.succeed(FleetContext.FleetContext, {
+          load: Ref.get(shareDown).pipe(
+            Effect.flatMap((down) =>
+              down ? Effect.fail(new LanFleetError({ reason: "unavailable" })) : Ref.get(fleet),
+            ),
+          ),
+        }),
+      ),
       Layer.provide(
         Layer.mock(FleetAccessPolicy.FleetAccess)({
           accessFor: (environmentId) =>
-            Ref.get(levels).pipe(Effect.map((current) => current[environmentId])),
+            Ref.get(levels).pipe(
+              Effect.tap(() =>
+                Ref.getAndSet(afterAccessRead, undefined).pipe(
+                  Effect.flatMap((change) => change ?? Effect.void),
+                ),
+              ),
+              Effect.map((current) => current[environmentId]),
+            ),
           current: Ref.get(policy),
         }),
       ),
@@ -176,6 +196,8 @@ const makeMachine = (input: {
       fleet,
       levels,
       policy,
+      afterAccessRead,
+      shareDown,
       transportOrigin,
       backendOrigin,
       adapter: Context.get(context, FleetPeerLinks.FleetPeerLinks),
@@ -641,16 +663,59 @@ it.live(
         yield* round(fleet);
         expect(yield* callerAccess(fleet)).toBe("full-access");
 
-        // Restricted again, it drops the full-access link at once, before any issuer acts.
+        // Restricted again, it drops the full-access link at once, before any issuer acts and
+        // even while the share does not answer.
         yield* ownAccess("read-only");
+        yield* Ref.set(linking.shareDown, true);
         yield* linking.adapter.pass;
         expect(yield* linkOf).toBeUndefined();
         expect(yield* callerAccess(fleet)).not.toBe("full-access");
-        yield* linked.adapter.pass;
-        yield* linking.adapter.pass;
+        yield* Ref.set(linking.shareDown, false);
+        yield* round(fleet);
         expect(yield* callerAccess(fleet)).toBe("read-only");
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("never keeps a link above an access list that narrows during a pass", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+      const { cryoFrog, pandaMedic, linking, linked } = fleet;
+      const linkOf = linking.links
+        .get(pandaMedic.peer.environmentId)
+        .pipe(Effect.map(Option.getOrUndefined));
+      // CryoFrog asks; PandaMedic offers full access.
+      yield* linking.adapter.pass;
+      yield* linked.adapter.pass;
+      // CryoFrog's own list makes it read-only while its pass is under way, before it redeems.
+      yield* Ref.set(
+        linking.afterAccessRead,
+        Ref.update(linking.policy, (current) => ({
+          ...current,
+          revision: 2,
+          machines: [{ machineId: cryoFrog.peer.machineId, access: "read-only" as const }],
+        })),
+      );
+      yield* linking.adapter.pass;
+      expect((yield* linkOf)?.access).toBe<AuthMcpClientAccess>("read-only");
+      expect(yield* callerAccess(fleet)).toBe("read-only");
+
+      // PandaMedic's list narrows CryoFrog after it read CryoFrog's access but before it mints:
+      // the code carries only what the list says now.
+      const fresh = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+      yield* fresh.linking.adapter.pass;
+      yield* Ref.set(
+        fresh.linked.afterAccessRead,
+        grant(fresh.linked, fresh.cryoFrog, "read-only"),
+      );
+      yield* fresh.linked.adapter.pass;
+      yield* fresh.linking.adapter.pass;
+      const freshLink = yield* fresh.linking.links.get(fresh.pandaMedic.peer.environmentId);
+      expect(Option.getOrUndefined(freshLink)?.access).toBe<AuthMcpClientAccess>("read-only");
+      expect(yield* callerAccess(fresh)).toBe("read-only");
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.live("does nothing on either machine while the adapter is off", () =>

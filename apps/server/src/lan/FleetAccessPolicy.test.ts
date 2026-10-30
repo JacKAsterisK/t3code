@@ -74,20 +74,21 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
     machineId: self.peer.machineId,
     peers,
     legacyAccess: "standard" as const,
-    deliveryDirectory,
     member: true,
     signingPrivateKey: self.signingPrivateKey,
   });
-  /** `self` publishes its signed connection summary now, as a running 1.0.24 or 1.0.25 does. */
-  const publishCatalog = (self: Machine) =>
+  const catalogFile = (self: Machine) =>
+    path.join(
+      deliveryDirectory,
+      `${Delivery.deliveryFileName(self.peer.machineId, self.peer.machineId)}.catalog.json`,
+    );
+  /** `self` publishes its signed connection summary, as a running 1.0.24 or 1.0.25 does. */
+  const publishCatalog = (self: Machine, createdAt?: number) =>
     Effect.gen(function* () {
       yield* fs.makeDirectory(deliveryDirectory, { recursive: true });
-      const now = yield* Clock.currentTimeMillis;
+      const now = createdAt ?? (yield* Clock.currentTimeMillis);
       yield* writeFleetJson(
-        path.join(
-          deliveryDirectory,
-          `${Delivery.deliveryFileName(self.peer.machineId, self.peer.machineId)}.catalog.json`,
-        ),
+        catalogFile(self),
         Delivery.makeFleetCatalog(
           {
             version: 1,
@@ -209,7 +210,9 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
     seedOf,
     seedFile,
     markReady,
+    readyFile: (self: Machine) => path.join(readyDirectory, `${self.peer.machineId}.json`),
     publishCatalog,
+    catalogFile,
     setPeers: (next: ReadonlyArray<FleetPeer>) => {
       peers = next;
     },
@@ -344,7 +347,6 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
           seed: "waiting",
           seedPending: {
             machineIds: [f.cryo.peer.machineId, f.panda.peer.machineId, f.anvil.peer.machineId],
-            running: [],
           },
         });
         expect(yield* f.fs.exists(f.directory)).toBe(false);
@@ -474,52 +476,51 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
     }).pipe(Effect.provide(configLayer)),
   );
 
-  it.effect(
-    "waits for every machine to run 1.0.26, and after a day stops waiting only for offline ones",
-    () =>
+  it.effect.each(["fresh", "stale", "missing", "unreadable", "behind-clock"])(
+    "waits, however long it takes, for an enabled machine without a marker whose summary is %s",
+    (summary) =>
       Effect.gen(function* () {
         const f = yield* fleet();
         yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
-        // No other machine says it runs 1.0.26 yet: nothing is adopted.
+        for (const machine of [f.anvil, f.spd]) yield* f.markReady(machine);
+        // PandaMedic may run 1.0.25: whatever its connection summary says, it signed no marker.
+        const start = yield* Clock.currentTimeMillis;
+        if (summary === "fresh") yield* f.publishCatalog(f.panda);
+        if (summary === "stale") yield* f.publishCatalog(f.panda, start - 30 * 86_400_000);
+        if (summary === "behind-clock") yield* f.publishCatalog(f.panda, 0);
+        // A listing that wrongly says the summary is not there, as a share can.
+        const observed = FileSystem.FileSystem.of({
+          ...f.fs,
+          exists: (file) =>
+            summary === "unreadable" && file === f.catalogFile(f.panda)
+              ? Effect.succeed(false)
+              : f.fs.exists(file),
+        });
         const stateDir = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-state-" });
+        for (let day = 0; day <= 30; day += 10) {
+          if (day > 0) yield* TestClock.adjust(`${10 * 24} hours`);
+          if (summary === "fresh") yield* f.publishCatalog(f.panda);
+          // A restart keeps nothing that would end the wait.
+          const cryo = yield* f
+            .machine(stateDir)
+            .pipe(Effect.provideService(FileSystem.FileSystem, observed));
+          const waiting = yield* cryo.refresh(f.input(f.cryo));
+          expect(waiting).toMatchObject({
+            revision: 0,
+            seed: "waiting",
+            seedPending: { machineIds: [f.panda.peer.machineId] },
+          });
+          expect(FleetAccessPolicy.policyApplies(waiting)).toBe(false);
+          expect(yield* f.fs.exists(f.directory)).toBe(false);
+        }
+        // A marker signed with another machine's key does not count.
+        yield* f.markReady(f.panda, f.cryo);
         const cryo = yield* f.machine(stateDir);
-        const first = yield* cryo.refresh(f.input(f.cryo));
-        const others = [f.panda.peer.machineId, f.anvil.peer.machineId, f.spd.peer.machineId];
-        expect(first).toMatchObject({
-          revision: 0,
-          seed: "waiting",
-          seedPending: {
-            machineIds: others,
-            running: [],
-            adoptAt: FleetAccessPolicy.SEED_READY_WAIT_MS,
-          },
-        });
-        expect(FleetAccessPolicy.policyApplies(first)).toBe(false);
-        // A marker another machine's key signed does not count.
-        yield* f.markReady(f.anvil, f.cryo);
-        yield* TestClock.adjust(FleetAccessPolicy.SEED_READY_WAIT_MS - 1);
-        // A restart keeps when this machine first saw the list.
-        const restarted = yield* f.machine(stateDir);
-        expect(yield* restarted.refresh(f.input(f.cryo))).toMatchObject({
-          revision: 0,
-          seedPending: { machineIds: others, adoptAt: FleetAccessPolicy.SEED_READY_WAIT_MS },
-        });
-        expect(yield* f.fs.exists(f.directory)).toBe(false);
-        // A machine that first sees it later waits longer; one that updated is not waited for.
-        yield* f.markReady(f.anvil);
-        const late = yield* (yield* f.machine()).refresh(f.input(f.panda));
-        expect(late.seedPending).toEqual({
-          machineIds: [f.spd.peer.machineId],
-          running: [],
-          adoptAt: 2 * FleetAccessPolicy.SEED_READY_WAIT_MS - 1,
-        });
-
-        // A day after CryoFrog first saw it, SPDevMachine has published nothing: it is off, and
-        // the list is adopted without it.
-        yield* TestClock.adjust(1);
-        const adopted = yield* restarted.refresh(f.input(f.cryo));
+        expect((yield* cryo.refresh(f.input(f.cryo))).revision).toBe(0);
+        // It updates and says so: the list is adopted at once.
+        yield* f.markReady(f.panda);
+        const adopted = yield* cryo.refresh(f.input(f.cryo));
         expect(adopted.revision).toBe(1);
-        expect(adopted.seed).toBeUndefined();
         expect(adopted.seedPending).toBeUndefined();
         expect(f.accessOf(adopted, f.anvil)).toBe("read-only");
         expect(f.accessOf(adopted, f.spd)).toBe("read-only");
@@ -527,51 +528,49 @@ it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
       }).pipe(Effect.provide(configLayer)),
   );
 
+  it.effect("reads every marker again under the lock before it writes the first revision", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
+      for (const machine of [f.panda, f.anvil, f.spd]) yield* f.markReady(machine);
+      // PandaMedic's marker goes between the check and the lock, as when it is replaced by a
+      // machine with new keys that has not said it runs 1.0.26 yet.
+      const lock = f.path.join(f.root, "fleet-access.lock");
+      const observed = FileSystem.FileSystem.of({
+        ...f.fs,
+        makeDirectory: (file, options) =>
+          file === lock
+            ? f.fs
+                .remove(f.readyFile(f.panda))
+                .pipe(Effect.ignore, Effect.andThen(f.fs.makeDirectory(file, options)))
+            : f.fs.makeDirectory(file, options),
+      });
+      const cryo = yield* f.machine().pipe(Effect.provideService(FileSystem.FileSystem, observed));
+      const state = yield* cryo.refresh(f.input(f.cryo));
+      expect(state).toMatchObject({
+        revision: 0,
+        seed: "waiting",
+        seedPending: { machineIds: [f.panda.peer.machineId] },
+      });
+      expect(yield* f.fs.exists(f.directory)).toBe(false);
+      expect(yield* f.fs.exists(lock)).toBe(false);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect(
-    "keeps waiting past the day for a running machine without a marker, until it stops or updates",
+    "adopts at once when every enabled machine runs 1.0.26, and never waits for a disabled one",
     () =>
       Effect.gen(function* () {
         const f = yield* fleet();
         yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
-        for (const machine of [f.anvil, f.spd]) yield* f.markReady(machine);
-        // PandaMedic runs 1.0.25 (or 1.0.24): it republishes its summary, but signs no marker.
-        yield* f.publishCatalog(f.panda);
-        const cryo = yield* f.machine();
-        const start = yield* Clock.currentTimeMillis;
-        expect((yield* cryo.refresh(f.input(f.cryo))).seedPending).toEqual({
-          machineIds: [f.panda.peer.machineId],
-          running: [f.panda.peer.machineId],
-          adoptAt: start + FleetAccessPolicy.SEED_READY_WAIT_MS,
-        });
-        for (let hours = 6; hours <= 48; hours += 6) {
-          yield* TestClock.adjust("6 hours");
-          yield* f.publishCatalog(f.panda);
-          const waiting = yield* cryo.refresh(f.input(f.cryo));
-          expect(waiting.revision).toBe(0);
-          expect(waiting.seedPending?.running).toEqual([f.panda.peer.machineId]);
-        }
-        // It goes off. A summary a day old no longer counts as running.
-        yield* TestClock.adjust(FleetAccessPolicy.SEED_RUNNING_WITHIN_MS - 1);
-        expect((yield* cryo.refresh(f.input(f.cryo))).revision).toBe(0);
-        yield* TestClock.adjust(1);
-        const adopted = yield* cryo.refresh(f.input(f.cryo));
+        for (const machine of [f.cryo, f.panda, f.anvil, f.spd]) yield* f.publishCatalog(machine);
+        for (const machine of [f.panda, f.anvil]) yield* f.markReady(machine);
+        // SPDevMachine is disabled: it is not waited for, and still starts read-only.
+        f.setPeers([f.cryo.peer, f.panda.peer, f.anvil.peer, { ...f.spd.peer, enabled: false }]);
+        const adopted = yield* (yield* f.machine()).refresh(f.input(f.cryo));
         expect(adopted.revision).toBe(1);
-        expect(f.accessOf(adopted, f.anvil)).toBe("read-only");
+        expect(f.accessOf(adopted, f.spd)).toBe("read-only");
       }).pipe(Effect.provide(configLayer)),
-  );
-
-  it.effect("adopts at once when every enabled machine runs 1.0.26, running or not", () =>
-    Effect.gen(function* () {
-      const f = yield* fleet();
-      yield* f.writeSeed(f.seedOf(f.anvil, f.spd));
-      for (const machine of [f.cryo, f.panda, f.anvil, f.spd]) yield* f.publishCatalog(machine);
-      for (const machine of [f.panda, f.anvil]) yield* f.markReady(machine);
-      // SPDevMachine is disabled: it is not waited for, and still starts read-only.
-      f.setPeers([f.cryo.peer, f.panda.peer, f.anvil.peer, { ...f.spd.peer, enabled: false }]);
-      const adopted = yield* (yield* f.machine()).refresh(f.input(f.cryo));
-      expect(adopted.revision).toBe(1);
-      expect(f.accessOf(adopted, f.spd)).toBe("read-only");
-    }).pipe(Effect.provide(configLayer)),
   );
 
   it.effect(

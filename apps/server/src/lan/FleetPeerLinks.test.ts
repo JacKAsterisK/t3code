@@ -770,3 +770,59 @@ it.live("does nothing on either machine while the adapter is off", () =>
     }),
   ).pipe(Effect.provide(NodeServices.layer)),
 );
+
+it.live("widens and narrows one pair's link through an exception, with no prompt", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+      const { cryoFrog, pandaMedic, linking, linked } = fleet;
+      const cryo = cryoFrog.peer.machineId;
+      const panda = pandaMedic.peer.machineId;
+      const linkedSessions = linked.linkSessions(cryoFrog);
+      // Both machines read one list: CryoFrog read-only, with or without standard on PandaMedic.
+      const read = (revision: number, standardOn: ReadonlyArray<string>) =>
+        Effect.gen(function* () {
+          const list = {
+            revision,
+            defaultAccess: "standard" as const,
+            machines: [{ machineId: cryo, access: "read-only" as const }],
+            pairs: FleetAccessPolicy.replaceExceptions([], [{ machineId: cryo, standardOn }]),
+            peers: [cryoFrog.peer, pandaMedic.peer].map((peer) => ({
+              machineId: peer.machineId,
+              environmentId: peer.environmentId,
+            })),
+            member: true,
+          };
+          yield* Ref.set(linking.policy, { ...list, machineId: cryo });
+          const issuer = { ...list, machineId: panda };
+          yield* Ref.set(linked.policy, issuer);
+          yield* grant(linked, cryoFrog, FleetAccessPolicy.callerAccess(issuer, cryo));
+        });
+
+      yield* read(1, []);
+      yield* round(fleet);
+      expect(yield* callerAccess(fleet)).toBe("read-only");
+
+      // An exception for another machine changes nothing between these two.
+      yield* read(2, ["anviltoad"]);
+      yield* round(fleet);
+      expect(yield* callerAccess(fleet)).toBe("read-only");
+
+      // The exception for PandaMedic replaces the read-only link with a standard one, and the
+      // read-only session is retired, with nothing approved or picked up by hand.
+      yield* read(3, [panda]);
+      yield* round(fleet);
+      expect(yield* callerAccess(fleet)).toBe("full-access");
+      expect(yield* linkedSessions).toHaveLength(1);
+
+      // The requester reads the removal first: it drops the standard link at once.
+      yield* Ref.update(linking.policy, (current) => ({ ...current, revision: 4, pairs: [] }));
+      yield* linking.adapter.pass;
+      expect(yield* callerAccess(fleet)).not.toBe("full-access");
+      // Once both read it, the pair relinks read-only, as after a downgrade.
+      yield* read(4, []);
+      yield* round(fleet);
+      expect(yield* callerAccess(fleet)).toBe("read-only");
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
+);

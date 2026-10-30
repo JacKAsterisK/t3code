@@ -208,6 +208,55 @@ calls. They do not stop software on that machine that deliberately forges fleet
 files on the share. Keep write access to the share to the fleet's machines and
 their administrators.
 
+### Exceptions
+
+An exception gives a read-only machine standard access on the machines it
+names, while it stays read-only on every other one. In **Machine access**, a
+read-only machine's row shows **Standard on:** and **Choose**: tick the machines
+and **Save**. Only a machine with standard access can save. Each direction is
+its own exception, so for AnvilToad and SPDevMachine to have standard access on
+each other, choose SPDevMachine for AnvilToad and AnvilToad for SPDevMachine.
+Exceptions on a machine that is itself standard change nothing until it is
+made read-only again.
+
+- The receiving machine decides, per pair: a caller has standard access there
+  if it is standard, or if the list names that caller and that receiver.
+  Otherwise it has its listed level. This applies everywhere access applies:
+  the cap on each use, revocation, the credentials and peer links each machine
+  issues and replaces, the caller's own ceiling on the links it keeps, and its
+  refusal to forward task changes. An exception never lets a read-only machine
+  change the list.
+- The list's rules apply unchanged. A revision that adds an exception counts
+  only if its writer had standard access under what it follows. A read-only
+  machine can grant no exception, to itself or anyone, and can remove only its
+  own. Competing revisions keep an exception only if every one of them grants
+  it. A revision whose writer left or changed keys keeps only the exceptions
+  the revisions it follows grant. An exception naming a machine the fleet does
+  not know yet is kept, hidden, and applies once that machine joins.
+- Adding one needs nothing more: within a few minutes the receiver replaces the
+  read-only fleet credential and peer link it gave the caller with standard
+  ones. No approval, pickup or relink. Removing one narrows that pair
+  as a downgrade does: writes stop at once on each use, fleet connections keep
+  reading, capped, until the read-only replacement is in use, and the peer link
+  is relinked read-only on the next pass.
+
+With versions mixed, exceptions take effect pair by pair as both machines
+update: the receiver must run a release with exceptions to grant one, and the
+caller to lift its own link ceiling. An exception is stored inside the signed
+list as an entry LAN 1.0.26 reads as a machine it does not know, so 1.0.26
+still verifies and applies every revision and ignores the exception:
+
+- A 1.0.26 machine keeps AnvilToad read-only toward itself whatever the list's
+  exceptions say, and a 1.0.26 AnvilToad links read-only to an updated
+  SPDevMachine. No machine loses reads, or the links and writes the list
+  without exceptions gives it.
+- A save from a 1.0.26 machine keeps the exceptions, because its Settings
+  signs every entry it was shown. It can never add one: a revision without its
+  writer's own mark keeps only the exceptions the revisions it follows grant.
+- Nothing waits for machines to update. Revision files never gain a field:
+  1.0.26 skips such a file and every revision after it, which would leave it on
+  an old list.
+
 ### Rolling out 1.0.26 with a starting list
 
 Hub updates one machine at a time when T3 is idle, so versions mix for hours or

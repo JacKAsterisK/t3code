@@ -339,14 +339,18 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * What this machine's own accepted list lets it do on its peers, read live each time: no link it
-   * makes or keeps goes above it, whatever an issuer with another view of the list offers.
+   * What this machine's own accepted list lets it do on a peer, exceptions included, read live each
+   * time: no link it makes or keeps goes above it, whatever an issuer with another view of the list
+   * offers.
    */
-  const ownCeiling = fleetAccess.current.pipe(
-    Effect.map((policy) => linkAccess(FleetAccessPolicy.selfAccess(policy))),
-  );
+  const ownCeiling = (environmentId: EnvironmentId) =>
+    fleetAccess.current.pipe(
+      Effect.map((policy) =>
+        linkAccess(FleetAccessPolicy.accessOnEnvironment(policy, environmentId)),
+      ),
+    );
   /**
-   * Unlinks `peer` at once when its link is above this machine's own access: its issuer may not
+   * Unlinks `peer` at once when its link is above this machine's access there: its issuer may not
    * know the list that narrowed it. True when it did.
    */
   const dropOverAccess = Effect.fn("FleetPeerLinks.dropOverAccess")(function* (
@@ -356,7 +360,7 @@ const make = Effect.gen(function* () {
     if (
       Option.isNone(current) ||
       current.value.access === "read-only" ||
-      (yield* ownCeiling) !== "read-only"
+      (yield* ownCeiling(environmentId)) !== "read-only"
     )
       return false;
     yield* peerLinks.unlink(environmentId);
@@ -412,7 +416,10 @@ const make = Effect.gen(function* () {
         };
       } else if (Option.isSome(payload) && payload.value.access !== undefined) {
         // A code at a wider access also signs in at a narrower one, and the session gets only that.
-        const access = (yield* ownCeiling) === "read-only" ? "read-only" : payload.value.access;
+        const access =
+          (yield* ownCeiling(peer.environmentId)) === "read-only"
+            ? "read-only"
+            : payload.value.access;
         const linked = yield* peerLinks
           .link({
             url: origin,
@@ -465,7 +472,7 @@ const make = Effect.gen(function* () {
       entry = rest;
     }
     const current = yield* peerLinks.get(peer.environmentId);
-    const ceiling = yield* ownCeiling;
+    const ceiling = yield* ownCeiling(peer.environmentId);
     const recorded = entry.link;
     const due =
       recorded === undefined ||

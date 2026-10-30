@@ -162,6 +162,8 @@ function layer(
     readonly read?: Native.NativeTaskService["Service"]["read"];
     readonly observe?: Native.NativeTaskService["Service"]["observe"];
     readonly fleetAccess?: "read-only" | "standard";
+    // This machine, whatever its own level, is standard on the fleet machine behind `remoteId`.
+    readonly standardOnRemote?: boolean;
   } = {},
 ) {
   const database = Layer.effectDiscard(Migration.pipe(Effect.andThen(GenerationMigration))).pipe(
@@ -193,13 +195,40 @@ function layer(
         revision: 1,
         defaultAccess: options.fleetAccess ?? "standard",
         machines: [],
+        pairs: options.standardOnRemote
+          ? [FleetAccessPolicy.pairEntryId("machine-self", "machine-remote")]
+          : [],
         machineId: "machine-self",
-        peers: [],
+        peers: [{ machineId: "machine-remote", environmentId: remoteId }],
       }),
     }),
   );
   return Routing.layer.pipe(Layer.provideMerge(services));
 }
+
+it.effect(
+  "lets a read-only fleet machine change tasks only on the machines it is standard on",
+  () =>
+    Effect.gen(function* () {
+      const attempt = (standardOnRemote: boolean) =>
+        Routing.EnvironmentRouting.pipe(
+          Effect.flatMap((router) =>
+            router.launch(scope(), { ...launch, environmentId: remoteId }),
+          ),
+          Effect.flip,
+          Effect.provide(
+            layer({
+              config: Effect.succeed(config(true)),
+              fleetAccess: "read-only",
+              standardOnRemote,
+            }),
+          ),
+        );
+      assert.equal((yield* attempt(false)).code, "capability_denied");
+      // Past the read-only gate, it reaches the transport, which this test leaves unreachable.
+      assert.equal((yield* attempt(true)).code, "orchestration_error");
+    }),
+);
 
 it.effect(
   "denies provider tokens, read-only writes, unknown machines and unapproved transcripts",

@@ -76,7 +76,7 @@ const make = Effect.gen(function* () {
       )
         return "none";
       return FleetAccessPolicy.policyApplies(state)
-        ? FleetAccessPolicy.machineAccess(state, machineId)
+        ? FleetAccessPolicy.callerAccess(state, machineId)
         : "standard";
     },
   );

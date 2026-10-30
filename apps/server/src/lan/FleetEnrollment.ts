@@ -322,6 +322,13 @@ const make = Effect.gen(function* () {
       }
     }
     const policy = current.accessPolicy;
+    const exceptions =
+      policy === undefined
+        ? []
+        : FleetAccessPolicy.exceptionsOf(policy, [
+            ...current.peers.map((peer) => peer.machineId),
+            ...policy.machines.map((machine) => machine.machineId),
+          ]);
     return {
       ...base,
       ...(policy === undefined
@@ -331,6 +338,7 @@ const make = Effect.gen(function* () {
               revision: policy.revision,
               defaultAccess: policy.defaultAccess,
               machines: policy.machines,
+              ...(exceptions.length === 0 ? {} : { exceptions }),
               selfAccess: FleetAccessPolicy.selfAccess(policy),
               canChange:
                 FleetAccessPolicy.selfAccess(policy) === "standard" && policy.unavailable !== true,
@@ -405,7 +413,18 @@ const make = Effect.gen(function* () {
                 member: current.member,
                 signingPrivateKey: record.signingPrivateKey,
                 expectedRevision: input.revision,
-                next: { defaultAccess: input.defaultAccess, machines: input.machines },
+                next: {
+                  defaultAccess: input.defaultAccess,
+                  machines: input.machines,
+                  ...(input.exceptions === undefined
+                    ? {}
+                    : {
+                        pairs: FleetAccessPolicy.replaceExceptions(
+                          current.accessPolicy?.pairs,
+                          input.exceptions,
+                        ),
+                      }),
+                },
               });
               return;
             }

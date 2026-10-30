@@ -95,8 +95,63 @@ const seedReadyData = (marker: SeedReady) =>
 
 export interface FleetAccessSnapshot {
   readonly defaultAccess: Level;
+  /** Each machine's own level. Never holds the pair entries below. */
   readonly machines: ReadonlyArray<typeof MachineAccess.Type>;
+  /**
+   * Exceptions, as pair entry IDs: a caller with standard access on one receiver whatever its own
+   * level. None when absent.
+   */
+  readonly pairs?: ReadonlyArray<string>;
 }
+
+/**
+ * Exceptions ride in the signed `machines` as entries 1.0.26 reads as unknown machines: a new field
+ * would make it skip the revision and all after it. Each is `<hash(caller)>-<hash(pair)>`, so it
+ * fits a machine ID and one caller's exceptions are found without knowing every receiver.
+ */
+const PAIR_PREFIX = "pair-access-";
+const PAIR_ENTRY = /^pair-access-[a-f0-9]{16}-[a-f0-9]{16}$/u;
+/**
+ * A writer that knows exceptions marks its revision with an entry derived from that revision. A
+ * 1.0.26 save copies the entries it was shown, its parent's marker among them, and a 1.0.26 merge
+ * may join competing heads' exceptions. Without a marker of its own a revision keeps only the
+ * exceptions every revision it follows grants, so a writer that cannot see them never adds one.
+ */
+const WRITER_ENTRY = /^pair-access-writer-[a-f0-9]{32}$/u;
+const hashOf = (parts: ReadonlyArray<unknown>, length: number) =>
+  NodeCrypto.createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, length);
+const callerPrefix = (caller: string) =>
+  `${PAIR_PREFIX}${hashOf(["fleet-access-pair-caller", caller], 16)}-`;
+/** The entry that makes `caller` standard on `receiver`. */
+export const pairEntryId = (caller: string, receiver: string) =>
+  `${callerPrefix(caller)}${hashOf(["fleet-access-pair", caller, receiver], 16)}`;
+const isPairEntryOf = (caller: string, id: string) => id.startsWith(callerPrefix(caller));
+const encodedEntry = (machineId: string) =>
+  PAIR_ENTRY.test(machineId) || WRITER_ENTRY.test(machineId);
+const writerEntryId = (header: {
+  readonly fleetId: string;
+  readonly revision: number;
+  readonly previous: string | ReadonlyArray<string> | null;
+  readonly signerMachineId: string;
+  readonly createdAt: number;
+}) =>
+  `${PAIR_PREFIX}writer-${hashOf(
+    [
+      "fleet-access-pair-writer",
+      header.fleetId,
+      header.revision,
+      header.previous,
+      header.signerMachineId,
+      header.createdAt,
+    ],
+    32,
+  )}`;
+const normalizePairs = (pairs: ReadonlyArray<string> | undefined) =>
+  [...new Set(pairs ?? [])].filter((id) => PAIR_ENTRY.test(id)).toSorted();
+const intersectPairs = (sets: ReadonlyArray<ReadonlyArray<string> | undefined>) =>
+  sets.length === 0
+    ? []
+    : normalizePairs(sets[0]).filter((id) => sets.every((set) => (set ?? []).includes(id)));
 
 const LocalCache = Schema.Struct({
   version: Schema.Literal(1),
@@ -143,15 +198,90 @@ const normalize = (machines: FleetAccessSnapshot["machines"]) =>
     .map(([machineId, access]) => ({ machineId, access }))
     .sort((left, right) => (left.machineId < right.machineId ? -1 : 1));
 
+/** A machine's own level, before any exception. */
 const accessOf = (snapshot: FleetAccessSnapshot, machineId: string): Level =>
   snapshot.machines.find((machine) => machine.machineId === machineId)?.access ??
   snapshot.defaultAccess;
 
+/** What `caller` may do on `receiver`: standard if it is, or if an exception names that pair. */
+export const pairAccess = (
+  snapshot: FleetAccessSnapshot,
+  caller: string,
+  receiver: string,
+): Level =>
+  accessOf(snapshot, caller) === "standard" ||
+  (snapshot.pairs ?? []).includes(pairEntryId(caller, receiver))
+    ? "standard"
+    : "read-only";
+
+/**
+ * The exceptions among `machineIds`, by caller. One naming a machine not among them stays in the
+ * list but is not shown.
+ */
+export const exceptionsOf = (snapshot: FleetAccessSnapshot, machineIds: ReadonlyArray<string>) => {
+  const ids = [...new Set(machineIds)].toSorted();
+  const pairs = new Set(snapshot.pairs ?? []);
+  return ids.flatMap((machineId) => {
+    const standardOn = ids.filter(
+      (receiver) => receiver !== machineId && pairs.has(pairEntryId(machineId, receiver)),
+    );
+    return standardOn.length === 0 ? [] : [{ machineId, standardOn }];
+  });
+};
+
+/** `pairs` with each listed caller's exceptions replaced by the receivers given for it. */
+export const replaceExceptions = (
+  pairs: ReadonlyArray<string> | undefined,
+  exceptions: ReadonlyArray<{
+    readonly machineId: string;
+    readonly standardOn: ReadonlyArray<string>;
+  }>,
+) =>
+  normalizePairs([
+    ...(pairs ?? []).filter(
+      (id) => !exceptions.some((exception) => isPairEntryOf(exception.machineId, id)),
+    ),
+    ...exceptions.flatMap((exception) =>
+      exception.standardOn
+        .filter((receiver) => receiver !== exception.machineId)
+        .map((receiver) => pairEntryId(exception.machineId, receiver)),
+    ),
+  ]);
+
+/**
+ * What a revision grants, read from its entries: its machines and, when its writer marked it, its
+ * exceptions. Unmarked, it keeps only the exceptions every revision it follows grants.
+ */
+const snapshotOf = (
+  entry: FleetAccessEntry,
+  parents: ReadonlyArray<FleetAccessSnapshot>,
+): FleetAccessSnapshot => {
+  const listed = entry.machines
+    .filter((machine) => PAIR_ENTRY.test(machine.machineId) && machine.access === "standard")
+    .map((machine) => machine.machineId);
+  const marked = entry.machines.some(
+    (machine) => machine.machineId === writerEntryId(entry) && machine.access === "standard",
+  );
+  return {
+    defaultAccess: entry.defaultAccess,
+    machines: entry.machines.filter((machine) => !encodedEntry(machine.machineId)),
+    pairs: marked
+      ? normalizePairs(listed)
+      : parents.length === 0
+        ? []
+        : intersectPairs([listed, ...parents.map((parent) => parent.pairs)]),
+  };
+};
+
 const sameSnapshot = (left: FleetAccessSnapshot, right: FleetAccessSnapshot) =>
   left.defaultAccess === right.defaultAccess &&
-  JSON.stringify(normalize(left.machines)) === JSON.stringify(normalize(right.machines));
+  JSON.stringify(normalize(left.machines)) === JSON.stringify(normalize(right.machines)) &&
+  JSON.stringify(normalizePairs(left.pairs)) === JSON.stringify(normalizePairs(right.pairs));
 
-/** Each machine at the most restrictive access any of the snapshots gives it. */
+/**
+ * Each machine at the most restrictive access any of the snapshots gives it, with only the
+ * exceptions all of them grant.
+ */
 function mostRestrictive(snapshots: ReadonlyArray<FleetAccessSnapshot>): FleetAccessSnapshot {
   const least = (levels: ReadonlyArray<Level>): Level =>
     levels.includes("read-only") ? "read-only" : "standard";
@@ -164,12 +294,14 @@ function mostRestrictive(snapshots: ReadonlyArray<FleetAccessSnapshot>): FleetAc
         access: least(snapshots.map((snapshot) => accessOf(snapshot, machineId))),
       })),
     ),
+    pairs: intersectPairs(snapshots.map((snapshot) => snapshot.pairs)),
   };
 }
 
 /**
  * Before any policy every machine may write one. After that a standard machine may change
- * anything, and a read-only machine may only restrict itself.
+ * anything, and a read-only machine may only restrict itself: it grants no exception, and removes
+ * only its own.
  */
 function authorizeAccessChange(
   previous: FleetAccessSnapshot | undefined,
@@ -180,20 +312,40 @@ function authorizeAccessChange(
   if (next.defaultAccess !== previous.defaultAccess) return false;
   const others = (snapshot: FleetAccessSnapshot) =>
     JSON.stringify(normalize(snapshot.machines.filter((m) => m.machineId !== signerMachineId)));
-  return others(previous) === others(next) && accessOf(next, signerMachineId) === "read-only";
+  const before = normalizePairs(previous.pairs);
+  const after = normalizePairs(next.pairs);
+  return (
+    others(previous) === others(next) &&
+    accessOf(next, signerMachineId) === "read-only" &&
+    after.every((id) => before.includes(id)) &&
+    before.every((id) => after.includes(id) || isPairEntryOf(signerMachineId, id))
+  );
 }
 
 /** A machine the fleet knows must remain able to change the policy, or no one could lift it. */
 const keepsAStandardMachine = (snapshot: FleetAccessSnapshot, machineIds: ReadonlyArray<string>) =>
   machineIds.some((machineId) => accessOf(snapshot, machineId) === "standard");
 
+/**
+ * Signs a revision. Its exceptions join `machines` with this revision's writer mark; entries in
+ * `machines` itself are written as given.
+ */
 export function signAccessEntry(
   entry: DistributiveOmit<FleetAccessEntry, "signature" | "machines"> & FleetAccessSnapshot,
   signingPrivateKey: string,
 ): FleetAccessEntry {
+  // The file holds no field 1.0.26 does not know: it skips such a revision and all that follow.
+  const { pairs: listed, ...fields } = entry;
+  const pairs = normalizePairs(listed);
   const unsigned = {
-    ...entry,
-    machines: normalize(entry.machines),
+    ...fields,
+    machines: normalize([
+      ...entry.machines,
+      ...pairs.map((machineId) => ({ machineId, access: "standard" as const })),
+      ...(pairs.length === 0
+        ? []
+        : [{ machineId: writerEntryId(entry), access: "standard" as const }]),
+    ]),
     signature: "",
   } as FleetAccessEntry;
   return {
@@ -262,13 +414,17 @@ function evaluateAccess(input: {
     const resolved = parents as ReadonlyArray<AccessRevision>;
     if (entry.revision !== 1 + Math.max(0, ...resolved.map((parent) => parent.entry.revision)))
       continue;
+    const own = snapshotOf(
+      entry,
+      resolved.map((parent) => parent.effective),
+    );
     if (
       !sticky.has(digest) &&
       (JSON.stringify(normalize(entry.machines)) !== JSON.stringify(entry.machines) ||
         // Without any peers (a cache read at startup) there is nothing to check this against.
-        (known.length > 0 && !keepsAStandardMachine(entry, known)) ||
+        (known.length > 0 && !keepsAStandardMachine(own, known)) ||
         !resolved.every((parent) =>
-          authorizeAccessChange(parent.effective, entry, entry.signerMachineId),
+          authorizeAccessChange(parent.effective, own, entry.signerMachineId),
         ))
     )
       continue;
@@ -278,8 +434,8 @@ function evaluateAccess(input: {
       digest,
       verified,
       effective: verified
-        ? { defaultAccess: entry.defaultAccess, machines: entry.machines }
-        : mostRestrictive([entry, ...resolved.map((parent) => parent.effective)]),
+        ? own
+        : mostRestrictive([own, ...resolved.map((parent) => parent.effective)]),
     });
   }
   const followed = new Set([...revisions.values()].flatMap((item) => parentsOf(item.entry)));
@@ -316,6 +472,8 @@ export interface FleetAccessState {
   readonly revision: number;
   readonly defaultAccess: Level;
   readonly machines: FleetAccessSnapshot["machines"];
+  /** Exceptions, as pair entry IDs; see `pairAccess`. None when absent. */
+  readonly pairs?: ReadonlyArray<string>;
   readonly machineId: string | undefined;
   /** The enabled machines whose credentials this policy governs, this one included while enrolled. */
   readonly peers: ReadonlyArray<{ readonly machineId: string; readonly environmentId: string }>;
@@ -341,13 +499,32 @@ export interface FleetAccessState {
   readonly seedPending?: { readonly machineIds: ReadonlyArray<string> };
 }
 
+/** A machine's own level in the list, before any exception. */
 export const machineAccess = (state: FleetAccessState, machineId: string) =>
   accessOf(state, machineId);
-/** This machine's own access; outside any fleet, or before any saved policy, it is unrestricted. */
+/** What `machineId` may do here: its own level, or standard where an exception names this machine. */
+export const callerAccess = (state: FleetAccessState, machineId: string) =>
+  state.machineId === undefined
+    ? accessOf(state, machineId)
+    : pairAccess(state, machineId, state.machineId);
+/**
+ * This machine's own level, which also decides whether it may change the list; outside any fleet,
+ * or before any saved policy, it is unrestricted.
+ */
 export const selfAccess = (state: FleetAccessState): Level =>
   state.machineId === undefined || state.revision === 0
     ? "standard"
     : accessOf(state, state.machineId);
+/** What this machine may do on `receiver`: its own level, or standard where an exception says so. */
+export const accessOn = (state: FleetAccessState, receiver: string): Level =>
+  state.machineId === undefined || state.revision === 0
+    ? "standard"
+    : pairAccess(state, state.machineId, receiver);
+/** `accessOn` for a fleet peer's environment, and this machine's own level for any other. */
+export const accessOnEnvironment = (state: FleetAccessState, environmentId: string): Level => {
+  const peer = state.peers.find((item) => item.environmentId === environmentId);
+  return peer === undefined ? selfAccess(state) : accessOn(state, peer.machineId);
+};
 /** Whether access follows a saved policy; before one, each credential keeps its access. */
 export const policyApplies = (state: FleetAccessState) => state.revision > 0;
 /**
@@ -442,6 +619,7 @@ const make = Effect.gen(function* () {
     revision: evaluation?.revision ?? 0,
     defaultAccess: evaluation?.snapshot?.defaultAccess ?? legacyAccess,
     machines: evaluation?.snapshot?.machines ?? [],
+    pairs: evaluation?.snapshot?.pairs ?? [],
     machineId: value?.machineId,
     peers: value?.peers ?? [],
     member: value?.member === true,
@@ -733,6 +911,22 @@ const make = Effect.gen(function* () {
           candidates.some((entry) => entry.fleetId === input.fleetId))
       )
         return yield* configurationError();
+      // A read-only writer leaves every other entry as it was, exceptions and their writer's mark
+      // included: 1.0.26 refuses anything else from it. Unmarked, its revision keeps what its
+      // parents grant.
+      const carried = parents.map((parent) =>
+        parent.entry.machines.filter((machine) => encodedEntry(machine.machineId)),
+      );
+      const readOnly = parents.some(
+        (parent) => accessOf(parent.effective, input.machineId) !== "standard",
+      );
+      if (
+        readOnly &&
+        (new Set(carried.map((entries) => JSON.stringify(entries))).size > 1 ||
+          JSON.stringify(normalizePairs(next.pairs)) !==
+            JSON.stringify(intersectPairs(parents.map((parent) => parent.effective.pairs))))
+      )
+        return yield* configurationError();
       yield* fs.makeDirectory(directory, { recursive: true });
       // Republish accepted entries the share lost, so machines joining later can verify them.
       const present = new Set(candidates.map(entryFileName));
@@ -744,7 +938,10 @@ const make = Effect.gen(function* () {
         revision: 1 + Math.max(0, ...parents.map((parent) => parent.entry.revision)),
         signerMachineId: input.machineId,
         createdAt: yield* Clock.currentTimeMillis,
-        ...next,
+        defaultAccess: next.defaultAccess,
+        ...(readOnly
+          ? { machines: [...next.machines, ...(carried[0] ?? [])] }
+          : { machines: next.machines, pairs: next.pairs ?? [] }),
       };
       const entry = signAccessEntry(
         parents.length > 1
@@ -811,14 +1008,20 @@ const make = Effect.gen(function* () {
         )
           return yield* configurationError();
         const current = view.evaluation.snapshot;
+        // A change that does not name exceptions keeps the ones the list has.
+        const pairs = normalizePairs(input.next.pairs ?? current?.pairs);
         // Entries are kept for machines that are not enabled peers right now, so a restricted
         // machine that drops out and comes back is still restricted.
         const next: FleetAccessSnapshot = {
           defaultAccess: input.next.defaultAccess,
-          machines: normalize(input.next.machines),
+          machines: normalize(
+            input.next.machines.filter((machine) => !encodedEntry(machine.machineId)),
+          ),
+          pairs,
         };
         if (
-          next.machines.length > 100 ||
+          // Exceptions share the 100 entries with the machines, and need their writer's mark.
+          next.machines.length + (pairs.length === 0 ? 0 : pairs.length + 1) > 100 ||
           !authorizeAccessChange(current, next, input.machineId) ||
           // Someone must remain able to change the policy, or no one could lift it.
           !input.peers.some((peer) => peer.enabled && accessOf(next, peer.machineId) === "standard")
@@ -944,7 +1147,7 @@ const make = Effect.gen(function* () {
     SubscriptionRef.get(state).pipe(
       Effect.map((current) => {
         const peer = current.peers.find((item) => item.environmentId === environmentId);
-        return peer === undefined ? undefined : accessOf(current, peer.machineId);
+        return peer === undefined ? undefined : callerAccess(current, peer.machineId);
       }),
     );
 

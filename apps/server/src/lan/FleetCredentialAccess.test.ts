@@ -474,3 +474,58 @@ it.live("refuses everything from a machine that left or is no longer trusted, an
     }),
   ),
 );
+
+it.live(
+  "gives a read-only machine standard access here only through an exception naming this machine",
+  () =>
+    withRoutes((handler, { auth, revoke }) =>
+      Effect.gen(function* () {
+        const anvil = yield* anvilFleetSession(auth);
+        const grant = yield* approveTaskGrant(
+          handler,
+          (yield* json<{ credential: string }>(yield* mintCode(handler, anvil.token))).credential,
+        );
+        const panda = yield* auth.issueSession({
+          subject: `lan-fleet:${Delivery.deliveryFileName(CRYO, PANDA)}`,
+          scopes: AuthStandardClientScopes,
+        });
+        const accessOf = (token: string) =>
+          auth.authenticateMcpClient(mcpRequest(token)).pipe(Effect.map((client) => client.access));
+        const list = (pairs: ReadonlyArray<string>) => {
+          policy = {
+            ...policy,
+            revision: policy.revision + 1,
+            machines: [
+              { machineId: ANVIL, access: "read-only" },
+              { machineId: PANDA, access: "read-only" },
+            ],
+            pairs,
+          };
+        };
+        // Both are read-only. AnvilToad is standard on CryoFrog; PandaMedic only on AnvilToad.
+        list([
+          FleetAccessPolicy.pairEntryId(ANVIL, CRYO),
+          FleetAccessPolicy.pairEntryId(PANDA, ANVIL),
+        ]);
+        expect(yield* accessOf(grant.access_token)).toBe("auto");
+        const minted = yield* mintCode(handler, anvil.token);
+        expect(minted.status).toBe(200);
+        expect((yield* mintCode(handler, panda.token)).status).toBe(403);
+        // The unused standard code AnvilToad minted here is within its access, so it stays.
+        const codes = (yield* auth.listPairingLinks()).length;
+        yield* revoke;
+        expect((yield* auth.listPairingLinks()).length).toBe(codes);
+
+        // The exception goes: writes stop at once, reads and sessions stay, the code goes.
+        list([FleetAccessPolicy.pairEntryId(PANDA, ANVIL)]);
+        expect(yield* accessOf(grant.access_token)).toBe("read-only");
+        expect((yield* mintCode(handler, anvil.token)).status).toBe(403);
+        yield* revoke;
+        expect((yield* auth.listPairingLinks()).length).toBe(codes - 1);
+        expect(yield* accessOf(grant.access_token)).toBe("read-only");
+        expect((yield* auth.listSessions()).some((s) => s.sessionId === anvil.sessionId)).toBe(
+          true,
+        );
+      }),
+    ),
+);

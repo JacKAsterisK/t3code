@@ -319,7 +319,7 @@ const make = Effect.gen(function* () {
                 let outgoingRejected = false;
                 const access =
                   policy !== undefined && policyActive
-                    ? FleetAccessPolicy.machineAccess(policy, peer.machineId)
+                    ? FleetAccessPolicy.callerAccess(policy, peer.machineId)
                     : config.access === "read-only"
                       ? "read-only"
                       : "standard";

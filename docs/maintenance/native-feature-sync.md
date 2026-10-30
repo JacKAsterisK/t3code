@@ -397,7 +397,11 @@ approval before code or runtime changes.
   and the `orchestration:operate` checks on RPCs and in the web client.
 - **Must preserve:** the receiving machine enforces; one signed, synced policy; a
   read-only machine cannot lift its own restriction; changes need no approval or
-  relink; links between unaffected machines are untouched. Only a successful
+  relink; links between unaffected machines are untouched. Exceptions (a
+  read-only machine standard on named machines) are evaluated per pair on the
+  receiver and stored in the signed `machines` array as hashed entries 1.0.26
+  reads as unknown machines; never add a field to revision files, which 1.0.26
+  decodes strictly and skips with everything after them. Only a successful
   read revokes: an unreadable policy caps at the last accepted one and revokes
   nothing, and with none accepted changes nothing; a machine leaves only when
   shown disabled or missing for the departure grace. A grant holder's claim
@@ -418,9 +422,11 @@ approval before code or runtime changes.
   each link's access from `FleetAccess.accessFor` and follow `FleetAccess.changes`
   instead of choosing one itself.
 - **Tests:** `FleetAccessPolicy.test.ts` (competing and orphaned revisions, the
-  starting list and its readiness wait, departed signers, locks, floods),
+  starting list and its readiness wait, departed signers, locks, floods,
+  exceptions and their 1.0.26 encoding),
   `FleetCredentialAccess.test.ts` (receiver caps, revocation, unreadable
-  policy, holder attribution),
+  policy, holder attribution, exceptions), `FleetPeerLinks.test.ts` (per-pair
+  widen and narrow),
   `RpcAuthorization.test.ts` (per-call scopes), `ws.test.ts` (webhook URLs),
   `FleetEnrollment.test.ts` (sync, refused lifts, departure grace),
   `LanFleet.test.ts` (replacement, renewal, stale sync lock),

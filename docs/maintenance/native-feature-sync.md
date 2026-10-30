@@ -405,6 +405,18 @@ approval before code or runtime changes.
   is 1.0.26's rule, applied to the entries as signed (`revisionCounts`), so both
   versions follow the same chain; exceptions change only what a counted
   revision grants, and a read-only machine can neither grant nor remove one.
+  An exception applies only while its receiver's own level is read-only
+  (`exceptionApplies`, inside `pairAccess`, which every consumer reads):
+  standard on a machine includes its reach, meaning its agents and shell and
+  through them its credentials, its peer links to other machines and owner
+  access to its own server (`t3` on the host configures the fleet as that
+  machine). An exception onto a standard machine would reach every machine
+  that one writes to and could administer the fleet through it. One onto a
+  machine that is or becomes standard stays stored and does nothing; it narrows
+  that pair like any downgrade and applies again if the receiver turns
+  read-only. A save that adds one onto a machine standard in the resulting list
+  is refused (`LanFleetError.refusal` `exception-onto-standard`). This is
+  evaluation only; revision acceptance is unchanged.
   An exception never grants fleet administration: `server.syncLanFleet`,
   `server.getLanFleetSetup` and `server.configureLanFleet` from a fleet-attributed
   credential need the caller's own standard level
@@ -434,10 +446,13 @@ approval before code or runtime changes.
   their issued access until they expire (at most 30 days). Webhook URLs a
   connection saw while standard stay usable after it is downgraded, until rotated.
   Owner-approval fleets get no automatic credential replacement. Software forging
-  share files is out of scope (shared-folder trust). A desktop client's own fleet
-  connection to a peer is held to the caller's list only by the receiver, so a
-  caller that reads a narrowing first relies on the receiver's cap there until
-  the receiver reads it too. A 1.0.26 machine still revokes or unlinks a
+  share files is out of scope (shared-folder trust). Accepted propagation delay:
+  the desktop client's own fleet connections to peers, and the codes fleet sync
+  collects, are capped by the receiver, not the requester, so after a narrowing
+  they keep their old access until the receiver reads the list, within its sync
+  delay. Agents reach peers through peer links, on which the requester already
+  refuses writes locally; the remaining window is the receiver's sync delay. A
+  1.0.26 machine still revokes or unlinks a
   narrowed peer link rather than keeping it for reads; this ends once every
   machine is updated.
 - **Data:** signed revisions in `fleet-access` on the share, an optional one-time
@@ -451,14 +466,15 @@ approval before code or runtime changes.
 - **Tests:** `FleetAccessPolicy.test.ts` (competing and orphaned revisions, the
   starting list and its readiness wait, departed signers, locks, floods,
   exceptions and their 1.0.26 encoding, the same reading from cache, with a
-  machine disabled and after a save, forged exception-shaped IDs), `FleetAccessPolicy.parity.test.ts` (revision acceptance against
+  machine disabled and after a save, forged exception-shaped IDs, exceptions
+  only onto read-only receivers and saves refused otherwise), `FleetAccessPolicy.parity.test.ts` (revision acceptance against
   `FleetAccessPolicy.v1026.fixtures.ts`, a frozen copy of 1.0.26's verifier
   that must never be edited to match newer code),
   `FleetCredentialAccess.test.ts` (receiver caps, revocation, unreadable
   policy, holder attribution, exceptions, capped peer-link sessions, fleet
   administration by base level, reserved IDs refused),
   `FleetPeerLinks.test.ts` (per-pair widen and narrow, reads kept through
-  narrowing whichever side reads it first, writes refused by the requester at
+  narrowing whichever side reads it first, a receiver turning standard, writes refused by the requester at
   once, a link signed in above a narrowed list dropped, under the real receiver
   cap), `McpToolAccess.test.ts` (each linked call carries its declaration's
   write flag), `RpcAuthorization.test.ts` (per-call scopes), `ws.test.ts`

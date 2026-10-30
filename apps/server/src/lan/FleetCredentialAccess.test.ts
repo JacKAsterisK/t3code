@@ -511,11 +511,13 @@ it.live(
             machines: [
               { machineId: ANVIL, access: "read-only" },
               { machineId: PANDA, access: "read-only" },
+              // This machine is read-only too: an exception only applies on a read-only machine.
+              { machineId: CRYO, access: "read-only" },
             ],
             pairs,
           };
         };
-        // Both are read-only. AnvilToad is standard on CryoFrog; PandaMedic only on AnvilToad.
+        // All three are read-only. AnvilToad is standard on CryoFrog; PandaMedic only on AnvilToad.
         list([
           FleetAccessPolicy.pairEntryId(ANVIL, CRYO),
           FleetAccessPolicy.pairEntryId(PANDA, ANVIL),
@@ -549,6 +551,62 @@ it.live(
     ),
 );
 
+it.live(
+  "narrows an exception onto this machine while it is standard, keeping reads, and restores it",
+  () =>
+    withRoutes((handler, { auth, revoke }) =>
+      Effect.gen(function* () {
+        const anvil = yield* anvilFleetSession(auth);
+        const peerLink = yield* auth.issueMcpClientSession({
+          label: "T3 Code · Test anviltoad",
+          access: "full-access",
+          peerLink: true,
+          client: { deviceType: "bot" },
+          approvalSubject: `lan-fleet-peer-link:${ANVIL}:00000000-0000-4000-8000-000000000001`,
+        });
+        const accessOf = (token: string) =>
+          auth.authenticateMcpClient(mcpRequest(token)).pipe(Effect.map((client) => client.access));
+        // AnvilToad keeps its exception onto CryoFrog throughout; only CryoFrog's level changes.
+        const list = (cryo: "read-only" | "standard") => {
+          policy = {
+            ...policy,
+            revision: policy.revision + 1,
+            machines: [
+              { machineId: ANVIL, access: "read-only" },
+              { machineId: CRYO, access: cryo },
+            ],
+            pairs: [FleetAccessPolicy.pairEntryId(ANVIL, CRYO)],
+          };
+        };
+        list("read-only");
+        const grant = yield* approveTaskGrant(
+          handler,
+          (yield* json<{ credential: string }>(yield* mintCode(handler, anvil.token))).credential,
+        );
+        expect(yield* accessOf(grant.access_token)).toBe("auto");
+        expect(yield* accessOf(peerLink.token)).toBe("full-access");
+
+        // CryoFrog is made standard: standard here would reach every machine it writes to, so the
+        // exception stops applying. Writes stop at once; sessions and reads stay.
+        list("standard");
+        expect(yield* accessOf(grant.access_token)).toBe("read-only");
+        expect(yield* accessOf(peerLink.token)).toBe("read-only");
+        expect((yield* mintCode(handler, anvil.token)).status).toBe(403);
+        yield* revoke;
+        const sessions = (yield* auth.listSessions()).map((s) => s.sessionId);
+        expect(sessions).toContain(anvil.sessionId);
+        expect(sessions).toContain(peerLink.sessionId);
+        expect(yield* accessOf(grant.access_token)).toBe("read-only");
+
+        // Read-only again, the stored exception applies again.
+        list("read-only");
+        expect(yield* accessOf(grant.access_token)).toBe("auto");
+        expect(yield* accessOf(peerLink.token)).toBe("full-access");
+        expect((yield* mintCode(handler, anvil.token)).status).toBe(200);
+      }),
+    ),
+);
+
 it.effect(
   "lets a machine standard here only by exception work here but never administer the fleet",
   () =>
@@ -567,7 +625,10 @@ it.effect(
         policy = {
           ...policy,
           revision: policy.revision + 1,
-          machines: [{ machineId: ANVIL, access: "read-only" }],
+          machines: [
+            { machineId: ANVIL, access: "read-only" },
+            { machineId: CRYO, access: "read-only" },
+          ],
           pairs,
         };
       };

@@ -223,6 +223,70 @@ const configLayer = Config.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-fleet-access-config-",
 });
 
+describe("fleet access exception evaluation", () => {
+  const anvil = "anviltoad";
+  const spd = "spdevmachine";
+  const panda = "pandamedic";
+  const snapshot = (
+    levels: Record<string, Access>,
+    standardOn: Record<string, ReadonlyArray<string>>,
+  ): FleetAccessPolicy.FleetAccessSnapshot => ({
+    defaultAccess: "standard",
+    machines: Object.entries(levels).map(([machineId, access]) => ({ machineId, access })),
+    pairs: FleetAccessPolicy.replaceExceptions(
+      [],
+      Object.entries(standardOn).map(([machineId, receivers]) => ({
+        machineId,
+        standardOn: receivers,
+      })),
+    ),
+  });
+
+  it("applies an exception only while its receiver is read-only itself", () => {
+    // Standard on PandaMedic would reach every machine PandaMedic writes to.
+    const list = snapshot({ [anvil]: "read-only" }, { [anvil]: [panda] });
+    expect(FleetAccessPolicy.exceptionApplies(list, panda)).toBe(false);
+    expect(FleetAccessPolicy.pairAccess(list, anvil, panda)).toBe("read-only");
+    // An unlisted receiver has the list's default.
+    const unlisted = snapshot({ [anvil]: "read-only" }, { [anvil]: ["buildmachine"] });
+    expect(FleetAccessPolicy.pairAccess(unlisted, anvil, "buildmachine")).toBe("read-only");
+    expect(
+      FleetAccessPolicy.pairAccess(
+        { ...unlisted, defaultAccess: "read-only" },
+        anvil,
+        "buildmachine",
+      ),
+    ).toBe("standard");
+  });
+
+  it("follows the receiver's level as it changes, the exception stored throughout", () => {
+    const at = (receiver: Access) =>
+      snapshot({ [anvil]: "read-only", [spd]: receiver }, { [anvil]: [spd] });
+    expect(FleetAccessPolicy.pairAccess(at("read-only"), anvil, spd)).toBe("standard");
+    expect(FleetAccessPolicy.pairAccess(at("standard"), anvil, spd)).toBe("read-only");
+    expect(at("standard").pairs).toEqual(at("read-only").pairs);
+    expect(FleetAccessPolicy.pairAccess(at("read-only"), anvil, spd)).toBe("standard");
+    // A standard caller is standard everywhere, exception or not.
+    expect(FleetAccessPolicy.pairAccess(at("standard"), spd, anvil)).toBe("standard");
+  });
+
+  it("gives two read-only machines standard on each other and on no other machine", () => {
+    const list = snapshot(
+      { [anvil]: "read-only", [spd]: "read-only" },
+      { [anvil]: [spd], [spd]: [anvil] },
+    );
+    expect(FleetAccessPolicy.pairAccess(list, anvil, spd)).toBe("standard");
+    expect(FleetAccessPolicy.pairAccess(list, spd, anvil)).toBe("standard");
+    for (const caller of [anvil, spd])
+      expect(FleetAccessPolicy.pairAccess(list, caller, panda)).toBe("read-only");
+    const state = { ...list, revision: 1, peers: [] };
+    expect(FleetAccessPolicy.accessOn({ ...state, machineId: anvil }, spd)).toBe("standard");
+    expect(FleetAccessPolicy.callerAccess({ ...state, machineId: spd }, anvil)).toBe("standard");
+    expect(FleetAccessPolicy.accessOn({ ...state, machineId: anvil }, panda)).toBe("read-only");
+    expect(FleetAccessPolicy.selfAccess({ ...state, machineId: anvil })).toBe("read-only");
+  });
+});
+
 it.layer(NodeServices.layer)("fleet access policy revisions", (it) => {
   it.effect(
     "never lets a ground competing first revision lift a restriction, even with an empty cache",
@@ -728,6 +792,83 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
     }).pipe(Effect.provide(configLayer)),
   );
 
+  it.effect(
+    "refuses a save adding an exception onto a standard machine, and keeps inactive ones",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fleet();
+        const anvil = f.anvil.peer.machineId;
+        const spd = f.spd.peer.machineId;
+        const panda = f.panda.peer.machineId;
+        const cryo = yield* f.machine();
+        const saved = yield* cryo.change({
+          ...f.input(f.cryo),
+          expectedRevision: 0,
+          next: pairList(f),
+        });
+        // PandaMedic is standard: an exception onto it is refused, with a reason Settings shows.
+        const ontoPanda = cryo.change({
+          ...f.input(f.cryo),
+          expectedRevision: saved.revision,
+          next: {
+            ...pairList(f),
+            pairs: FleetAccessPolicy.replaceExceptions(saved.pairs, [
+              { machineId: anvil, standardOn: [spd, panda] },
+            ]),
+          },
+        });
+        const refused = yield* Effect.flip(ontoPanda);
+        expect(refused.reason).toBe("configuration");
+        expect(refused.refusal).toBe("exception-onto-standard");
+        expect(refused.message).toContain("read-only");
+        expect((yield* cryo.current).revision).toBe(saved.revision);
+        // So is one onto a machine the same save makes standard.
+        const lifted = yield* Effect.flip(
+          cryo.change({
+            ...f.input(f.cryo),
+            expectedRevision: saved.revision,
+            next: {
+              defaultAccess: "standard",
+              machines: [f.readOnly(f.anvil), f.readOnly(f.panda)],
+              pairs: FleetAccessPolicy.replaceExceptions(saved.pairs, [
+                { machineId: panda, standardOn: [spd] },
+              ]),
+            },
+          }),
+        );
+        expect(lifted.refusal).toBe("exception-onto-standard");
+
+        // SPDevMachine made standard keeps AnvilToad's stored exception onto it, inactive.
+        const promoted = yield* f.change(cryo, f.cryo, saved.revision, [f.readOnly(f.anvil)]);
+        expect(promoted.pairs).toEqual(saved.pairs);
+        expect(FleetAccessPolicy.callerAccess({ ...promoted, machineId: spd }, anvil)).toBe(
+          "read-only",
+        );
+        // A later save that keeps it, as Settings sends it, adds nothing and is accepted.
+        const kept = yield* cryo.change({
+          ...f.input(f.cryo),
+          expectedRevision: promoted.revision,
+          next: {
+            defaultAccess: "standard",
+            machines: [f.readOnly(f.anvil), f.readOnly(f.panda)],
+            pairs: FleetAccessPolicy.replaceExceptions(promoted.pairs, [
+              { machineId: anvil, standardOn: [spd] },
+            ]),
+          },
+        });
+        expect(kept.pairs).toEqual(saved.pairs);
+        // Read-only again, it applies again.
+        const restored = yield* f.change(cryo, f.cryo, kept.revision, [
+          f.readOnly(f.anvil),
+          f.readOnly(f.spd),
+          f.readOnly(f.panda),
+        ]);
+        expect(FleetAccessPolicy.callerAccess({ ...restored, machineId: spd }, anvil)).toBe(
+          "standard",
+        );
+      }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("keeps exceptions through a change that does not name them, unknown ones too", () =>
     Effect.gen(function* () {
       const f = yield* fleet();
@@ -737,7 +878,12 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
       yield* cryo.change({
         ...f.input(f.cryo),
         expectedRevision: 0,
-        next: { ...list, pairs: [...list.pairs, later] },
+        // Read-only itself, or an exception onto it would not apply and could not be saved.
+        next: {
+          ...list,
+          machines: [...list.machines, { machineId: "buildmachine", access: "read-only" }],
+          pairs: [...list.pairs, later],
+        },
       });
       // A level change, as Settings sends it, names no exceptions.
       const changed = yield* f.change(cryo, f.cryo, 1, [
@@ -820,7 +966,7 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
         yield* f.writeEntry(signed(f.anvil, [FleetAccessPolicy.pairEntryId(anvil, spd)], 3));
         const refused = yield* fresh();
         expect(refused.revision).toBe(1);
-        expect(FleetAccessPolicy.pairAccess(refused, anvil, cryo)).toBe("read-only");
+        expect(refused.pairs).not.toContain(FleetAccessPolicy.pairEntryId(anvil, cryo));
         expect(FleetAccessPolicy.pairAccess(refused, spd, anvil)).toBe("standard");
         // Nor by removing its own: 1.0.26 would not count that revision, nor any after it, so
         // neither does this version. Only a standard machine removes it.
@@ -846,10 +992,13 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
         yield* (yield* merge.machine()).change({
           ...merge.input(merge.cryo),
           expectedRevision: 0,
-          next: { defaultAccess: "standard", machines: [merge.readOnly(merge.anvil)] },
+          next: {
+            defaultAccess: "standard",
+            machines: [merge.readOnly(merge.anvil), merge.readOnly(merge.spd)],
+          },
         });
         const base = FleetAccessPolicy.entryDigest((yield* onlyEntry(merge)).entry);
-        const both = FleetAccessPolicy.pairEntryId(anvil, cryo);
+        const both = FleetAccessPolicy.pairEntryId(spd, anvil);
         const one = FleetAccessPolicy.pairEntryId(anvil, spd);
         for (const [signer, pairs] of [
           [merge.cryo, [both, one]],
@@ -865,7 +1014,7 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
                 signerMachineId: signer.peer.machineId,
                 createdAt: 0,
                 defaultAccess: "standard",
-                machines: [merge.readOnly(merge.anvil)],
+                machines: [merge.readOnly(merge.anvil), merge.readOnly(merge.spd)],
                 pairs,
               },
               signer.signingPrivateKey,
@@ -874,7 +1023,7 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
         const merged = yield* (yield* merge.machine()).refresh(merge.input(merge.spd));
         expect(merged.revision).toBe(2);
         expect(merged.pairs).toEqual([both]);
-        expect(FleetAccessPolicy.pairAccess(merged, anvil, cryo)).toBe("standard");
+        expect(FleetAccessPolicy.pairAccess(merged, spd, anvil)).toBe("standard");
         expect(FleetAccessPolicy.pairAccess(merged, anvil, spd)).toBe("read-only");
       }).pipe(Effect.provide(configLayer)),
   );
@@ -987,7 +1136,7 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
           expectedRevision: 0,
           next: {
             defaultAccess: "standard",
-            machines: [f.readOnly(f.anvil)],
+            machines: [f.readOnly(f.anvil), f.readOnly(f.spd)],
             pairs: standardOnSpd,
           },
         });
@@ -1020,7 +1169,10 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
         const resaved = yield* cryo.change({
           ...f.input(f.cryo),
           expectedRevision: saved.revision,
-          next: { defaultAccess: "standard", machines: [f.readOnly(f.anvil), f.readOnly(f.panda)] },
+          next: {
+            defaultAccess: "standard",
+            machines: [f.readOnly(f.anvil), f.readOnly(f.spd), f.readOnly(f.panda)],
+          },
         });
         expect(resaved.revision).toBe(saved.revision + 1);
         expect(FleetAccessPolicy.pairAccess(resaved, anvil, spd)).toBe("standard");

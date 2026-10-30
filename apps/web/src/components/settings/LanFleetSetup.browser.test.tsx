@@ -245,42 +245,57 @@ it("locks machine access on a read-only machine", async () => {
     .toBeDisabled();
 });
 
+const peerOf = (machineId: string, label: string, octet: number, verificationCode: string) => ({
+  machineId,
+  environmentId: EnvironmentId.make(`environment-${machineId}`),
+  label,
+  origin: `https://192.168.40.${octet}:4443`,
+  verificationCode,
+  status: "approved" as const,
+});
+
 it("saves the machines a read-only machine is standard on, from a standard machine", async () => {
   const { configure } = setup({
     stage: "active",
     sharedFolderTrust: true,
     peers: [
       ...accessPeers,
-      {
-        machineId: "third",
-        environmentId: EnvironmentId.make("environment-third"),
-        label: "Third machine",
-        origin: "https://192.168.40.12:4443",
-        verificationCode: "fedcba654321",
-        status: "approved",
-      },
+      peerOf("third", "Third machine", 12, "fedcba654321"),
+      peerOf("fourth", "Fourth machine", 13, "0123456789ab"),
     ],
     accessPolicy: {
       revision: 4,
       defaultAccess: "standard",
-      machines: [{ machineId: "other", access: "read-only" }],
-      exceptions: [{ machineId: "other", standardOn: ["self"] }],
+      machines: [
+        { machineId: "other", access: "read-only" },
+        { machineId: "third", access: "read-only" },
+        { machineId: "fourth", access: "read-only" },
+      ],
+      exceptions: [{ machineId: "other", standardOn: ["third"] }],
       selfAccess: "standard",
       canChange: true,
     },
   });
   await using screen = await render(<LanFleetSetup />);
-  await expect.element(screen.getByText("Standard on: Synthetic device")).toBeVisible();
+  await expect
+    .element(screen.getByText("Standard on: Third machine", { exact: true }))
+    .toBeVisible();
   // Standard machines get no picker: an exception only matters for a read-only one.
   await expect
-    .element(page.getByRole("button", { name: "Choose where Third machine has standard access" }))
+    .element(
+      page.getByRole("button", { name: "Choose where Synthetic device has standard access" }),
+    )
     .not.toBeInTheDocument();
   await screen
     .getByRole("button", { name: "Choose where Other machine has standard access" })
     .click();
   await expect.element(page.getByText("Where may Other machine make changes?")).toBeVisible();
-  await expect.element(page.getByRole("checkbox", { name: "Synthetic device" })).toBeChecked();
-  await page.getByRole("checkbox", { name: "Third machine" }).click();
+  // Only read-only machines are offered: standard on a standard one would reach all it can change.
+  await expect
+    .element(page.getByRole("checkbox", { name: "Synthetic device" }))
+    .not.toBeInTheDocument();
+  await expect.element(page.getByRole("checkbox", { name: "Third machine" })).toBeChecked();
+  await page.getByRole("checkbox", { name: "Fourth machine" }).click();
   expect(configure).not.toHaveBeenCalled();
   await page.getByRole("button", { name: "Save" }).click();
   expect(configure).toHaveBeenCalledExactlyOnceWith({
@@ -288,8 +303,58 @@ it("saves the machines a read-only machine is standard on, from a standard machi
     confirmed: true,
     revision: 4,
     defaultAccess: "standard",
+    machines: [
+      { machineId: "other", access: "read-only" },
+      { machineId: "third", access: "read-only" },
+      { machineId: "fourth", access: "read-only" },
+    ],
+    exceptions: [{ machineId: "other", standardOn: ["third", "fourth"] }],
+  });
+});
+
+it("shows an exception onto a machine that is now standard as inactive, removable only", async () => {
+  const { configure } = setup({
+    stage: "active",
+    sharedFolderTrust: true,
+    peers: [...accessPeers, peerOf("third", "Third machine", 12, "fedcba654321")],
+    accessPolicy: {
+      revision: 6,
+      defaultAccess: "standard",
+      machines: [{ machineId: "other", access: "read-only" }],
+      // Third machine was read-only when this was saved, and is standard now.
+      exceptions: [{ machineId: "other", standardOn: ["third"] }],
+      selfAccess: "standard",
+      canChange: true,
+    },
+  });
+  await using screen = await render(<LanFleetSetup />);
+  await expect.element(screen.getByText(/^Standard on: no machines/)).toBeVisible();
+  await expect
+    .element(screen.getByText("· Inactive on Third machine, which is standard"))
+    .toBeVisible();
+  await screen
+    .getByRole("button", { name: "Choose where Other machine has standard access" })
+    .click();
+  await expect.element(page.getByText(/Only read-only machines can be picked/)).toBeVisible();
+  // The saved one is listed so it can be removed; no other standard machine is offered.
+  const saved = page.getByRole("checkbox", { name: /Third machine/ });
+  await expect.element(saved).toBeChecked();
+  await expect.element(page.getByText("· Inactive while standard")).toBeVisible();
+  await expect
+    .element(page.getByRole("checkbox", { name: "Synthetic device" }))
+    .not.toBeInTheDocument();
+  await saved.click();
+  await expect.element(saved).not.toBeChecked();
+  // Once removed in the dialog it cannot be picked again.
+  await expect.element(saved).toBeDisabled();
+  await page.getByRole("button", { name: "Save" }).click();
+  expect(configure).toHaveBeenCalledExactlyOnceWith({
+    operation: "access",
+    confirmed: true,
+    revision: 6,
+    defaultAccess: "standard",
     machines: [{ machineId: "other", access: "read-only" }],
-    exceptions: [{ machineId: "other", standardOn: ["self", "third"] }],
+    exceptions: [{ machineId: "other", standardOn: [] }],
   });
 });
 
@@ -297,18 +362,24 @@ it("shows a read-only machine its exceptions but lets it change none", async () 
   setup({
     stage: "active",
     sharedFolderTrust: true,
-    peers: accessPeers,
+    peers: [...accessPeers, peerOf("third", "Third machine", 12, "fedcba654321")],
     accessPolicy: {
       revision: 3,
       defaultAccess: "standard",
-      machines: [{ machineId: "self", access: "read-only" }],
-      exceptions: [{ machineId: "self", standardOn: ["other"] }],
+      machines: [
+        { machineId: "self", access: "read-only" },
+        { machineId: "other", access: "read-only" },
+      ],
+      // Third machine is standard, so only the exception onto Other machine applies.
+      exceptions: [{ machineId: "self", standardOn: ["other", "third"] }],
       selfAccess: "read-only",
       canChange: false,
     },
   });
   await using screen = await render(<LanFleetSetup />);
-  await expect.element(screen.getByText(/except standard access on Other machine/)).toBeVisible();
+  await expect
+    .element(screen.getByText(/except standard access on Other machine\. Only/))
+    .toBeVisible();
   await expect
     .element(
       screen.getByRole("button", { name: "Choose where Synthetic device has standard access" }),

@@ -216,15 +216,34 @@ read-only machine's row shows **Standard on:** and **Choose**: tick the machines
 and **Save**. Only a machine with standard access can save. Each direction is
 its own exception, so for AnvilToad and SPDevMachine to have standard access on
 each other, choose SPDevMachine for AnvilToad and AnvilToad for SPDevMachine.
-Exceptions on a machine that is itself standard change nothing until it is
-made read-only again.
+A standard machine's own exceptions change nothing until it is made read-only
+again.
 
+An exception only applies on a machine that is itself read-only, so
+**Choose** offers only read-only machines. Standard access on a machine
+includes its reach: its agents and shell, and through them that machine's own
+credentials, its peer links to other machines, and its owner access to its own
+server, including `t3` on that host, which needs no sign-in and can configure
+the fleet as that machine. An exception onto a standard machine would reach
+every machine that one can change, and could administer the fleet through it.
+That would break both "not on the other machines" and the rule that a
+read-only machine cannot lift its own restriction.
+
+- A save that adds an exception onto a machine that is standard in the saved
+  list is refused, with a message saying why.
+- When a machine named by an exception is made standard, the exception stays
+  saved but stops applying: that pair narrows as a downgrade does, writes stop
+  and reads are kept. Its row shows it as **Inactive on** that machine, **which
+  is standard**. Make the machine read-only again and the exception applies
+  again, with nothing to approve; or open **Choose** and untick it to remove
+  it.
 - The receiving machine decides, per pair: a caller has standard access there
-  if it is standard, or if the list names that caller and that receiver.
-  Otherwise it has its listed level. This applies everywhere access applies:
-  the cap on each use, revocation, the credentials and peer links each machine
-  issues and replaces, the caller's own ceiling on the links it keeps, and its
-  refusal to forward task changes.
+  if it is standard, or if the list names that caller and that receiver and the
+  receiver is itself read-only. Otherwise it has its listed level. This applies
+  everywhere access applies: the cap on each use, revocation, the credentials
+  and peer links each machine issues and replaces, the caller's own ceiling on
+  the links it keeps, its refusal to forward task changes, routing, and what
+  `t3_environment_links` reports.
 - An exception is for working on that machine: threads, agents, the shell,
   files and that machine's own settings. It never makes the caller a fleet
   administrator there. Changing the list or its exceptions, fleet setup,
@@ -243,7 +262,7 @@ made read-only again.
   one of them grants it. A revision whose writer left or changed keys keeps only
   the exceptions the revisions it follows grant. An exception naming a machine
   the fleet does not know yet is kept, hidden, and applies once that machine
-  joins.
+  joins, if it is read-only.
 - An entry whose ID has the form of an exception or a writer's mark is always
   read as one. The reading depends on the list alone, never on which machines
   the fleet has, so it is the same on every machine: at startup, before any
@@ -272,6 +291,12 @@ made read-only again.
   caller's list narrowed is dropped, and a read-only one is asked for, unless
   it replaced an earlier link. A replacement stays for its reads, and the caller
   still refuses its writes.
+- Accepted propagation delay: the desktop app's own fleet connections to other
+  machines, and the codes fleet sync collects, are capped by the receiver, not
+  by the caller. After a narrowing they keep their old access until the
+  receiver reads the change, within its sync delay. Agents reach other machines
+  through peer links, on which the caller already refuses writes itself, so the
+  remaining window is only the receiver's sync delay.
 - A code being minted as the list narrows carries only what the live list says
   right before minting, including the first list a fleet adopts mid-sync. It is
   withdrawn rather than offered if the list narrows before it is published.

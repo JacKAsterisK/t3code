@@ -5,6 +5,7 @@ import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   Dialog,
   DialogClose,
@@ -353,6 +354,8 @@ const machineAccessItems = [
   { value: "read-only", label: "Read only" },
   { value: "standard", label: "Standard" },
 ];
+const inactiveExceptionReason =
+  "standard access on a standard machine would reach every machine it can change.";
 type MachineAccessChange = {
   readonly machineId: string | null;
   readonly label: string;
@@ -377,10 +380,26 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
     policy.defaultAccess;
   const standardOn = (machineId: string) =>
     policy.exceptions?.find((exception) => exception.machineId === machineId)?.standardOn ?? [];
+  // An exception applies only on a read-only machine: standard on a standard one would reach every
+  // machine that one can change. One onto a standard machine stays saved but does nothing.
+  const exceptionApplies = (receiver: string) => accessOf(receiver) === "read-only";
+  const activeOn = (machineId: string) => standardOn(machineId).filter(exceptionApplies);
+  const inactiveOn = (machineId: string) =>
+    standardOn(machineId).filter((receiver) => !exceptionApplies(receiver));
   const labelOf = (machineId: string) =>
     setup.peers.find((peer) => peer.machineId === machineId)?.label ?? machineId;
   const self = machines.find((peer) => peer.environmentId === setup.environmentId);
-  const selfExceptions = self === undefined ? [] : standardOn(self.machineId);
+  const selfExceptions = self === undefined ? [] : activeOn(self.machineId);
+  // Read-only machines, and any saved ones now standard so they can be removed.
+  const exceptionTargets =
+    exceptionChange === null
+      ? []
+      : machines.filter(
+          (peer) =>
+            peer.machineId !== exceptionChange.machineId &&
+            (exceptionApplies(peer.machineId) ||
+              standardOn(exceptionChange.machineId).includes(peer.machineId)),
+        );
   const disabled = fleet.busy || !fleet.allowed || !policy.canChange;
   const select = (label: string, value: FleetAccess, machineId: string | null) => (
     <div className="w-36 shrink-0">
@@ -460,9 +479,21 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
             <div className="flex items-center justify-between gap-3 pl-3 text-xs text-muted-foreground">
               <span>
                 Standard on:{" "}
-                {standardOn(peer.machineId).length === 0
+                {activeOn(peer.machineId).length === 0
                   ? "no machines"
-                  : standardOn(peer.machineId).map(labelOf).join(", ")}
+                  : activeOn(peer.machineId).map(labelOf).join(", ")}
+                {inactiveOn(peer.machineId).length === 0 ? null : (
+                  <Tooltip>
+                    <TooltipTrigger render={<span />}>
+                      {` · Inactive on ${inactiveOn(peer.machineId).map(labelOf).join(", ")}, ${
+                        inactiveOn(peer.machineId).length === 1 ? "which is" : "which are"
+                      } standard`}
+                    </TooltipTrigger>
+                    <TooltipPopup side="top">
+                      An exception applies only on a read-only machine: {inactiveExceptionReason}
+                    </TooltipPopup>
+                  </Tooltip>
+                )}
               </span>
               <Button
                 size="compact"
@@ -558,26 +589,33 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
                 {exceptionChange.label} gets standard access on the machines you pick and stays read
                 only on the rest. Every machine applies this automatically and replaces the
                 credentials it gave this one within a few minutes. Nothing needs approving on any
-                machine.
+                machine. Only read-only machines can be picked: {inactiveExceptionReason}
               </DialogDescription>
             </DialogHeader>
             <DialogPanel>
               <div className="divide-y divide-border/60 rounded-lg border border-input bg-muted/25">
-                {machines
-                  .filter((peer) => peer.machineId !== exceptionChange.machineId)
-                  .map((peer) => (
+                {exceptionTargets.length === 0 ? (
+                  <p className="px-3 py-2.5 text-xs text-muted-foreground">
+                    No other machine is read-only.
+                  </p>
+                ) : null}
+                {exceptionTargets.map((peer) => {
+                  const checked = exceptionChange.standardOn.includes(peer.machineId);
+                  const applies = exceptionApplies(peer.machineId);
+                  return (
                     <label
                       key={peer.machineId}
                       className="flex cursor-pointer items-center gap-3 px-3 py-2.5 text-xs transition-colors hover:bg-muted/40"
                     >
                       <Checkbox
-                        checked={exceptionChange.standardOn.includes(peer.machineId)}
-                        disabled={fleet.busy}
-                        onCheckedChange={(checked) =>
+                        checked={checked}
+                        // A saved one onto a standard machine can only be removed.
+                        disabled={fleet.busy || (!applies && !checked)}
+                        onCheckedChange={(next) =>
                           setExceptionChange({
                             ...exceptionChange,
                             standardOn:
-                              checked === true
+                              next === true
                                 ? [...exceptionChange.standardOn, peer.machineId]
                                 : exceptionChange.standardOn.filter(
                                     (machineId) => machineId !== peer.machineId,
@@ -586,8 +624,12 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
                         }
                       />
                       {peer.label}
+                      {applies ? null : (
+                        <span className="text-muted-foreground"> · Inactive while standard</span>
+                      )}
                     </label>
-                  ))}
+                  );
+                })}
               </div>
             </DialogPanel>
             <DialogFooter>

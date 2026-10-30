@@ -868,13 +868,16 @@ it.live("widens and narrows one pair's link through an exception, with no prompt
       const cryo = cryoFrog.peer.machineId;
       const panda = pandaMedic.peer.machineId;
       const linkedSessions = linked.linkSessions(cryoFrog);
-      // Both machines read one list: CryoFrog read-only, with or without standard on PandaMedic.
+      // Both machines read one list: both read-only, CryoFrog standard on PandaMedic or not.
       const read = (revision: number, standardOn: ReadonlyArray<string>) =>
         Effect.gen(function* () {
           const list = {
             revision,
             defaultAccess: "standard" as const,
-            machines: [{ machineId: cryo, access: "read-only" as const }],
+            machines: [
+              { machineId: cryo, access: "read-only" as const },
+              { machineId: panda, access: "read-only" as const },
+            ],
             pairs: FleetAccessPolicy.replaceExceptions([], [{ machineId: cryo, standardOn }]),
             peers: [cryoFrog.peer, pandaMedic.peer].map((peer) => ({
               machineId: peer.machineId,
@@ -945,7 +948,10 @@ it.live("keeps reading through an exception's removal that the receiver reads fi
       const listOf = (revision: number, standardOn: ReadonlyArray<string>, self: string) => ({
         revision,
         defaultAccess: "standard" as const,
-        machines: [{ machineId: cryo, access: "read-only" as const }],
+        machines: [
+          { machineId: cryo, access: "read-only" as const },
+          { machineId: panda, access: "read-only" as const },
+        ],
         pairs: FleetAccessPolicy.replaceExceptions([], [{ machineId: cryo, standardOn }]),
         peers: [cryoFrog.peer, pandaMedic.peer].map((peer) => ({
           machineId: peer.machineId,
@@ -984,6 +990,75 @@ it.live("keeps reading through an exception's removal that the receiver reads fi
       expect(
         codes.filter((code) => FleetAccessPolicy.credentialAccess(code) === "standard"),
       ).toEqual([]);
+    }),
+  ).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("narrows an exception's link once its receiver becomes standard, and widens it back", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+      const { cryoFrog, pandaMedic, linking, linked } = fleet;
+      const cryo = cryoFrog.peer.machineId;
+      const panda = pandaMedic.peer.machineId;
+      const linkedSessions = linked.linkSessions(cryoFrog);
+      // CryoFrog read-only with standard on PandaMedic throughout; only PandaMedic's level changes.
+      const listOf = (revision: number, pandaAccess: FleetAccessLevel, self: string) => ({
+        revision,
+        defaultAccess: "standard" as const,
+        machines: [
+          { machineId: cryo, access: "read-only" as const },
+          { machineId: panda, access: pandaAccess },
+        ],
+        pairs: FleetAccessPolicy.replaceExceptions([], [{ machineId: cryo, standardOn: [panda] }]),
+        peers: [cryoFrog.peer, pandaMedic.peer].map((peer) => ({
+          machineId: peer.machineId,
+          environmentId: peer.environmentId,
+        })),
+        member: true,
+        machineId: self,
+      });
+      const readBoth = (revision: number, pandaAccess: FleetAccessLevel) =>
+        Effect.gen(function* () {
+          yield* Ref.set(linking.policy, listOf(revision, pandaAccess, cryo));
+          const issuer = listOf(revision, pandaAccess, panda);
+          yield* Ref.set(linked.policy, issuer);
+          yield* grant(linked, cryoFrog, FleetAccessPolicy.callerAccess(issuer, cryo));
+        });
+      yield* readBoth(1, "read-only");
+      yield* round(fleet);
+      expect(yield* callerAccess(fleet)).toBe("full-access");
+      const [standardSession] = yield* linkedSessions;
+
+      // PandaMedic becomes standard. CryoFrog reads it first: standard there would reach every
+      // machine PandaMedic writes to, so it refuses its own writes at once and keeps reading.
+      yield* Ref.set(linking.policy, listOf(2, "standard", cryo));
+      expect(yield* writeAccess(fleet)).toBe("capability_denied");
+      expect(yield* callerAccess(fleet)).toBe("full-access");
+      // PandaMedic reads it: writes stop at once, reads go on, and nothing is revoked yet.
+      const promoted = listOf(2, "standard", panda);
+      expect(FleetAccessPolicy.callerAccess(promoted, cryo)).toBe("read-only");
+      yield* Ref.set(linked.policy, promoted);
+      yield* grant(linked, cryoFrog, "read-only");
+      yield* linked.adapter.pass;
+      expect(yield* callerAccess(fleet)).toBe("read-only");
+      expect((yield* linkedSessions).map((session) => session.sessionId)).toEqual([
+        standardSession?.sessionId,
+      ]);
+      // The pair relinks read-only, and only then is the standard session retired.
+      yield* round(fleet);
+      expect(yield* callerAccess(fleet)).toBe("read-only");
+      const relinked = yield* linkedSessions;
+      expect(relinked).toHaveLength(1);
+      expect(relinked[0]?.sessionId).not.toBe(standardSession?.sessionId);
+      const link = yield* linking.links.get(pandaMedic.peer.environmentId);
+      expect(Option.getOrUndefined(link)?.access).toBe<AuthMcpClientAccess>("read-only");
+
+      // Read-only again, the stored exception applies again with no prompt.
+      yield* readBoth(3, "read-only");
+      yield* round(fleet);
+      expect(yield* callerAccess(fleet)).toBe("full-access");
+      expect(yield* writeAccess(fleet)).toBe("full-access");
     }),
   ).pipe(Effect.provide(NodeServices.layer)),
 );

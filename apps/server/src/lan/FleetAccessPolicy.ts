@@ -216,16 +216,58 @@ const accessOf = (snapshot: FleetAccessSnapshot, machineId: string): Level =>
   snapshot.machines.find((machine) => machine.machineId === machineId)?.access ??
   snapshot.defaultAccess;
 
-/** What `caller` may do on `receiver`: standard if it is, or if an exception names that pair. */
+/**
+ * An exception applies only while its receiver is read-only: standard on a machine includes its
+ * reach (its credentials, peer links and owner access to its own server), so one onto a standard
+ * machine would reach every machine it writes to. It stays stored and does nothing meanwhile.
+ */
+export const exceptionApplies = (snapshot: FleetAccessSnapshot, receiver: string) =>
+  accessOf(snapshot, receiver) === "read-only";
+
+/**
+ * What `caller` may do on `receiver`: standard if it is, or if an exception names that pair while
+ * the receiver is read-only. Every use of a pair's access reads it here.
+ */
 export const pairAccess = (
   snapshot: FleetAccessSnapshot,
   caller: string,
   receiver: string,
 ): Level =>
   accessOf(snapshot, caller) === "standard" ||
-  (snapshot.pairs ?? []).includes(pairEntryId(caller, receiver))
+  (exceptionApplies(snapshot, receiver) &&
+    (snapshot.pairs ?? []).includes(pairEntryId(caller, receiver)))
     ? "standard"
     : "read-only";
+
+/**
+ * Whether `next` adds an exception that would not take effect, its receiver standard in `next`.
+ * Receivers are found among `machineIds` and the lists' own machines; one not found is unlisted,
+ * so it has `next`'s default.
+ */
+const addsInactiveException = (
+  previous: FleetAccessSnapshot | undefined,
+  next: FleetAccessSnapshot,
+  machineIds: ReadonlyArray<string>,
+) => {
+  const before = new Set(previous?.pairs ?? []);
+  const added = normalizePairs(next.pairs).filter((id) => !before.has(id));
+  if (added.length === 0) return false;
+  const ids = [
+    ...new Set([
+      ...machineIds,
+      ...next.machines.map((machine) => machine.machineId),
+      ...(previous?.machines ?? []).map((machine) => machine.machineId),
+    ]),
+  ];
+  return added.some((id) => {
+    const receiver = ids.find((candidate) =>
+      ids.some((caller) => pairEntryId(caller, candidate) === id),
+    );
+    return receiver === undefined
+      ? next.defaultAccess === "standard"
+      : !exceptionApplies(next, receiver);
+  });
+};
 
 /**
  * The exceptions among `machineIds`, by caller. One naming a machine not among them stays in the
@@ -1096,6 +1138,19 @@ const make = Effect.gen(function* () {
           )
         )
           return yield* configurationError();
+        // A new exception onto a machine this list makes standard would do nothing. Stored ones
+        // stay, inactive, and apply again once their receiver is read-only.
+        if (
+          addsInactiveException(
+            current,
+            next,
+            input.peers.map((peer) => peer.machineId),
+          )
+        )
+          return yield* new LanFleetError({
+            reason: "configuration",
+            refusal: "exception-onto-standard",
+          });
         if (
           current !== undefined &&
           view.evaluation.heads.length === 1 &&

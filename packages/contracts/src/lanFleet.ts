@@ -201,8 +201,13 @@ export type LanFleetSetupState = typeof LanFleetSetupState.Type;
 
 export class LanFleetError extends Schema.TaggedError<LanFleetError>()("LanFleetError", {
   reason: Schema.Literals(["configuration", "unavailable", "busy", "transport"]),
+  // Why a change was refused, when it has a clearer message than its reason. A string, so a
+  // client that does not know one shows the reason's message instead.
+  refusal: Schema.optionalKey(Schema.String),
 }) {
   override get message(): string {
+    if (this.refusal === "exception-onto-standard")
+      return "An exception only applies on a machine that is itself read-only. Standard access on a standard machine reaches every machine it can change, so choose only read-only machines.";
     if (this.reason === "transport")
       return "The encrypted LAN endpoint could not start. Check that its selected address is local and its port is available; existing keys and connections were preserved.";
     return this.reason === "busy"

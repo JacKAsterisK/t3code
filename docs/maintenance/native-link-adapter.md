@@ -225,8 +225,8 @@ A policy change takes effect without approval:
 - L's adapter consumes the offer on its next pass. `PeerLinks.link` then
   replaces the row with the new `access`.
 - L also holds itself to its own accepted list (`accessOn`: its own level, or
-  standard on D where an exception names that pair), since D's copy may lag or
-  be missing:
+  standard on D where an exception names that pair and D is itself read-only),
+  since D's copy may lag or be missing:
   - An offer must carry the list revision D minted it under
     (`policyRevision`). LAN 1.0.25 offers carry none: its adapter, turned on by
     hand, offers its setup access even with no list. L never uses such an offer.

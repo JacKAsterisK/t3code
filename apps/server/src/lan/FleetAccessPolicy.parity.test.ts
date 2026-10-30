@@ -116,6 +116,9 @@ function parity(
       current.snapshot === undefined
         ? "standard"
         : FleetAccessPolicy.pairAccess(current.snapshot, id(caller), id(receiver)),
+    /** Whether the counted list holds that exception, whether it applies or not. */
+    grants: (caller: Machine, receiver: Machine) =>
+      (current.snapshot?.pairs ?? []).includes(pair(caller, receiver)),
   };
 }
 
@@ -195,7 +198,7 @@ describe("fleet access revisions count the same in LAN 1.0.26 and this version",
       const result = parity([r1, r2, entry]);
       expect(result.counts(entry)).toBe(counted);
       expect(result.access(anvil, spd)).toBe("standard");
-      expect(result.access(anvil, cryo)).toBe("read-only");
+      expect(result.grants(anvil, cryo)).toBe(false);
       expect(result.access(spd, anvil)).toBe("read-only");
     }
     // Marking its own revision with exceptions, as a standard writer would, never counts.
@@ -235,25 +238,25 @@ describe("fleet access revisions count the same in LAN 1.0.26 and this version",
     );
     const refused = parity([r1, r2, added, widened]);
     expect(refused.counts(widened)).toBe(true);
-    expect(refused.access(anvil, cryo)).toBe("read-only");
+    expect(refused.grants(anvil, cryo)).toBe(false);
   });
 
   it("joins competing revisions the same way, and keeps only exceptions all of them grant", () => {
     const { r1 } = base();
-    const both = pair(anvil, cryo);
+    const both = pair(spd, anvil);
     const one = pair(anvil, spd);
     const left = sign(cryo, [r1], [readOnly(anvil), readOnly(spd)], { pairs: [both, one] });
     const right = sign(panda, [r1], [readOnly(anvil), readOnly(spd)], { pairs: [both] });
     const heads = parity([r1, left, right]);
     expect(heads.current.heads).toHaveLength(2);
-    expect(heads.access(anvil, cryo)).toBe("standard");
+    expect(heads.access(spd, anvil)).toBe("standard");
     expect(heads.access(anvil, spd)).toBe("read-only");
     // A standard machine joins them.
     const joined = sign(panda, [left, right], [readOnly(anvil), readOnly(spd)], { pairs: [one] });
     const merged = parity([r1, left, right, joined]);
     expect(merged.counts(joined)).toBe(true);
     expect(merged.access(anvil, spd)).toBe("standard");
-    expect(merged.access(anvil, cryo)).toBe("read-only");
+    expect(merged.access(spd, anvil)).toBe("read-only");
     // A read-only machine cannot join heads whose entries differ, nor follow one with others'.
     const readOnlyJoin = sign(
       anvil,
@@ -284,7 +287,7 @@ describe("fleet access revisions count the same in LAN 1.0.26 and this version",
     );
     const legacyMerged = parity([r1, left, right, legacyJoin]);
     expect(legacyMerged.counts(legacyJoin)).toBe(true);
-    expect(legacyMerged.access(anvil, cryo)).toBe("standard");
+    expect(legacyMerged.access(spd, anvil)).toBe("standard");
     expect(legacyMerged.access(anvil, spd)).toBe("read-only");
   });
 

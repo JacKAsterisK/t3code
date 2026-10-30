@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 
 import * as Config from "../config.ts";
 import * as FleetUsers from "./FleetUsers.ts";
@@ -40,11 +41,19 @@ const fixture = Effect.fn("FleetUsersTest.fixture")(function* () {
   const share = yield* fs.makeTempDirectoryScoped({ prefix: "t3-fleet-users-share-" });
   const rosterPath = path.join(share, "roster.json");
   const usersFile = path.join(share, FleetUsers.FLEET_USERS_FILE);
-  const machine = Effect.fn("FleetUsersTest.machine")(function* (existingStateDir?: string) {
+  const machine = Effect.fn("FleetUsersTest.machine")(function* (
+    existingStateDir?: string,
+    fileSystem?: FileSystem.FileSystem,
+  ) {
     const stateDir =
       existingStateDir ?? (yield* fs.makeTempDirectoryScoped({ prefix: "t3-fleet-users-state-" }));
     const context = yield* Layer.build(
-      FleetUsers.layer.pipe(Layer.provide(Config.layer({ ...base, stateDir }))),
+      FleetUsers.layer.pipe(
+        Layer.provide(Config.layer({ ...base, stateDir })),
+        Layer.provide(
+          fileSystem === undefined ? Layer.empty : Layer.succeed(FileSystem.FileSystem)(fileSystem),
+        ),
+      ),
     );
     return { users: Context.get(context, FleetUsers.FleetUsers), stateDir };
   });
@@ -171,6 +180,39 @@ it.layer(NodeServices.layer)("fleet users", (it) => {
         }),
         cleared,
       );
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("keeps the last good copy when checking for the users file fails", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.writeUsers(USERS_FILE);
+      // The review's reproduction: the share is reachable, but checking for its users file fails
+      // with an access error, not NotFound.
+      let denied = false;
+      const flaky = FileSystem.FileSystem.of({
+        ...f.fs,
+        exists: (requested) =>
+          denied && requested === f.usersFile
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: "PermissionDenied",
+                  module: "FileSystem",
+                  method: "access",
+                  pathOrDescriptor: requested,
+                }),
+              )
+            : f.fs.exists(requested),
+      });
+      const { users, stateDir } = yield* f.machine(undefined, flaky);
+      const refresh = () => users.refresh({ rosterPath: f.rosterPath, machineId: DAN_MACHINE });
+      assert.deepEqual(yield* refresh(), danDirectory);
+      denied = true;
+      assert.deepEqual(yield* refresh(), danDirectory);
+      assert.deepEqual(yield* users.current, danDirectory);
+      // The saved copy is still the good one, so a restart keeps it too.
+      const restarted = yield* f.machine(stateDir);
+      assert.deepEqual(yield* restarted.users.current, danDirectory);
     }).pipe(Effect.provide(configLayer)),
   );
 

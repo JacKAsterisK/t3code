@@ -91,8 +91,11 @@ const make = Effect.gen(function* () {
     if (!(yield* fs.exists(root).pipe(Effect.orElseSucceed(() => false))))
       return { _tag: "unavailable" } as const;
     const file = path.join(root, FLEET_USERS_FILE);
-    if (!(yield* fs.exists(file).pipe(Effect.orElseSucceed(() => false))))
-      return { _tag: "absent" } as const;
+    // Only a confirmed absence removes the users: exists is false for NotFound alone, and an
+    // access or network error checking for the file keeps the last good copy too.
+    const present = yield* fs.exists(file).pipe(Effect.orElseSucceed(() => undefined));
+    if (present === undefined) return { _tag: "unavailable" } as const;
+    if (!present) return { _tag: "absent" } as const;
     return yield* readFleetJson(file, FleetUsersFile).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.flatMap((value) => Effect.try(() => validateFleetUsers(value))),

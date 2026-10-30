@@ -553,8 +553,9 @@ Proposed; each step needs Dan's approval.
 
 ## Known bugs
 
-- **Thread tools reject the `thread_` ID that T3 gives agents** (reported
-  2026-10-30 from a Reprint thread on CryoFrog). A thread mention carries the
+- **Fixed in `9a8adb212f`, not yet released: thread tools rejected the
+  `thread_` ID that T3 gives agents** (reported 2026-10-30 from a Reprint
+  thread on CryoFrog). A thread mention carries the
   context ID `thread_<uuid>`: in `t3-context://v1/thread/thread_<uuid>`, in
   `ref=` and in the `<t3_context>` block's `id`. The same block's `threadId`,
   and every thread tool, take the bare UUID. `t3_thread_read("thread_<uuid>")`
@@ -564,10 +565,17 @@ Proposed; each step needs Dan's approval.
   `e9a40c65` skipped a coordination check the user asked for. Only
   `t3_thread_read` was tested; `t3_thread_send`, `_wait`, `_interrupt` and
   `_update` likely share the lookup.
-  - **Fix:** normalize `threadId` once for every thread tool: strip `thread_`
-    and accept `t3-context://v1/thread/…` and `t3-thread://v2/<env>/<thread>`.
-    Report a malformed or unknown ID separately from a deleted or archived
-    thread, naming the expected form. Show one canonical ID in `<t3_context>`,
-    or label the one tools take.
-  - **Schedule:** its own small branch after the pair-access change ships in
-    1.0.27, for the next release. Worth offering upstream.
+  - **Fix:** `McpToolAccess.toLayer` resolves `threadId` and `targetThreadId`
+    for every tool before its checks and route. It accepts the ID,
+    `thread_<id>`, `t3-context://v1/thread/<id>` and `t3-thread://` links; a
+    v2 link's environment becomes `environmentId`, and a conflicting one is
+    refused. `thread_` is dropped only before a UUID or an ID that names a
+    thread, so `thread:provider:…` IDs stay intact. An unknown ID says "No
+    thread … exists here." with the accepted forms; only a deleted thread is
+    "no longer available". Codes are unchanged. `<t3_context>` labels
+    `threadId` as the ID tools take.
+  - **Limit:** a thread whose ID holds characters a context ID cannot, such
+    as `:`, gets a hashed context ID, which still names no thread. The error
+    points agents at `threadId`.
+  - **Next:** ships in the next release. Worth offering upstream; upstream
+    `main` has the same lookup.

@@ -401,7 +401,17 @@ approval before code or runtime changes.
   read-only machine standard on named machines) are evaluated per pair on the
   receiver and stored in the signed `machines` array as hashed entries 1.0.26
   reads as unknown machines; never add a field to revision files, which 1.0.26
-  decodes strictly and skips with everything after them. Only a successful
+  decodes strictly and skips with everything after them. Which revisions count
+  is 1.0.26's rule, applied to the entries as signed (`revisionCounts`), so both
+  versions follow the same chain; exceptions change only what a counted
+  revision grants, and a read-only machine can neither grant nor remove one. A
+  fleet machine's own entry is read exactly as 1.0.26 reads it and is never an
+  exception; new machine IDs starting `pair-access-` are not enrolled. Narrowing
+  is make-before-break for fleet credentials, task grants and peer links alike:
+  the receiver caps each call at once, keeps the session reading, and retires
+  it only after its replacement is in use; a code is re-checked against the
+  live list before minting and after publishing, and withdrawn if it narrowed.
+  Only a successful
   read revokes: an unreadable policy caps at the last accepted one and revokes
   nothing, and with none accepted changes nothing; a machine leaves only when
   shown disabled or missing for the departure grace. A grant holder's claim
@@ -412,7 +422,10 @@ approval before code or runtime changes.
   their issued access until they expire (at most 30 days). Webhook URLs a
   connection saw while standard stay usable after it is downgraded, until rotated.
   Owner-approval fleets get no automatic credential replacement. Software forging
-  share files is out of scope (shared-folder trust).
+  share files is out of scope (shared-folder trust). A caller that reads a
+  narrowing before the receiver keeps its wider peer link (for its reads) and
+  does not refuse forwarded writes itself; until the receiver reads the change,
+  the receiver's list governs those writes, as for every credential it issued.
 - **Data:** signed revisions in `fleet-access` on the share, an optional one-time
   starting list `fleet-access-seed.json` beside the roster (removed once
   adopted) with signed readiness markers in `fleet-access-ready`, the accepted
@@ -423,13 +436,18 @@ approval before code or runtime changes.
   instead of choosing one itself.
 - **Tests:** `FleetAccessPolicy.test.ts` (competing and orphaned revisions, the
   starting list and its readiness wait, departed signers, locks, floods,
-  exceptions and their 1.0.26 encoding),
+  exceptions and their 1.0.26 encoding, fleet machines with exception-shaped
+  IDs), `FleetAccessPolicy.parity.test.ts` (revision acceptance against
+  `FleetAccessPolicy.v1026.fixtures.ts`, a frozen copy of 1.0.26's verifier
+  that must never be edited to match newer code),
   `FleetCredentialAccess.test.ts` (receiver caps, revocation, unreadable
-  policy, holder attribution, exceptions), `FleetPeerLinks.test.ts` (per-pair
-  widen and narrow),
+  policy, holder attribution, exceptions, capped peer-link sessions),
+  `FleetPeerLinks.test.ts` (per-pair widen and narrow, reads kept through
+  narrowing whichever side reads it first, under the real receiver cap),
   `RpcAuthorization.test.ts` (per-call scopes), `ws.test.ts` (webhook URLs),
-  `FleetEnrollment.test.ts` (sync, refused lifts, departure grace),
-  `LanFleet.test.ts` (replacement, renewal, stale sync lock),
+  `FleetEnrollment.test.ts` (sync, refused lifts, departure grace, reserved
+  IDs), `LanFleet.test.ts` (replacement, renewal, stale sync lock, codes
+  withdrawn when the list narrows mid-sync),
   `GatewayT3OAuthClient.test.ts`, `EnvironmentRouting.test.ts`.
 - **Owner:** Dan. **Rollback:** set every machine to Standard in **Machine
   access**; each machine replaces the read-only credentials on its next sync.

@@ -115,6 +115,9 @@ const make = Effect.gen(function* () {
         if (
           name === `${peer.machineId}.json` &&
           peer.enabled &&
+          // A new machine never takes an ID that could read as an access-list exception.
+          (!FleetAccessPolicy.reservedMachineId(peer.machineId) ||
+            peers.some((existing) => existing.machineId === peer.machineId)) &&
           roster.machines.some(
             (machine) =>
               machine.machineId === peer.machineId &&
@@ -600,7 +603,10 @@ const make = Effect.gen(function* () {
                     });
                     if (
                       Authority.peerVerificationCode(request.peer) !== input.verificationCode ||
-                      request.peer.machineId !== input.machineId
+                      request.peer.machineId !== input.machineId ||
+                      // A new machine never takes an ID that could read as an exception.
+                      (FleetAccessPolicy.reservedMachineId(input.machineId) &&
+                        !authority.peers.some((peer) => peer.machineId === input.machineId))
                     )
                       return yield* configurationError();
                     const metadata = fresh.roster.machines.find(

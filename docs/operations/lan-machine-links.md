@@ -226,19 +226,36 @@ made read-only again.
   issues and replaces, the caller's own ceiling on the links it keeps, and its
   refusal to forward task changes. An exception never lets a read-only machine
   change the list.
-- The list's rules apply unchanged. A revision that adds an exception counts
-  only if its writer had standard access under what it follows. A read-only
-  machine can grant no exception, to itself or anyone, and can remove only its
-  own. Competing revisions keep an exception only if every one of them grants
-  it. A revision whose writer left or changed keys keeps only the exceptions
-  the revisions it follows grant. An exception naming a machine the fleet does
-  not know yet is kept, hidden, and applies once that machine joins.
+- The list's rules apply unchanged, and which revisions count is decided
+  exactly as LAN 1.0.26 decides it, over every entry as signed. A revision that
+  adds or removes an exception counts only if its writer had standard access
+  under what it follows. A read-only machine can grant no exception and remove
+  none, its own included: it may only restrict itself, every other entry left
+  as it was, or 1.0.26 would not count the revision, nor any after it, and the
+  two versions would stop on different lists. Exceptions change only what a
+  counted revision grants. Competing revisions keep an exception only if every
+  one of them grants it. A revision whose writer left or changed keys keeps only
+  the exceptions the revisions it follows grant. An exception naming a machine
+  the fleet does not know yet is kept, hidden, and applies once that machine
+  joins.
+- A fleet machine's own entry is never an exception, whatever its ID looks like:
+  each machine has exactly the level 1.0.26 gives it, and only entries that
+  belong to no fleet machine can grant one. A save never adds an exception that
+  would be a fleet machine's entry, and this version enrolls no new machine
+  whose ID starts with `pair-access-`.
 - Adding one needs nothing more: within a few minutes the receiver replaces the
   read-only fleet credential and peer link it gave the caller with standard
-  ones. No approval, pickup or relink. Removing one narrows that pair
-  as a downgrade does: writes stop at once on each use, fleet connections keep
-  reading, capped, until the read-only replacement is in use, and the peer link
-  is relinked read-only on the next pass.
+  ones. No approval, pickup or relink.
+- Removing one narrows that pair as a downgrade does, and nothing loses reads:
+  each replacement is made before the old credential is retired. Once the
+  receiver reads the change, writes stop at once on each use of every fleet
+  connection, task grant and peer link the caller holds there, which keep
+  reading, capped. The receiver offers read-only replacements unasked and
+  retires each old session only once its replacement is in use. A caller that
+  reads the change first keeps its link and asks for a read-only one. A code
+  being minted as the list narrows carries only what the list says right before
+  minting, and is withdrawn rather than offered if the list narrows before it
+  is published.
 
 With versions mixed, exceptions take effect pair by pair as both machines
 update: the receiver must run a release with exceptions to grant one, and the
@@ -357,9 +374,13 @@ machine with no saved list that finds no `fleet-access` folder on the share.
 
 The linking machine also holds itself to its own list: it never links above the
 access its accepted list gives it, whatever the destination offers, reading its
-list again right before and after each sign-in, and drops at once a link above
-it when its list narrows, before reading the share, then relinks at its access.
-The destination likewise mints each code at what its list says at that moment.
+list again right before each sign-in. When its list narrows it keeps the link it
+has, so it never stops reading, and asks for one at its access; the new link
+replaces the old one, and only then does the destination retire the old session.
+The destination caps each call on the old link at what its own list says as soon
+as it reads the change, and offers the narrower code unasked. It mints each code
+at what its list says at that moment, and withdraws one the list narrowed before
+it was offered.
 Another machine applies a later change in Settings only once it reads it, within
 about five minutes; until then it may still offer the access the change took
 away, just as it still serves its fleet connections at the old access. It

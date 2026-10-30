@@ -489,6 +489,14 @@ it.live(
           subject: `lan-fleet:${Delivery.deliveryFileName(CRYO, PANDA)}`,
           scopes: AuthStandardClientScopes,
         });
+        // AnvilToad's fleet peer link here, signed in with a standard peer-link code.
+        const peerLink = yield* auth.issueMcpClientSession({
+          label: "T3 Code · Test anviltoad",
+          access: "full-access",
+          peerLink: true,
+          client: { deviceType: "bot" },
+          approvalSubject: `lan-fleet-peer-link:${ANVIL}:00000000-0000-4000-8000-000000000001`,
+        });
         const accessOf = (token: string) =>
           auth.authenticateMcpClient(mcpRequest(token)).pipe(Effect.map((client) => client.access));
         const list = (pairs: ReadonlyArray<string>) => {
@@ -508,6 +516,7 @@ it.live(
           FleetAccessPolicy.pairEntryId(PANDA, ANVIL),
         ]);
         expect(yield* accessOf(grant.access_token)).toBe("auto");
+        expect(yield* accessOf(peerLink.token)).toBe("full-access");
         const minted = yield* mintCode(handler, anvil.token);
         expect(minted.status).toBe(200);
         expect((yield* mintCode(handler, panda.token)).status).toBe(403);
@@ -524,6 +533,11 @@ it.live(
         expect((yield* auth.listPairingLinks()).length).toBe(codes - 1);
         expect(yield* accessOf(grant.access_token)).toBe("read-only");
         expect((yield* auth.listSessions()).some((s) => s.sessionId === anvil.sessionId)).toBe(
+          true,
+        );
+        // Its peer link session too: capped at each call, kept, so it never stops reading.
+        expect(yield* accessOf(peerLink.token)).toBe("read-only");
+        expect((yield* auth.listSessions()).some((s) => s.sessionId === peerLink.sessionId)).toBe(
           true,
         );
       }),

@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Random delivery identifiers contain no machine or credential data.
 import * as NodeCrypto from "node:crypto";
 import {
+  type FleetAccess as FleetAccessLevel,
   FleetRoster,
   FleetConnectHost,
   LanFleetError,
@@ -497,10 +498,26 @@ const make = Effect.gen(function* () {
                   journal[`sent:${outgoingKey}`] = sent;
                   // Reserve durably before minting. An interrupted issue needs review, never rotation.
                   yield* writeFleetJson(journalFile, journal);
+                  // The list may narrow while this sync waits on the share or the auth store, and
+                  // a revocation pass may finish before this code exists: it carries only what
+                  // the list says right before minting, and is withdrawn if that narrows before
+                  // it is offered.
+                  const liveAccess = (granted: FleetAccessLevel) =>
+                    policyActive
+                      ? fleetAccess.current.pipe(
+                          Effect.map((live) =>
+                            FleetAccessPolicy.policyApplies(live) &&
+                            FleetAccessPolicy.callerAccess(live, peer.machineId) === "read-only"
+                              ? "read-only"
+                              : granted,
+                          ),
+                        )
+                      : Effect.succeed(granted);
+                  const minted = yield* liveAccess(access);
                   const issued = yield* auth.createPairingLink({
                     ttl: Duration.hours(24),
                     subject: `lan-fleet:${outgoingKey}`,
-                    scopes: FleetAccessPolicy.fleetCredentialScopes(access),
+                    scopes: FleetAccessPolicy.fleetCredentialScopes(minted),
                   });
                   if (sharedFolder) {
                     sent = { ...sent, pairingLinkId: issued.id };
@@ -519,10 +536,22 @@ const make = Effect.gen(function* () {
                     }),
                   );
                   yield* writeFleetJson(outFile, delivery);
-                  sent = { ...sent, status: "pending" };
-                  journal[`sent:${outgoingKey}`] = sent;
-                  yield* writeFleetJson(journalFile, journal);
-                  if (sharedFolder) availableDeliveryIds.add(sent.deliveryId);
+                  if ((yield* liveAccess(minted)) !== minted) {
+                    // Narrowed while minting or publishing: withdraw the code, not offer it. The
+                    // next sync offers one at the narrower access.
+                    yield* auth.revokePairingLink(issued.id);
+                    yield* fs.rename(outFile, `${outFile}.obsolete-${sent.deliveryId}`);
+                    if (sharedFolder) activeLinks.splice(activeLinks.indexOf(issued), 1);
+                    delete journal[`sent:${outgoingKey}`];
+                    yield* writeFleetJson(journalFile, journal);
+                    sent = undefined;
+                    status = "pending";
+                  } else {
+                    sent = { ...sent, status: "pending" };
+                    journal[`sent:${outgoingKey}`] = sent;
+                    yield* writeFleetJson(journalFile, journal);
+                    if (sharedFolder) availableDeliveryIds.add(sent.deliveryId);
+                  }
                 }
                 if (sent !== undefined) {
                   status = outgoingRejected

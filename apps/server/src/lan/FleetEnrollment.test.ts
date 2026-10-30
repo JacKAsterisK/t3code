@@ -1098,6 +1098,66 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         );
       }).pipe(Effect.provide(configLayer)),
   );
+
+  it.effect.each([false, true])(
+    "never enrolls a new machine whose ID could read as an access-list exception (shared folder: %s)",
+    (shared) =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false, shared ? "accessible" : false);
+        yield* f.start();
+        const owner = f.a.record()!;
+        // A request as a machine on another build could write: its own keys, a chosen ID.
+        const request = Effect.fn("FleetEnrollmentTest.request")(
+          function* (name: string, machineId: string) {
+            const record = Authority.generateFleetIdentity(
+              EnvironmentId.make(`environment:${name}`),
+              owner.fleetId,
+              owner.rootPublicKey,
+              false,
+              { autoPickup: true, access: "standard" },
+              machineId,
+            );
+            const peer = Authority.identityPeer(
+              record,
+              `Test ${name}`,
+              `https://${name}.example.test`,
+            );
+            const { encryptionPublicKey: _e, signingPublicKey: _s, tls: _tls, ...metadata } = peer;
+            const roster = yield* readFleetJson(f.rosterPath, FleetRoster);
+            yield* writeFleetJson(f.rosterPath, {
+              ...roster,
+              machines: [...roster.machines, metadata],
+            });
+            yield* f.fs.makeDirectory(f.path.join(f.root, "fleet-enrollment"), { recursive: true });
+            yield* writeFleetJson(
+              f.path.join(f.root, "fleet-enrollment", `${machineId}.json`),
+              Authority.enrollmentRequest(record, peer),
+            );
+            return Authority.peerVerificationCode(peer);
+          },
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        const reserved = FleetAccessPolicy.pairEntryId("anviltoad", "spdevmachine");
+        const reservedCode = yield* request("odd", reserved);
+        const ordinaryCode = yield* request("plain", "plain-machine");
+        if (shared) {
+          const enabled = ((yield* f.a.enrollment.resolve)?.peers ?? []).map(
+            (peer) => peer.machineId,
+          );
+          assert.include(enabled, "plain-machine");
+          assert.notInclude(enabled, reserved);
+        } else {
+          const refused = yield* f.approve(reserved, reservedCode).pipe(Effect.flip);
+          assert.equal(refused.reason, "configuration");
+          yield* f.approve("plain-machine", ordinaryCode);
+          const approved = (yield* f.a.enrollment.status).peers
+            .filter((peer) => peer.status === "approved")
+            .map((peer) => peer.machineId);
+          assert.include(approved, "plain-machine");
+          assert.notInclude(approved, reserved);
+        }
+      }).pipe(Effect.provide(configLayer)),
+  );
 });
 
 it.layer(NodeServices.layer)("leaving the fleet and the starting list", (it) => {

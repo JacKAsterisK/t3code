@@ -451,3 +451,10 @@ Proposed; each step needs Dan's approval.
    `RemoteTaskTransport`, `EnvironmentRegistry` and the routing half of the LAN
    toolkit and docs, and keep migrations 068–071.
 3. **Retained import (row 12)**, if #16731 lands.
+4. **LAN Android app**, wanted eventually and not scheduled. The official app
+   can likely pair with each machine over plain HTTP on the home network, once
+   its server is opened to the LAN; that is unverified against the fork's
+   server version. It cannot use T3 Connect (off in LAN builds) or the fleet's
+   self-signed endpoints, and it shows no fork features. A sideloaded build of
+   `apps/mobile` would add machine grouping (`b48277a17`), trust in the fleet's
+   pinned certificates and, with a VPN or our own relay, access away from home.

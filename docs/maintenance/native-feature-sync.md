@@ -468,8 +468,11 @@ approval before code or runtime changes.
   that is not a fleet server. Sessions from codes minted before attribution keep
   their issued access until they expire (at most 30 days). Webhook URLs a
   connection saw while standard stay usable after it is downgraded, until rotated;
-  one standard only by an exception never sees them. Guest shares made before
-  this rule stay until they expire or are closed.
+  one standard only by an exception never sees them, but a full-access thread it
+  starts there can list them, like anything else that machine's shell can read
+  (the documented full-control limit). Guest shares made before this rule stay
+  until they expire or are closed. The requester's write re-check and the send
+  are not atomic: a list that narrows between them lets that one write go.
   Owner-approval fleets get no automatic credential replacement. Software forging
   share files is out of scope (shared-folder trust). Accepted propagation delay:
   the desktop client's own fleet connections to peers, and the codes fleet sync

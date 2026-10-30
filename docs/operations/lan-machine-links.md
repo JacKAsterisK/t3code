@@ -246,6 +246,11 @@ no rule here can take it back afterwards:
   stored, **Machine access** names the machines that had full control of it and
   asks before saving. Check that machine first, or reinstall it if a caller
   could not be trusted.
+- The same goes for threads the caller starts there. A full-access thread on the
+  receiver can read its database, use its shell and list its scheduled tasks
+  with their webhook URLs, and anything it hands back to the caller outlives the
+  exception. The webhook rule below only stops the caller's own connection from
+  seeing those URLs.
 
 - A save that adds an exception onto a machine that is standard in the saved
   list is refused, with a message saying why. So is one that does not name two
@@ -313,8 +318,10 @@ no rule here can take it back afterwards:
   link keeps reading, but the caller refuses every write over it: in
   `environmentId` tools, `delegate_task` and forwarded task calls alike. It
   reads its list again right before each write is sent, a retry or a new
-  session included, so a list that narrows mid-call stops the write. It then
-  asks for a read-only link. A link that finishes signing in after the caller's
+  session included, so a list that narrows mid-call stops the write. That
+  re-check and the send are not one step: a list that narrows in the instant
+  between them lets that one write go, as if it had been sent a moment earlier.
+  It then asks for a read-only link. A link that finishes signing in after the caller's
   list narrowed is kept for its reads, first link or not: the caller refuses
   its writes, confirms it to the receiver as usual and asks for a read-only one.
   Dropping it would leave a 1.0.26 receiver holding the spent code, ignoring

@@ -374,6 +374,8 @@ interface FleetAccessInput {
   readonly member: boolean;
   /** When given, a read may re-sign a head whose writer's key no longer verifies. */
   readonly signingPrivateKey?: string;
+  /** Machines the roster disables: the starting list may still name them but never waits for them. */
+  readonly rosterDisabled?: ReadonlyArray<string>;
 }
 
 /**
@@ -499,7 +501,11 @@ const make = Effect.gen(function* () {
     if (seed.value.fleetId !== input.fleetId) return invalidSeed("another fleet");
     if (
       new Set(named).size !== named.length ||
-      named.some((machineId) => !input.peers.some((peer) => peer.machineId === machineId))
+      named.some(
+        (machineId) =>
+          !input.peers.some((peer) => peer.machineId === machineId) &&
+          !input.rosterDisabled?.includes(machineId),
+      )
     )
       return invalidSeed("a machine it names is not in the fleet");
     const snapshot: FleetAccessSnapshot = {
@@ -574,7 +580,9 @@ const make = Effect.gen(function* () {
    */
   const seedReadiness = Effect.fn("FleetAccess.seedReadiness")(function* (input: FleetAccessInput) {
     const machineIds: Array<string> = [];
-    for (const peer of input.peers.filter((item) => item.enabled)) {
+    for (const peer of input.peers.filter(
+      (item) => item.enabled && !input.rosterDisabled?.includes(item.machineId),
+    )) {
       if (verifiedReady(yield* readReady(input.root, peer.machineId), input.fleetId, peer))
         continue;
       // This machine runs 1.0.26 itself: it says so, and never waits for itself.

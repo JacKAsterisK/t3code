@@ -104,6 +104,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
       }),
     });
     const config = { ...base, stateDir, port: 4000 };
+    const launchEnvironment: Record<string, string> = { [FLEET_ROSTER_ENV]: rosterPath };
     let starts = 0;
     let closes = 0;
     const transportLayer = managedTls
@@ -144,9 +145,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
             Layer.provide(
               Layer.mock(DirectEndpoints.DirectEndpoints)({ resolve: () => Effect.succeed([]) }),
             ),
-            Layer.provide(
-              Layer.succeed(HostProcess.Environment, { [FLEET_ROSTER_ENV]: rosterPath }),
-            ),
+            Layer.provide(Layer.succeed(HostProcess.Environment, launchEnvironment)),
             Layer.provideMerge(
               FleetAccessPolicy.layer.pipe(
                 Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)),
@@ -165,9 +164,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
               Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
               Layer.provide(Layer.succeed(FleetEnrollment.FleetEnrollment, enrollment)),
               Layer.provide(Layer.succeed(FleetAccessPolicy.FleetAccess, fleetAccess)),
-              Layer.provide(
-                Layer.succeed(HostProcess.Environment, { [FLEET_ROSTER_ENV]: rosterPath }),
-              ),
+              Layer.provide(Layer.succeed(HostProcess.Environment, launchEnvironment)),
               Layer.provide(
                 Layer.mock(EnvironmentAuth.EnvironmentAuth)({
                   createPairingLink: (input) =>
@@ -222,6 +219,10 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
         serverScope = yield* Scope.make();
         services = yield* build();
       }),
+      /** As if Hub launched this server with the fleet switched off. */
+      disableBootstrap: () => {
+        launchEnvironment[FLEET_ROSTER_ENV] = "";
+      },
       record: () => record,
       replaceRecord: (next: Authority.FleetVaultRecord | undefined) => {
         record = next;
@@ -1095,6 +1096,81 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
           f.issued.find((grant) => grant.issuer === "beta")?.scopes,
           AuthStandardClientScopes,
         );
+      }).pipe(Effect.provide(configLayer)),
+  );
+});
+
+it.layer(NodeServices.layer)("leaving the fleet and the starting list", (it) => {
+  it.effect("a server relaunched with the fleet switched off no longer links", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(false, "accessible");
+      yield* f.a.enrollment.configure({
+        operation: "start",
+        confirmed: true,
+        origin: "https://alpha.example.test",
+        autoPickup: true,
+        access: "standard",
+      });
+      yield* f.join("");
+      yield* f.a.enrollment.configure({
+        operation: "access",
+        confirmed: true,
+        revision: 0,
+        defaultAccess: "standard",
+        machines: [{ machineId: f.b.record()!.machineId, access: "read-only" }],
+      });
+      assert.isTrue(FleetAccessPolicy.fleetLinksApply(yield* f.a.fleetAccess.current));
+
+      // Sync and the fleet context return before reading enrollment, so startup must clear it.
+      f.a.disableBootstrap();
+      yield* f.a.restart;
+      yield* f.a.links.backgroundSync;
+      const state = yield* f.a.fleetAccess.current;
+      assert.isFalse(FleetAccessPolicy.fleetLinksApply(state));
+      // The accepted list still governs the credentials this machine issued.
+      assert.equal(state.revision, 1);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect.each([false, true])(
+    "adopts the starting list without a machine the roster disables (authority entry: %s)",
+    (approved) =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false, "accessible");
+        yield* f.a.enrollment.configure({
+          operation: "start",
+          confirmed: true,
+          origin: "https://alpha.example.test",
+          autoPickup: true,
+          access: "standard",
+        });
+        yield* f.join("");
+        const beta = f.b.record()!.machineId;
+        if (approved)
+          yield* f.a.enrollment.configure({
+            operation: "approve",
+            confirmed: true,
+            machineId: beta,
+            verificationCode: (yield* f.b.enrollment.status).deviceCode!,
+          });
+        yield* f.a.enrollment.resolve;
+        const files = Effect.provideService(FileSystem.FileSystem, f.fs);
+        const roster = yield* readFleetJson(f.rosterPath, FleetRoster).pipe(files);
+        yield* writeFleetJson(f.rosterPath, {
+          ...roster,
+          machines: roster.machines.map((machine) =>
+            machine.machineId === beta ? { ...machine, enabled: false } : machine,
+          ),
+        }).pipe(files);
+        // The list still names the disabled machine, but never waits for its marker.
+        yield* writeFleetJson(f.path.join(f.root, FleetAccessPolicy.SEED_FILE), {
+          version: 1,
+          fleetId: f.a.record()!.fleetId,
+          defaultAccess: "standard",
+          readOnly: [beta],
+        }).pipe(files);
+        yield* f.a.enrollment.resolve;
+        assert.equal((yield* f.a.fleetAccess.current).revision, 1);
       }).pipe(Effect.provide(configLayer)),
   );
 });

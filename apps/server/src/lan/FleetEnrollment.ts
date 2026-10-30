@@ -59,6 +59,10 @@ const make = Effect.gen(function* () {
   const membership = yield* makeMembership(path.join(config.stateDir, "lan-fleet-members.json"));
   const bootstrap = () =>
     Effect.try({ try: () => resolveFleetBootstrap(processEnvironment), catch: configurationError });
+  // Sync and the fleet context stop before reading enrollment when the fleet is switched off, so a
+  // membership cached from an earlier launch is cleared here, at startup.
+  if ((yield* bootstrap().pipe(Effect.orElseSucceed(() => null))) === undefined)
+    yield* fleetAccess.leave;
   const load = Effect.fn("FleetEnrollment.load")(function* () {
     const paths = yield* bootstrap();
     if (paths === undefined) {
@@ -195,6 +199,9 @@ const make = Effect.gen(function* () {
             legacyAccess: record.access,
             member,
             signingPrivateKey: record.signingPrivateKey,
+            rosterDisabled: roster.machines
+              .filter((machine) => !machine.enabled)
+              .map((machine) => machine.machineId),
           });
     return {
       accessPolicy,

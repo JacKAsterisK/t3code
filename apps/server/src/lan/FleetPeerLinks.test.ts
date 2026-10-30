@@ -714,6 +714,30 @@ it.live("never keeps a link above an access list that narrows during a pass", ()
       const freshLink = yield* fresh.linking.links.get(fresh.pandaMedic.peer.environmentId);
       expect(Option.getOrUndefined(freshLink)?.access).toBe<AuthMcpClientAccess>("read-only");
       expect(yield* callerAccess(fresh)).toBe("read-only");
+
+      // PandaMedic's list narrows CryoFrog while it revokes the codes it offered before: the code
+      // it then mints carries only what the list says now.
+      const revoking = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+      yield* revoking.linking.adapter.pass;
+      const listPairingLinks = revoking.linked.auth.listPairingLinks;
+      let narrowOnce = true;
+      Object.assign(revoking.linked.auth, {
+        listPairingLinks: (...args: Parameters<typeof listPairingLinks>) =>
+          listPairingLinks(...args).pipe(
+            Effect.tap(() => {
+              if (!narrowOnce) return Effect.void;
+              narrowOnce = false;
+              return grant(revoking.linked, revoking.cryoFrog, "read-only");
+            }),
+          ),
+      });
+      yield* revoking.linked.adapter.pass;
+      yield* revoking.linking.adapter.pass;
+      const revokingLink = yield* revoking.linking.links.get(
+        revoking.pandaMedic.peer.environmentId,
+      );
+      expect(Option.getOrUndefined(revokingLink)?.access).toBe<AuthMcpClientAccess>("read-only");
+      expect(yield* callerAccess(revoking)).toBe("read-only");
     }),
   ).pipe(Effect.provide(NodeServices.layer)),
 );

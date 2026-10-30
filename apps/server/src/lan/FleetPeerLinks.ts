@@ -257,43 +257,57 @@ const make = Effect.gen(function* () {
       Delivery.verifyPeerLinkRequest(request.value, peer, fleet.self, now);
     // A linked peer whose access changed, or whose session ended here, gets a code unasked.
     const stale = linked !== undefined && (linked.level !== level || live.length === 0);
-    // The list may have narrowed while this pass read the share: mint at no more than it says now.
-    const mintPolicy = yield* fleetAccess.current;
-    const mintLevel = yield* fleetAccess.accessFor(peer.environmentId);
-    const granted =
-      level === undefined || mintLevel === undefined
-        ? undefined
-        : rank(mintLevel) < rank(level)
-          ? mintLevel
-          : level;
-    if (granted !== undefined && offer === undefined && (asked || stale)) {
+    // The list may narrow while this pass waits on the share or the auth store, so every step that
+    // could hand out access reads it again and keeps the lower level.
+    const narrowed = (current: Level | undefined) =>
+      fleetAccess
+        .accessFor(peer.environmentId)
+        .pipe(
+          Effect.map((latest) =>
+            current === undefined || latest === undefined
+              ? undefined
+              : rank(latest) < rank(current)
+                ? latest
+                : current,
+          ),
+        );
+    const servable = yield* narrowed(level);
+    if (servable !== undefined && offer === undefined && (asked || stale)) {
       yield* revokeCodes(codePrefix(peer.machineId));
-      const deliveryId = NodeCrypto.randomUUID();
-      const issued = yield* auth.createPairingLink({
-        ttl: CODE_TTL,
-        subject: `${codePrefix(peer.machineId)}${deliveryId}`,
-        scopes: mcpClientScopes(linkAccess(granted)),
-      });
-      const expiresAt = Math.min(
-        DateTime.toEpochMillis(issued.expiresAt),
-        now + Duration.toMillis(CODE_TTL),
-      );
-      yield* writeShare(
-        offerFile,
-        Delivery.sealDelivery({
-          config: fleet.config,
-          sender: fleet.self,
-          recipient: peer,
-          deliveryId,
-          expiresAt,
-          credential: issued.credential,
-          // Tells the peer this code follows a Machine access list, unlike a 1.0.25 offer.
-          peerLink: { access: linkAccess(granted), policyRevision: mintPolicy.revision },
-        }),
-      );
-      offer = { deliveryId, level: granted, expiresAt };
-      if (asked) answeredRequestId = request.value.requestId;
-    } else if (granted === undefined) yield* revokeCodes(codePrefix(peer.machineId));
+      const mintPolicy = yield* fleetAccess.current;
+      const granted = yield* narrowed(servable);
+      if (granted !== undefined) {
+        const deliveryId = NodeCrypto.randomUUID();
+        const issued = yield* auth.createPairingLink({
+          ttl: CODE_TTL,
+          subject: `${codePrefix(peer.machineId)}${deliveryId}`,
+          scopes: mcpClientScopes(linkAccess(granted)),
+        });
+        // Narrowed while minting: withdraw the code instead of offering it.
+        if ((yield* narrowed(granted)) !== granted) yield* revokeCodes(codePrefix(peer.machineId));
+        else {
+          const expiresAt = Math.min(
+            DateTime.toEpochMillis(issued.expiresAt),
+            now + Duration.toMillis(CODE_TTL),
+          );
+          yield* writeShare(
+            offerFile,
+            Delivery.sealDelivery({
+              config: fleet.config,
+              sender: fleet.self,
+              recipient: peer,
+              deliveryId,
+              expiresAt,
+              credential: issued.credential,
+              // Tells the peer this code follows a Machine access list, unlike a 1.0.25 offer.
+              peerLink: { access: linkAccess(granted), policyRevision: mintPolicy.revision },
+            }),
+          );
+          offer = { deliveryId, level: granted, expiresAt };
+          if (asked) answeredRequestId = request.value.requestId;
+        }
+      }
+    } else if (servable === undefined) yield* revokeCodes(codePrefix(peer.machineId));
     yield* updateServing(peer.machineId, (current) => ({
       ...(offer === undefined ? {} : { offer }),
       ...(answeredRequestId === undefined ? {} : { answeredRequestId }),

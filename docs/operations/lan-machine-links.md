@@ -32,7 +32,8 @@ roster row for that ID is preserved; otherwise setup creates a stable machine ID
 from the environment identity. It never guesses or enrolls other devices. Adding
 another machine uses the same join/approve flow without a new build.
 
-Read-only access permits thread, file, and diagnostic reads. Standard access also
+Read-only access permits thread, file, and diagnostic reads, and setting a
+thread's [owner](task-owners.md). Standard access also
 permits agents, shell commands, file changes, provider configuration, settings,
 and client-access management. The owner approves membership; it cannot turn on a
 member's automatic sync.

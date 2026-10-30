@@ -59,6 +59,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import * as FleetUsers from "../lan/FleetUsers.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
@@ -1845,12 +1846,31 @@ describe("OrchestratorMcpService provider resolution", () => {
               attachments: [],
               dispatchMode: { type: "start_immediately" },
             });
+            yield* orchestrator.dispatch({
+              type: "thread.owner.set",
+              commandId: CommandId.make("parent:owner"),
+              threadId: parentThreadId,
+              ownerId: "dan",
+            });
             const request = {
               threads: [{ target: { driverKind: driver, model } }],
               clientRequestId: "create-retry",
             };
             const first = yield* service.createThreads(scope, request);
             const child = first.threads[0]!;
+            // A thread the agent starts stays with its caller's owner unless it names another.
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(child.threadId)).thread.ownerId,
+              "dan",
+            );
+            const named = yield* service.createThreads(scope, {
+              threads: [{ ...request.threads[0]!, ownerId: "gavin" }],
+              clientRequestId: "named-owner",
+            });
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(named.threads[0]!.threadId)).thread.ownerId,
+              "gavin",
+            );
             const selection = parentEnabled
               ? { instanceId: codexInstanceId, model: "gpt-5.4" }
               : { instanceId: altInstanceId, model: "gpt-5.5" };
@@ -2739,34 +2759,31 @@ describe("OrchestratorMcpService thread list", () => {
     snoozedUntil: snoozed ? DateTime.makeUnsafe("2099-01-01T00:00:00Z") : null,
   });
   const shells = [
-    shell("thread:a-snoozed", "project:a", true),
+    { ...shell("thread:a-snoozed", "project:a", true), ownerId: "dan" },
     shell("thread:a-awake", "project:a", false),
-    shell("thread:b-snoozed", "project:b", true),
+    { ...shell("thread:b-snoozed", "project:b", true), ownerId: "unlisted" },
   ];
-  const service = layerOrchestratorService.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        NodeServices.layer,
-        Layer.mock(ThreadManagementService.ThreadManagementService)({
-          listProjectThreads: (input) =>
-            Effect.succeed(
-              shells.filter(
-                (thread) => input.projectId === undefined || thread.projectId === input.projectId,
-              ),
-            ),
-        }),
-        ServerSettings.layerTest(),
-        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
-        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
-          list: () => Effect.succeed([]),
-        }),
-        Layer.mock(ProjectService.ProjectService)({}),
-        Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
-        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-      ),
-    ),
+  const dependencies = Layer.mergeAll(
+    NodeServices.layer,
+    Layer.mock(ThreadManagementService.ThreadManagementService)({
+      listProjectThreads: (input) =>
+        Effect.succeed(
+          shells.filter(
+            (thread) => input.projectId === undefined || thread.projectId === input.projectId,
+          ),
+        ),
+    }),
+    ServerSettings.layerTest(),
+    Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+    Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+      list: () => Effect.succeed([]),
+    }),
+    Layer.mock(ProjectService.ProjectService)({}),
+    Layer.mock(SecretRequests.SecretRequests)({}),
+    Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+    Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
   );
+  const service = layerOrchestratorService.pipe(Layer.provide(dependencies));
 
   it.effect("lists snoozed threads across every project with allProjects", () =>
     Effect.gen(function* () {
@@ -2785,6 +2802,39 @@ describe("OrchestratorMcpService thread list", () => {
         ],
       );
     }).pipe(Effect.provide(service)),
+  );
+
+  it.effect.each([
+    {
+      name: "named from the fleet users file",
+      layer: layerOrchestratorService.pipe(
+        Layer.provide(
+          Layer.merge(
+            dependencies,
+            FleetUsers.layerStatic({
+              users: [{ id: "dan", name: "Dan" }],
+              machineId: "machine-test",
+              defaultOwnerId: null,
+            }),
+          ),
+        ),
+      ),
+      danName: "Dan",
+    },
+    { name: "by id without a fleet users service", layer: service, danName: "dan" },
+  ])("shows each thread's owner $name", ({ layer, danName }) =>
+    Effect.gen(function* () {
+      const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const listed = yield* mcp.listThreads(client, { allProjects: true });
+      assert.deepStrictEqual(
+        listed.threads.map((thread) => [thread.threadId, thread.ownerId, thread.ownerName]),
+        [
+          ["thread:a-snoozed", "dan", danName],
+          ["thread:a-awake", null, null],
+          ["thread:b-snoozed", "unlisted", "unlisted"],
+        ],
+      );
+    }).pipe(Effect.provide(layer)),
   );
 });
 

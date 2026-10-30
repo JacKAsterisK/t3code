@@ -89,6 +89,8 @@ interface BoxThread {
   readonly linkOrigin: Ref.Ref<{ readonly sessionId: string; readonly label: string } | null>;
   /** The parent the launch names, so the thread there can link back to it. */
   readonly delegatedFrom: Ref.Ref<ThreadLaunch.ThreadLaunchInput["delegatedFrom"] | null>;
+  /** The owner the launch names, if any. */
+  readonly ownerId: Ref.Ref<string | null>;
   /** The model and modes it was launched with. */
   readonly launchedWith: Ref.Ref<LaunchedWith | null>;
   /** The first message the thread there was launched with. */
@@ -137,6 +139,7 @@ const makeBoxThread = Effect.gen(function* () {
       null,
     ),
     delegatedFrom: yield* Ref.make<ThreadLaunch.ThreadLaunchInput["delegatedFrom"] | null>(null),
+    ownerId: yield* Ref.make<string | null>(null),
     launchedWith: yield* Ref.make<LaunchedWith | null>(null),
     message: yield* Ref.make<string | null>(null),
     status: yield* Ref.make<OrchestrationV2Run["status"]>("running"),
@@ -425,6 +428,7 @@ const boxToolkitLayer = (thread: BoxThread) => {
           Ref.set(thread.launched, input.threadId!).pipe(
             Effect.andThen(Ref.set(thread.linkOrigin, input.linkOrigin ?? null)),
             Effect.andThen(Ref.set(thread.delegatedFrom, input.delegatedFrom ?? null)),
+            Effect.andThen(Ref.set(thread.ownerId, input.ownerId ?? null)),
             Effect.andThen(Ref.set(thread.message, input.initialMessage?.text ?? null)),
             Effect.andThen(
               Ref.set(thread.launchedWith, {
@@ -821,6 +825,8 @@ it.effect("a task delegated to the box wakes the laptop's parent when it ends th
         threadId: parentThreadId,
         title: "Laptop parent",
       });
+      // A parent with no owner names none, so the box gives the task its own default.
+      expect(yield* Ref.get(thread.ownerId)).toBeNull();
       // A retry with the same key launches nothing new and records nothing new.
       const retried = yield* delegateToBox(a);
       expect(retried.taskId).toBe(delegated.taskId);
@@ -911,6 +917,12 @@ it.effect("a task named only by environment inherits the parent's model, within 
       // The parent runs with full access; the link allows less.
       yield* linkTo(a.links, b, "auto-accept-edits");
       yield* seedParent(a);
+      yield* a.orchestrator.dispatch({
+        type: "thread.owner.set",
+        commandId: CommandId.make("command:owner:laptop-parent"),
+        threadId: parentThreadId,
+        ownerId: "dan",
+      });
 
       const result = yield* a.call("delegate_task", {
         task: "Run the suite on the box.",
@@ -923,6 +935,8 @@ it.effect("a task named only by environment inherits the parent's model, within 
         runtimeMode: "auto-accept-edits",
         interactionMode: "default",
       });
+      // ...and the parent's owner, so the task there stays with them.
+      expect(yield* Ref.get(thread.ownerId)).toBe("dan");
 
       // Asking for more than the link allows is still refused there.
       const broader = yield* a.call("delegate_task", {

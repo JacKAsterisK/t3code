@@ -453,6 +453,8 @@ export interface ProviderAdapterV2TurnInput {
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
   readonly appContext?: ReadonlyArray<{ readonly key: string; readonly text: string }>;
+  /** T3 Code LAN: the name of the fleet user who manages this thread, told to its agent. */
+  readonly taskOwnerName?: string | undefined;
 }
 
 export interface ProviderAdapterV2SteerInput {

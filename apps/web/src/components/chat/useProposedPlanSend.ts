@@ -30,6 +30,7 @@ import {
 } from "../../proposedPlan";
 import type { LatestProposedPlanState } from "../../session-logic";
 import { readEnvironmentScope } from "../../state/session";
+import { useSelfOwnerId } from "../../hooks/useTaskOwners";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import type { ChatMessage } from "../../types";
@@ -244,6 +245,7 @@ interface ImplementPlanInNewThreadInput extends PlanSendBase {
  * thread is deleted again if it cannot be started or opened.
  */
 export function useImplementPlanInNewThread(input: ImplementPlanInNewThreadInput) {
+  const selfOwnerId = useSelfOwnerId();
   const {
     environmentId,
     routeThreadKey,
@@ -314,6 +316,7 @@ export function useImplementPlanInNewThread(input: ImplementPlanInNewThreadInput
         branch: activeThreadBranch,
         worktreePath: activeThread.worktreePath,
         createdAt,
+        ...(selfOwnerId === null ? {} : { ownerId: selfOwnerId }),
       },
     });
     let failure: AtomCommandResult<unknown, unknown> | null =

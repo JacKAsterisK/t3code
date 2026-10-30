@@ -198,6 +198,7 @@ interface ScheduledTaskRow {
   readonly interaction_mode: string;
   readonly created_by: string;
   readonly creation_source: string;
+  readonly owner_id: string | null;
   readonly created_at: string;
   readonly updated_at: string;
   readonly next_run_at: string | null;
@@ -322,6 +323,10 @@ function webhookEndpoint(
   };
 }
 
+// T3 Code LAN: a task's owner when it names one; otherwise its runs take the machine's default.
+const ownerField = (ownerId: string | null | undefined): { readonly ownerId?: string } =>
+  ownerId == null ? {} : { ownerId };
+
 // Runs per task row; list and lookup operations already own the span.
 const decodeRow = Effect.fnUntraced(
   function* (row: ScheduledTaskRow, origin: WebhookOrigin | null = null) {
@@ -343,6 +348,7 @@ const decodeRow = Effect.fnUntraced(
       interactionMode: row.interaction_mode,
       createdBy: row.created_by,
       creationSource: row.creation_source,
+      ...(row.owner_id === null ? {} : { ownerId: row.owner_id }),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       nextRunAt: row.next_run_at,
@@ -453,6 +459,7 @@ export const layer = Layer.effect(
         interaction_mode,
         created_by,
         creation_source,
+        owner_id,
         created_at,
         updated_at,
         next_run_at,
@@ -490,6 +497,7 @@ export const layer = Layer.effect(
         interaction_mode,
         created_by,
         creation_source,
+        owner_id,
         created_at,
         updated_at,
         next_run_at,
@@ -565,6 +573,7 @@ export const layer = Layer.effect(
           interaction_mode,
           created_by,
           creation_source,
+          owner_id,
           created_at,
           updated_at,
           next_run_at,
@@ -589,6 +598,7 @@ export const layer = Layer.effect(
           ${task.interactionMode},
           ${task.createdBy},
           ${task.creationSource},
+          ${task.ownerId ?? null},
           ${task.createdAt},
           ${task.updatedAt},
           ${task.nextRunAt},
@@ -613,6 +623,7 @@ export const layer = Layer.effect(
           runtime_mode = excluded.runtime_mode,
           interaction_mode = excluded.interaction_mode,
           creation_source = excluded.creation_source,
+          owner_id = excluded.owner_id,
           updated_at = excluded.updated_at,
           next_run_at = excluded.next_run_at,
           -- Only rotate changes a live token, so a save racing a rotation
@@ -881,6 +892,7 @@ export const layer = Layer.effect(
                       },
                       createdBy: active.createdBy,
                       creationSource: active.creationSource,
+                      ...ownerField(active.ownerId),
                     })
                     .pipe(Effect.map((launched) => launched.threadId)),
                 )
@@ -1220,6 +1232,8 @@ export const layer = Layer.effect(
         interactionMode: input.interactionMode,
         createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
         creationSource: input.creationSource ?? "web",
+        // Absent keeps what the task had, so editing it in a form keeps an agent-named owner.
+        ...ownerField(input.ownerId === undefined ? existingTask?.ownerId : input.ownerId),
         createdAt: existingTask?.createdAt ?? iso(now),
         updatedAt: iso(now),
         nextRunAt: scheduleUnchanged

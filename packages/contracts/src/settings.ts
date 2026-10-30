@@ -70,6 +70,12 @@ export const SidebarThreadGrouping = Schema.Literals(["none", "machine"]);
 export type SidebarThreadGrouping = typeof SidebarThreadGrouping.Type;
 const DEFAULT_SIDEBAR_THREAD_GROUPING: SidebarThreadGrouping = "none";
 
+// T3 Code LAN: which owners' tasks the sidebar shows: "all", "mine", or "user:<id>".
+export const SidebarOwnerFilter = Schema.String.check(
+  Schema.isPattern(/^(?:all|mine|user:[a-z0-9][a-z0-9_-]{0,31})$/u),
+);
+export type SidebarOwnerFilter = typeof SidebarOwnerFilter.Type;
+
 export const SidebarProjectGroupingMode = Schema.Literals([
   "repository",
   "repository_path",
@@ -493,6 +499,12 @@ export const ClientSettingsSchema = Schema.Struct({
   // the boring sidebar; the boring sidebar toggle clears it.
   legacySidebarEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarWorkingShelfEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // T3 Code LAN: the fleet user this device belongs to, who owns tasks it starts. Empty: the
+  // default owner of the machine this app runs on.
+  taskOwnerSelf: Schema.String.check(Schema.isMaxLength(32)).pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+  ),
+  sidebarOwnerFilter: SidebarOwnerFilter.pipe(Schema.withDecodingDefault(Effect.succeed("all"))),
   sidebarThreadGrouping: SidebarThreadGrouping.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_THREAD_GROUPING)),
   ),
@@ -1801,6 +1813,8 @@ export const ClientSettingsPatch = Schema.Struct({
   threadDetailsItems: Schema.optionalKey(Schema.Record(Schema.String, Schema.Boolean)),
   legacySidebarEnabled: Schema.optionalKey(Schema.Boolean),
   sidebarWorkingShelfEnabled: Schema.optionalKey(Schema.Boolean),
+  taskOwnerSelf: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(32))),
+  sidebarOwnerFilter: Schema.optionalKey(SidebarOwnerFilter),
   sidebarThreadGrouping: Schema.optionalKey(SidebarThreadGrouping),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
   sidebarProjectGroupingOverrides: Schema.optionalKey(

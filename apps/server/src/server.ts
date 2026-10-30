@@ -38,6 +38,8 @@ import {
 import { fixPath } from "./os-jank.ts";
 import * as Ws from "./ws.ts";
 import * as FleetAccessPolicy from "./lan/FleetAccessPolicy.ts";
+import * as FleetUsers from "./lan/FleetUsers.ts";
+import * as TaskOwnerBackfill from "./lan/TaskOwnerBackfill.ts";
 import * as LanFleet from "./lan/LanFleet.ts";
 import * as FleetMcpOrigin from "./lan/FleetMcpOrigin.ts";
 import * as FleetGrantAttribution from "./lan/FleetGrantAttribution.ts";
@@ -663,8 +665,13 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
+  // T3 Code LAN: once this machine has a default owner, its unowned tasks take it, once.
+  Layer.effectDiscard(TaskOwnerBackfill.make.pipe(Effect.flatMap((service) => service.start()))),
 ).pipe(
   Layer.provideMerge(layerOrchestrationApplication),
+  // T3 Code LAN: one users directory for new-thread defaults, agents' context, fleet sync and
+  // clients, by layer memoization.
+  Layer.provideMerge(FleetUsers.layer),
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
   Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
   Layer.provideMerge(layerServerSettings),

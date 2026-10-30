@@ -7,6 +7,7 @@ import { isLocalEnvironmentDisabled } from "~/localEnvironment";
 import { desktopWslStateAtom } from "~/state/desktopWslState";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { usePeerLinkHosts } from "~/state/peerLinks";
+import { useFleetUsersDirectory } from "~/hooks/useTaskOwners";
 import { useEnvironmentQuery } from "~/state/query";
 import { useEnvironmentScope } from "~/state/session";
 import { isWslSettingsRowVisible } from "./ConnectionsSettings.logic";
@@ -44,6 +45,7 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const canMaintain = useEnvironmentScope(primaryEnvironmentId, AuthEnvironmentMaintainScope);
   const hasPeerLinkHost = usePeerLinkHosts().length > 0;
+  const hasFleetUsers = (useFleetUsersDirectory()?.users.length ?? 0) > 0;
   const cloudLinkState = usePrimaryCloudLinkState().data;
   // Same fallback as the Connections row: older servers imply a tunnel from `linked`.
   const managedTunnelActive =
@@ -69,5 +71,6 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
     hasThreadAutoSettlement,
     managedTunnelActive,
     hasPeerLinkHost,
+    hasFleetUsers,
   });
 }

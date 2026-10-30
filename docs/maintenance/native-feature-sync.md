@@ -54,6 +54,12 @@ approval before code or runtime changes.
   (`derivedColumns`); an upstream migration that adds such a column must join
   that list, or verifying a home across candidate migrations reports its work
   as changed (fork 79's `completion_delivery_state` did, fixed in `be56dd16c`).
+  A fork column a migration adds as null for every row joins `addedNullColumns`
+  instead: null hashes as absent and a value hashes (fork 80's
+  `scheduled_tasks.owner_id`).
+- Fork migration 80 `ScheduledTaskOwner` (task owners, row 14) has no upstream
+  counterpart; the next upstream migration takes the number after the fork's
+  head.
 
 ## Summary
 
@@ -72,6 +78,7 @@ approval before code or runtime changes.
 | 11  | LAN build, distribution and update gate          | Upstream release and updater pipeline                          | released                          | keep                                      |
 | 12  | Native maintenance, home repair, retained import | `t3_thread_import` (#16731), "Continue threads after restarts" | proposed / released               | keep                                      |
 | 13  | Per-machine fleet access                         | One `AuthMcpClientAccess` mode per peer link                   | nightly, Labs beta                | keep                                      |
+| 14  | Task owners                                      | None                                                           | none (`cb9629e68`)                | keep                                      |
 
 ## Rows
 
@@ -500,6 +507,21 @@ approval before code or runtime changes.
   nothing, and with none accepted changes nothing; a machine leaves only when
   shown disabled or missing for the departure grace. A grant holder's claim
   re-attributes only an unattributed grant, and only to the claim's signer.
+- **Read-only allowance (task owners, row 14):** setting a thread's owner is
+  the one write a read-only session may make. `requiredScopesForRpcCall` in
+  `RpcAuthorization.ts` asks only `orchestration:read` of an
+  `orchestration.dispatchCommand` whose payload is `thread.owner.set`
+  (`THREAD_OWNER_COMMAND_TYPE`); every other command type still needs
+  `orchestration:operate`. Because the check runs per call on the capped
+  scopes, a read-only fleet machine (`fleetCredentialScopes("read-only")`) may
+  set an owner on a machine it reads, including after it narrows
+  mid-connection; one that left the fleet may not. Guests hold no WebSocket
+  session, so they never can. No MCP route sets an owner, so no
+  `McpToolAccess` declaration or `PeerMcpClient` write ceiling changes; agents
+  only name an owner when they create a thread, which is already a write. The
+  web client sends it without the operate check (`useSetThreadOwner`).
+  `RpcAuthorization.test.ts` ("thread owner authorization") walks every
+  `OrchestrationV2Command` member to prove only this one opens.
 - **Gaps:** task grants approved before attribution only read while any machine
   is restricted until their holder's next refresh, and indefinitely for a holder
   that is not a fleet server. Sessions from codes minted before attribution keep
@@ -557,6 +579,56 @@ approval before code or runtime changes.
 - **Owner:** Dan. **Rollback:** set every machine to Standard in **Machine
   access**; each machine replaces the read-only credentials on its next sync.
 - **Revisit:** when upstream adds per-link access changes or project-scoped links.
+
+### 14. Task owners
+
+- **Local:** `ownerId` on `OrchestrationV2AppThread` and the thread shell, the
+  `thread.owner.set` command and `thread.owner-set` event
+  (`packages/contracts/src/orchestrationV2.ts`, `dispatchThreadOwnerSet` in
+  `Orchestrator.ts`); `apps/server/src/lan/FleetUsers.ts` (`fleet-users.json`
+  beside the roster, read on fleet sync, cached in
+  `userdata\lan-fleet-users.json`, sent as `ServerConfig.fleetUsers`);
+  `TaskOwnerBackfill.ts` (one pass, marker `userdata\task-owner-backfill.json`);
+  the agent line `taskOwnerInstructions` in `runtimeInstructions.ts`, passed as
+  `taskOwnerName` by `RunExecutionService`; `ownerId`/`ownerName` in
+  `t3_thread_list` and `t3_thread_read`; `ownerId` parameters on
+  `t3_thread_launch`, `create_threads`, `schedule_task` and
+  `t3_lan_task_launch`; the web badge, header, menus, palette, sidebar filter
+  and **I am** setting (`apps/web/src/taskOwners.ts`, `ThreadOwnerBadge.tsx`).
+  See [Task owners](../operations/task-owners.md).
+- **Upstream:** no thread owner or assignee (checked upstream `main`
+  `cb9629e68`, 2026-10-30). Threads belong to the environment's one user.
+- **Must preserve:** an owner is a label: it never changes access or locks a
+  thread. Owner changes keep `updatedAt` (not activity) and choosing the
+  current owner is not an error. The owner lives on the hosting machine's
+  thread, so every viewer sees it through the shell stream. Children (provider
+  subagents, `delegate_task` here and across machines, forks) inherit the
+  parent's owner. The backfill runs once per machine. The read-only allowance is
+  recorded in row 13.
+- **Gaps:** a users-file edit reaches a connected window on its next reconnect
+  (`ServerConfig` snapshot; no stream event). A Claude session learns an owner
+  change when its query reopens. There is no unassign. A peer older than this
+  feature drops the `ownerId` a remote `delegate_task` sends (excess parameters
+  are ignored on decode; not tested against an old build). The mobile app shows
+  no owners.
+- **Data:** thread payload JSON (no column). Fork migration 080
+  `ScheduledTaskOwner` adds `scheduled_tasks.owner_id`; `workGeneration` hashes
+  a null `owner_id` as absent (`addedNullColumns` in `NativeMaintenance.ts`), so
+  the migration alone changes no work. Owner events count as work like pins.
+- **Decision:** keep.
+- **Tests:** `FleetUsers.test.ts`, `TaskOwnerBackfill.test.ts`,
+  `Orchestrator.control-reads.test.ts` (owner storage, events, create
+  defaults), `SubagentProjection.test.ts`, `ThreadForkService.test.ts`,
+  `RemoteDelegation.test.ts`, `ScheduledTaskService.test.ts`,
+  `OrchestratorMcpService.test.ts`, `NativeMaintenance.test.ts`,
+  `RpcAuthorization.test.ts`, `runtimeInstructions.test.ts`,
+  `CodexDeveloperInstructions.test.ts`, contracts `lanFleet.test.ts` and
+  `orchestrationV2.test.ts`, client-runtime `orchestrationV2Projection.test.ts`,
+  web `taskOwners.test.ts`, `threadActionMenu.logic.test.ts`,
+  `Sidebar.logic.test.ts`, `ThreadOwners.browser.test.tsx`.
+- **Owner:** Dan. **Rollback:** remove `fleet-users.json`; badges and defaults
+  stop, stored owners stay on threads as raw ids.
+- **Revisit:** if upstream adds thread assignment or multi-user environments.
 
 ## Sequence
 

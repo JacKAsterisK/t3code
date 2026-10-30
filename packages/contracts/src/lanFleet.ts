@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ProjectIconColor } from "./project.ts";
 
 export const FleetMachineId = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9_-]{0,63}$/u));
 export const FleetMachine = Schema.Struct({
@@ -17,6 +18,34 @@ export const FleetRoster = Schema.Struct({
   machines: Schema.Array(FleetMachine).check(Schema.isMaxLength(100)),
 });
 export type FleetRoster = typeof FleetRoster.Type;
+
+// A person the fleet's tasks belong to, listed in fleet-users.json beside the roster. An owner is
+// a label only: it never grants or limits access to anything.
+export const FleetUserId = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9_-]{0,31}$/u));
+export type FleetUserId = typeof FleetUserId.Type;
+export const FleetUser = Schema.Struct({
+  id: FleetUserId,
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+  // A theme colour token; without one the badge picks a stable colour from the id.
+  color: Schema.optionalKey(ProjectIconColor),
+});
+export type FleetUser = typeof FleetUser.Type;
+// fleet-users.json beside the roster. Each machine keeps its last good copy, so badges survive
+// the share being away.
+export const FleetUsersFile = Schema.Struct({
+  version: Schema.Literal(1),
+  users: Schema.Array(FleetUser).check(Schema.isMaxLength(50)),
+  // The owner each machine gives a task nothing else names an owner for.
+  machineOwners: Schema.Record(FleetMachineId, FleetUserId),
+});
+export type FleetUsersFile = typeof FleetUsersFile.Type;
+// What a client sees: the users, and this machine's id and default owner when it knows them.
+export const FleetUsersDirectory = Schema.Struct({
+  users: Schema.Array(FleetUser),
+  machineId: Schema.NullOr(FleetMachineId),
+  defaultOwnerId: Schema.NullOr(FleetUserId),
+});
+export type FleetUsersDirectory = typeof FleetUsersDirectory.Type;
 
 export const FleetConnectHost = Schema.String.check(
   Schema.isMaxLength(253),

@@ -476,3 +476,70 @@ it.effect("a bound run follows its thread when promotion moves it mid-send", () 
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
+
+it.effect(
+  "a task's owner survives an edit that names none, reaches its runs, and null clears it",
+  () =>
+    Effect.gen(function* () {
+      const launchedOwners = yield* Ref.make<Array<string | undefined>>([]);
+      const layer = ScheduledTaskService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+              launch: (input) =>
+                Ref.update(launchedOwners, (all) => [...all, input.ownerId]).pipe(
+                  Effect.as({ threadId: ThreadId.make(`thread:run-${input.commandId}`) } as never),
+                ),
+            }),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+              namedProjectsRoot: "/projects",
+              isScratchProject: () => Effect.succeed(false),
+            }),
+            NodeCrypto.layer,
+            Scheduler.layer,
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const form = {
+          id: ScheduledTaskId.make("task:owned"),
+          title: "Nightly suite",
+          prompt: "Run the suite",
+          enabled: true,
+          schedule: { type: "interval", everyMs: 60_000 },
+          projectId: ProjectId.make("project:test"),
+          threadId: null,
+          workspaceStrategy: { type: "root" },
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        } as const;
+        const ownerColumn = sql<{
+          owner_id: string | null;
+        }>`SELECT owner_id FROM scheduled_tasks WHERE task_id = 'task:owned'`;
+
+        const created = yield* service.upsert({ ...form, ownerId: "dan" });
+        assert.equal(created.task.ownerId, "dan");
+        assert.equal((yield* ownerColumn)[0]?.owner_id, "dan");
+
+        // A form edit that does not carry the owner keeps the one the task has.
+        const edited = yield* service.upsert({ ...form, title: "Nightly suite (edited)" });
+        assert.equal(edited.task.ownerId, "dan");
+        assert.equal((yield* service.list()).tasks[0]?.ownerId, "dan");
+
+        yield* service.runNow({ id: form.id });
+
+        // Null clears it: the next run takes the machine's default owner.
+        const cleared = yield* service.upsert({ ...form, ownerId: null });
+        assert.isUndefined(cleared.task.ownerId);
+        assert.isNull((yield* ownerColumn)[0]?.owner_id);
+        yield* service.runNow({ id: form.id });
+
+        assert.deepEqual(yield* Ref.get(launchedOwners), ["dan", undefined]);
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);

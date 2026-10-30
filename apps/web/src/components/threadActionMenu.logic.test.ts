@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildThreadActionMenuItems, type ThreadActionMenuState } from "./threadActionMenu.logic";
+import {
+  buildThreadActionMenuItems,
+  threadActionRequiresOperate,
+  type ThreadActionMenuState,
+} from "./threadActionMenu.logic";
+
+const FLEET_USERS = [
+  { id: "dan", name: "Dan" },
+  { id: "gavin", name: "Gavin" },
+];
 
 const baseState: ThreadActionMenuState = {
   canOperate: true,
@@ -35,6 +44,7 @@ describe("buildThreadActionMenuItems", () => {
         isPinned: reversed,
         isSettled: reversed,
         isSnoozed: reversed,
+        owner: { ownerId: "dan", users: FLEET_USERS },
       });
       const expected = reversed
         ? [
@@ -62,8 +72,24 @@ describe("buildThreadActionMenuItems", () => {
         items.find((item) => item.id === "snooze")?.children?.every((child) => child.disabled) ??
           true,
       ).toBe(true);
+      // Read-only sessions may still set an owner, so assigning stays enabled.
+      expect(items.find((item) => item.id === "owner")?.children).toEqual([
+        { id: "owner:dan", label: "Dan", checked: true },
+        { id: "owner:gavin", label: "Gavin", checked: false },
+      ]);
+      expect(threadActionRequiresOperate("owner:gavin")).toBe(false);
     },
   );
+
+  it("offers Assign to only when the fleet has users", () => {
+    const ids = (owner: ThreadActionMenuState["owner"]) =>
+      buildThreadActionMenuItems({ ...baseState, ...(owner ? { owner } : {}) }).map(
+        (item) => item.id,
+      );
+    expect(ids(undefined)).not.toContain("owner");
+    expect(ids({ ownerId: null, users: [] })).not.toContain("owner");
+    expect(ids({ ownerId: null, users: FLEET_USERS })).toContain("owner");
+  });
 
   it("disables archive and turning into a project while the thread is running", () => {
     const items = buildThreadActionMenuItems({

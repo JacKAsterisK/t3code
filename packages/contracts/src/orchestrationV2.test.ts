@@ -9,12 +9,15 @@ import {
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2RpcSchemas,
+  OrchestrationV2AppThreadJson,
+  OrchestrationV2Command,
   OrchestrationV2Subagent,
   OrchestrationV2ThreadShellJson,
   OrchestrationV2SubagentJson,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
+  THREAD_OWNER_COMMAND_TYPE,
 } from "./orchestrationV2.ts";
 
 const now = DateTime.makeUnsafe("2026-04-20T00:00:00.000Z");
@@ -484,6 +487,74 @@ describe("thread open stats", () => {
     const opens = { openedAt: 1, score: 1, picks: [{ query: "upl", at: 1 }] };
     expect(decode({ ...shell, opens }).opens).toEqual(opens);
     expect(decode({ ...shell, opens: { openedAt: "2026-10-01", score: 1 } }).opens).toBeNull();
+  });
+});
+
+describe("thread owners", () => {
+  const appThread = {
+    id: "thread-test",
+    projectId: "project-test",
+    title: "Thread",
+    providerInstanceId: "codex",
+    modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    activeProviderThreadId: null,
+    lineage: { rootThreadId: "thread-test", parentThreadId: null, relationshipToParent: null },
+    forkedFrom: null,
+    createdBy: "user",
+    creationSource: "mobile",
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    deletedAt: null,
+  };
+  const shell = {
+    ...appThread,
+    latestRunId: null,
+    activeRunId: null,
+    status: "idle",
+    pendingRuntimeRequest: null,
+    latestVisibleMessage: null,
+    latestUserMessageAt: null,
+    hasActionableProposedPlan: false,
+    itemCount: 0,
+    visibleItemCount: 0,
+  };
+
+  it.each([
+    ["app thread", appThread, OrchestrationV2AppThreadJson],
+    ["thread shell", shell, OrchestrationV2ThreadShellJson],
+  ] as const)("round-trips a %s's owner, and reads one without it", (_label, json, schema) => {
+    const decode = Schema.decodeUnknownSync(schema as Schema.Codec<unknown, unknown>);
+    const encode = Schema.encodeSync(schema as Schema.Codec<unknown, unknown>);
+    const ownerOf = (value: unknown) => (value as { readonly ownerId?: unknown }).ownerId;
+    const owned = decode({ ...json, ownerId: "dan" });
+    expect(ownerOf(owned)).toBe("dan");
+    expect(ownerOf(encode(owned))).toBe("dan");
+    expect(ownerOf(decode({ ...json, ownerId: null }))).toBeNull();
+    expect(Object.hasOwn(decode(json) as object, "ownerId")).toBe(false);
+    // An id this build's users file could not hold still loads.
+    expect(ownerOf(decode({ ...json, ownerId: "Some Owner" }))).toBe("Some Owner");
+  });
+
+  it("decodes the owner command, and only with a user id", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2Command);
+    const command = {
+      type: THREAD_OWNER_COMMAND_TYPE,
+      commandId: "command-owner",
+      threadId: "thread-test",
+      ownerId: "dan",
+    };
+    expect(decode(command)).toEqual(command);
+    expect(() => decode({ ...command, ownerId: "Dan" })).toThrow();
+    expect(() => decode({ ...command, ownerId: null })).toThrow();
+    const { ownerId: _ownerId, ...withoutOwner } = command;
+    expect(() => decode(withoutOwner)).toThrow();
   });
 });
 

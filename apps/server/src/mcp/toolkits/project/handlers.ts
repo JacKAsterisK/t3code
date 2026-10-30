@@ -1,3 +1,4 @@
+import * as FleetUsers from "../../../lan/FleetUsers.ts";
 import {
   CommandId,
   MessageId,
@@ -234,6 +235,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           ...(linkOrigin === undefined ? {} : { linkOrigin }),
           // Kept only alongside linkOrigin: thread.create drops it otherwise.
           ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
+          // Named, else the calling thread's: a thread an agent starts stays with its owner.
+          ...FleetUsers.inheritedOwner(input.ownerId, caller?.ownerId),
         }).pipe(
           Effect.mapError((error) => {
             if (error._tag === "AttachmentClaimError") {

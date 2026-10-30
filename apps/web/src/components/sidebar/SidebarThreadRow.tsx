@@ -102,6 +102,7 @@ import {
 import { pickSnoozePreset, resolveSnoozePresets, type SnoozePreset } from "../Sidebar.snooze";
 import { useThreadShell } from "../../state/entities";
 import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
+import { ThreadOwnerBadge } from "../ThreadOwnerBadge";
 import { ThreadSearchMatchExcerpt } from "../ThreadSearchMatch";
 import { makeWorkspaceFileDropHandlers } from "../chat/workspaceFileDrop";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
@@ -1123,6 +1124,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       />
     )
   ) : null;
+  const ownerBadge =
+    thread.ownerId && !sortable?.isDragging ? (
+      <ThreadOwnerBadge threadRef={threadRef} ownerId={thread.ownerId} />
+    ) : null;
 
   const remoteMachineIcon =
     isRemote && !showsScratchMachine ? (
@@ -1251,6 +1256,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               {title}
               {multiline ? titleLineIcons : null}
               {pinIndicator}
+              {ownerBadge}
               {multiline ? null : terminalStatusIcon}
               {isRegeneratingTitle ? (
                 <span role="status" className="sr-only">
@@ -1423,6 +1429,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             <div className="col-start-2 flex h-5 min-w-0 items-center gap-1.5">
               {pinIndicator}
               {title}
+              {ownerBadge}
               {isRegeneratingTitle ? (
                 <span role="status" className="sr-only">
                   Regenerating title

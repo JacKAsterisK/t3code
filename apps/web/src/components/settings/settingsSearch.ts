@@ -68,6 +68,7 @@ export interface SettingsSearchItem {
   readonly wslAvailableOnly?: boolean;
   readonly managedTunnelOnly?: boolean;
   readonly peerLinksOnly?: boolean;
+  readonly fleetUsersOnly?: boolean;
   readonly secondary?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
 }
@@ -83,6 +84,7 @@ export interface SettingsSearchAvailability {
   readonly hasThreadAutoSettlement: boolean;
   readonly managedTunnelActive?: boolean;
   readonly hasPeerLinkHost?: boolean;
+  readonly hasFleetUsers?: boolean;
 }
 
 export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
@@ -448,6 +450,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Group threads by machine",
     to: "/settings/general",
     searchTerms: ["machine environment server computer remote sidebar group"],
+  },
+  {
+    id: "task-owner-self",
+    title: "I am",
+    to: "/settings/general",
+    searchTerms: ["task owner who me mine user person fleet assign managed by"],
+    fleetUsersOnly: true,
   },
   {
     id: "boring-sidebar",
@@ -1332,7 +1341,8 @@ export function filterAvailableSettingsSearchItems(
       (!item.wslAvailableOnly || availability.isWslSettingsRowVisible) &&
       (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement) &&
       (!item.managedTunnelOnly || availability.managedTunnelActive === true) &&
-      (!item.peerLinksOnly || availability.hasPeerLinkHost === true),
+      (!item.peerLinksOnly || availability.hasPeerLinkHost === true) &&
+      (!item.fleetUsersOnly || availability.hasFleetUsers === true),
   );
 }
 

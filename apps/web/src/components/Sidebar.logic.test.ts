@@ -11,6 +11,7 @@ import {
   getFallbackThreadIdAfterDelete,
   hasUnseenCompletion,
   resolveSidebarRowThreadId,
+  filterSidebarV2VisibleThreads,
   orderItemsByPreferredIds,
   pinOrderKeyBetween,
   resolveProjectStatusIndicator,
@@ -213,6 +214,40 @@ describe("sidebar thread lineage helpers", () => {
     const loopA = subagentOf("thread-loop-a", ThreadId.make("thread-loop-b"));
     const loopB = subagentOf("thread-loop-b", loopA.id);
     expect(resolveSidebarRowThreadId(loopA.id, environmentId, [loopA, loopB])).toBe(loopA.id);
+  });
+});
+
+describe("filterSidebarV2VisibleThreads owner filter", () => {
+  it("keeps one owner's threads, and a listed parent's children follow it", () => {
+    const owned = (id: string, ownerId: string | null, parentId: ThreadId | null = null) => ({
+      ...makeThreadFixture({
+        id: ThreadId.make(id),
+        ...(parentId === null
+          ? {}
+          : {
+              lineage: {
+                rootThreadId: parentId,
+                parentThreadId: parentId,
+                relationshipToParent: "subagent" as const,
+              },
+            }),
+      }),
+      ownerId,
+    });
+    const dans = owned("thread-dan", "dan");
+    const gavins = owned("thread-gavin", "gavin");
+    const unowned = owned("thread-unowned", null);
+    // Gavin's subagent under Dan's thread lists under that thread, never on its own.
+    const gavinsChild = owned("thread-child", "gavin", dans.id);
+    const threads = [dans, gavins, unowned, gavinsChild];
+    const visibleIds = (ownerFilterId: string | null) =>
+      filterSidebarV2VisibleThreads(threads, null, new Set(), ownerFilterId).map(
+        (thread) => thread.id,
+      );
+
+    expect(visibleIds(null)).toEqual([dans.id, gavins.id, unowned.id]);
+    expect(visibleIds("dan")).toEqual([dans.id]);
+    expect(visibleIds("gavin")).toEqual([gavins.id]);
   });
 });
 

@@ -44,6 +44,7 @@ import {
 import { AuthMcpClientAccess } from "./auth.ts";
 import { ChatAttachment } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
+import { FleetUserId } from "./lanFleet.ts";
 import {
   OrchestrationSearchThreadsInput,
   OrchestrationSearchThreadsResult,
@@ -433,6 +434,18 @@ const LenientThreadOpens = Schema.NullOr(OrchestrationV2ThreadOpens).pipe(
   Schema.catchDecoding(() => Effect.succeedSome(null)),
 );
 
+/**
+ * Who manages a thread: a fleet-users.json user id, shown as a badge and told to its agent. A
+ * label only; it never limits access. Lenient so an id this build cannot read still loads.
+ */
+export const OrchestrationV2ThreadOwnerId = Schema.NullOr(TrimmedNonEmptyString);
+
+/**
+ * T3 Code LAN: the one orchestration command a read-only session may dispatch, read-only fleet
+ * machines among them. An owner is a label, so setting one opens no other write.
+ */
+export const THREAD_OWNER_COMMAND_TYPE = "thread.owner.set" as const;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -479,6 +492,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   guestShare: Schema.optional(Schema.NullOr(ThreadGuestShare)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  ownerId: Schema.optional(OrchestrationV2ThreadOwnerId),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -1846,6 +1860,7 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.unpinned",
       "thread.pin-reordered",
       "thread.active-reordered",
+      "thread.owner-set",
       "thread.visited",
       "thread.marked-unread",
       "thread.metadata-updated",
@@ -2095,6 +2110,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  ownerId: Schema.optional(OrchestrationV2ThreadOwnerId),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -2726,6 +2742,7 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.unpinned",
       "thread.pin-reordered",
       "thread.active-reordered",
+      "thread.owner-set",
       "thread.visited",
       "thread.marked-unread",
       "thread.pull-request-synced",
@@ -2875,6 +2892,8 @@ export const OrchestrationV2Command = Schema.Union([
     interactionMode: ProviderInteractionMode,
     branch: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+    /** Absent: this machine's default owner from fleet-users.json, if any. */
+    ownerId: Schema.optional(FleetUserId),
     /** Only the server sets this; a client's thread.create never carries one. */
     linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
     /** Only the server sets this, with `linkOrigin`, for a linked environment's delegated task. */
@@ -2976,6 +2995,13 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     orderKey: TrimmedNonEmptyString,
+  }),
+  /** The one write a read-only session may make (see THREAD_OWNER_COMMAND_TYPE). */
+  Schema.Struct({
+    type: Schema.Literal("thread.owner.set"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    ownerId: FleetUserId,
   }),
   Schema.Struct({
     type: Schema.Literal("thread.visit"),
@@ -3589,6 +3615,8 @@ export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
+  /** Absent: this machine's default owner from fleet-users.json, if any. */
+  ownerId: Schema.optional(FleetUserId),
   initialMessage: Schema.optional(
     Schema.Struct({
       messageId: Schema.optional(MessageId),

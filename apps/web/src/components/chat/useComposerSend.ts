@@ -85,6 +85,7 @@ import { environmentServerConfigsAtom } from "../../state/server";
 import { threadEnvironment } from "../../state/threads";
 import { runMobileComposerTransition } from "./draftHeroTransition";
 import { useClientSettingsHydrated, useEnvironmentSettings } from "../../hooks/useSettings";
+import { useSelfOwnerId } from "../../hooks/useTaskOwners";
 import { environmentPresentations } from "../../state/presentation";
 import {
   approvalRedirectNotice,
@@ -328,6 +329,7 @@ export function useComposerSend(input: ComposerSendInput) {
   const handleNewThread = useNewThreadHandler();
   const navigate = useNavigate();
   const clientSettingsHydrated = useClientSettingsHydrated();
+  const selfOwnerId = useSelfOwnerId();
   const planModeEnabled = useEnvironmentSettings(environmentId, selectPlanModeEnabled);
   const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
@@ -1257,6 +1259,7 @@ export function useComposerSend(input: ComposerSendInput) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      ...(selfOwnerId === null ? {} : { ownerId: selfOwnerId }),
                     },
                   }
                 : {}),

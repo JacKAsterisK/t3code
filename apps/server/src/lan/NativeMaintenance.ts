@@ -344,6 +344,14 @@ const derivedColumns = [
   "target_provider_instance_id",
   "completion_delivery_state",
 ];
+// Columns a migration adds as null for every existing row. Null hashes as absent, so adding one
+// changes no work; a row that holds a value hashes it.
+const addedNullColumns = ["owner_id"];
+const durableRowJson = (row: Readonly<Record<string, unknown>>) => {
+  const durable = { ...row };
+  for (const column of addedNullColumns) if (durable[column] === null) delete durable[column];
+  return JSON.stringify(durable);
+};
 
 const isWarmProviderState = (table: string, status: unknown) =>
   (table === "orchestration_v2_projection_provider_sessions" && status === "ready") ||
@@ -791,7 +799,7 @@ function inspectWork(
         for (const row of db
           .prepare("SELECT * FROM " + table)
           .all()
-          .map((row) => JSON.stringify(row))
+          .map(durableRowJson)
           .sort())
           hash.update(row);
       }
@@ -804,7 +812,7 @@ function inspectWork(
       ]) {
         hash.update(table!);
         for (const row of db.prepare(`SELECT * FROM ${table} ORDER BY ${key}`).iterate())
-          hash.update(JSON.stringify(row));
+          hash.update(durableRowJson(row));
       }
       if (update) {
         for (const [table, key] of [

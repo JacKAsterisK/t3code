@@ -20,6 +20,8 @@ export type ThreadActionMenuId =
   | "rename"
   | "regenerate-title"
   | "mark-unread"
+  | "owner"
+  | `owner:${string}`
   | "share-guest"
   | "copy"
   | "copy-path"
@@ -95,10 +97,19 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
+  /** The fleet's users to assign the thread to; empty outside a fleet. */
+  readonly owner?: {
+    readonly ownerId: string | null;
+    readonly users: ReadonlyArray<{ readonly id: string; readonly name: string }>;
+  };
 }
 
-/** Local navigation, read markers, and copying remain available to read-only clients. */
+/**
+ * Local navigation, read markers, and copying remain available to read-only clients, and so
+ * does assigning an owner: the server lets a read-only session set that label.
+ */
 export function threadActionRequiresOperate(action: ThreadActionMenuId): boolean {
+  if (action === "owner" || action.startsWith("owner:")) return false;
   return ![
     "find",
     "new-thread-on-branch",
@@ -178,6 +189,20 @@ export function buildThreadActionMenuItems(
         ]
       : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
+    ...(state.owner && state.owner.users.length > 0
+      ? [
+          {
+            id: "owner" as const,
+            label: "Assign to…",
+            icon: "user",
+            children: state.owner.users.map((user) => ({
+              id: `owner:${user.id}` as const,
+              label: user.name,
+              checked: user.id === state.owner?.ownerId,
+            })),
+          },
+        ]
+      : []),
     ...(state.canShareWithGuest
       ? [{ id: "share-guest" as const, label: "Share with guest", icon: "user-plus" }]
       : []),

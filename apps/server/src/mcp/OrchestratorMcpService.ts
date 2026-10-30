@@ -1,3 +1,4 @@
+import * as FleetUsers from "../lan/FleetUsers.ts";
 import {
   CommandId,
   type RunId,
@@ -11,6 +12,7 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
+  type FleetUsersDirectory,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type OrchestrationV2TurnItem,
   OrchestratorMcpFailure,
@@ -770,6 +772,7 @@ function listItemFromShell(
   scope: McpInvocationScope,
   shell: OrchestrationV2ThreadShell,
   nowMs: number,
+  owners: Pick<FleetUsersDirectory, "users">,
 ): OrchestratorMcpThreadListItem {
   return {
     threadId: shell.id,
@@ -778,6 +781,7 @@ function listItemFromShell(
     link: threadLinkFor(scope, shell.id),
     createdBy: shell.createdBy,
     creationSource: shell.creationSource,
+    ...FleetUsers.threadOwnerFields(owners, shell.ownerId),
     status: shell.activityRunStatus ?? shell.status,
     latestRunId: shell.latestRunId,
     providerInstanceId: shell.modelSelection.instanceId,
@@ -802,6 +806,7 @@ function threadDetail(
   itemCount: number,
   shell: OrchestrationV2ThreadShell,
   nowMs: number,
+  owners: Pick<FleetUsersDirectory, "users">,
 ): OrchestratorMcpThreadDetail {
   const latest = ThreadManagementService.latestRun(projection);
   const active = ThreadManagementService.latestActiveRun(projection);
@@ -812,6 +817,7 @@ function threadDetail(
     link: threadLinkFor(scope, projection.thread.id),
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
+    ...FleetUsers.threadOwnerFields(owners, projection.thread.ownerId),
     status: active?.status ?? latest?.status ?? "idle",
     latestRunId: latest?.id ?? null,
     activeRunId: active?.id ?? null,
@@ -977,6 +983,11 @@ function timelineItem(input: {
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
+  // T3 Code LAN: owner names for thread results; without a users file, owners show by id.
+  const fleetUsers = yield* Effect.serviceOption(FleetUsers.FleetUsers);
+  const currentFleetUsers = Option.isSome(fleetUsers)
+    ? fleetUsers.value.current
+    : Effect.succeed(FleetUsers.NO_FLEET_USERS);
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
@@ -1890,6 +1901,8 @@ const make = Effect.gen(function* () {
         interactionMode: limits.interactionMode,
         createdBy: "agent",
         creationSource: "mcp",
+        // Named, else the scheduling thread's owner; outside a thread, each run's machine default.
+        ...FleetUsers.inheritedOwner(input.ownerId, parent?.thread.ownerId),
         // Scope the idempotency key by provider session so two callers
         // reusing the same clientRequestId cannot collide on one task row.
         ...(input.clientRequestId === undefined
@@ -1971,6 +1984,7 @@ const make = Effect.gen(function* () {
           interactionMode: existing.interactionMode,
           createdBy: existing.createdBy,
           creationSource: existing.creationSource,
+          ...(input.ownerId === undefined ? {} : { ownerId: input.ownerId }),
         };
         const { task } = yield* scheduledTasks
           .upsert(upsertInput)
@@ -2696,6 +2710,8 @@ const make = Effect.gen(function* () {
                   interactionMode,
                   branch: parent.thread.branch,
                   worktreePath: parent.thread.worktreePath,
+                  // Named, else the calling thread's owner.
+                  ...FleetUsers.inheritedOwner(request.ownerId, parent.thread.ownerId),
                   ...(parent.thread.linkOrigin === undefined
                     ? {}
                     : { linkOrigin: parent.thread.linkOrigin }),
@@ -2829,11 +2845,12 @@ const make = Effect.gen(function* () {
       const cursor = input.cursor ?? 0;
       const limit = input.limit ?? DEFAULT_THREAD_LIST_LIMIT;
       const page = filtered.slice(cursor, cursor + limit);
+      const owners = yield* currentFleetUsers;
       const nextCursor = cursor + page.length < filtered.length ? cursor + page.length : null;
       return {
         projectId,
         currentThreadId: parent?.thread.id ?? null,
-        threads: page.map((shell) => listItemFromShell(scope, shell, nowMs)),
+        threads: page.map((shell) => listItemFromShell(scope, shell, nowMs, owners)),
         nextCursor,
         total: filtered.length,
       } satisfies OrchestratorMcpThreadListResult;
@@ -2931,6 +2948,7 @@ const make = Effect.gen(function* () {
           timeline.totalItems,
           shell,
           yield* Clock.currentTimeMillis,
+          yield* currentFleetUsers,
         ),
         recentRuns: target.runs
           .toSorted((left, right) => right.ordinal - left.ordinal)

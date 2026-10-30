@@ -11,6 +11,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { FleetUserId } from "./lanFleet.ts";
 import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
@@ -208,6 +209,8 @@ export const ScheduledTask = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
+  /** T3 Code LAN: who its runs' threads belong to; absent: the machine's default owner. */
+  ownerId: Schema.optional(Schema.NullOr(FleetUserId)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   nextRunAt: Schema.NullOr(IsoDateTime),
@@ -245,6 +248,8 @@ export const ScheduledTaskUpsertInput = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   createdBy: Schema.optional(OrchestrationV2Actor),
   creationSource: Schema.optional(OrchestrationV2CreationSource),
+  /** T3 Code LAN: absent keeps the saved owner; null clears it. */
+  ownerId: Schema.optional(Schema.NullOr(FleetUserId)),
 });
 export type ScheduledTaskUpsertInput = typeof ScheduledTaskUpsertInput.Type;
 

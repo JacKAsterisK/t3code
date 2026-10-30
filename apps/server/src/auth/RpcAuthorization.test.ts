@@ -1,4 +1,5 @@
 import {
+  type AuthEnvironmentScope,
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
@@ -14,6 +15,11 @@ import {
   AuthSourceControlWriteScope,
   AuthTerminalReadScope,
   AuthTerminalOperateScope,
+  CommandId,
+  MessageId,
+  ORCHESTRATION_V2_WS_METHODS,
+  OrchestrationV2Command,
+  THREAD_OWNER_COMMAND_TYPE,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -28,6 +34,7 @@ import {
   requiredScopeForRpcMethod,
   requiredScopeForDeviceList,
 } from "./RpcAuthorization.ts";
+import { fleetCredentialScopes } from "../lan/FleetAccessPolicy.ts";
 import * as RpcAuthorization from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
@@ -452,3 +459,142 @@ it.effect("denies manual cleanup before the handler without settings permission"
     expect(handled).toBe(false);
   }).pipe(Effect.scoped),
 );
+
+describe("thread owner authorization", () => {
+  const dispatch = ORCHESTRATION_V2_WS_METHODS.dispatchCommand;
+  const readOnly = fleetCredentialScopes("read-only");
+  const threadId = ThreadId.make("thread-owned");
+  const ownerSet = {
+    type: THREAD_OWNER_COMMAND_TYPE,
+    commandId: CommandId.make("command-owner"),
+    threadId,
+    ownerId: "dan",
+  } as const;
+  const writes = [
+    { type: "thread.pin", commandId: CommandId.make("command-pin"), threadId },
+    { type: "thread.archive", commandId: CommandId.make("command-archive"), threadId },
+    {
+      type: "message.dispatch",
+      commandId: CommandId.make("command-message"),
+      threadId,
+      messageId: MessageId.make("message-1"),
+      createdBy: "user",
+      creationSource: "web",
+      text: "hello",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+    },
+  ] as const;
+
+  const commandTypes = OrchestrationV2Command.members.flatMap((member) => {
+    const type = (member as { readonly fields: { readonly type: unknown } }).fields.type as {
+      readonly literal?: string;
+      readonly literals?: ReadonlyArray<string>;
+    };
+    const literals = type.literal === undefined ? (type.literals ?? []) : [type.literal];
+    expect(literals.length).toBeGreaterThan(0);
+    return literals;
+  });
+
+  it("lets read permission set an owner and nothing else a client can dispatch", () => {
+    expect(readOnly).toEqual([
+      AuthOrchestrationReadScope,
+      AuthFilesystemReadScope,
+      AuthDiagnosticsReadScope,
+    ]);
+    expect(commandTypes).toContain(THREAD_OWNER_COMMAND_TYPE);
+    expect(commandTypes.length).toBeGreaterThan(50);
+    for (const type of commandTypes) {
+      const required = RpcAuthorization.requiredScopesForRpcCall(dispatch, {
+        type,
+        commandId: "command",
+        threadId,
+      });
+      if (type === THREAD_OWNER_COMMAND_TYPE)
+        expect(required, type).toEqual([AuthOrchestrationReadScope]);
+      else expect(required, type).toContain(AuthOrchestrationOperateScope);
+    }
+    // The allowance is for that command on dispatch only, not a payload shaped like it elsewhere.
+    expect(RpcAuthorization.requiredScopesForRpcCall(dispatch, undefined)).toContain(
+      AuthOrchestrationOperateScope,
+    );
+    expect(
+      RpcAuthorization.requiredScopesForRpcCall(ORCHESTRATION_V2_WS_METHODS.launchThread, ownerSet),
+    ).not.toEqual([AuthOrchestrationReadScope]);
+  });
+
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof dispatch> => tag !== dispatch,
+    ),
+  );
+  const client = (
+    scopes: ReadonlyArray<AuthEnvironmentScope>,
+    handled: Array<string>,
+    currentScopes?: Effect.Effect<ReadonlyArray<AuthEnvironmentScope> | undefined>,
+  ) =>
+    RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(dispatch, (command) =>
+            Effect.sync(() => {
+              handled.push(command.type);
+              return { sequence: handled.length };
+            }),
+          ),
+          RpcAuthorization.layer(scopes, undefined, currentScopes),
+        ),
+      ),
+    );
+
+  it.effect("lets a read-only session set an owner but refuses its other writes", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const rpc = yield* client(readOnly, handled);
+      yield* rpc[dispatch](ownerSet);
+      for (const command of writes)
+        expect(yield* rpc[dispatch](command).pipe(Effect.flip)).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthOrchestrationOperateScope,
+        });
+      expect(handled).toEqual([THREAD_OWNER_COMMAND_TYPE]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("refuses an owner to a session that cannot read threads", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const rpc = yield* client([AuthFilesystemReadScope, AuthDiagnosticsReadScope], handled);
+      expect(yield* rpc[dispatch](ownerSet).pipe(Effect.flip)).toMatchObject({
+        requiredPermission: AuthOrchestrationReadScope,
+      });
+      expect(handled).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("still lets a session the fleet narrows to read-only set an owner, and only that", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const standard = fleetCredentialScopes("standard");
+      let current: ReadonlyArray<AuthEnvironmentScope> | undefined = standard;
+      const rpc = yield* client(
+        standard,
+        handled,
+        Effect.sync(() => current),
+      );
+      yield* rpc[dispatch](writes[0]);
+      current = readOnly;
+      yield* rpc[dispatch](ownerSet);
+      for (const command of writes)
+        expect(yield* rpc[dispatch](command).pipe(Effect.flip)).toMatchObject({
+          requiredPermission: AuthOrchestrationOperateScope,
+        });
+      // A machine that left the fleet may not even set an owner.
+      current = undefined;
+      expect(yield* rpc[dispatch](ownerSet).pipe(Effect.flip)).toMatchObject({
+        requiredPermission: AuthOrchestrationReadScope,
+      });
+      expect(handled).toEqual(["thread.pin", THREAD_OWNER_COMMAND_TYPE]);
+    }).pipe(Effect.scoped),
+  );
+});

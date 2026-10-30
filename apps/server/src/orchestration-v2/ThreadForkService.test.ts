@@ -131,14 +131,18 @@ const planFork = (
     });
   }).pipe(Effect.provide(ThreadForkService.layer));
 
-it.effect("keeps a fork awake when its source thread is snoozed", () =>
+it.effect("keeps a fork awake when its source thread is snoozed, and keeps its owner", () =>
   Effect.gen(function* () {
-    const sourceThread = makeSourceThread();
+    const sourceThread = { ...makeSourceThread(), ownerId: "dan" };
     const sourceRun = makeSourceRun("completed");
-    const result = yield* planFork(sourceRun);
+    const result = yield* planFork(sourceRun, {
+      ...makeSourceProjection(sourceRun),
+      thread: sourceThread,
+    });
 
     assert.isNull(result.targetThread.snoozedUntil);
     assert.isNull(result.targetThread.snoozedAt);
+    assert.equal(result.targetThread.ownerId, "dan");
     assert.equal(result.targetThread.projectId, sourceThread.projectId);
     assert.equal(result.targetThread.providerInstanceId, sourceThread.providerInstanceId);
     assert.deepEqual(result.targetThread.modelSelection, sourceThread.modelSelection);

@@ -7,10 +7,13 @@ const monogramSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme
 export function ProjectMonogram({
   text,
   color,
+  round = false,
   className,
 }: {
   readonly text: string;
   readonly color: ProjectIconColor;
+  // Task owners are round, so a person never reads as a project.
+  readonly round?: boolean | undefined;
   readonly className?: string | undefined;
 }) {
   // Wrap the tile to avoid menu/button SVG margin trimming.
@@ -22,7 +25,8 @@ export function ProjectMonogram({
       <svg
         viewBox="0 0 16 16"
         className={cn(
-          "size-full overflow-hidden rounded-[25%] font-mono select-none",
+          "size-full overflow-hidden font-mono select-none",
+          round ? "rounded-full" : "rounded-[25%]",
           projectIconColorClassName(color),
         )}
         style={{

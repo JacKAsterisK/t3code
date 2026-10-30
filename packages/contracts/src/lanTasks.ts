@@ -9,6 +9,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { FleetUserId } from "./lanFleet.ts";
 import {
   OrchestrationV2RunStatus,
   OrchestrationV2ThreadLaunchWorkspaceStrategy,
@@ -31,6 +32,8 @@ export const LanTaskLaunchInput = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
+  // Who manages the task; absent: the machine's default owner.
+  ownerId: Schema.optional(FleetUserId),
 });
 export type LanTaskLaunchInput = typeof LanTaskLaunchInput.Type;
 export const LanTaskLaunchResult = Schema.Struct({

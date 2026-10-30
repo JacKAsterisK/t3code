@@ -8,6 +8,25 @@ export function buildRuntimeInstructions(runtime: {
   readonly model?: string | undefined;
   readonly modelName?: string | undefined;
   readonly reasoningEffort?: string | undefined;
+  /** T3 Code LAN: the fleet user who manages this thread. */
+  readonly taskOwnerName?: string | undefined;
+}): string {
+  const owner = taskOwnerInstructions(runtime.taskOwnerName);
+  return `${baseRuntimeInstructions(runtime)}${owner === "" ? "" : `\n\n${owner}`}`;
+}
+
+/** T3 Code LAN: one line naming who manages the thread; empty when it has no owner. */
+export function taskOwnerInstructions(ownerName: string | undefined): string {
+  // Angle brackets would close the tag; a name never needs them.
+  const name = toSingleLine(ownerName ?? "").replaceAll(/[<>]/g, "");
+  return name === "" ? "" : `<task_owner>This task is managed by ${name}.</task_owner>`;
+}
+
+function baseRuntimeInstructions(runtime: {
+  readonly harness: string;
+  readonly model?: string | undefined;
+  readonly modelName?: string | undefined;
+  readonly reasoningEffort?: string | undefined;
 }): string {
   const harness = toSingleLine(runtime.harness);
   const model = toSingleLine(runtime.model ?? "");

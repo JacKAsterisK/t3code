@@ -21,6 +21,7 @@ import type { ComposerHandleRef } from "../../composerHandleContext";
 import { releaseDraftAttachments } from "../../lib/attachmentUploadQueue";
 import type { buildMessageContext } from "../../lib/composerContextRecords";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { useSelfOwnerId } from "../../hooks/useTaskOwners";
 import { threadEnvironment } from "../../state/threads";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
@@ -61,6 +62,7 @@ interface MultipleModelSendInput {
  * user has moved on, through a "Restore prompt" toast.
  */
 export function useMultipleModelSend(input: MultipleModelSendInput) {
+  const selfOwnerId = useSelfOwnerId();
   const {
     environmentId,
     routeThreadKey,
@@ -185,6 +187,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
                       branch,
                       worktreePath: null,
                       createdAt: createdAt,
+                      ...(selfOwnerId === null ? {} : { ownerId: selfOwnerId }),
                     },
                     prepareWorktree: {
                       projectCwd: project.workspaceRoot,

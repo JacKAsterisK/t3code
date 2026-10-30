@@ -82,7 +82,7 @@ const emptyCounts: Counts = {
   legacyThreads: 0,
   legacyMessages: 0,
 };
-export const supportedMigrationIds = Array.from({ length: 79 }, (_, index) => index + 1);
+export const supportedMigrationIds = Array.from({ length: 80 }, (_, index) => index + 1);
 const trackedFiles = [
   "userdata/environment-id",
   "userdata/statev2.sqlite",

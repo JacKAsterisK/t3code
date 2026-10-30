@@ -76,6 +76,8 @@ export interface CreateThreadInput extends CommandMetadata {
   readonly interactionMode: ProviderInteractionMode;
   readonly branch: string | null;
   readonly worktreePath: string | null;
+  /** The device's own user; absent: the host machine's default owner. */
+  readonly ownerId?: string | undefined;
 }
 
 export interface ThreadCommandInput extends CommandMetadata {
@@ -150,6 +152,8 @@ interface StartThreadBootstrap {
     readonly branch: string | null;
     readonly worktreePath: string | null;
     readonly createdAt: string;
+    /** The device's own user; absent: the host machine's default owner. */
+    readonly ownerId?: string | undefined;
   };
   readonly prepareWorktree?: {
     readonly requireWorktree?: boolean;
@@ -396,6 +400,7 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
     interactionMode: input.interactionMode,
     branch: input.branch,
     worktreePath: input.worktreePath,
+    ...(input.ownerId === undefined ? {} : { ownerId: input.ownerId }),
   });
 });
 
@@ -524,6 +529,20 @@ export const reorderActiveThread = Effect.fn("EnvironmentCommands.reorderActiveT
     commandId: yield* allocateCommandId(input),
     threadId: input.threadId,
     orderKey: input.orderKey,
+  });
+});
+
+export interface SetThreadOwnerInput extends ThreadCommandInput {
+  readonly ownerId: string;
+}
+export const setThreadOwner = Effect.fn("EnvironmentCommands.setThreadOwner")(function* (
+  input: SetThreadOwnerInput,
+) {
+  return yield* dispatch({
+    type: "thread.owner.set",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    ownerId: input.ownerId,
   });
 });
 
@@ -704,6 +723,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       workspaceStrategy,
+      ...(bootstrap?.ownerId === undefined ? {} : { ownerId: bootstrap.ownerId }),
       initialMessage: {
         messageId: input.message.messageId,
         text: input.message.text,

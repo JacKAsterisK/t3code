@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { AuthMcpClientAccess } from "./auth.ts";
+import { FleetUserId } from "./lanFleet.ts";
 import {
   ContextTransferId,
   EnvironmentId,
@@ -264,6 +265,12 @@ export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
   target: Schema.optional(OrchestratorMcpTarget),
   runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),
   interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
+  ownerId: Schema.optional(
+    FleetUserId.annotate({
+      description:
+        "Fleet user who manages the thread (a fleet-users.json id). Omit to inherit yours.",
+    }),
+  ),
 });
 export type OrchestratorMcpCreateThreadRequest = typeof OrchestratorMcpCreateThreadRequest.Type;
 
@@ -352,6 +359,13 @@ export const OrchestratorMcpThreadPullRequest = Schema.Struct({
 });
 export type OrchestratorMcpThreadPullRequest = typeof OrchestratorMcpThreadPullRequest.Type;
 
+// T3 Code LAN: the fleet user who manages a thread, by id and by name (the id when the users
+// file does not list them). Absent from servers before task owners.
+const OrchestratorMcpThreadOwnerFields = {
+  ownerId: Schema.optional(Schema.NullOr(Schema.String)),
+  ownerName: Schema.optional(Schema.NullOr(Schema.String)),
+} as const;
+
 export const OrchestratorMcpThreadListItem = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
@@ -359,6 +373,7 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   link: Schema.optional(Schema.String),
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
+  ...OrchestratorMcpThreadOwnerFields,
   status: OrchestratorMcpThreadStatus,
   latestRunId: Schema.NullOr(RunId),
   providerInstanceId: ProviderInstanceId,
@@ -429,6 +444,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   link: Schema.optional(Schema.String),
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
+  ...OrchestratorMcpThreadOwnerFields,
   status: OrchestratorMcpThreadStatus,
   latestRunId: Schema.NullOr(RunId),
   activeRunId: Schema.NullOr(RunId),
@@ -661,6 +677,12 @@ export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
       description: "Default true: runs post in this thread. False: new thread per run.",
     }),
   ),
+  ownerId: Schema.optional(
+    FleetUserId.annotate({
+      description:
+        "Fleet user its runs' threads belong to (a fleet-users.json id). Omit to inherit yours.",
+    }),
+  ),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
 export type OrchestratorMcpScheduleTaskInput = typeof OrchestratorMcpScheduleTaskInput.Type;
@@ -721,6 +743,7 @@ export const OrchestratorMcpUpdateScheduledTaskInput = Schema.Struct({
   schedule: Schema.optional(OrchestratorMcpSchedule),
   enabled: Schema.optional(Schema.Boolean),
   bindToCurrentThread: Schema.optional(Schema.Boolean),
+  ownerId: Schema.optional(FleetUserId),
 });
 export type OrchestratorMcpUpdateScheduledTaskInput =
   typeof OrchestratorMcpUpdateScheduledTaskInput.Type;

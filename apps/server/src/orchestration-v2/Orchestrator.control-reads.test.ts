@@ -30,6 +30,7 @@ import {
   orchestrationCommandDuration,
   orchestrationCommandsTotal,
 } from "../observability/Metrics.ts";
+import * as FleetUsers from "../lan/FleetUsers.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts";
@@ -1521,4 +1522,152 @@ it.effect("dispatch records the command outcome and its duration", () =>
     assert.strictEqual((yield* successes).count - successesBefore, 1);
     assert.strictEqual((yield* durations).count - durationsBefore, 1);
   }).pipe(Effect.provide(layerTest)),
+);
+
+const ownerThreadCreate = (name: string, ownerId?: string) =>
+  ({
+    type: "thread.create",
+    commandId: CommandId.make(`create-${name}`),
+    threadId: ThreadId.make(`thread:${name}`),
+    projectId: ProjectId.make("project:owners"),
+    title: "Owned thread",
+    modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    createdBy: "user",
+    creationSource: "web",
+    ...(ownerId === undefined ? {} : { ownerId }),
+  }) as const;
+
+it.effect("thread.owner.set records the owner as a label without bumping activity", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const events = yield* EventSink.EventSinkV2;
+    const create = ownerThreadCreate("owner-set");
+    const threadId = create.threadId;
+    yield* orchestrator.dispatch(create);
+    const before = yield* projections.getThread(threadId);
+    assert.isUndefined(before.ownerId);
+    yield* TestClock.adjust("1 minute");
+
+    const setDan = CommandId.make("owner-set-dan");
+    yield* orchestrator.dispatch({
+      type: "thread.owner.set",
+      commandId: setDan,
+      threadId,
+      ownerId: "dan",
+    });
+    const committed = yield* events.readByCommandId({ commandId: setDan }).pipe(Stream.runCollect);
+    assert.lengthOf(committed, 1);
+    assert.equal(committed[0]?.event.type, "thread.owner-set");
+    assert.deepEqual(committed[0]?.event.payload, { ...before, ownerId: "dan" });
+    // The thread keeps its place: updatedAt is unchanged.
+    assert.deepEqual(yield* projections.getThread(threadId), { ...before, ownerId: "dan" });
+    assert.deepInclude(yield* projections.getThreadShell(threadId), {
+      ownerId: "dan",
+      updatedAt: before.updatedAt,
+    });
+    assert.deepInclude((yield* projections.getThreadProjection(threadId)).thread, {
+      ownerId: "dan",
+      updatedAt: before.updatedAt,
+    });
+
+    yield* orchestrator.dispatch({
+      type: "thread.owner.set",
+      commandId: CommandId.make("owner-set-gavin"),
+      threadId,
+      ownerId: "gavin",
+    });
+    assert.deepInclude(yield* projections.getThreadShell(threadId), {
+      ownerId: "gavin",
+      updatedAt: before.updatedAt,
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("thread.owner.set with the thread's current owner succeeds without an event", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const events = yield* EventSink.EventSinkV2;
+    const create = ownerThreadCreate("owner-set-same", "dan");
+    const threadId = create.threadId;
+    yield* orchestrator.dispatch(create);
+    const before = yield* projections.getThread(threadId);
+    const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+    const sameOwner = CommandId.make("owner-set-same-dan");
+    yield* orchestrator.dispatch({
+      type: "thread.owner.set",
+      commandId: sameOwner,
+      threadId,
+      ownerId: "dan",
+    });
+    assert.lengthOf(
+      yield* events.readByCommandId({ commandId: sameOwner }).pipe(Stream.runCollect),
+      0,
+    );
+    assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+    assert.deepEqual(yield* projections.getThread(threadId), before);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("thread.owner.set refuses a deleted thread", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const create = ownerThreadCreate("owner-set-deleted");
+    const threadId = create.threadId;
+    yield* orchestrator.dispatch(create);
+    yield* orchestrator.dispatch({
+      type: "thread.delete",
+      commandId: CommandId.make("delete-owner-set-deleted"),
+      threadId,
+    });
+    const before = yield* projections.getThread(threadId);
+    const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+    const refused = yield* orchestrator
+      .dispatch({
+        type: "thread.owner.set",
+        commandId: CommandId.make("owner-set-deleted"),
+        threadId,
+        ownerId: "dan",
+      })
+      .pipe(Effect.flip);
+    assert.equal(refused._tag, "OrchestratorDispatchError");
+    assert.deepEqual(yield* projections.getThread(threadId), before);
+    assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([
+  { name: "no-fleet-users", fleetDefault: undefined, named: undefined, expected: undefined },
+  { name: "fleet-default", fleetDefault: "dan", named: undefined, expected: "dan" },
+  { name: "named-wins", fleetDefault: "dan", named: "gavin", expected: "gavin" },
+  { name: "named-without-fleet", fleetDefault: undefined, named: "gavin", expected: "gavin" },
+  { name: "no-default-owner", fleetDefault: null, named: undefined, expected: undefined },
+] as const)("thread.create owner: $name", ({ name, fleetDefault, named, expected }) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const create = ownerThreadCreate(`create-owner-${name}`, named);
+    yield* orchestrator.dispatch(create);
+    assert.strictEqual((yield* projections.getThread(create.threadId)).ownerId, expected);
+    assert.strictEqual(
+      (yield* projections.getThreadShell(create.threadId))?.ownerId,
+      expected ?? null,
+    );
+  }).pipe(
+    Effect.provide(
+      fleetDefault === undefined
+        ? layerTest
+        : layerTest.pipe(
+            Layer.provide(
+              FleetUsers.layerStatic({ users: [], machineId: "m", defaultOwnerId: fleetDefault }),
+            ),
+          ),
+    ),
+  ),
 );

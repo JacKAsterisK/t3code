@@ -44,6 +44,7 @@ import {
   reorderPinnedThread,
   reorderActiveThread,
   setThreadAutoSettle,
+  setThreadOwner,
   settleThread,
   snoozeThread,
   startThreadTurn,
@@ -199,6 +200,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     setAutoSettle: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:set-auto-settle",
       execute: setThreadAutoSettle,
+      scheduler,
+      concurrency,
+    }),
+    setOwner: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:set-owner",
+      execute: setThreadOwner,
       scheduler,
       concurrency,
     }),
@@ -440,6 +447,10 @@ export function createThreadEnvironmentAtoms<R, E>(
     reorderActive: optimistic.wrap(commands.reorderActive, (thread, input) => ({
       ...thread,
       activeOrderKey: input.orderKey,
+    })),
+    setOwner: optimistic.wrap(commands.setOwner, (thread, input) => ({
+      ...thread,
+      ownerId: input.ownerId,
     })),
   };
 }

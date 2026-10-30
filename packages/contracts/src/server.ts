@@ -28,6 +28,7 @@ import { RuntimeMode } from "./providerPolicy.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits, UsageLimitSourceSnapshots } from "./providerUsageLimits.ts";
 import { ServerSettings } from "./settings.ts";
+import { FleetUsersDirectory } from "./lanFleet.ts";
 import { DesktopUpdateChannelSchema } from "./ipc.ts";
 
 const KeybindingsMalformedConfigIssue = Schema.Struct({
@@ -644,6 +645,11 @@ export const ServerConfig = Schema.Struct({
   secretReferences: Schema.optionalKey(Schema.Boolean),
   scratchWorkspaceRoot: Schema.optionalKey(TrimmedNonEmptyString),
   newProjectsRoot: Schema.optionalKey(TrimmedNonEmptyString),
+  /**
+   * T3 Code LAN: the fleet's users from fleet-users.json and this machine's default owner, for
+   * task owner badges. Absent outside a fleet and from servers before task owners.
+   */
+  fleetUsers: Schema.optionalKey(FleetUsersDirectory),
   /**
    * The latest stall long enough to notice, sent only for a few minutes after
    * it. A client that reconnects reads it to say why the host stopped

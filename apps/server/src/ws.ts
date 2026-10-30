@@ -117,6 +117,7 @@ import * as LanFleet from "./lan/LanFleet.ts";
 import * as FleetTransport from "./lan/FleetTransport.ts";
 import * as FleetPeerLinks from "./lan/FleetPeerLinks.ts";
 import * as FleetAccessPolicy from "./lan/FleetAccessPolicy.ts";
+import * as FleetUsers from "./lan/FleetUsers.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -1248,6 +1249,7 @@ export const layerWsRpc = (
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
+      const fleetUsers = yield* Effect.serviceOption(FleetUsers.FleetUsers);
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
@@ -1829,6 +1831,10 @@ export const layerWsRpc = (
         const auth = yield* serverAuth.getDescriptor();
         const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
         const lastEventLoopStall = yield* eventLoopMonitor.latestNoticeableStall;
+        // T3 Code LAN: only a machine that has read a fleet users file shows owner names.
+        const fleetUsersDirectory = Option.isSome(fleetUsers)
+          ? yield* fleetUsers.value.current
+          : undefined;
         const editorConfig = yield* resolveEditorConfig(
           yield* resolveAvailableEditorsForConfig(externalLauncher.resolveAvailableEditors()),
           resolveFileManagerRevealKindForConfig(externalLauncher.resolveFileManagerRevealKind()),
@@ -1891,6 +1897,7 @@ export const layerWsRpc = (
           }),
           newProjectsRoot: managedFolders.namedProjectsRoot,
           ...(lastEventLoopStall === undefined ? {} : { lastEventLoopStall }),
+          ...(fleetUsersDirectory === undefined ? {} : { fleetUsers: fleetUsersDirectory }),
         };
       });
 
@@ -2139,6 +2146,7 @@ export const layerWsRpc = (
                     runtimeMode: input.runtimeMode,
                     interactionMode: input.interactionMode,
                     workspaceStrategy: input.workspaceStrategy,
+                    ...(input.ownerId === undefined ? {} : { ownerId: input.ownerId }),
                     ...(input.initialMessage === undefined
                       ? {}
                       : {

@@ -71,6 +71,7 @@ import {
   MonitorIcon,
   SquarePenIcon,
   TextSearchIcon,
+  UserIcon,
   UserPlusIcon,
 } from "lucide-react";
 import { openThreadFind } from "./chat/threadFindStore";
@@ -89,6 +90,9 @@ import { useAtomValue } from "@effect/atom-react";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useFleetUsersDirectory, useSetThreadOwner } from "../hooks/useTaskOwners";
+import { presentTaskOwner } from "../taskOwners";
+import { ProjectMonogram } from "./ProjectMonogram";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { copyThreadReference } from "../lib/copyThreadReference";
 import {
@@ -491,6 +495,8 @@ function OpenCommandPaletteDialog(props: {
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const providersByEnvironment = useEnvironmentProviders();
   const { changeThemeItem, changeAppearanceItem, themeEditorItem } = useCommandPaletteThemeItems();
+  const fleetUsersDirectory = useFleetUsersDirectory();
+  const setThreadOwner = useSetThreadOwner();
   const currentView = viewStack.at(-1)?.view ?? null;
   const threadSearchQuery = currentView === null && !isActionsOnly ? deferredQuery : "";
   const [browseGeneration, setBrowseGeneration] = useState(0);
@@ -1404,6 +1410,53 @@ function OpenCommandPaletteDialog(props: {
       run: async () => {
         openGuestShareDialog(threadRef);
       },
+    });
+  }
+
+  if (activeThread !== null && fleetUsersDirectory && fleetUsersDirectory.users.length > 0) {
+    const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
+    const currentOwnerId = activeThread.ownerId;
+    actionItems.push({
+      kind: "submenu",
+      value: "action:assign-thread-owner",
+      searchTerms: ["assign", "owner", "manage", "reassign", "hand off", "user"],
+      title: "Assign to…",
+      searchTitle: "Assign to",
+      icon: <UserIcon className={ITEM_ICON_CLASS} />,
+      addonIcon: <UserIcon className={ADDON_ICON_CLASS} />,
+      groups: [
+        {
+          value: "thread-owners",
+          label: "Assign to",
+          items: fleetUsersDirectory.users.map((user) => {
+            const owner = presentTaskOwner(fleetUsersDirectory, user.id);
+            return {
+              kind: "action" as const,
+              value: `owner:${user.id}`,
+              title: user.name,
+              searchTerms: [user.name, user.id, "assign", "owner"],
+              icon: (
+                <ProjectMonogram
+                  round
+                  text={owner.initial}
+                  color={owner.color}
+                  className="size-4"
+                />
+              ),
+              ...(user.id === currentOwnerId
+                ? {
+                    titleTrailingContent: (
+                      <span className="text-xs text-muted-foreground/70">Current</span>
+                    ),
+                  }
+                : {}),
+              run: async () => {
+                if (user.id !== currentOwnerId) await setThreadOwner(threadRef, user.id);
+              },
+            };
+          }),
+        },
+      ],
     });
   }
 

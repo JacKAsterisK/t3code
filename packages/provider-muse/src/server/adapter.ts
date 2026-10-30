@@ -2064,6 +2064,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
                       harness: "Muse Code",
                       model: session.model ?? undefined,
                       reasoningEffort: effort,
+                      taskOwnerName: turnInput.taskOwnerName,
                     }),
                   },
                   ...parts,

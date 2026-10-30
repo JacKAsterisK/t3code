@@ -27,6 +27,7 @@ import {
   type AuthEnvironmentScope,
   EnvironmentAuthorizationError,
   RpcScopeAuthorization,
+  THREAD_OWNER_COMMAND_TYPE,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -245,10 +246,21 @@ const requiredScopesForSettingsUpdate = (payload: unknown) => {
 const decodeProjectMutation = Schema.decodeUnknownSync(ProjectMutation);
 const decodeAssetCreateUrlInput = Schema.decodeUnknownSync(AssetCreateUrlInput);
 
-const requiredScopesForRpcCall = (
+// T3 Code LAN: an owner is a label, so any session that may read threads may set one, a read-only
+// fleet machine's among them. Guests never hold a WebSocket session. Every other command still
+// needs operate.
+const isThreadOwnerCommand = (payload: unknown) =>
+  typeof payload === "object" &&
+  payload !== null &&
+  (payload as { readonly type?: unknown }).type === THREAD_OWNER_COMMAND_TYPE;
+
+export const requiredScopesForRpcCall = (
   method: string,
   payload: unknown,
 ): ReadonlyArray<AuthEnvironmentScope> => {
+  if (method === ORCHESTRATION_V2_WS_METHODS.dispatchCommand && isThreadOwnerCommand(payload)) {
+    return [AuthOrchestrationReadScope];
+  }
   if (method === WS_METHODS.serverRetryResourceTelemetry) {
     return [AuthEnvironmentMaintainScope, AuthDiagnosticsReadScope];
   }

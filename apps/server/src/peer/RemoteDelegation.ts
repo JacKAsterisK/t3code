@@ -276,6 +276,8 @@ const make = Effect.gen(function* () {
           ...(interactionMode === undefined ? {} : { interactionMode }),
           message: task,
           clientRequestId: `delegate:${scope.thread.threadId}:${key}`,
+          // The task there stays with this thread's owner.
+          ...(parent.thread.ownerId == null ? {} : { ownerId: parent.thread.ownerId }),
           // The thread there shows it is this thread's subagent, with a way back.
           delegatedFrom: {
             environmentId: hereId,

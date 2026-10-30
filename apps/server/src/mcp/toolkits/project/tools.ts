@@ -19,6 +19,7 @@ import {
   OrchestratorMcpFailure,
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
+  FleetUserId,
 } from "@t3tools/contracts";
 import * as FileSystem from "effect/FileSystem";
 import * as DocumentText from "../../../provider/DocumentText.ts";
@@ -150,6 +151,12 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     ),
     attachments: Schema.optional(Schema.Array(McpAttachmentInput).check(Schema.isMaxLength(8))),
     clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+    ownerId: Schema.optional(
+      FleetUserId.annotate({
+        description:
+          "Fleet user who manages the thread (a fleet-users.json id). Omit to inherit yours, else this machine's default owner.",
+      }),
+    ),
     /** Set by a linked environment launching its agent's delegated task here; ignored otherwise. */
     delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
   }),

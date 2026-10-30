@@ -45,6 +45,7 @@ import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
+import { readFleetUsersDirectory, useSetThreadOwner } from "./useTaskOwners";
 import { canTurnThreadIntoProject, useThreadActions } from "./useThreadActions";
 
 function failureToast(title: string, error: unknown) {
@@ -91,6 +92,7 @@ export function useThreadActionMenu(input: {
     reportFailure: false,
   });
   const handleNewThread = useNewThreadHandler();
+  const setThreadOwner = useSetThreadOwner();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -148,6 +150,7 @@ export function useThreadActionMenu(input: {
         snoozePresets,
         canShareWithGuest,
         canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+        owner: { ownerId: thread.ownerId, users: readFleetUsersDirectory()?.users ?? [] },
       });
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));
       if (clicked._tag === "Failure" || clicked.value === null) return;
@@ -160,6 +163,11 @@ export function useThreadActionMenu(input: {
           "Thread action unavailable",
           new Error("This connection cannot change threads."),
         );
+        return;
+      }
+      if (action.startsWith("owner:")) {
+        const ownerId = action.slice("owner:".length);
+        if (ownerId !== thread.ownerId) await setThreadOwner(threadRef, ownerId);
         return;
       }
       if (action.startsWith("snooze:")) {

@@ -98,6 +98,7 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import { useFleetUsersDirectory } from "../../hooks/useTaskOwners";
 import { BackgroundActivitySettingsRow } from "./BackgroundActivitySettings";
 import { AdvancedSettings } from "./AdvancedSettings";
 import { PullRequestLinksOpenInAppSetting } from "./IntegrationsSettings";
@@ -500,6 +501,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.sidebarThreadGrouping !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadGrouping
       ? ["Group threads by machine"]
       : []),
+    ...(settings.taskOwnerSelf !== DEFAULT_UNIFIED_SETTINGS.taskOwnerSelf ? ["I am"] : []),
     ...(settings.sidebarAutoSettleAfterDays !== DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays
       ? ["Auto-settle inactive threads"]
       : []),
@@ -667,6 +669,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       sidebarProjectSortOrder: DEFAULT_UNIFIED_SETTINGS.sidebarProjectSortOrder,
       sidebarWorkingShelfEnabled: DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled,
       sidebarThreadGrouping: DEFAULT_UNIFIED_SETTINGS.sidebarThreadGrouping,
+      taskOwnerSelf: DEFAULT_UNIFIED_SETTINGS.taskOwnerSelf,
       sidebarAutoSettleAfterDays: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
       sidebarAutoSettleKeepPullRequests: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleKeepPullRequests,
       sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
@@ -793,6 +796,60 @@ export function LegacyFeaturesSection() {
         }
       />
     </SettingsSection>
+  );
+}
+
+// Select items need a non-empty value; the setting stores the machine default as "".
+const MACHINE_DEFAULT_OWNER = "machine-default";
+
+function TaskOwnerSelfRow() {
+  const taskOwnerSelf = useScopedSettings((settings) => settings.taskOwnerSelf);
+  const updateSettings = useUpdateScopedSettings();
+  const directory = useFleetUsersDirectory();
+  if (!directory || directory.users.length === 0) return null;
+  const nameOf = (id: string) => directory.users.find((user) => user.id === id)?.name ?? id;
+  const defaultLabel = `Machine default (${
+    directory.defaultOwnerId === null ? "none" : nameOf(directory.defaultOwnerId)
+  })`;
+  const value = taskOwnerSelf || MACHINE_DEFAULT_OWNER;
+  return (
+    <SettingsRow
+      {...searchableSetting("task-owner-self")}
+      description="Who this device belongs to. Threads you start here are yours, and the sidebar's Mine filter shows them."
+      resetAction={
+        taskOwnerSelf !== DEFAULT_UNIFIED_SETTINGS.taskOwnerSelf ? (
+          <SettingResetButton
+            label="task owner"
+            onClick={() =>
+              updateSettings({ taskOwnerSelf: DEFAULT_UNIFIED_SETTINGS.taskOwnerSelf })
+            }
+          />
+        ) : null
+      }
+      control={
+        <Select
+          value={value}
+          onValueChange={(next) => {
+            if (typeof next !== "string") return;
+            updateSettings({ taskOwnerSelf: next === MACHINE_DEFAULT_OWNER ? "" : next });
+          }}
+        >
+          <SelectTrigger size="sm" className="w-full sm:w-44" aria-label="I am">
+            <SelectValue>{taskOwnerSelf ? nameOf(taskOwnerSelf) : defaultLabel}</SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            <SelectItem hideIndicator value={MACHINE_DEFAULT_OWNER}>
+              {defaultLabel}
+            </SelectItem>
+            {directory.users.map((user) => (
+              <SelectItem hideIndicator key={user.id} value={user.id}>
+                {user.name}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+      }
+    />
   );
 }
 
@@ -947,6 +1004,7 @@ export function GeneralSettingsPanel() {
             />
           }
         />
+        <TaskOwnerSelfRow />
       </SettingsSection>
 
       <SettingsSection id="confirmations" title="Confirmations">

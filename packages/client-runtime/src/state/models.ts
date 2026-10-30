@@ -179,6 +179,8 @@ export interface EnvironmentThreadShell {
   readonly snoozedAt: string | null;
   readonly limitRecovery?: import("@t3tools/contracts").OrchestrationV2LimitRecovery | null;
   readonly pinnedAt: string | null;
+  /** T3 Code LAN: who manages the thread, a fleet-users.json user id. */
+  readonly ownerId: string | null;
   readonly autoSettleDisabledAt?: string | null;
   readonly pinOrderKey: string | null;
   readonly activeOrderKey: string | null;
@@ -336,6 +338,7 @@ export function presentThreadShell(
     snoozedAt: nullableIso(thread.snoozedAt ?? null),
     limitRecovery: thread.limitRecovery ?? null,
     pinnedAt: nullableIso(thread.pinnedAt ?? null),
+    ownerId: thread.ownerId ?? null,
     autoSettleDisabledAt: nullableIso(thread.autoSettleDisabledAt ?? null),
     pinOrderKey: thread.pinOrderKey ?? null,
     activeOrderKey: thread.activeOrderKey ?? null,

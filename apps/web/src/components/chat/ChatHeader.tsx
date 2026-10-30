@@ -31,6 +31,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { useOrchestrationCommand } from "../../state/use-orchestration-command";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { ThreadOwnerBadge } from "../ThreadOwnerBadge";
 import {
   WorkspaceBreadcrumb,
   WorkspaceBreadcrumbItem,
@@ -48,6 +49,7 @@ interface ChatHeaderProps {
   activeThreadId: ThreadId;
   activeThreadTitle: string;
   activeThreadLinkOrigin?: string | null | undefined;
+  activeThreadOwnerId?: string | null | undefined;
   isServerThread: boolean;
   activeProject: EnvironmentProject | null;
   parentThreadLink: { threadId: ThreadId; title: string } | null;
@@ -75,6 +77,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadId,
   activeThreadTitle,
   activeThreadLinkOrigin,
+  activeThreadOwnerId,
   isServerThread,
   activeProject,
   parentThreadLink,
@@ -424,6 +427,9 @@ export const ChatHeader = memo(function ChatHeader({
                 Started by an agent on {activeThreadLinkOrigin} through a linked environment.
               </TooltipPopup>
             </Tooltip>
+          ) : null}
+          {renamingTitle === null && isServerThread && activeThreadOwnerId ? (
+            <ThreadOwnerBadge showName threadRef={activeThreadRef} ownerId={activeThreadOwnerId} />
           ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>

@@ -188,6 +188,21 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     expect(next?.updatedAt).toEqual(archivedAt);
   });
 
+  it("applies an owner change without counting it as activity", () => {
+    const event = {
+      id: "event-owner",
+      type: "thread.owner-set",
+      threadId,
+      occurredAt: DateTime.makeUnsafe("2026-06-20T01:00:00.000Z"),
+      payload: { ...emptyProjection.thread, ownerId: "dan" },
+    } as OrchestrationV2DomainEvent;
+
+    const next = applyOrchestrationV2ProjectionEvent(emptyProjection, event);
+    expect(next?.thread.ownerId).toBe("dan");
+    expect(next?.thread.updatedAt).toEqual(now);
+    expect(next?.updatedAt).toEqual(now);
+  });
+
   it("preserves visible row identity when run updates do not change membership", () => {
     const item = commandItem("item-stable");
     const visibleTurnItems = [

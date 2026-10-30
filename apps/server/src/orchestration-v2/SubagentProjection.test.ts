@@ -81,8 +81,8 @@ function makeParentThread(): OrchestrationV2AppThread {
   };
 }
 
-it("keeps a subagent child awake when its parent thread is snoozed", () => {
-  const parentThread = makeParentThread();
+it("keeps a subagent child awake when its parent thread is snoozed, and keeps its owner", () => {
+  const parentThread = { ...makeParentThread(), ownerId: "dan" };
   const childProviderThreadId = ProviderThreadId.make("provider-thread:subagent-awake-child");
   const parentNodeId = NodeId.make("node:subagent-parent");
   const childThread = makeSubagentChildThread({
@@ -100,6 +100,7 @@ it("keeps a subagent child awake when its parent thread is snoozed", () => {
 
   assert.isNull(childThread.snoozedUntil);
   assert.isNull(childThread.snoozedAt);
+  assert.equal(childThread.ownerId, "dan");
   assert.equal(childThread.projectId, parentThread.projectId);
   assert.equal(childThread.runtimeMode, parentThread.runtimeMode);
   assert.equal(childThread.interactionMode, parentThread.interactionMode);

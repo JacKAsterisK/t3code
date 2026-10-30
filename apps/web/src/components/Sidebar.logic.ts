@@ -617,15 +617,18 @@ export function resolveSidebarRowThreadId(
 /**
  * `delegatedUnderParent` holds the tasks linked environments run for a thread
  * the sidebar lists, by thread key; they show under that thread, as subagents do.
+ * `ownerFilterId` keeps one owner's threads; threads under a parent follow it whoever owns them.
  */
 export function filterSidebarV2VisibleThreads<
   T extends Pick<SidebarThreadSummary, "archivedAt" | "environmentId" | "id" | "lineage"> & {
     projectId: string;
+    ownerId?: string | null;
   },
 >(
   threads: readonly T[],
   scopedProjectKeys: ReadonlySet<string> | null,
   delegatedUnderParent: ReadonlySet<string>,
+  ownerFilterId: string | null = null,
 ): T[] {
   return threads.filter(
     (thread) =>
@@ -635,6 +638,7 @@ export function filterSidebarV2VisibleThreads<
         thread.lineage,
         delegatedUnderParent,
       ) &&
+      (ownerFilterId === null || thread.ownerId === ownerFilterId) &&
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
   );

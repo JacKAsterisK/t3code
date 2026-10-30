@@ -54,6 +54,14 @@ describe("Codex runtime context", () => {
     NodeAssert.match(instructions, /as gpt 5\.3 codex with high effort reasoning effort/);
     NodeAssert.doesNotMatch(instructions, /<runtime_info>[^<]*\n/);
   });
+
+  it("tells the agent who manages the task, only when it has an owner", () => {
+    NodeAssert.match(
+      runtimeInstructions({ model: "gpt-5.3-codex", taskOwnerName: "Dan" }),
+      /<task_owner>This task is managed by Dan\.<\/task_owner>$/,
+    );
+    NodeAssert.doesNotMatch(runtimeInstructions({ model: "gpt-5.3-codex" }), /<task_owner>/);
+  });
 });
 
 describe("Codex orchestration context", () => {

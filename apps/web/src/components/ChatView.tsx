@@ -3241,6 +3241,7 @@ export default function ChatView(props: ChatViewProps) {
             isServerThread={isServerThread}
             activeThreadTitle={activeThread.title}
             activeThreadLinkOrigin={activeThreadShell?.linkOrigin?.label ?? null}
+            activeThreadOwnerId={activeThreadShell?.ownerId ?? null}
             activeProject={activeProject ?? null}
             parentThreadLink={headerParentThreadLink}
             onOpenThread={onOpenRelatedThreadStable}

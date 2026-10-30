@@ -1211,9 +1211,43 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
         const verified = yield* service.verify({ ...request, operation: "verify" });
         assert.equal(verified.workGeneration, observed.workGeneration);
         const after = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
-        assert.deepEqual(after.prepare("SELECT * FROM scheduled_tasks").all(), before);
+        // The row keeps every value; 080_ScheduledTaskOwner only adds an empty owner.
+        assert.deepEqual(
+          after.prepare("SELECT * FROM scheduled_tasks").all(),
+          before.map((row) => ({ ...row, owner_id: null })),
+        );
         after.close();
       }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("adding the empty schedule owner column changes no work; an owner does", () =>
+    Effect.gen(function* () {
+      const { request, insert, mutate, dbPath } = yield* fixtureAtMigration(79);
+      yield* insert("scheduled_tasks", "fixture", { enabled: 1, last_run_status: "never" });
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const observed = yield* service.inspect(request);
+      // Verify applies 080_ScheduledTaskOwner and refuses if the work generation moved.
+      const verified = yield* service.verify({ ...request, operation: "verify" });
+      assert.equal(verified.workGeneration, observed.workGeneration);
+      const migrated = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+      assert.deepEqual(
+        migrated
+          .prepare("SELECT owner_id FROM scheduled_tasks")
+          .all()
+          .map((row) => row.owner_id),
+        [null],
+      );
+      migrated.close();
+      yield* mutate("UPDATE scheduled_tasks SET owner_id='dan'");
+      const ownedRepair = NativeMaintenance.inspectStoppedRepairWork(dbPath).workGeneration;
+      assert.notEqual((yield* service.inspect(request)).workGeneration, observed.workGeneration);
+      yield* mutate("UPDATE scheduled_tasks SET owner_id=NULL");
+      assert.equal((yield* service.inspect(request)).workGeneration, observed.workGeneration);
+      assert.notEqual(
+        NativeMaintenance.inspectStoppedRepairWork(dbPath).workGeneration,
+        ownedRepair,
+      );
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("probes an active WAL snapshot without admission or durable file writes", () =>

@@ -21,6 +21,7 @@ import {
   type RuntimeMode,
   type ScheduledTaskId,
   ThreadId,
+  type FleetUserId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -102,6 +103,8 @@ export interface ThreadLaunchInput {
   readonly creationSource: OrchestrationV2CreationSource;
   /** The linked environment this launch is for, if one asked for it. */
   readonly linkOrigin?: OrchestrationV2LinkOrigin;
+  /** Who manages the thread; absent: this machine's default owner. */
+  readonly ownerId?: FleetUserId | undefined;
   /** The parent there, when that environment's agent delegated this as a task. */
   readonly delegatedFrom?: OrchestrationV2DelegatedFrom;
 }
@@ -919,6 +922,7 @@ const make = Effect.gen(function* () {
                   ? {}
                   : { importedNativeThread: input.importedNativeThread }),
                 ...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
+                ...(input.ownerId === undefined ? {} : { ownerId: input.ownerId }),
                 ...(input.delegatedFrom === undefined
                   ? {}
                   : { delegatedFrom: input.delegatedFrom }),

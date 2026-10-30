@@ -1,3 +1,4 @@
+import * as FleetUsers from "../lan/FleetUsers.ts";
 import * as NativeUpdateGate from "../lan/NativeUpdateGate.ts";
 import type {
   GuestShareId,
@@ -502,6 +503,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.unpin":
     case "thread.pin.reorder":
     case "thread.active.reorder":
+    case "thread.owner.set":
     case "thread.visit":
     case "thread.mark-unread":
     case "thread.metadata.update":
@@ -1002,6 +1004,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projectionStore = yield* ProjectionStoreV2;
+  // T3 Code LAN: a new thread nothing names an owner for gets this machine's default owner.
+  const fleetUsers = yield* Effect.serviceOption(FleetUsers.FleetUsers);
+  const defaultOwnerId = Option.isSome(fleetUsers)
+    ? fleetUsers.value.current.pipe(Effect.map((directory) => directory.defaultOwnerId))
+    : Effect.succeed(null);
   const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
   const nextTurnItemOrdinal = (
     projection: Pick<OrchestrationV2ThreadProjection, "thread"> &
@@ -2625,6 +2632,39 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       { concurrency: 1, discard: true },
     );
 
+  // A label only: archived, settled and read-only child threads take an owner too. It is not
+  // activity, so the thread keeps its place and updatedAt.
+  const dispatchThreadOwnerSet = Effect.fn("orchestrationV2.dispatch.threadOwnerSet")(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "thread.owner.set" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const thread = yield* projectionStore
+      .getThread(command.threadId)
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+        ),
+      );
+    if (thread.deletedAt !== null) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Thread ${command.threadId} is deleted.`,
+      });
+    }
+    if (thread.ownerId === command.ownerId) return;
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "thread.owner-set",
+      threadId: command.threadId,
+      providerInstanceId: thread.providerInstanceId,
+      occurredAt: yield* DateTime.now,
+      payload: { ...thread, ownerId: command.ownerId },
+    });
+  });
+
   const dispatchThreadCreate = Effect.fn("orchestrationV2.dispatch.threadCreate")(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "thread.create" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
@@ -2652,9 +2692,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
+    const ownerId = command.ownerId ?? (yield* defaultOwnerId);
     const thread: OrchestrationV2AppThread = {
       createdBy: command.createdBy,
       creationSource: command.creationSource,
+      ...(ownerId === null ? {} : { ownerId }),
       id: command.threadId,
       projectId: command.projectId,
       title: command.title,
@@ -12808,6 +12850,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "provider.switch":
         yield* dispatchThreadMutation(command, events, effects);
         break;
+      case "thread.owner.set":
+        yield* dispatchThreadOwnerSet(command, events);
+        break;
       case "thread.pull-request-watch.sync":
         yield* dispatchPullRequestWatchSync(command, events, effects);
         break;
@@ -13155,7 +13200,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "thread.stop" ||
           command.type === "subagent.stop" ||
           // Closing a share again, or after it ended, is not an error.
-          command.type === "thread.guest-share.close",
+          command.type === "thread.guest-share.close" ||
+          // Nor is choosing the owner a thread already has.
+          command.type === "thread.owner.set",
         (_planned) =>
           new OrchestratorDispatchError({
             commandId: command.commandId,

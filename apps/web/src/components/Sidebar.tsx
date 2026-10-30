@@ -132,6 +132,13 @@ import {
   useClientSettings,
 } from "../hooks/useSettings";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
+import { useFleetUsersDirectory, useSelfOwnerId, useSetThreadOwner } from "../hooks/useTaskOwners";
+import {
+  buildOwnerFilterOptions,
+  presentTaskOwner,
+  resolveOwnerFilterId,
+  selectedOwnerFilterOption,
+} from "../taskOwners";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import {
@@ -235,6 +242,7 @@ import {
   type SnoozePreset,
 } from "./Sidebar.snooze";
 import { ProjectFavicon } from "./ProjectFavicon";
+import { ProjectMonogram } from "./ProjectMonogram";
 import { deriveProviderEntriesByEnvironment } from "../providerInstances";
 import { useStableCallback } from "../hooks/useStableCallback";
 import {
@@ -364,6 +372,8 @@ type SidebarOptimisticDrop = {
 interface SidebarThreadPartitionInput {
   readonly threads: readonly EnvironmentThreadShell[];
   readonly scopedProjectKeys: ReadonlySet<string> | null;
+  /** Keep only this owner's threads; null keeps every thread. */
+  readonly ownerFilterId: string | null;
   /** Tasks linked environments run for a listed thread; they show under it. */
   readonly delegatedUnderParent: ReadonlySet<string>;
   readonly serverConfigs: ReadonlyMap<EnvironmentId, EnvironmentServerConfig>;
@@ -427,6 +437,7 @@ function routeThreadOnly(
 function useSidebarThreads(input: {
   readonly projectScopeKey: string | null;
   readonly scopedProjectKeys: ReadonlySet<string> | null;
+  readonly ownerFilterId: string | null;
   readonly serverConfigs: ReadonlyMap<EnvironmentId, EnvironmentServerConfig>;
   readonly connectedEnvironmentIds: readonly EnvironmentId[];
   readonly optimisticDrop: SidebarOptimisticDrop | null;
@@ -447,6 +458,7 @@ function useSidebarThreads(input: {
   const {
     projectScopeKey,
     scopedProjectKeys,
+    ownerFilterId,
     serverConfigs,
     connectedEnvironmentIds,
     optimisticDrop,
@@ -511,6 +523,7 @@ function useSidebarThreads(input: {
   const partition = partitionSidebarThreads({
     threads,
     scopedProjectKeys,
+    ownerFilterId,
     delegatedUnderParent,
     serverConfigs,
     connectedEnvironmentIds,
@@ -692,6 +705,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
   const {
     threads,
     scopedProjectKeys,
+    ownerFilterId,
     delegatedUnderParent,
     serverConfigs,
     optimisticDrop,
@@ -699,7 +713,12 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     sortActiveBySend,
   } = input;
   const preciseNow = new Date().toISOString();
-  const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys, delegatedUnderParent);
+  const visible = filterSidebarV2VisibleThreads(
+    threads,
+    scopedProjectKeys,
+    delegatedUnderParent,
+    ownerFilterId,
+  );
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
   const pinned: EnvironmentThreadShell[] = [];
   const active: EnvironmentThreadShell[] = [];
@@ -981,6 +1000,18 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectScopeItems,
   } = useSidebarLookups();
   const delegatedUnderParent = useDelegatedUnderParent();
+  const fleetUsersDirectory = useFleetUsersDirectory();
+  const selfOwnerId = useSelfOwnerId();
+  const sidebarOwnerFilter = useClientSettings((s) => s.sidebarOwnerFilter);
+  const ownerFilterId = resolveOwnerFilterId({
+    filter: sidebarOwnerFilter,
+    selfOwnerId,
+    directory: fleetUsersDirectory,
+  });
+  const ownerFilterOptions = buildOwnerFilterOptions(fleetUsersDirectory, selfOwnerId);
+  const ownerFilterOwner =
+    ownerFilterId === null ? null : presentTaskOwner(fleetUsersDirectory, ownerFilterId);
+  const setThreadOwner = useSetThreadOwner();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -1425,6 +1456,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   } = useSidebarThreads({
     projectScopeKey,
     scopedProjectKeys,
+    ownerFilterId,
     serverConfigs,
     connectedEnvironmentIds,
     optimisticDrop,
@@ -2778,6 +2810,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 canShareWithGuestAtom(threadRef.environmentId),
               ),
               canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+              owner: { ownerId: thread.ownerId, users: fleetUsersDirectory?.users ?? [] },
               supports: {
                 settlement: configLoaded,
                 autoSettleOptOut: supportsAutoSettleOptOut,
@@ -2792,6 +2825,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         );
         if (clicked._tag === "Failure" || clicked.value === null) return;
         if (threadActionRequiresOperate(clicked.value) && !checkThreadOperations([thread])) return;
+        if (clicked.value.startsWith("owner:")) {
+          const ownerId = clicked.value.slice("owner:".length);
+          if (ownerId !== thread.ownerId) await setThreadOwner(threadRef, ownerId);
+          return;
+        }
         if (clicked.value?.startsWith("snooze:")) {
           const preset =
             clicked.value === "snooze:custom"
@@ -3154,11 +3192,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   <ComboboxTrigger
                     render={
                       <SidebarHeaderIconButton
-                        label={
+                        label={[
                           scopedProjectGroups.length > 0
                             ? `Filter threads by project: ${scopedProjectGroups.map((project) => project.displayName).join(", ")}`
-                            : "Filter threads by project"
-                        }
+                            : "Filter threads by project",
+                          ...(ownerFilterOwner
+                            ? [`showing ${ownerFilterOwner.name}'s threads`]
+                            : []),
+                        ].join(", ")}
                       />
                     }
                   >
@@ -3176,6 +3217,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                       <span className="flex shrink-0">
                         <ProjectFavicon project={scopedProjectGroups[0]} className="size-4" />
                       </span>
+                    ) : ownerFilterOwner ? (
+                      <ProjectMonogram
+                        round
+                        text={ownerFilterOwner.initial}
+                        color={ownerFilterOwner.color}
+                      />
                     ) : (
                       <ListFilterIcon className="size-4" />
                     )}
@@ -3240,6 +3287,27 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         >
                           <Toggle value="none">None</Toggle>
                           <Toggle value="machine">Machine</Toggle>
+                        </ToggleGroup>
+                      </div>
+                    ) : null}
+                    {ownerFilterOptions.length > 0 ? (
+                      <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1.5">
+                        <span className="text-xs font-medium text-muted-foreground">Owner</span>
+                        <ToggleGroup
+                          aria-label="Show threads managed by"
+                          value={[selectedOwnerFilterOption(ownerFilterId, selfOwnerId)]}
+                          onValueChange={(next) => {
+                            const value = next[0];
+                            if (value !== undefined) {
+                              void updateClientSettings({ sidebarOwnerFilter: value });
+                            }
+                          }}
+                        >
+                          {ownerFilterOptions.map((option) => (
+                            <Toggle key={option.value} value={option.value}>
+                              {option.label}
+                            </Toggle>
+                          ))}
                         </ToggleGroup>
                       </div>
                     ) : null}

@@ -1477,6 +1477,8 @@ export function makeClaudeQueryOptions(input: {
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
   readonly allowDangerouslySkipPermissions?: boolean;
   readonly appendSystemPromptFileText?: string;
+  /** T3 Code LAN: set when the query opens; a later owner change reaches the next query. */
+  readonly taskOwnerName?: string | undefined;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
 }): ClaudeAgentSdkQueryOptions {
@@ -1585,7 +1587,7 @@ export function makeClaudeQueryOptions(input: {
       type: "preset" as const,
       preset: "claude_code" as const,
       append: [
-        buildRuntimeInstructions({ harness: "Claude Code" }) +
+        buildRuntimeInstructions({ harness: "Claude Code", taskOwnerName: input.taskOwnerName }) +
           (input.mcpServers === undefined
             ? ""
             : T3_CODE_ORCHESTRATION_INSTRUCTIONS +
@@ -10237,6 +10239,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             onElicitation,
             supportedDialogKinds: ["resume_return"],
             ...(appendSystemPromptFileText === undefined ? {} : { appendSystemPromptFileText }),
+            taskOwnerName: turnInput.taskOwnerName,
             ...(toolSearchOverride === undefined ? {} : { toolSearchOverride }),
           });
           const resolvedTurnCwd = yield* fileSystem

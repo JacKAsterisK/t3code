@@ -5,6 +5,7 @@ import {
   AuthStandardClientScopes,
   type AuthEnvironmentScope,
   EnvironmentId,
+  type FleetUsersDirectory,
   EventId,
   ExecutionEnvironmentDescriptor,
   MessageId,
@@ -201,6 +202,7 @@ function run(threadId: ThreadId, id: RunId, ordinal: number, userMessageId: stri
 export interface FakeThread {
   readonly id: ThreadId;
   readonly title: string;
+  readonly ownerId?: string | null;
   readonly runs: ReadonlyArray<OrchestrationV2Run>;
   readonly items: ReadonlyArray<OrchestrationV2TurnItem>;
 }
@@ -262,6 +264,7 @@ function shellOf(thread: FakeThread, projectId = PROJECT_ID): OrchestrationV2Thr
     settledAt: null,
     lastVisitedAt: AT,
     deletedAt: null,
+    ...(thread.ownerId === undefined ? {} : { ownerId: thread.ownerId }),
   };
 }
 
@@ -327,6 +330,14 @@ const json = (body: unknown, status = 200) =>
 const threadSubscribers = new Map<string, Queue.Queue<OrchestrationV2ThreadStreamItem>>();
 let threads: ReadonlyArray<FakeThread> = [];
 let sequence = 1;
+let fleetUsers: FleetUsersDirectory | undefined;
+// Commands the app dispatched to either machine, oldest first.
+let dispatched: Array<unknown> = [];
+
+/** Every orchestration command the app has dispatched since the environment was installed. */
+export function dispatchedCommands(): ReadonlyArray<unknown> {
+  return dispatched;
+}
 
 const subscribe = <A>(first: ReadonlyArray<A>, register?: (queue: Queue.Queue<A>) => () => void) =>
   Stream.unwrap(
@@ -343,11 +354,20 @@ const subscribe = <A>(first: ReadonlyArray<A>, register?: (queue: Queue.Queue<A>
 
 // One machine: the app's own environment, whose thread events tests can push, or the remote.
 function sessionFor(
-  config: ServerConfig,
+  baseConfig: ServerConfig,
   machineProject: OrchestrationProjectShell,
   live: boolean,
 ): EnvironmentConnectionLease["session"] {
+  const currentConfig = (): ServerConfig =>
+    fleetUsers === undefined ? baseConfig : { ...baseConfig, fleetUsers };
   const handlers: Record<string, (input: never) => unknown> = {
+    // Accepted without events: a pending one would hold up the thread's next command, which runs
+    // after it.
+    [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (input: unknown) =>
+      Effect.sync(() => {
+        dispatched.push(input);
+        return { sequence };
+      }),
     [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: () =>
       subscribe<OrchestrationV2ShellStreamItem>([
         {
@@ -387,7 +407,7 @@ function sessionFor(
       );
     },
     [WS_METHODS.subscribeServerConfig]: () =>
-      subscribe([{ version: 1 as const, type: "snapshot" as const, config }]),
+      subscribe([{ version: 1 as const, type: "snapshot" as const, config: currentConfig() }]),
   };
 
   // Unanswered calls stay pending, like a server that has not replied yet.
@@ -402,9 +422,9 @@ function sessionFor(
 
   return {
     client: client as unknown as WsRpcProtocolClient,
-    initialConfig: Effect.succeed(config),
+    initialConfig: Effect.sync(currentConfig),
     subscribeServerConfig: () =>
-      subscribe([{ version: 1 as const, type: "snapshot" as const, config }]),
+      subscribe([{ version: 1 as const, type: "snapshot" as const, config: currentConfig() }]),
     ready: Effect.void,
     probe: Effect.void,
     inboundFrames: Effect.succeed(0),
@@ -473,13 +493,19 @@ function remoteResponse(pathname: string, scopes: ReadonlyArray<AuthEnvironmentS
 
 /**
  * Serves the environment's HTTP API and these threads until disposed. With `remoteScopes`,
- * a second machine at REMOTE_ORIGIN accepts any pairing code and grants those scopes.
+ * a second machine at REMOTE_ORIGIN accepts any pairing code and grants those scopes. With
+ * `fleetUsers`, both machines' configs list those task owners.
  */
 export function installFakeEnvironment(
   fixtures: ReadonlyArray<FakeThread>,
-  options: { readonly remoteScopes?: ReadonlyArray<AuthEnvironmentScope> } = {},
+  options: {
+    readonly remoteScopes?: ReadonlyArray<AuthEnvironmentScope>;
+    readonly fleetUsers?: FleetUsersDirectory;
+  } = {},
 ): Disposable {
   threads = fixtures;
+  fleetUsers = options.fleetUsers;
+  dispatched = [];
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
     if (url.origin === REMOTE_ORIGIN && options.remoteScopes !== undefined)
@@ -503,6 +529,8 @@ export function installFakeEnvironment(
     [Symbol.dispose]: () => {
       globalThis.fetch = realFetch;
       threads = [];
+      fleetUsers = undefined;
+      dispatched = [];
     },
   };
 }

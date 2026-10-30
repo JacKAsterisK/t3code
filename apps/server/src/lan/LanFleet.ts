@@ -32,6 +32,7 @@ import { FLEET_ROSTER_ENV, resolveFleetBootstrap } from "./FleetBootstrap.ts";
 import * as FleetEnrollment from "./FleetEnrollment.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import * as FleetPeerLinks from "./FleetPeerLinks.ts";
+import * as FleetUsers from "./FleetUsers.ts";
 
 const Record = Schema.Struct({
   deliveryId: Schema.String,
@@ -93,6 +94,8 @@ const make = Effect.gen(function* () {
   const enrollment = yield* FleetEnrollment.FleetEnrollment;
   const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
   const peerLinks = yield* Effect.serviceOption(FleetPeerLinks.FleetPeerLinks);
+  // Each sync reads the fleet's users beside the roster; owner badges never block a sync.
+  const fleetUsers = yield* Effect.serviceOption(FleetUsers.FleetUsers);
   // A sync may bring new catalogs, trust or peer-link requests for the peer-link adapter.
   const requestPeerLinkPass = Option.isSome(peerLinks) ? peerLinks.value.requestPass : Effect.void;
   const privateFile = path.join(serverConfig.stateDir, "lan-fleet-private.json");
@@ -195,6 +198,11 @@ const make = Effect.gen(function* () {
         Delivery.validateFleetKeys(config, self);
       }).pipe(Effect.mapError(() => new LanFleetError({ reason: "configuration" })));
       if (self === undefined) return yield* new LanFleetError({ reason: "configuration" });
+      if (Option.isSome(fleetUsers))
+        yield* fleetUsers.value.refresh({
+          rosterPath: config.rosterPath,
+          machineId: self.machineId,
+        });
       const ownCatalogFile = path.join(
         config.deliveryDirectory,
         `${Delivery.deliveryFileName(self.machineId, self.machineId)}.catalog.json`,

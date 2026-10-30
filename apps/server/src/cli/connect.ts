@@ -536,7 +536,7 @@ const runCloudCommand = Effect.fn("cloud.cli.run_cloud_command")(function* <A, E
       cause:
         "T3 Connect is disabled in this LAN distribution. Use an approved direct environment connection.",
     });
-  const config = yield* resolveCliAuthConfig(flags, logLevel);
+  const config = yield* resolveCliAuthConfig(flags, logLevel, options);
   const minimumLogLevel = options?.quietLogs ? "Error" : config.logLevel;
   const layerRuntime = Layer.mergeAll(
     ServerSecretStore.layer,

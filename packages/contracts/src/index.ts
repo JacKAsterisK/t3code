@@ -69,6 +69,7 @@ export * from "./worktreeSetup.ts";
 export * from "./secretRequest.ts";
 export * from "./lanRouting.ts";
 export * from "./lanFleet.ts";
+export * from "./secretReference.ts";
 export * from "./clientRpcPermissions.ts";
 export * from "./lanTasks.ts";
 export * from "./lanToolParameters.ts";

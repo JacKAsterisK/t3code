@@ -221,7 +221,7 @@ import * as ProjectService from "./project/ProjectService.ts";
 import { threadWorkspaceRoot } from "./project/threadWorkspaceRoot.ts";
 import * as ManagedProjectFolders from "./project/ManagedProjectFolders.ts";
 import * as ScratchThreadPromotion from "./project/ScratchThreadPromotion.ts";
-import { projectMutationOperation } from "./project/ProjectMutation.ts";
+import { mutateProjectWithClone } from "./project/ProjectMutation.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
@@ -1233,6 +1233,7 @@ export const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
+  reportProfiles: ServerBrowser.ProfileReporter,
   // What the connection may use now, such as after its fleet access narrows; never more than at open.
   currentScopes: Effect.Effect<ReadonlyArray<AuthEnvironmentScope>> = Effect.succeed(
     currentSession.scopes,
@@ -1882,6 +1883,7 @@ export const layerWsRpc = (
           threadFind: true,
           threadFindProgressive: true,
           secretProviderSettings: true,
+          secretReferences: true,
           ...Option.match(scratchWorkspaceRoot, {
             onNone: () => ({}),
             onSome: (root) => ({ scratchWorkspaceRoot: root }),
@@ -1945,10 +1947,7 @@ export const layerWsRpc = (
       );
 
       const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
-        const result = yield* projectMutationOperation(projectService, mutation);
-        if (mutation.type === "project.delete")
-          yield* projectCloneTracker.discard(mutation.projectId);
-        return result;
+        return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
       const handlers = ServerWsRpcGroup.of({
@@ -2003,6 +2002,8 @@ export const layerWsRpc = (
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: (input) => threadManagement.stopWorkflow(input),
+        [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: (input) =>
+          threadManagement.forceStopThread(input),
         [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: (input) =>
           readWorkflowScript({ scriptPath: input.scriptPath }),
         [ORCHESTRATION_V2_WS_METHODS.getTurnItem]: (input) =>
@@ -2414,9 +2415,11 @@ export const layerWsRpc = (
                   cwd: input.cwd,
                   fresh: input.fresh === true,
                 })
-              : input.instanceId !== undefined
-                ? providerRegistry.refreshInstance(input.instanceId)
-                : providerRegistry.refresh();
+              : input.reloadSecrets === true
+                ? providerRegistry.reloadSecretsAndRefresh(input.instanceId)
+                : input.instanceId !== undefined
+                  ? providerRegistry.refreshInstance(input.instanceId)
+                  : providerRegistry.refresh();
             if (input.refreshModels) {
               const instances = yield* providerInstances.listInstances;
               for (const instance of instances) {
@@ -3090,6 +3093,7 @@ export const layerWsRpc = (
           gitWorkflow.switchRef(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.vcsInit]: (input) =>
           vcsProvisioning.initRepository(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+        [WS_METHODS.reviewGetBranchCommits]: (input) => review.getBranchCommits(input),
         [WS_METHODS.reviewGetDiffPreview]: (input) => review.getDiffPreview(input),
         [WS_METHODS.reviewGetDiffFileContents]: (input) => review.getDiffFileContents(input),
         [WS_METHODS.terminalOpen]: (input) => terminalManager.open(input),
@@ -3120,7 +3124,7 @@ export const layerWsRpc = (
         [WS_METHODS.previewClose]: (input) => previewManager.close(input),
         [WS_METHODS.previewList]: (input) => previewManager.list(input),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
-        [WS_METHODS.previewReportProfiles]: (input) => serverBrowser.reportProfiles(input),
+        [WS_METHODS.previewReportProfiles]: (input) => reportProfiles(input),
         [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
         [WS_METHODS.subscribePreviewEvents]: (_input) => previewManager.events,
         [WS_METHODS.deviceConfigure]: (input) => deviceService.configure(input),
@@ -3405,6 +3409,7 @@ export const layer = Layer.unwrap(
         );
         const clientAnalyticsProps = readClientAnalyticsProps(request);
         yield* analytics.recordOwners(readClientOwners(request), "client");
+        const reportProfiles = yield* serverBrowser.profileReporter;
         const rpcWebSocketHttpEffect = Effect.gen(function* () {
           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
           yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
@@ -3443,6 +3448,7 @@ export const layer = Layer.unwrap(
               session,
               clientAnalyticsProps,
               serverBrowser,
+              reportProfiles,
               Option.isSome(accessCap)
                 ? accessCap.value
                     .scopes(session)

@@ -697,6 +697,7 @@ it.effect(
             },
             {},
             yield* ServerBrowser.ServerBrowser,
+            () => Effect.void,
           ).pipe(Layer.provide(configRpcServices));
           const context = yield* handlerScope === undefined
             ? Layer.build(handlerLayer)
@@ -906,6 +907,7 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
           },
           {},
           yield* ServerBrowser.ServerBrowser,
+          () => Effect.void,
         ).pipe(Layer.provide(configRpcServices)),
       ),
     );
@@ -1003,6 +1005,7 @@ it.effect("stops showing webhook URLs once a connection's access narrows after i
           },
           {},
           yield* ServerBrowser.ServerBrowser,
+          () => Effect.void,
           Effect.sync(() => current),
         ).pipe(
           Layer.provide(
@@ -1086,6 +1089,7 @@ it.effect("refuses fleet administration to a connection that may not administer 
             },
             {},
             yield* ServerBrowser.ServerBrowser,
+            () => Effect.void,
             Effect.succeed(scopes),
             Effect.sync(() => administers),
           ).pipe(
@@ -1189,6 +1193,7 @@ it.effect("hands no outside access to a connection standard here only by an exce
             },
             {},
             yield* ServerBrowser.ServerBrowser,
+            () => Effect.void,
             Effect.succeed(scopes),
             Effect.sync(() => administers),
           ).pipe(

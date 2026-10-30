@@ -1,5 +1,5 @@
 import { expect, it } from "vite-plus/test";
-import { parseChangedCheckArgs, selectChangedTests } from "./changed-tests.ts";
+import { parseDeferredTests, selectChangedTests } from "./changed-tests.ts";
 
 const optionalBudgetTest = "packages/client-runtime/src/operations/commands.performance.test.ts";
 const functionalCommandTest = "packages/client-runtime/src/operations/commands.test.ts";
@@ -12,19 +12,15 @@ it("deduplicates Windows paths before counting or passing changed test files", (
 });
 
 it("defers only explicitly selected optional tests and reports every deferred file", () => {
-  const args = parseChangedCheckArgs([
-    "HEAD~1",
-    "--defer-test",
+  const deferred = parseDeferredTests([
     optionalBudgetTest.replaceAll("/", "\\"),
-    "--defer-test",
     optionalBudgetTest,
   ]);
-  expect(args.ref).toBe("HEAD~1");
-  expect(selectChangedTests([functionalCommandTest, optionalBudgetTest], args.deferred)).toEqual({
+  expect(selectChangedTests([functionalCommandTest, optionalBudgetTest], deferred)).toEqual({
     tests: [functionalCommandTest],
     skipped: [optionalBudgetTest],
   });
-  expect(() => selectChangedTests([], args.deferred)).toThrow(/outside/u);
+  expect(() => selectChangedTests([], deferred)).toThrow(/outside/u);
 });
 
 it("retains the budget test when its functional companion is absent", () => {
@@ -68,15 +64,9 @@ it("refuses deferring the complete fleet credential and onboarding selection", (
   expect(() => selectChangedTests(tests, tests)).toThrow(/cannot be deferred/u);
 });
 
-it.each(
-  [
-    ["--defer-test"],
-    ["--defer-test", "../outside.test.ts"],
-    ["--defer-test", "C:\\outside.test.ts"],
-    ["--defer-test", "src"],
-    ["--unknown"],
-    ["main", "another"],
-  ].map((args) => ({ args })),
-)("refuses malformed changed-check arguments: $args", ({ args }) => {
-  expect(() => parseChangedCheckArgs(args)).toThrow();
-});
+it.each(["", "../outside.test.ts", "C:\\outside.test.ts", "/outside.test.ts", "src"])(
+  "refuses a malformed --defer-test value: %j",
+  (file) => {
+    expect(() => parseDeferredTests([file])).toThrow(/exact repository-relative/u);
+  },
+);

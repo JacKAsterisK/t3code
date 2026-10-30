@@ -10,26 +10,19 @@ const OPTIONAL_TEST_COMPANIONS = new Map([
   ],
 ]);
 
-export function parseChangedCheckArgs(args: readonly string[]) {
-  let ref: string | undefined;
-  const deferred: string[] = [];
-  for (let index = 0; index < args.length; index++) {
-    const arg = args[index]!;
-    if (arg === "--defer-test") {
-      const file = normalize(args[++index] ?? "");
-      if (
-        (!file.endsWith(".test.ts") && !file.endsWith(".test.tsx")) ||
-        file.startsWith("/") ||
-        file.includes(":") ||
-        file.split("/").includes("..")
-      )
-        throw new Error("--defer-test requires an exact repository-relative test file.");
-      deferred.push(file);
-    } else if (arg.startsWith("-") || ref !== undefined) {
-      throw new Error("Usage: check:changed [ref] [--defer-test path.test.ts ...]");
-    } else ref = arg;
-  }
-  return { ref: ref ?? "origin/main", deferred };
+// Each --defer-test value must name one exact repository-relative test file.
+export function parseDeferredTests(files: readonly string[]) {
+  return files.map((value) => {
+    const file = normalize(value);
+    if (
+      (!file.endsWith(".test.ts") && !file.endsWith(".test.tsx")) ||
+      file.startsWith("/") ||
+      file.includes(":") ||
+      file.split("/").includes("..")
+    )
+      throw new Error("--defer-test requires an exact repository-relative test file.");
+    return file;
+  });
 }
 
 export function selectChangedTests(selected: Iterable<string>, deferred: readonly string[]) {

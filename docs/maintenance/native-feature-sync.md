@@ -12,8 +12,8 @@ approval before code or runtime changes.
   `a7bd75470` on `lan/upstream-sync-2026-10-29` for LAN 1.0.26 (previous sync
   `9826dbb99` at `e8f65e9fe`). Latest stable is v0.1.5. Linked environments
   first shipped in nightlies from `0.1.4-nightly.20261027.3796`.
-- Shipping release: T3 Code LAN 1.0.25, fork `3d995471c`, upstream `9826dbb99`,
-  app and server version 0.1.3, installed by Hub 0.5.115
+- Shipping release: T3 Code LAN 1.0.26, fork `80a58cfc2`, upstream `dd1484815`,
+  app and server version 0.1.5, installed by Hub 0.5.115
   (`%LOCALAPPDATA%\Programs\T3CodeLAN\active.json`, `app\t3code-lan-package.json`).
   Upstream PRs #16684 and #17130 are ancestors of `b428bda9d`.
 - AnvilToad configuration observed 2026-10-28: `linkedEnvironmentsEnabled` unset

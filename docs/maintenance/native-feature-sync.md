@@ -63,22 +63,22 @@ approval before code or runtime changes.
 
 ## Summary
 
-| #   | Behavior                                         | Native equivalent                                              | Upstream status                   | Decision                                  |
-| --- | ------------------------------------------------ | -------------------------------------------------------------- | --------------------------------- | ----------------------------------------- |
-| 1   | Fleet membership and machine links               | None (T3 Connect needs the cloud)                              | —                                 | keep                                      |
-| 2   | Agent target discovery                           | `t3_environment_links`, link-request card                      | nightly, Labs beta                | adapt ([design](native-link-adapter.md))  |
-| 3   | Remote task lifecycle                            | `environmentId` on thread tools, remote `delegate_task`        | nightly, Labs beta                | replace (in-app agents) · defer (gateway) |
-| 4   | Remote questions and approvals                   | `t3_pending_request` with `environmentId`                      | nightly, Labs beta                | replace with row 3                        |
-| 5   | Task observation and notifications               | `t3_thread_wait`; delegated-task wake inside T3 only           | partial                           | keep                                      |
-| 6   | Renewable task-only OAuth grants                 | 30-day outside-agent OAuth, no refresh                         | released                          | keep                                      |
-| 7   | Encrypted LAN endpoint, startup, reconnect       | None for Windows LAN (Connect, Tailscale, Linux/macOS service) | —                                 | keep                                      |
-| 8   | Task grouping by machine                         | Boring sidebar project folders                                 | nightly Labs, no machine grouping | keep (protected)                          |
-| 9   | Hub install, update and launch adapter           | Electron updater from GitHub, `t3 update`                      | released                          | keep                                      |
-| 10  | Switchyard gateway adapter                       | Outside agents on `/mcp` with `environmentId`                  | nightly, Labs beta                | defer                                     |
-| 11  | LAN build, distribution and update gate          | Upstream release and updater pipeline                          | released                          | keep                                      |
-| 12  | Native maintenance, home repair, retained import | `t3_thread_import` (#16731), "Continue threads after restarts" | proposed / released               | keep                                      |
-| 13  | Per-machine fleet access                         | One `AuthMcpClientAccess` mode per peer link                   | nightly, Labs beta                | keep                                      |
-| 14  | Task owners                                      | None                                                           | none (`cb9629e68`)                | keep                                      |
+| #   | Behavior                                         | Native equivalent                                              | Upstream status                   | Decision                                                                         |
+| --- | ------------------------------------------------ | -------------------------------------------------------------- | --------------------------------- | -------------------------------------------------------------------------------- |
+| 1   | Fleet membership and machine links               | None (T3 Connect needs the cloud)                              | —                                 | keep                                                                             |
+| 2   | Agent target discovery                           | `t3_environment_links`, link-request card                      | nightly, Labs beta                | adapt ([design](native-link-adapter.md))                                         |
+| 3   | Remote task lifecycle                            | `environmentId` on thread tools, remote `delegate_task`        | nightly, Labs beta                | replace (in-app agents) · defer (gateway)                                        |
+| 4   | Remote questions and approvals                   | `t3_pending_request` with `environmentId`                      | nightly, Labs beta                | replace with row 3 · approvals planned ([design](agent-events-and-approvals.md)) |
+| 5   | Task observation and notifications               | `t3_thread_wait`; delegated-task wake inside T3 only           | partial                           | keep · events planned ([design](agent-events-and-approvals.md))                  |
+| 6   | Renewable task-only OAuth grants                 | 30-day outside-agent OAuth, no refresh                         | released                          | keep                                                                             |
+| 7   | Encrypted LAN endpoint, startup, reconnect       | None for Windows LAN (Connect, Tailscale, Linux/macOS service) | —                                 | keep                                                                             |
+| 8   | Task grouping by machine                         | Boring sidebar project folders                                 | nightly Labs, no machine grouping | keep (protected)                                                                 |
+| 9   | Hub install, update and launch adapter           | Electron updater from GitHub, `t3 update`                      | released                          | keep                                                                             |
+| 10  | Switchyard gateway adapter                       | Outside agents on `/mcp` with `environmentId`                  | nightly, Labs beta                | defer                                                                            |
+| 11  | LAN build, distribution and update gate          | Upstream release and updater pipeline                          | released                          | keep                                                                             |
+| 12  | Native maintenance, home repair, retained import | `t3_thread_import` (#16731), "Continue threads after restarts" | proposed / released               | keep                                                                             |
+| 13  | Per-machine fleet access                         | One `AuthMcpClientAccess` mode per peer link                   | nightly, Labs beta                | keep                                                                             |
+| 14  | Task owners                                      | None                                                           | none (`cb9629e68`)                | keep                                                                             |
 
 ## Rows
 
@@ -206,11 +206,28 @@ approval before code or runtime changes.
   `environmentId`. It cannot approve a permission request. Open: #26344
   (questions and approvals from remote delegated tasks appear on the parent),
   #26492 and #26665.
-- **Gaps:** none known for questions. Surfacing approvals from remote delegated
-  tasks is still a proposal.
+- **Gaps:**
+  - None known for questions.
+  - Surfacing approvals from remote delegated tasks is still a proposal
+    (#26344 closed 2026-10-30 pending triage of #26527).
+  - No MCP client can answer a permission request. On 2026-10-30, Gecko
+    Butler could not submit Dan's verbal approval of a Codex "Allow … to use
+    Google Chrome?" request.
 - **Decision:** replace together with row 3, which has the same callers.
-- **Tests:** planned: a forwarded `respond` cannot approve a permission request.
-- **Owner, rollback and revisit:** as row 3.
+  **Approvals: planned.** See [Agent events and approvals](agent-events-and-approvals.md):
+  - a fork tool, `t3_approval_request`, behind an opt-in
+    `orchestration:approve` grant scope, off by default;
+  - approve once or decline only, bound to a presentation digest;
+  - single use, audited on the thread;
+  - forwarded through native links only when both the client's grant and the
+    link carry the scope.
+
+  `t3_pending_request` stays upstream's, for questions only.
+
+- **Tests:** planned: a forwarded `respond` cannot approve a permission request;
+  the approval tool's tests and harness are listed in the design.
+- **Owner, rollback and revisit:** as row 3. The planned approvals roll back by
+  leaving the scope ungranted.
 
 ### 5. Task observation and notifications
 
@@ -227,13 +244,30 @@ approval before code or runtime changes.
 - **Must preserve:** durable capture, deduplication, replay, restart recovery,
   quiet routine events and a real assistant wake. Test each one separately; an
   HTTP success proves none of them.
-- **Gaps:** neither upstream nor the fork can wake an external assistant.
+- **Gaps:** neither upstream nor the fork can wake an external assistant. On
+  2026-10-30, Gecko Butler learned of a native approval only by polling.
+  `/mcp` serves only MCP `2025-06-18`. effect 4.0.5 has a `2026-07-28` adapter
+  with `server/discover`, but it has no events capability or `events/*`
+  methods.
 - **Decision:** keep for the gateway. For in-app agents, native `delegate_task`
   and `t3_thread_wait` take over with row 3. Do not add a second ledger.
-- **Tests:** `EnvironmentRouting.test.ts`, `GatewayTaskSurface.test.ts`.
-- **Owner:** Dan. **Rollback:** not applicable.
+  **Events: planned.** See [Agent events and approvals](agent-events-and-approvals.md):
+  - OpenAI MCP Events (MCP `2026-07-28`, webhook delivery) on `/mcp`;
+  - a durable per-machine fact log with deterministic IDs;
+  - BuildMachine pulls linked peers' facts over native links;
+  - owner metadata in every event, never used as a filter.
+
+  The fact log is proposed to **replace** `RoutingStore`'s observation inbox
+  as the single ledger. That changes this row to replace and needs Dan's
+  approval.
+
+- **Tests:** `EnvironmentRouting.test.ts`, `GatewayTaskSurface.test.ts`; the
+  planned events tests, harness and live dot test are in the design.
+- **Owner:** Dan. **Rollback:** not applicable today; the planned events turn
+  off with `agentEvents.enabled`.
 - **Revisit:** when upstream adds MCP events, notifications or webhooks for
-  thread state, or when a supported assistant wake receiver exists.
+  thread state, or when a supported assistant wake receiver exists. Also when
+  the design's wake probe (phase 0, live step L2) has run.
 
 ### 6. Renewable task-only OAuth grants
 

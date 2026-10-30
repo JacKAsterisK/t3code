@@ -4,6 +4,7 @@ import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contract
 import {
   formatThreadLink,
   guessThreadLinkRef,
+  parseThreadIdInput,
   parseThreadLinkHref,
   relabelThreadLinks,
   threadLinkCandidates,
@@ -156,5 +157,51 @@ describe("thread links", () => {
       "[Fix ci build](t3-thread://v2/e/t1)",
     );
     expect(formatThreadLink(ref("e", "t1"), " ] ")).toBe("<t3-thread://v2/e/t1>");
+  });
+});
+
+describe("thread id inputs", () => {
+  const uuid = "5d0b4a3e-8c1f-4a52-9d37-2f6c7e1b9a04";
+  const input = (environmentId: string | null, candidates: string[], likely: string) => ({
+    environmentId: environmentId === null ? null : EnvironmentId.make(environmentId),
+    candidates: candidates.map((id) => ThreadId.make(id)),
+    likely: ThreadId.make(likely),
+  });
+
+  it("reads a thread's id, context id, context reference and links as that thread", () => {
+    expect(parseThreadIdInput(uuid)).toEqual(input(null, [uuid], uuid));
+    expect(parseThreadIdInput(`thread_${uuid}`)).toEqual(
+      input(null, [`thread_${uuid}`, uuid], uuid),
+    );
+    expect(parseThreadIdInput(`t3-context://v1/thread/thread_${uuid}`)).toEqual(
+      input(null, [`thread_${uuid}`, uuid], uuid),
+    );
+    expect(parseThreadIdInput(`t3-thread://v2/env-1/${uuid}`)).toEqual(
+      input("env-1", [uuid], uuid),
+    );
+    expect(parseThreadIdInput(`t3-thread://v1/${uuid}`)).toEqual(input(null, [uuid], uuid));
+  });
+
+  it("keeps ids that are not uuids as written unless a lookup finds the rest", () => {
+    expect(parseThreadIdInput("thread:provider:codex:1")).toEqual(
+      input(null, ["thread:provider:codex:1"], "thread:provider:codex:1"),
+    );
+    expect(parseThreadIdInput("thread_legacy")).toEqual(
+      input(null, ["thread_legacy", "legacy"], "thread_legacy"),
+    );
+    expect(parseThreadIdInput("t3-thread://v2/env-1/thread:delegated-task:mcp%3A1")).toEqual(
+      input(
+        "env-1",
+        ["thread:delegated-task:mcp%3A1", "thread:delegated-task:mcp:1"],
+        "thread:delegated-task:mcp%3A1",
+      ),
+    );
+  });
+
+  it("names no thread for another kind of reference or a malformed link", () => {
+    expect(parseThreadIdInput("t3-context://v1/file/file_notes")).toBeNull();
+    expect(parseThreadIdInput("t3-context://v1/thread")).toBeNull();
+    expect(parseThreadIdInput(`t3-thread://v2/${uuid}`)).toBeNull();
+    expect(parseThreadIdInput(`t3-thread://v3/env-1/${uuid}`)).toBeNull();
   });
 });

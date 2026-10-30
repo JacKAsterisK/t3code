@@ -1123,7 +1123,7 @@ const make = Effect.gen(function* () {
       .getThreadShell(threadId)
       .pipe(Effect.mapError(threadManagementFailure));
     if (shell === null || shell.deletedAt !== null) {
-      return yield* threadNotFound(threadManagement, threadId, `Thread ${threadId} was not found.`);
+      return yield* threadNotFound(threadManagement, threadId, shell);
     }
     return yield* loadProjectThread(shell.projectId, threadId);
   });
@@ -1195,11 +1195,7 @@ const make = Effect.gen(function* () {
       .getThreadShell(threadId)
       .pipe(Effect.mapError(threadManagementFailure));
     if (shell === null || shell.deletedAt !== null) {
-      return yield* threadNotFound(
-        threadManagement,
-        threadId,
-        `Thread ${threadId} is no longer available.`,
-      );
+      return yield* threadNotFound(threadManagement, threadId, shell);
     }
     const target = yield* threadManagement
       .getProjectThreadRecords({ projectId: shell.projectId, threadId }, [

@@ -384,6 +384,13 @@ reasoning, checkpoint, handoff, and runtime-request items. Large item text is
 bounded and reports whether it was truncated. `afterPosition` and
 `nextPosition` support incremental reads.
 
+Every tool's `threadId` and `targetThreadId` also take the forms T3 shows
+agents: a context ID `thread_<threadId>`, a `t3-context://v1/thread/<id>`
+reference, or a `t3-thread://` link. A v2 link's environment becomes
+`environmentId`; a different `environmentId` is refused. An ID that names no
+thread fails `thread_not_found` with "No thread … exists here." and the
+accepted forms; only a deleted thread is "no longer available".
+
 Thread and message results include required `createdBy` and `creationSource`
 provenance. MCP-created threads and user-role messages use `createdBy: "agent"`
 and `creationSource: "mcp"`; provider output uses `creationSource: "provider"`.

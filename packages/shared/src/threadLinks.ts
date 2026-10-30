@@ -2,6 +2,8 @@ import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contract
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import { parseComposerContextHref } from "./composerContextReferences.ts";
+
 export const THREAD_LINK_PROTOCOL = "t3-thread";
 const V1_PREFIX = `${THREAD_LINK_PROTOCOL}://v1/`;
 const V2_PREFIX = `${THREAD_LINK_PROTOCOL}://v2/`;
@@ -40,6 +42,53 @@ export function percentDecodedThreadLinkId(threadId: ThreadId): ThreadId | null 
   } catch {
     return null;
   }
+}
+
+export const THREAD_ID_INPUT_FORMS =
+  "Thread tools take a threadId, thread_<threadId>, t3-context://v1/thread/<id> or t3-thread://v2/<environmentId>/<threadId>.";
+
+// A thread's context id is `thread_<threadId>`; see toKindScopedComposerContextId.
+const THREAD_CONTEXT_ID_PREFIX = "thread_";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** What an agent wrote for a thread: its id, context id, context reference or thread link. */
+export interface ThreadIdInput {
+  /** The environment a v2 link names. */
+  readonly environmentId: EnvironmentId | null;
+  /** The ids it can name, as written first, so an id that holds `thread_` is never rewritten. */
+  readonly candidates: ReadonlyArray<ThreadId>;
+  /** The id to use where no thread can be looked up: a context id only loses `thread_` before a uuid. */
+  readonly likely: ThreadId;
+}
+
+/** Null for a reference that names no thread, such as a file's context reference. */
+export function parseThreadIdInput(input: string): ThreadIdInput | null {
+  if (input.startsWith(`${THREAD_LINK_PROTOCOL}:`)) {
+    const link = parseThreadLinkHref(input);
+    if (link === null) return null;
+    const decoded = percentDecodedThreadLinkId(link.threadId);
+    return {
+      environmentId: link.environmentId,
+      candidates: decoded === null ? [link.threadId] : [link.threadId, decoded],
+      likely: link.threadId,
+    };
+  }
+  let id = input;
+  if (input.startsWith("t3-context:")) {
+    const reference = parseComposerContextHref(input);
+    if (reference === null || reference.kind !== "thread") return null;
+    id = reference.contextId;
+  }
+  const written = Option.getOrNull(decodeThreadId(id));
+  if (written === null) return null;
+  const rest = id.startsWith(THREAD_CONTEXT_ID_PREFIX)
+    ? Option.getOrNull(decodeThreadId(id.slice(THREAD_CONTEXT_ID_PREFIX.length)))
+    : null;
+  return {
+    environmentId: null,
+    candidates: rest === null ? [written] : [written, rest],
+    likely: rest !== null && UUID.test(rest) ? rest : written,
+  };
 }
 
 /** The threads a link can name, in its own environment or else the message's: as written, then decoded. */

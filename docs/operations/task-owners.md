@@ -51,9 +51,9 @@ and when a window syncs) and keeps the last good copy in
 `userdata\lan-fleet-users.json`. So badges and defaults survive the share being
 away:
 
-- **Share unreachable, or file invalid:** the last good copy stays in use; an
-  invalid file is logged.
-- **Share reachable, no file:** the users are cleared. Owners show as their raw
+- **Share unreachable, file invalid, or the file cannot be checked** (an access
+  or network error): the last good copy stays in use; an invalid file is logged.
+- **Share reachable, file confirmed absent:** the users are cleared. Owners show as their raw
   id and no default applies.
 - **Never read:** everything still works; tasks just have no owner.
 
@@ -65,15 +65,18 @@ A window picks up an edited file the next time it connects to its machine.
 | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | You, from the app                                                                 | This device's **I am** user (Settings › General). It defaults to the owner of the machine the app runs on. |
 | An agent: `delegate_task` (here or on another machine), provider subagents, forks | The parent task's owner.                                                                                   |
-| An agent: `t3_thread_launch`, `create_threads`                                    | The `ownerId` it passes, else its own task's owner.                                                        |
+| An agent: `t3_thread_launch` (here or on a linked machine), `create_threads`      | The `ownerId` it passes, else its own task's owner.                                                        |
 | `schedule_task`                                                                   | The `ownerId` it passes, else the scheduling task's owner, else each run's machine default.                |
 | An outside MCP agent, `t3_lan_task_launch`, a scheduled run without an owner      | The `ownerId` passed, else the host machine's default owner.                                               |
 
 ### Existing tasks
 
 The first time a machine knows its default owner, it gives every task it hosts
-that has no owner to that default. It does this once, and records it in
-`userdata\task-owner-backfill.json`. Later file changes never reassign anything.
+that has no owner to that default. A task gets it only if it is still unowned at
+that moment, so an owner someone picks during the pass stays. A pass that covers
+every task records it in `userdata\task-owner-backfill.json`, and later file
+changes never reassign anything; a pass that could not label a task records
+nothing and tries again at the next start.
 After the pass, every task has an owner; you can reassign one but not unassign it.
 
 ## Changing an owner
@@ -95,7 +98,7 @@ Tasks with no owner show only under **Everyone**. A subtask follows its parent.
 
 Each turn tells the task's agent who manages it, for example
 `This task is managed by Dan.` A Claude session learns a change when its session
-next restarts. `t3_thread_read` and `t3_thread_list` results include `ownerId`
+next restarts; a Pi session at its next turn. `t3_thread_read` and `t3_thread_list` results include `ownerId`
 and `ownerName`.
 
 ## Who can change an owner

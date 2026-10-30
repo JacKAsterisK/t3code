@@ -458,3 +458,24 @@ Proposed; each step needs Dan's approval.
    self-signed endpoints, and it shows no fork features. A sideloaded build of
    `apps/mobile` would add machine grouping (`b48277a17`), trust in the fleet's
    pinned certificates and, with a VPN or our own relay, access away from home.
+
+## Known bugs
+
+- **Thread tools reject the `thread_` ID that T3 gives agents** (reported
+  2026-10-30 from a Reprint thread on CryoFrog). A thread mention carries the
+  context ID `thread_<uuid>`: in `t3-context://v1/thread/thread_<uuid>`, in
+  `ref=` and in the `<t3_context>` block's `id`. The same block's `threadId`,
+  and every thread tool, take the bare UUID. `t3_thread_read("thread_<uuid>")`
+  fails with `thread_not_found`, "Thread … is no longer available."
+  (`OrchestratorMcpService.ts:1201`; upstream `main` `9b1d351ba0` has the same
+  path), even for a running thread. Agents read that as deleted: CryoFrog thread
+  `e9a40c65` skipped a coordination check the user asked for. Only
+  `t3_thread_read` was tested; `t3_thread_send`, `_wait`, `_interrupt` and
+  `_update` likely share the lookup.
+  - **Fix:** normalize `threadId` once for every thread tool: strip `thread_`
+    and accept `t3-context://v1/thread/…` and `t3-thread://v2/<env>/<thread>`.
+    Report a malformed or unknown ID separately from a deleted or archived
+    thread, naming the expected form. Show one canonical ID in `<t3_context>`,
+    or label the one tools take.
+  - **Schedule:** its own small branch after the pair-access change ships in
+    1.0.27, for the next release. Worth offering upstream.

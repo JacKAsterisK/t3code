@@ -335,6 +335,15 @@ const decodeCohort = Schema.decodeUnknownSync(OrchestrationV2DelegatedCompletion
 const decodeTaskDelivery = Schema.decodeUnknownSync(OrchestrationV2DelegatedCompletionTaskDelivery);
 const decodeGoal = Schema.decodeUnknownSync(OrchestrationV2ProviderGoal);
 const statuses = nativeWorkStatusDefinitions;
+// Columns migrations backfill from payload_json. A candidate migration that adds or fills one
+// changes no work, so workGeneration leaves them out.
+const derivedColumns = [
+  "provider_instance_id",
+  "driver",
+  "source_provider_instance_id",
+  "target_provider_instance_id",
+  "completion_delivery_state",
+];
 
 const isWarmProviderState = (table: string, status: unknown) =>
   (table === "orchestration_v2_projection_provider_sessions" && status === "ready") ||
@@ -762,13 +771,7 @@ function inspectWork(
           .all()
           .map((row) => {
             const durable = { ...row };
-            for (const derived of [
-              "provider_instance_id",
-              "driver",
-              "source_provider_instance_id",
-              "target_provider_instance_id",
-            ])
-              delete durable[derived];
+            for (const derived of derivedColumns) delete durable[derived];
             return JSON.stringify(durable);
           })
           .sort();
@@ -822,13 +825,7 @@ function inspectWork(
           for (const row of db.prepare("SELECT * FROM " + table + " ORDER BY " + key).iterate()) {
             hash.update(table!);
             const durable = { ...row };
-            for (const derived of [
-              "provider_instance_id",
-              "driver",
-              "source_provider_instance_id",
-              "target_provider_instance_id",
-            ])
-              delete durable[derived];
+            for (const derived of derivedColumns) delete durable[derived];
             hash.update(JSON.stringify(durable));
           }
         }

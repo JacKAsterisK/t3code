@@ -180,7 +180,7 @@ describe("delivery schedule", () => {
 
 // Pause the real SQL transaction at an explicit service boundary to force worker interleavings.
 const pauseTransaction = (
-  sql: SqlClient.SqlClient["Service"],
+  sql: SqlClient.SqlClient,
   spanName: string,
   before: Effect.Effect<unknown>,
   after: Effect.Effect<unknown> = Effect.void,

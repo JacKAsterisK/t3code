@@ -216,6 +216,53 @@ it.layer(NodeServices.layer)("fleet users", (it) => {
     }).pipe(Effect.provide(configLayer)),
   );
 
+  it.effect("retries saving its cache after a failed save, so a restart has the newer copy", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.writeUsers(USERS_FILE);
+      // The review's reproduction: the saved copy says Dan, the share changes, and one save fails.
+      let failSaves = 0;
+      const flaky = FileSystem.FileSystem.of({
+        ...f.fs,
+        rename: (from, to) => {
+          if (failSaves > 0 && to.endsWith("lan-fleet-users.json")) {
+            failSaves -= 1;
+            return Effect.fail(
+              PlatformError.systemError({
+                _tag: "Busy",
+                module: "FileSystem",
+                method: "rename",
+                pathOrDescriptor: to,
+              }),
+            );
+          }
+          return f.fs.rename(from, to);
+        },
+      });
+      const { users, stateDir } = yield* f.machine(undefined, flaky);
+      const refresh = () => users.refresh({ rosterPath: f.rosterPath, machineId: DAN_MACHINE });
+      assert.deepEqual(yield* refresh(), danDirectory);
+      const gavinOwnsDan = {
+        ...USERS_FILE,
+        machineOwners: { ...USERS_FILE.machineOwners, [DAN_MACHINE]: "gavin" },
+      };
+      yield* f.writeUsers(gavinOwnsDan);
+      failSaves = 1;
+      const gavinDirectory = { ...danDirectory, defaultOwnerId: "gavin" };
+      assert.deepEqual(yield* refresh(), gavinDirectory);
+      // The next identical refresh saves what the failed one could not.
+      assert.deepEqual(yield* refresh(), gavinDirectory);
+      const restarted = yield* f.machine(stateDir);
+      assert.deepEqual(
+        yield* restarted.users.refresh({
+          rosterPath: f.unreachableRosterPath,
+          machineId: DAN_MACHINE,
+        }),
+        gavinDirectory,
+      );
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("starts from its cache after a restart, for the machine that wrote it only", () =>
     Effect.gen(function* () {
       const f = yield* fixture();

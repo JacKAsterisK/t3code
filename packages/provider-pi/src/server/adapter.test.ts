@@ -29,6 +29,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
@@ -1620,6 +1621,33 @@ describe("PiAdapterV2", () => {
         yield* fileSystem.readFileString(ownerFile!),
         "<task_owner>This task is managed by Gavin.</task_owner>",
       );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("gives each opening a short owner file that only its own close removes", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      // The review's reproductions: a delegated task's session ID is long enough to break a Windows
+      // file name, and a reopened runtime starts while its predecessor is still closing.
+      const longSessionId = `pi:review-task-owners-${"0123456789abcdef".repeat(14)}`;
+      const closingScope = yield* Scope.make();
+      const closing = yield* makeFakePi;
+      yield* openRuntime(closing, "default", THREAD_ID, longSessionId).pipe(
+        Scope.provide(closingScope),
+      );
+      const closingFile = closing.lastSpawn().env.T3_PI_TASK_OWNER_FILE!;
+      const replacement = yield* makeFakePi;
+      yield* openRuntime(replacement, "default", THREAD_ID, longSessionId);
+      const replacementFile = replacement.lastSpawn().env.T3_PI_TASK_OWNER_FILE!;
+      assert.notEqual(replacementFile, closingFile);
+      for (const file of [closingFile, replacementFile]) {
+        const name = file.slice(file.lastIndexOf("/") + 1);
+        assert.isAtMost(name.length, 100);
+        assert.notInclude(name, "review-task-owners");
+      }
+      yield* Scope.close(closingScope, Exit.void);
+      assert.isFalse(yield* fileSystem.exists(closingFile));
+      assert.isTrue(yield* fileSystem.exists(replacementFile));
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

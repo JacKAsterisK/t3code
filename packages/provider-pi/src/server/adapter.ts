@@ -32,6 +32,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
+import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -465,9 +466,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       }
       // T3 Code LAN: Pi outlives a turn, so who manages the thread goes in a file the extension
       // reads at each agent start; startTurn rewrites it. It starts empty, never a stale owner.
+      // Each opening gets its own file, so closing a predecessor never removes a replacement's.
+      const openingHalf = Random.nextIntBetween(0, 2 ** 48).pipe(
+        Effect.map((value) => value.toString(16).padStart(12, "0")),
+      );
       const taskOwnerFile = piTaskOwnerFilePath(
         host.paths.providerStatusCacheDir,
-        input.providerSessionId,
+        `${yield* openingHalf}${yield* openingHalf}`,
       );
       const writeTaskOwner = (ownerName: string | undefined) =>
         fileSystem.writeFileString(taskOwnerFile, taskOwnerInstructions(ownerName)).pipe(

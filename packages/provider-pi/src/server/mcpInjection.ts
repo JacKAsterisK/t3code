@@ -225,9 +225,13 @@ function piT3McpExtensionDestPath(cacheDir: string): string {
   return `${cacheDir.replace(/\\/g, "/")}/${PI_T3_MCP_EXTENSION_FILENAME}`;
 }
 
-/** T3 Code LAN: one session's owner line, beside the extension; see T3_PI_TASK_OWNER_FILE_ENV. */
-export function piTaskOwnerFilePath(cacheDir: string, providerSessionId: string): string {
-  const name = providerSessionId.replace(/[^A-Za-z0-9._-]/g, "_");
+/**
+ * T3 Code LAN: one runtime opening's owner line, beside the extension; see
+ * T3_PI_TASK_OWNER_FILE_ENV. Named per opening, not per session: a session ID can be too long for a
+ * Windows file name, and a reopened runtime must not share the file its closing predecessor removes.
+ */
+export function piTaskOwnerFilePath(cacheDir: string, openingId: string): string {
+  const name = openingId.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64);
   return `${cacheDir.replace(/\\/g, "/")}/pi-task-owner-${name}.txt`;
 }
 

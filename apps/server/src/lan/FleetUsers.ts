@@ -83,6 +83,8 @@ const make = Effect.gen(function* () {
         Effect.orElseSucceed(() => undefined),
       )
     : undefined;
+  // What the cache file holds. It can trail `cache` after a failed save, which the next refresh retries.
+  let persisted = cache;
   const state = yield* SubscriptionRef.make(directoryOf(cache));
 
   const readShare = Effect.fn("FleetUsers.readShare")(function* (rosterPath: string) {
@@ -124,15 +126,19 @@ const make = Effect.gen(function* () {
               : // Unavailable or invalid.
                 kept,
       };
-      if (JSON.stringify(next) !== JSON.stringify(cache)) {
-        yield* writeFleetJson(cacheFile, next).pipe(
+      cache = next;
+      if (JSON.stringify(next) !== JSON.stringify(persisted)) {
+        const saved = yield* writeFleetJson(cacheFile, next).pipe(
           Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.as(true),
           Effect.tapError((cause) =>
-            Effect.logWarning("Fleet users cache could not be saved.", { cause }),
+            Effect.logWarning("Fleet users cache could not be saved; the next refresh retries.", {
+              cause,
+            }),
           ),
-          Effect.ignore,
+          Effect.orElseSucceed(() => false),
         );
-        cache = next;
+        if (saved) persisted = next;
       }
       const updated = directoryOf(cache);
       if (JSON.stringify(updated) !== JSON.stringify(yield* SubscriptionRef.get(state)))

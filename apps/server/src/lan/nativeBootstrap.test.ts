@@ -105,7 +105,24 @@ it.layer(NodeServices.layer)("native fresh-home bootstrap", (it) => {
               .prepare("SELECT name FROM sqlite_master WHERE type='table'")
               .all()) {
               const name = String(row.name);
-              if (
+              if (name === "agent_gateway_compatibility_state") {
+                assert.deepEqual(
+                  db
+                    .prepare("SELECT * FROM agent_gateway_compatibility_state")
+                    .all()
+                    .map((entry) => ({ ...entry })),
+                  [
+                    {
+                      id: 1,
+                      mode: "legacy",
+                      generation: 0,
+                      shadow_reads: 0,
+                      shadow_digest: null,
+                      backup_id: null,
+                    },
+                  ],
+                );
+              } else if (
                 !searchShadows.has(name) &&
                 !["effect_sql_migrations", "orchestration_v2_projection_metadata"].includes(name)
               )
@@ -142,38 +159,89 @@ it.layer(NodeServices.layer)("native fresh-home bootstrap", (it) => {
       }).pipe(Effect.provide(layer)),
   );
 
-  it.effect(
-    "never uses bootstrap to reset existing accepted data, authentication or an environment identity",
-    () =>
-      Effect.gen(function* () {
-        const { request, home, dbPath } = yield* fixture;
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const service = yield* NativeMaintenance.NativeMaintenance;
-        yield* service.bootstrap(request);
-        yield* Effect.sync(() => {
-          const db = new NodeSqlite.DatabaseSync(dbPath);
-          try {
-            db.exec(
-              "CREATE TABLE unrecognized_owner_data(value TEXT); INSERT INTO unrecognized_owner_data VALUES ('preserve me')",
-            );
-          } finally {
-            db.close();
-          }
-        });
-        const before = yield* fs.readFile(dbPath);
-        assert.equal((yield* service.bootstrap(request).pipe(Effect.flip)).reason, "changed");
-        assert.deepEqual(yield* fs.readFile(dbPath), before);
-        yield* fs.writeFileString(
-          path.join(home, "userdata", "environment-id"),
-          "other-environment\n",
-        );
-        assert.equal((yield* service.bootstrap(request).pipe(Effect.flip)).reason, "identity");
-        assert.equal(
-          yield* fs.readFileString(path.join(home, "userdata", "environment-id")),
-          "other-environment\n",
-        );
-      }).pipe(Effect.provide(layer)),
+  it.effect.each([
+    {
+      name: "unknown owner data",
+      mutate:
+        "CREATE TABLE unrecognized_owner_data(value TEXT); INSERT INTO unrecognized_owner_data VALUES ('preserve me')",
+    },
+    { name: "shadow mode", mutate: "UPDATE agent_gateway_compatibility_state SET mode='shadow'" },
+    { name: "adapter mode", mutate: "UPDATE agent_gateway_compatibility_state SET mode='adapter'" },
+    {
+      name: "changed generation",
+      mutate: "UPDATE agent_gateway_compatibility_state SET generation=1",
+    },
+    {
+      name: "shadow progress",
+      mutate: "UPDATE agent_gateway_compatibility_state SET shadow_reads=1",
+    },
+    {
+      name: "shadow evidence",
+      mutate: "UPDATE agent_gateway_compatibility_state SET shadow_digest='existing-evidence'",
+    },
+    {
+      name: "backup identity",
+      mutate: "UPDATE agent_gateway_compatibility_state SET backup_id='existing-backup'",
+    },
+    { name: "missing pristine row", mutate: "DELETE FROM agent_gateway_compatibility_state" },
+    {
+      name: "additional metadata column",
+      mutate:
+        "ALTER TABLE agent_gateway_compatibility_state ADD COLUMN owner_bytes TEXT DEFAULT 'preserve me'",
+    },
+    {
+      name: "event log identity",
+      mutate:
+        "INSERT INTO agent_event_log_state (id,epoch,head_seq,floor_seq) VALUES (1,'existing-epoch',0,1)",
+    },
+    {
+      name: "event fact",
+      mutate:
+        "INSERT INTO agent_event_facts (log_seq,event_id,fact_key,kind,origin_environment_id,origin_generation,source_kind,source_sequence,transition_ordinal,occurred_at,recorded_at,data_json) VALUES (1,'existing-fact','fact-key','run_finished','origin','generation','native',1,0,1,1,'{}')",
+    },
+    {
+      name: "approval authorization",
+      mutate:
+        "INSERT INTO agent_approval_authorizations (session_id,application_id,consent_family_id,initiating_client_id,enabled,updated_at,credential_kind) VALUES ('existing-session','app','family','client',1,1,'local')",
+    },
+    {
+      name: "authentication and OAuth grant",
+      mutate:
+        "INSERT INTO auth_sessions (session_id,subject,scopes,method,issued_at,expires_at) VALUES ('existing-session','owner','[\"orchestration:read\"]','pairing','2026-10-31','2026-11-01'); INSERT INTO auth_mcp_grants (grant_id,client_id,resource,session_id,access,expires_at,renewable) VALUES ('existing-grant','client','resource','existing-session','full-access',1,1)",
+    },
+  ])("never resets accepted $name, authentication or an environment identity", ({ mutate }) =>
+    Effect.gen(function* () {
+      const { request, home, dbPath } = yield* fixture;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      yield* service.bootstrap(request);
+      yield* Effect.sync(() => {
+        const db = new NodeSqlite.DatabaseSync(dbPath);
+        try {
+          db.exec(mutate);
+        } finally {
+          db.close();
+        }
+      });
+      const before = yield* fs.readFile(dbPath);
+      assert.throws(
+        () => NativeMaintenance.assertEmptyBootstrapDatabase(dbPath),
+        /Native maintenance refused \(busy\)\./u,
+      );
+      assert.deepEqual(yield* fs.readFile(dbPath), before);
+      assert.equal((yield* service.bootstrap(request).pipe(Effect.flip)).reason, "changed");
+      assert.deepEqual(yield* fs.readFile(dbPath), before);
+      yield* fs.writeFileString(
+        path.join(home, "userdata", "environment-id"),
+        "other-environment\n",
+      );
+      assert.equal((yield* service.bootstrap(request).pipe(Effect.flip)).reason, "identity");
+      assert.equal(
+        yield* fs.readFileString(path.join(home, "userdata", "environment-id")),
+        "other-environment\n",
+      );
+    }).pipe(Effect.provide(layer)),
   );
 
   it.effect(

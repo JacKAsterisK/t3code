@@ -48,6 +48,8 @@ approval before code or runtime changes.
 - Schema: no new upstream migration in this sync. The fork head is 89; retain
   additive 81–89 and matching home-repair support. Compatibility cutover remains
   an explicit guarded maintenance operation, not a publication side effect.
+  Fresh-home bootstrap accepts only migration 86's exact inert compatibility
+  row; changed metadata, captured facts, grants and unknown data remain refused.
 - Validation: run affected source and mandatory release tests plus one fresh
   Windows build and packaged functional audits. Chrome is skipped by user
   instruction; native mobile inspection and paid model replay remain unrun.

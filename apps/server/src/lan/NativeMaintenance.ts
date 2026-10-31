@@ -237,7 +237,7 @@ function inspectBootstrapHome(request: NativeMaintenanceRequest) {
   safeFile(NodePath.join(home, "userdata", "server-owner.sqlite"));
 }
 
-function assertEmptyBootstrapDatabase(databasePath: string) {
+export function assertEmptyBootstrapDatabase(databasePath: string) {
   if (!NodeFS.existsSync(databasePath)) return;
   safeFile(databasePath);
   const db = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
@@ -283,6 +283,24 @@ function assertEmptyBootstrapDatabase(databasePath: string) {
               entry.projection_name !== "thread-projections" ||
               ![1, 2].includes(Number(entry.schema_version)) ||
               entry.last_sequence !== 0,
+          )
+        )
+          throw new NativeMaintenanceError({ reason: "busy" });
+      } else if (name === "agent_gateway_compatibility_state") {
+        // Migration086 inserts exactly this pristine control row, without user data.
+        // SELECT* also refuses additional columns rather than hiding their bytes.
+        const rows = db.prepare("SELECT * FROM agent_gateway_compatibility_state").all();
+        if (
+          rows.length !== 1 ||
+          rows.some(
+            (entry) =>
+              Object.keys(entry).length !== 6 ||
+              entry.id !== 1 ||
+              entry.mode !== "legacy" ||
+              entry.generation !== 0 ||
+              entry.shadow_reads !== 0 ||
+              entry.shadow_digest !== null ||
+              entry.backup_id !== null,
           )
         )
           throw new NativeMaintenanceError({ reason: "busy" });

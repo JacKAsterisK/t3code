@@ -786,4 +786,7 @@ const make = Effect.gen(function* () {
 });
 
 export const layerServices = Layer.effect(FleetEnrollment, make);
-export const layer = layerServices.pipe(Layer.provide(Vault.layer));
+export const layer = layerServices.pipe(
+  Layer.provide(FleetTransport.layer),
+  Layer.provide(Vault.layer),
+);

@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import {
   EnvironmentId,
   FleetRoster,
@@ -29,9 +30,19 @@ import * as FleetEnrollment from "./FleetEnrollment.ts";
 import * as FleetVault from "./FleetVault.ts";
 import * as Authority from "./FleetAuthority.ts";
 import * as LanFleet from "./LanFleet.ts";
+import * as FleetUsers from "./FleetUsers.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import { FLEET_ROSTER_ENV, WINDOWS_FLEET_SHARE_ROOT } from "./FleetBootstrap.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
+
+vi.mock("./FleetVault.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./FleetVault.ts")>()),
+  layer: Layer.empty,
+}));
+vi.mock("./FleetNetwork.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./FleetNetwork.ts")>()),
+  layer: Layer.empty,
+}));
 
 // Only this in-memory vault and temporary synthetic shares are used; the OS vault is never constructed.
 const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
@@ -107,38 +118,39 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     const launchEnvironment: Record<string, string> = { [FLEET_ROSTER_ENV]: rosterPath };
     let starts = 0;
     let closes = 0;
+    const networkLayer = Layer.succeed(FleetNetwork.FleetNetwork, {
+      addresses: Effect.succeed([name === "alpha" ? "192.168.40.10" : "192.168.40.11"]),
+      listen: (input) =>
+        Effect.sync(() => {
+          starts++;
+          return {
+            httpBaseUrl: "https://" + input.listen.address + ":" + input.listen.port + "/",
+            wsBaseUrl: "wss://synthetic-only/",
+            close: () => {
+              closes++;
+              return Promise.resolve();
+            },
+          };
+        }),
+    });
     const transportLayer = managedTls
       ? FleetTransport.layerServices.pipe(
           Layer.provide(Config.layer(config)),
           Layer.provide(Layer.succeed(FleetVault.FleetVault, vault)),
-          Layer.provide(
-            Layer.succeed(FleetNetwork.FleetNetwork, {
-              addresses: Effect.succeed([name === "alpha" ? "192.168.40.10" : "192.168.40.11"]),
-              listen: (input) =>
-                Effect.sync(() => {
-                  starts++;
-                  return {
-                    httpBaseUrl: `https://${input.listen.address}:${input.listen.port}/`,
-                    wsBaseUrl: "wss://synthetic-only/",
-                    close: () => {
-                      closes++;
-                      return Promise.resolve();
-                    },
-                  };
-                }),
-            }),
-          ),
+          Layer.provide(networkLayer),
         )
       : Layer.empty;
+    let productionEnrollment = false;
     let serverScope = yield* Scope.make();
     yield* Effect.addFinalizer((exit) => Scope.close(serverScope, exit));
     const build = Effect.fn("FleetEnrollmentTest.build")(
       function* () {
         const enrollmentServices = yield* Layer.build(
-          FleetEnrollment.layerServices.pipe(
+          (productionEnrollment ? FleetEnrollment.layer : FleetEnrollment.layerServices).pipe(
+            Layer.provide(networkLayer),
             Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)),
             Layer.provide(Layer.succeed(HostProcess.Platform, platform)),
-            Layer.provide(transportLayer),
+            Layer.provide(productionEnrollment ? Layer.empty : transportLayer),
             Layer.provide(Config.layer(config)),
             Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
             Layer.provide(Layer.succeed(FleetVault.FleetVault, vault)),
@@ -156,9 +168,18 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
         );
         const enrollment = Context.get(enrollmentServices, FleetEnrollment.FleetEnrollment);
         const fleetAccess = Context.get(enrollmentServices, FleetAccessPolicy.FleetAccess);
+        const users = yield* FleetUsers.FleetUsers.pipe(
+          Effect.provide(
+            FleetUsers.layer.pipe(
+              Layer.provide(Config.layer(config)),
+              Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)),
+            ),
+          ),
+        );
         const links = yield* LanFleet.LanFleet.pipe(
           Effect.provide(
             LanFleet.layerServices.pipe(
+              Layer.provide(Layer.succeed(FleetUsers.FleetUsers, users)),
               Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)),
               Layer.provide(Config.layer(config)),
               Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
@@ -198,7 +219,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
             ),
           ),
         );
-        return { enrollment, links, fleetAccess };
+        return { enrollment, links, fleetAccess, users };
       },
       (effect) => Effect.provideService(effect, Scope.Scope, serverScope),
     );
@@ -210,6 +231,12 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
       },
       get links() {
         return services.links;
+      },
+      get users() {
+        return services.users;
+      },
+      useProductionEnrollment: () => {
+        productionEnrollment = true;
       },
       get fleetAccess() {
         return services.fleetAccess;
@@ -281,6 +308,40 @@ const configLayer = Config.ServerConfig.layerTest(process.cwd(), {
 });
 
 it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
+  it.effect(
+    "restores fleet sync and the owner directory when enrollment initializes before routes",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(true, "accessible");
+        yield* f.a.enrollment.configure({
+          operation: "start",
+          confirmed: true,
+          origin: "https://192.168.40.10:4001",
+          managedTls: true,
+          autoPickup: true,
+          access: "standard",
+        });
+        const before = f.a.record()!;
+        const users = [{ id: "dan", name: "Dan", color: "blue" as const }];
+        yield* writeFleetJson(f.path.join(f.root, FleetUsers.FLEET_USERS_FILE), {
+          version: 1,
+          users,
+          machineOwners: { [before.machineId]: "dan" },
+        }).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+        f.a.useProductionEnrollment();
+        yield* f.a.restart;
+        yield* f.sync(f.a, [f.a.environmentId]);
+        assert.equal((yield* f.a.enrollment.status).tlsReady, true);
+        assert.deepEqual(yield* f.a.users.current, {
+          users,
+          machineId: before.machineId,
+          defaultOwnerId: "dan",
+        });
+        assert.deepEqual(f.a.record()!.tls, before.tls);
+        assert.deepEqual(f.a.network(), { starts: 2, closes: 1 });
+      }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("does not replace an enrolled identity when its vault is temporarily missing", () =>
     Effect.gen(function* () {
       const f = yield* fixture(false, "accessible");

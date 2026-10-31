@@ -12,7 +12,9 @@ tunnel):
    provider permission request.
 
 [Native feature sync](native-feature-sync.md) rows 4 and 5 point here. Status:
-**planned, design only.** Nothing below is built. Evidence comes from fork
+**phase 0 built on `lan/agent-events-phase0`, awaiting review and the live wake
+test; phases 1–4 are design only.** [Phase 0 as built](#phase-0-as-built) is
+authoritative where it differs from the design below. Evidence comes from fork
 `main` at `7547aa4a5` (upstream `1854e14d0`), effect `4.0.5`, the task-owner
 work in progress on `lan/task-owners` (read from its worktree, uncommitted on
 2026-10-30), and OpenAI's
@@ -52,6 +54,292 @@ machine separately requires its link to carry `orchestration:approve`.
 Approvals can ship before events. A short transport and wake probe goes first,
 because whether the dot actually wakes on MCP Events is the largest unknown and
 the cheapest to test.
+
+## Phase 0 as built
+
+Everything is behind the per-machine `agentEventsEnabled` server setting (off
+by default). Turning it on needs a restart, because `/mcp` fixes its protocol
+list at startup. Turning it off stops answering `events/*` and stops delivery
+at once.
+
+### What runs
+
+- **Protocol** (`mcp/McpHttpServer.ts` `layerMcpTransport`). With the setting
+  on at startup, `/mcp` registers `2026-07-28` beside `2025-06-18`. Peers and
+  existing clients keep `2025-06-18`.
+- **Endpoint** (`mcp/events/McpEventsEndpoint.ts`). It runs inside the `/mcp`
+  auth middleware, after authentication, the mode-limit check and the
+  links-off refusal. It handles four kinds of request:
+  - `events/list`, `events/subscribe` and `events/unsubscribe` on
+    `2026-07-28`;
+  - the same three methods inside a `2025-06-18` session that this endpoint saw
+    `initialize` create, for the same signed-in session;
+  - `server/discover` (`2026-07-28`) and session `initialize`, whose results
+    effect builds and the endpoint then gains `capabilities.events: {}`. OpenAI
+    documents events on both. An unexpected result shape is logged as a
+    warning and left unpatched.
+
+  Every other request, and every request while the setting is off, reaches
+  effect unchanged.
+
+- **Admission** (`mcp/events/McpEventsAdmission.ts`). An events request is
+  answered only when effect 4.0.5 would admit it if the method were its own:
+  - no browser `Origin`, a JSON `Content-Type`, and an `Accept` that includes
+    both JSON and SSE;
+  - a single JSON-RPC 2.0 request with a string or numeric id;
+  - the version header and the `_meta` protocol claim agree, client
+    capabilities are present, and `Mcp-Method` matches;
+  - effect's own metadata decoder (`McpProtocol.v2026_07_28.runtime.profileFromRequestMetadata`)
+    accepts the metadata.
+
+  It may only be stricter than effect. Everything else, including malformed
+  JSON, batches, notifications, unsupported versions and mismatched headers,
+  goes to effect, which answers with its own error.
+
+- **Who may call.** Outside OAuth clients only. Thread callers
+  (`McpSessionRegistry`), linked peer sessions and task grants get `-32024`.
+  Subscribe also needs the outside-sharing bar (below).
+- **Store** (`agentEvents/AgentEventStore.ts`, migration 081). These are plain
+  SQL functions, so the CLI, a second process on the same WAL database, uses
+  the same code as the server.
+- **Delivery worker** (`agentEvents/AgentEventDelivery.ts`). It polls every
+  second and wakes early after a subscribe.
+  - At most one request is in flight per subscription and four overall, each
+    taking the subscription's lowest due sequence.
+  - The worker owns its sends: a shutdown interrupts them, and a send left
+    `sending` goes again on the next start with the same event id.
+  - It sweeps every 60 seconds, and at once when a session is removed or fleet
+    access changes. It prunes hourly and removes orphaned secret files at
+    startup.
+- **Sender** (`agentEvents/WebhookSender.ts`).
+  - Standard Webhooks headers, and both signatures during a 10-minute rotation
+    overlap.
+  - HTTPS only. Every answer from one DNS lookup must pass
+    `packages/shared/src/publicAddress.ts`, and the socket may connect only to
+    those answers, with the original hostname kept for SNI and the certificate
+    check.
+  - Redirects are never followed; a 3xx is a verification failure
+    (`redirect_refused`) and a retried delivery failure.
+  - A 10-second timeout, and response bodies are capped at 64 KiB.
+  - The dev harness's loopback exception
+    (`T3CODE_AGENT_EVENTS_ALLOW_LOOPBACK_CALLBACKS=1`) is ignored, with a
+    warning, unless the server has a `devUrl`.
+- **CLI** (`cli/agentEvents.ts`):
+  - `t3 agent-events status [--json] [--deliveries N]` lists the log head and
+    floor, then each subscription: state, ended reason, client, session,
+    arguments, redacted callback, `refreshBefore`, cursor, rotation, and its
+    delivery counts. For each recent delivery it shows the event id, sequence,
+    state, attempts, last status and error, and the last and next attempt. No
+    secret, and no callback query string, is ever printed.
+  - `t3 agent-events probe --subscription <sub_…> [--nonce <text>] [--note <text>]`
+    queues one probe event.
+
+### Subscriptions
+
+- **Principal.** The principal is `session:<sessionId>`, the session that the
+  sign-in approved.
+  - Outside OAuth sessions have no refresh, so the session is the whole
+    lineage. A second sign-in of the same app (same deterministic OAuth client
+    id) is a different principal, with its own subscriptions.
+  - A subscription stops when its session is revoked or expires. To renew
+    after re-signing in, the client subscribes again.
+  - Fleet attribution (`attribution_subject`, the session's subject) and the
+    client label are stored beside the principal and never form it. The
+    attribution must still match at delivery time.
+  - Renewable grants are task-only and refused; a non-task grant would own as
+    `grant:<grantId>`.
+- **Outside-sharing gate** (`agentEvents/AgentEventAuthority.ts`). This is
+  checked at subscribe and refresh, before every attempt and by the sweep,
+  always from `SessionStore.listActive` and never from the subscribing
+  request. All of these must hold:
+  - the session is an active bearer MCP-client session;
+  - after `CredentialAccessCap`, it still holds `orchestration:read`;
+  - a fleet-attributed credential also holds `orchestration:operate`, so
+    read-only fleet credentials are refused;
+  - `CredentialAccessCap.administersFleet` is true. That is the bar `ws.ts`
+    `sharingOutside` uses for guest shares and webhook URLs, so exception-only
+    fleet credentials are refused.
+
+  When authority cannot be established, the result fails closed: subscribe
+  returns `-32603` and nothing is stored, and a delivery waits 30 seconds
+  without sending. A refusal at delivery or sweep time makes the subscription
+  `revoked`, drops its queue and deletes its secret.
+
+- **TTL.** The default is 24 hours, bounded to 1 hour–7 days and never past the
+  session's expiry. `ttlMs: null` still gets a finite grant.
+- **Expiry.** Delivery stops exactly at `refreshBefore`, with no grace period.
+  The claim query requires `expires_at > now`, and the time is checked again
+  just before sending.
+  - The sweep marks the subscription `expired` and keeps its queue, so a later
+    subscribe resumes it.
+  - An expired, gone or unsubscribed subscription becomes `active` again when
+    its principal subscribes again.
+- **Secrets.** Each secret gets a fresh flat `ServerSecretStore` name
+  (`agent-events-<hash>-<random>`), so no subdirectory is needed.
+  - Crash safety: the file is written before any row points at it, and files
+    no row names are removed at startup once they are more than 10 minutes
+    old.
+  - A changed secret signs beside the old one for 10 minutes; the old one is
+    then retired and deleted.
+  - Unsubscribe, revocation and 410 delete the secret.
+- **Verification.** Each subscribe sends a fresh single-use 32-byte challenge,
+  signed with the new secret, and compares the echo in constant time. A
+  success is trusted for 24 hours per principal and URL. A 410 clears that
+  trust.
+
+### Events, cursors and the probe
+
+- **One log.** `agent_event_log_state` holds a random epoch, `head_seq` and
+  `floor_seq`. Phase 0's only events are probes (`agent_event_probes`), and
+  each takes its sequence from `head_seq`. Phase 2's facts will take theirs
+  from the same counter, so cursors and the epoch stay valid when facts
+  arrive.
+- **Probes are replayable.**
+  - A probe is a `t3.agent-event/1` envelope with `kind: "probe"`, null
+    `thread`, `run` and `owner`, and `detail { nonce, note, subscriptionId }`.
+    It targets one subscription only.
+  - The body is fixed when the probe is made and stored with its occurrence
+    time, so it survives restarts.
+  - The event id is `eventIdFor("probe", factKey, "1")`, with factKey
+    `probe:<env>:<subscriptionId>:<nonce>`. Re-running the CLI with the same
+    nonce changes nothing.
+- **Body.** `{ eventId, name, timestamp, data, cursor }`, built once by
+  splicing the stored `data` in unchanged; those exact bytes are signed.
+  - `timestamp` is the occurrence time and never changes.
+  - Only `webhook-timestamp` and the signature change between attempts, and
+    they change only when an attempt falls in a later second, since signing
+    times are whole seconds.
+- **Cursors.** A cursor is `c1.<epoch>.<seq>`.
+  - **Watermark.** A subscription's watermark is recomputed each time it is
+    needed, never carried forward: one less than its lowest unfinished
+    (`pending` or `sending`) sequence, or the head when nothing is unfinished.
+    A delivery body's `cursor` is capped the same way, so it never passes an
+    earlier event that is still retrying.
+  - **`cursor: null`.** The watermark is the head, and nothing is replayed.
+  - **Same epoch.** Events after the cursor are requeued. Delivered ones are
+    requeued too when the cursor is below the watermark (the client lost
+    them), or the subscription is new or from another epoch. The returned
+    cursor is then recomputed, so it falls back below the requeued events.
+  - **Another epoch, or below `floor_seq - 1`.** What is retained is replayed,
+    with `truncated: true`.
+  - **Ahead of the head.** The call fails with `-32602`.
+- **Retention.** Logged events go after 14 days or 50,000 sequences, but never
+  while a delivery for them is unfinished; the floor rises past each pruned
+  sequence. Finished deliveries, ended subscriptions and verifications go
+  after 7 days, 7 days and 24 hours.
+- **Responses.**
+
+  | Callback answer                                  | Result                                                                                      |
+  | ------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+  | 2xx                                              | `delivered`                                                                                 |
+  | 410                                              | The subscription is `gone`: queue dropped, secret and verification removed, nothing retried |
+  | 413                                              | That event is `rejected`, never retried                                                     |
+  | 429                                              | Retried after `Retry-After` (seconds or a date, kept to 5 s–8 h)                            |
+  | Anything else, a network or TLS error, a timeout | Retried at 5 s, 30 s, 2 min, 10 min, 30 min, 1 h, 2 h, 4 h, then every 8 h, ±20%            |
+
+  An event still failing 48 hours after it was queued is `abandoned`. A body
+  over 256 KiB is `rejected` without being sent.
+
+### Running the live wake test (L0–L2)
+
+On BuildMachine only, with Dan:
+
+1. Install the phase 0 build. Set `"agentEventsEnabled": true` in that
+   machine's server settings, then restart T3.
+2. **L0.** In ChatGPT, rescan the T3 Code app. Pass when the plugin page lists
+   `t3.task_activity` and the server log shows `server/discover` or
+   `initialize` and `events/list`.
+3. **L1.** Dan asks the dot, in a fresh chat, to "watch T3 for anything that
+   needs me". On BuildMachine, run `t3 agent-events status`. Pass when it shows
+   one `active` subscription for `t3.task_activity` `{}` from the dot's
+   client, with a `refreshBefore` in the future. (The callback was verified,
+   or the subscription would not exist.) Note its `sub_…` id.
+4. **L2.** After at least 30 minutes of chat idle, run:
+
+   ```sh
+   t3 agent-events probe --subscription <sub_…> --nonce <random-word>
+   ```
+
+   Then run `t3 agent-events status` until the probe's delivery shows
+   `delivered` with last status 2xx, and record the time.
+
+   Pass when the dot posts in that chat, unprompted, quoting the nonce.
+   Record the latency from the `queuedAt` time to the dot's message. Repeat
+   once with a new nonce.
+
+5. If the dot does not wake but the delivery shows 2xx, ChatGPT received the
+   event and did not wake on it: stop and revisit the plan with Dan. If the
+   delivery keeps retrying, `status` shows the last HTTP status or error
+   (`address_refused`, `tls_error`, `timeout`, `http_<n>`).
+
+Use `--base-dir` (or `--dev-url`) on both commands when the server's home is
+not the default. The probe never touches a thread or an agent.
+
+### Divergences from the design below
+
+- **Subscription table.** It is keyed and owned by the session principal, not
+  by `mcpClientSubject` plus `client_id` (review item 5). A re-sign-in does not
+  keep a subscription.
+- **Deliveries.** `agent_event_deliveries` references log sequences. Phase 0
+  logs only probes, in `agent_event_probes`, which phase 2 extends to facts
+  under the same sequence counter. The design's 083 `agent_event_log_state`
+  moves into 081, with `head_seq` added.
+- **Expiry.** Delivery stops at `refreshBefore` itself, not ten minutes after.
+- **Status tool.** The diagnostic is the `t3 agent-events status` CLI. The
+  `t3_agent_events` MCP status tool stays in phase 2.
+- **Events on `2025-06-18`.** Events are also served inside `2025-06-18`
+  sessions and advertised on `initialize`, because OpenAI documents both.
+- **Unknown cursor.** A malformed cursor or an unknown cursor version is
+  `-32602`.
+
+### Review changes
+
+These are the changes made for the design review (Astra ultra):
+
+1. **Transport admission.**
+   - `events/*` are no longer intercepted before effect's checks. The
+     admission reproduces effect's Origin, media-type, JSON-RPC, version,
+     metadata, capability and routing-header checks, and calls effect's own
+     metadata decoder. Anything it does not admit reaches effect unchanged.
+   - A parity matrix in `McpEventsEndpoint.test.ts` pins, for 19 request
+     variants, that `events/list` is admitted exactly when effect admits
+     `tools/list`. Every rejection must equal effect's answer for an unknown
+     method, byte for byte. The variants include missing or conflicting
+     metadata and routing headers, malformed JSON, batches, notifications,
+     unsupported versions and browser Origins.
+   - Both protocols are tested.
+   - A pin test fails if effect starts advertising or routing events itself.
+   - Discovery with an unexpected shape logs a diagnostic.
+   - `FleetMcpOrigin` is untouched, and no forwarded header is trusted.
+2. **Outside-sharing gate.** The `administersFleet` bar from `ws.ts`
+   `sharingOutside` applies at subscribe, refresh, every attempt and every
+   sweep. Read-only and exception fleet credentials are refused, and the gate
+   fails closed.
+3. **Expiration and replay.**
+   - Delivery stops exactly at expiry.
+   - The occurrence `timestamp` is immutable; only the signing time changes.
+   - Cursors are recomputed after a replay, so a replay below the watermark
+     returns a lower cursor.
+   - A pending payload is kept while a delivery references it.
+   - A cursor ahead of the head is refused.
+4. **A complete phase 0.**
+   - The probe body is durable in `agent_event_probes`, and probes are
+     replayable with non-null cursors.
+   - The expiry and revocation sweeps run in phase 0.
+   - `t3 agent-events status` provides the diagnostics, with no secrets.
+   - Secrets use flat names, crash-safe rotation and orphan cleanup.
+   - Auth and registration edits are limited to one middleware hook and the
+     protocol list in `McpHttpServer.ts`, plus the layer in `server.ts`. No
+     `auth/` file changed.
+5. **Principal.** Ownership is the approving session, kept separate from fleet
+   attribution and app identity. A second sign-in of the same app gets its own
+   subscriptions, and revoking the session stops delivery.
+6. **SSRF tests.** Real-socket tests cover:
+   - the address actually reached;
+   - mixed public and private answers;
+   - IPv4-mapped, NAT64 and ULA forms;
+   - DNS rebinding (exactly one lookup, connecting to the checked address);
+   - TLS hostname checks and redirect refusal.
 
 ## Findings
 
@@ -275,7 +563,8 @@ migration lands first. Every new migration must also:
   are additive.
 
 Webhook secrets never enter `statev2.sqlite`. They live in `ServerSecretStore`
-under `agent-events/<subscriptionId>[/previous]`, in the `userdata/secrets`
+under flat `agent-events-<hash>-<random>` names (phase 0 as built; the store
+creates only its root directory), in the `userdata/secrets`
 tree that home repair already preserves.
 
 ```sql

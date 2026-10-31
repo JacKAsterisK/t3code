@@ -60,6 +60,14 @@ approval before code or runtime changes.
 - Fork migration 80 `ScheduledTaskOwner` (task owners, row 14) has no upstream
   counterpart; the next upstream migration takes the number after the fork's
   head.
+- Fork migration 81 `AgentEventSubscriptions` (MCP Events phase 0, rows 4–5,
+  [design](agent-events-and-approvals.md)) adds only delivery-state tables
+  (`agent_event_log_state`, `agent_event_subscriptions`, `agent_event_probes`,
+  `agent_event_deliveries`, `agent_event_callback_verifications`). They are not
+  work: `workGeneration` hashes named tables only, so rows in them never change
+  it, and the migration writes no row. Webhook secrets live in the preserved
+  `userdata/secrets` tree as flat `agent-events-*.bin` files, never in
+  `statev2.sqlite`.
 
 ## Summary
 

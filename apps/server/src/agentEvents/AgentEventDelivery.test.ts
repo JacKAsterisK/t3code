@@ -178,7 +178,170 @@ describe("delivery schedule", () => {
   });
 });
 
+// Pause the real SQL transaction at an explicit service boundary to force worker interleavings.
+const pauseTransaction = (
+  sql: SqlClient.SqlClient["Service"],
+  spanName: string,
+  before: Effect.Effect<unknown>,
+  after: Effect.Effect<unknown> = Effect.void,
+) => {
+  let held = false;
+  return new Proxy(sql, {
+    get(target, property, receiver) {
+      if (property !== "withTransaction") return Reflect.get(target, property, receiver);
+      return <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        Effect.gen(function* () {
+          const span = yield* Effect.option(Effect.currentSpan);
+          const intercept = !held && span._tag === "Some" && span.value.name === spanName;
+          if (intercept) {
+            held = true;
+            yield* before;
+          }
+          const result = yield* sql.withTransaction(effect);
+          if (intercept) yield* after;
+          return result;
+        });
+    },
+  });
+};
+
 describe("AgentEventDelivery worker", () => {
+  it.effect("immediate cleanup cannot overlap queued recovery of the same claim", () =>
+    run(() =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* subscribeRow();
+          yield* probe("t3e1_a");
+          const sql = yield* SqlClient.SqlClient;
+          const secrets = yield* ServerSecretStore.ServerSecretStore;
+          const cleanupStarted = yield* Deferred.make<void>();
+          const resumeCleanup = yield* Deferred.make<void>();
+          const started = yield* Deferred.make<void>();
+          let reads = 0;
+          let sends = 0;
+          let active = 0;
+          const delayedSql = pauseTransaction(
+            sql,
+            "AgentEventStore.finishAttempt",
+            Deferred.succeed(cleanupStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(resumeCleanup)),
+            ),
+          );
+          const transport = WebhookTransport.of({
+            post: () =>
+              Effect.sync(() => {
+                sends += 1;
+                active += 1;
+              }).pipe(
+                Effect.andThen(Deferred.succeed(started, undefined)),
+                Effect.andThen(Effect.never),
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    active -= 1;
+                  }),
+                ),
+              ),
+          });
+          yield* Layer.build(AgentEventDelivery.layer).pipe(
+            Effect.provideService(SqlClient.SqlClient, delayedSql),
+            Effect.provideService(WebhookTransport, transport),
+            Effect.provideService(ServerSecretStore.ServerSecretStore, {
+              ...secrets,
+              get: (name) =>
+                Effect.suspend(() =>
+                  ++reads === 1
+                    ? Effect.fail(
+                        new ServerSecretStore.SecretStoreReadError({
+                          resource: "test event secret",
+                          cause: new Error("injected read failure"),
+                        }),
+                      )
+                    : secrets.get(name),
+                ),
+            }),
+          );
+          yield* Effect.gen(function* () {
+            yield* Deferred.await(cleanupStarted);
+            yield* TestClock.adjust("31 seconds");
+            assert.strictEqual((yield* deliveryOf("t3e1_a")).state, "sending");
+            assert.strictEqual(sends, 0);
+            yield* Deferred.succeed(resumeCleanup, undefined);
+            yield* TestClock.adjust("1 second");
+            yield* Deferred.await(started);
+            yield* TestClock.adjust("1 second");
+            assert.strictEqual(sends, 1);
+            assert.strictEqual(active, 1);
+            assert.strictEqual((yield* deliveryOf("t3e1_a")).state, "sending");
+          }).pipe(Effect.ensuring(Deferred.succeed(resumeCleanup, undefined)));
+        }),
+      ),
+    ),
+  );
+
+  it.effect("disable releases a claim acquired concurrently before asynchronous attempt work", () =>
+    run(() =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* subscribeRow();
+          yield* probe("t3e1_a");
+          const sql = yield* SqlClient.SqlClient;
+          const settings = yield* ServerSettings.ServerSettingsService;
+          const claiming = yield* Deferred.make<void>();
+          const resumeClaim = yield* Deferred.make<void>();
+          const claimed = yield* Deferred.make<void>();
+          const observed = yield* Deferred.make<void>();
+          const handled = yield* Deferred.make<void>();
+          const changes = yield* Queue.unbounded<Settings>();
+          const stream = Stream.fromQueue(changes).pipe(
+            Stream.flatMap((current) =>
+              Stream.concat(
+                Stream.fromEffect(Deferred.succeed(observed, undefined).pipe(Effect.as(current))),
+                Stream.fromEffectDrain(Deferred.succeed(handled, undefined)),
+              ),
+            ),
+          );
+          let attemptChecks = 0;
+          const authority = AgentEventAuthority.AgentEventAuthority.of({
+            check: () =>
+              Effect.gen(function* () {
+                const span = yield* Effect.option(Effect.currentSpan);
+                if (span._tag === "Some" && span.value.name === "AgentEventDelivery.attempt") {
+                  attemptChecks += 1;
+                  return yield* Effect.never;
+                }
+                return allowed();
+              }),
+          });
+          const delayedSql = pauseTransaction(
+            sql,
+            "AgentEventStore.claimDue",
+            Deferred.succeed(claiming, undefined).pipe(Effect.andThen(Deferred.await(resumeClaim))),
+            Deferred.succeed(claimed, undefined).pipe(Effect.asVoid),
+          );
+          yield* Layer.build(AgentEventDelivery.layer).pipe(
+            Effect.provideService(SqlClient.SqlClient, delayedSql),
+            Effect.provideService(AgentEventAuthority.AgentEventAuthority, authority),
+            Effect.provideService(ServerSettings.ServerSettingsService, {
+              ...settings,
+              subscribeChanges: Effect.succeed(stream),
+            }),
+          );
+          yield* Effect.gen(function* () {
+            yield* Deferred.await(claiming);
+            const current = yield* settings.updateSettings({ agentEventsEnabled: false });
+            yield* Queue.offer(changes, current);
+            yield* Deferred.await(observed);
+            yield* Deferred.succeed(resumeClaim, undefined);
+            yield* Deferred.await(claimed);
+            yield* Deferred.await(handled);
+            assert.strictEqual((yield* deliveryOf("t3e1_a")).state, "pending");
+            assert.strictEqual(attemptChecks, 0);
+            assert.strictEqual((yield* deliveryOf("t3e1_a")).attempts, 0);
+          }).pipe(Effect.ensuring(Deferred.succeed(resumeClaim, undefined)));
+        }),
+      ),
+    ),
+  );
   it.effect.each(["disable", "shutdown"] as const)(
     "%s cancels worker sends and releases their claims",
     (stop) =>

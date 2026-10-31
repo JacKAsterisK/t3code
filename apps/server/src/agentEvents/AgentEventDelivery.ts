@@ -14,6 +14,7 @@ import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
@@ -395,12 +396,25 @@ export const layer = Layer.effect(
         return next;
       });
     });
+    const releaseOrQueue = Effect.fn("AgentEventDelivery.releaseOrQueue")(function* (
+      claim: Cleanup,
+    ) {
+      yield* releaseClaim(claim).pipe(
+        Effect.catchCause((cause) =>
+          // Only the tick owns queued cleanup; an immediate release must finish before publishing it.
+          Ref.update(cleanup, (waiting) => new Map(waiting).set(claim.subscriptionId, claim)).pipe(
+            Effect.andThen(Effect.logWarning("Agent events claim cleanup failed.", { cause })),
+          ),
+        ),
+      );
+    });
     const retryCleanup = Effect.gen(function* () {
       for (const claim of (yield* Ref.get(cleanup)).values())
         yield* releaseClaim(claim).pipe(quietly("claim cleanup"));
     }).pipe(Effect.provide(context));
     yield* Effect.addFinalizer(() => retryCleanup);
     const sends = yield* FiberSet.make<void>();
+    const handoff = yield* Semaphore.make(1);
     const send = (claim: Claim) =>
       attempt(claim).pipe(
         Effect.onExit((exit) =>
@@ -412,10 +426,7 @@ export const layer = Layer.effect(
                   ...claim,
                   nextAttemptAt: now + (Exit.hasInterrupts(exit) ? 0 : UNAVAILABLE_RETRY_MS),
                 };
-                yield* Ref.update(cleanup, (waiting) =>
-                  new Map(waiting).set(claim.subscriptionId, pending),
-                );
-                yield* releaseClaim(pending).pipe(quietly("claim cleanup"));
+                yield* releaseOrQueue(pending);
               }),
         ),
         Effect.ensuring(
@@ -426,23 +437,38 @@ export const layer = Layer.effect(
         Effect.provide(context),
         quietly("delivery"),
       );
-    const tick = Effect.uninterruptibleMask((restore) =>
-      Effect.gen(function* () {
-        yield* retryCleanup;
-        if (!(yield* enabled)) return;
-        const now = yield* Clock.currentTimeMillis;
-        yield* Store.expireDue(now);
-        const free = MAX_IN_FLIGHT - (yield* Ref.get(inFlight));
-        const claims = yield* Store.claimDue(now, free);
-        yield* Ref.update(inFlight, (count) => count + claims.length);
-        for (const claim of claims) yield* FiberSet.run(sends, restore(send(claim)));
-      }),
-    ).pipe(Effect.provide(context), quietly("worker"));
+    // Disable cannot clear the fiber set between claiming rows and registering their sends.
+    const tick = handoff
+      .withPermit(
+        Effect.uninterruptibleMask((restore) =>
+          Effect.gen(function* () {
+            yield* retryCleanup;
+            if (!(yield* enabled)) return;
+            const now = yield* Clock.currentTimeMillis;
+            yield* Store.expireDue(now);
+            const free = MAX_IN_FLIGHT - (yield* Ref.get(inFlight));
+            const claims = yield* Store.claimDue(now, free);
+            if (!(yield* enabled)) {
+              yield* Effect.forEach(
+                claims,
+                (claim) => releaseOrQueue({ ...claim, nextAttemptAt: now }),
+                {
+                  discard: true,
+                },
+              );
+              return;
+            }
+            yield* Ref.update(inFlight, (count) => count + claims.length);
+            for (const claim of claims) yield* FiberSet.run(sends, restore(send(claim)));
+          }),
+        ),
+      )
+      .pipe(Effect.provide(context), quietly("worker"));
     yield* Effect.forkScoped(
       Stream.runForEach(settingsChanges, (current) =>
-        (current.agentEventsEnabled ? Effect.void : FiberSet.clear(sends)).pipe(
-          Effect.andThen(Queue.offer(wakeups, undefined)),
-        ),
+        handoff
+          .withPermit(current.agentEventsEnabled ? Effect.void : FiberSet.clear(sends))
+          .pipe(Effect.andThen(Queue.offer(wakeups, undefined))),
       ),
     );
 

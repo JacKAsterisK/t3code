@@ -129,9 +129,9 @@ describe("buildGrokModelCapabilities", () => {
         type: "select",
         currentValue: "medium",
         options: [
-          { id: "xhigh", label: "Extra High Effort", isDefault: true },
-          { id: "high", label: "High Effort" },
           { id: "medium", label: "Medium Effort" },
+          { id: "high", label: "High Effort" },
+          { id: "xhigh", label: "Extra High Effort", isDefault: true },
         ],
       },
     ]);
@@ -189,7 +189,8 @@ describe("buildGrokModelCapabilities", () => {
   });
 });
 
-it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
+// Persistent ACP subprocess cleanup uses real deadlines.
+it.layer(NodeServices.layer, { excludeTestServices: true })("checkGrokProviderStatus", (it) => {
   it.effect("reports an installed CLI as unhealthy when --version exits non-zero", () =>
     Effect.gen(function* () {
       const secretStderr = "broken grok install: secret-token-value";

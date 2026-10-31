@@ -1438,15 +1438,22 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
           ELECTRON_RUN_AS_NODE: "1",
           T3_ACP_CGROUP_WRAPPER: "1",
         };
+  // A detached Windows console makes cmd.exe lose the piped ACP input.
+  const detached =
+    options.ownDetachedProcessGroup === undefined
+      ? undefined
+      : options.ownDetachedProcessGroup &&
+        !(
+          containedSpawnCommand.shell &&
+          (options.processGroupPlatform ?? (yield* HostProcess.Platform)) === "win32"
+        );
   const child = yield* spawner
     .spawn(
       ChildProcess.make(containedSpawnCommand.command, containedSpawnCommand.args, {
         ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
         ...(spawnEnvironment ? { env: spawnEnvironment } : {}),
         extendEnv: options.spawn.extendEnv ?? true,
-        ...(options.ownDetachedProcessGroup === undefined
-          ? {}
-          : { detached: options.ownDetachedProcessGroup }),
+        ...(detached === undefined ? {} : { detached }),
         shell: containedSpawnCommand.shell,
       }),
     )

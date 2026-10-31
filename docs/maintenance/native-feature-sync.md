@@ -9,8 +9,8 @@ approval before code or runtime changes.
 ## Baseline
 
 - Upstream: `pingdotgg/t3code` `main` at
-  `54c5f25249961a1aa0b61932329092eadbd9d6fc` (2026-10-31), confirmed current
-  on `lan/release-1.0.30-20261031`. It is already merged through LAN 1.0.29.
+  `575579d68ac4bae09f8426a345d4a3eac1e90c67` (2026-10-31), merged on
+  `lan/release-1.0.30-20261031`. This adds one upstream commit after LAN 1.0.29.
   App, server, desktop and contracts remain upstream 0.1.6; the fork schema is 90.
 - Previous shipping release: T3 Code LAN 1.0.29, fork
   `b354a2d6c04350a06afd7316efdabebb235116e7`, published with its full
@@ -22,6 +22,16 @@ approval before code or runtime changes.
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
 
 ## LAN 1.0.30 sync decisions
+
+- Rows 2 and 6: Windows ACP shell launches keep piped input rather than creating
+  a detached console. Preserve the requested process-tree ownership and teardown;
+  direct executables and POSIX groups keep their existing detachment. Persistent
+  provider probe fixtures use real clocks so transport deadlines are observable.
+
+- Row 8: adopt the native model/effort picker layout fix, additive reasoning-role
+  metadata and ordered Grok effort choices. Keep machine grouping, task owners
+  and stored model/agent choices unchanged. Existing browser and provider cases
+  cover the native controls; the user-skipped manual Chrome check stays skipped.
 
 - Rows 6 and 12: retain the native runtime and access contracts. Correct the
   Windows verification fixtures to use native launcher shims, real directory

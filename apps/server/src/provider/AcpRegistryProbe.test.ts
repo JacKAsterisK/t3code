@@ -229,6 +229,7 @@ describe("ACP Registry probe", () => {
           { id: "medium", label: "Medium" },
           { id: "high", label: "High" },
         ],
+        role: "reasoning",
       },
     ]);
   });
@@ -318,7 +319,7 @@ describe("ACP Registry probe", () => {
     });
   });
 
-  it.effect("lists native sessions and logs out through generic ACP lifecycle methods", () => {
+  it.live("lists native sessions and logs out through generic ACP lifecycle methods", () => {
     const catalog = AcpRegistrySupport.AcpRegistryCatalog.of({
       search: () => Effect.die("unused search"),
       prepare: () => Effect.die("unused prepare"),

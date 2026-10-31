@@ -101,6 +101,11 @@ Each turn tells the task's agent who manages it, for example
 next restarts; a Pi session at its next turn. `t3_thread_read` and `t3_thread_list` results include `ownerId`
 and `ownerName`.
 
+Pi reads its line from a small `pi-task-owner-<random>.txt` file in the provider
+cache folder, one per session start, removed when that session closes. A hard crash
+skips that cleanup and leaves the file behind; nothing reads it again, and it is
+safe to delete.
+
 ## Who can change an owner
 
 Setting an owner is the one write a read-only session may make. Any

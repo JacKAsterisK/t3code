@@ -351,7 +351,9 @@ CREATE TABLE agent_approval_receipts (
   provider_generation TEXT NOT NULL, presentation_digest TEXT NOT NULL,
   decision TEXT NOT NULL, effective_scope TEXT NOT NULL, grant_digest TEXT NOT NULL,
   command_id TEXT NOT NULL, state TEXT NOT NULL,
-  -- prepared|committed|delivered|refused|delivery_failed|delivery_unknown
+  -- prepared|committed|delivery_admitted|response_written|provider_acknowledged
+  -- refused|delivery_withheld|delivery_failed|delivery_unknown
+  delivery_evidence_json TEXT, delivery_admitted_revision INTEGER,
   authority_revision INTEGER NOT NULL, actor_json TEXT NOT NULL,
   via_environment_id TEXT, upstream_receipt_id TEXT,
   result_sequence INTEGER, failure_code TEXT,
@@ -416,7 +418,8 @@ expiry/replay implementation. Phase 2 extends its recomputed watermark and
 ahead-of-head rejection to facts; occurrence timestamps remain fixed.
 
 Approval audit is independent: retain full terminal receipts 90 days.
-Never prune a prepared, committed-with-pending-delivery or uncertain receipt.
+Never prune a prepared, committed-with-pending-delivery, delivery-admitted
+or uncertain receipt.
 Retain compact retry-key/operation/command/incarnation tombstones until the
 issuing authorization and every expressly linked replacement are revoked or
 expired and native delivery has settled. A retired tombstone can never name
@@ -596,6 +599,15 @@ marked with its original observation time. Confirmed absence, never-read and
 unknown-user states are explicit. A machine default is informational and
 never overwrites a historical unassigned owner.
 
+Phase 2 first extends `lan/FleetUsers.ts` with a separate observation feed:
+`{ status: fresh|unavailable|invalid|absent|never_read, observedAt,
+observationGeneration, directoryDigest?, lastGoodObservedAt? }`. Emit every
+refresh outcome, including unchanged successful reads and failed reads that
+retain last-good values. Existing `current/changes` expose values only and
+cannot establish freshness (`FleetUsers.ts:44`, `:109-145`). Persist the
+observation feed before binding its generation to source commitment; reading
+the share or waiting for it never happens inside an EventSink transaction.
+
 Phase 2 adds `agentEvents/AgentEventOwnerJournal.ts`: snapshot each accepted
 `FleetUsers` directory observation with a persisted generation/digest and
 bind that generation to source events **at source commitment**, inside the
@@ -640,7 +652,17 @@ schema, not arbitrary unvalidated input. Never infer scope from button text,
 `requestKind` or the provider's reason. Retain the complete permission
 payload in the authoritative request/event; sanitize secrets, not
 authorization-relevant fields. If safe presentation cannot describe the
-whole grant, refuse MCP accept. Event previews may truncate text but
+whole grant, refuse MCP accept. Capture and validate the original native
+request **before lossy schema decoding**. For the initial Codex profile,
+`effect-codex-app-server/src/client.ts` validates a recursively closed,
+versioned raw profile at `dispatchRequest`, before `decodeOptionalPayload`
+in `_internal/shared.ts` can discard excess properties. Preserve the raw
+request plus supported/unsupported validation evidence with its binding;
+unknown keys at any permission/network/filesystem nesting make it app-only.
+Do not change unrelated native decoding globally or hash a stripped object
+as proof that the original authority was fully presented. Unsupported raw
+shapes retain a safe bounded app presentation without authorizing MCP replies.
+Event previews may truncate text but
 `read` must return the full safe grant (or `ui_only: incomplete_grant`).
 
 `approvalPresentationDigest` hashes canonical, versioned JSON containing
@@ -967,11 +989,17 @@ not accidentally route through the generic thread toolkit.
 
 A receipt result is
 `{ receiptId, commandId, state, replayed, decision, effectiveScope,
-sequence?, failureCode? }`. `committed` means native acceptance and the
-response effect are durable. `delivered` means the adapter acknowledged
-the response; neither claims the tool finished executing. `prepared` or
-`delivery_unknown` explicitly means pending/uncertain, never submitted.
-Exact retry returns the same operation/receipt and its latest state.
+sequence?, failureCode?, deliveryEvidence? }`. `committed` means the native
+resolution and response effect are durable, with no claim of transmission.
+`delivery_admitted` names the irreversible handoff authorization boundary.
+`response_written` means a command-bound native response write completed;
+`provider_acknowledged` is available only for an explicit correlated peer
+acknowledgment. Neither means the tool executed. Codex has no such peer
+acknowledgment for JSON-RPC responses, so Phase 1 reports `response_written`.
+Resolving an in-memory deferred or inserting into an outgoing queue never
+counts as a completed write. `prepared`, `committed` and `delivery_admitted`
+remain visibly pending; `delivery_unknown` is uncertain. Exact retry returns
+the same operation/receipt and its latest state.
 
 Refusal codes extend `OrchestratorMcpFailure` in
 `packages/contracts/src/orchestratorMcp.ts`: `approvals_not_granted`,
@@ -993,23 +1021,31 @@ protocol tests for supported rows. Missing/unknown payload or scope remains
 `ui_only`. For every accept, bind the selected native reply and full
 authorization-bearing input to the digest.
 
-| Provider/request                                                            | Actual accept and lifetime                                                                                                                                                                         | Phase 1 behavior and required presentation                                                                                                                                                                                                                               |
-| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Codex `item/commandExecution/requestApproval`, legacy `execCommandApproval` | Native `accept` / legacy `approved`; does not enter T3's session allowance. `acceptForSession` and `acceptAlways` do.                                                                              | Support request-once only when the native contract is known. Show full command/argv, cwd, requested execution/network/filesystem authority and policy-amendment proposal; do not use `reason ?? command` as the permission. No amendment/session choice.                 |
-| Codex `item/fileChange/requestApproval`, legacy `applyPatchApproval`        | Native `accept` / `approved` for the proposed change; session choices widen T3's file-change allowance.                                                                                            | Support once with the complete proposed changes, paths, grant root and relevant native parameters. Missing tracked changes => incomplete grant/app-only.                                                                                                                 |
-| Codex `item/permissions/requestApproval`                                    | Returns the **whole** requested permissions with `scope: "turn"`; decline returns empty permissions.                                                                                               | Support `effectiveScope: "turn"` only with explicit per-request turn consent and full filesystem read/write paths, network fields and any future decoded permission fields. Plain “approve once” is refused. Never infer from mapped command/file-read/file-change kind. |
-| Codex `mcpServer/elicitation/request`                                       | Form accept uses `toMcpElicitationResponse`; no requested persistence. URL accept maps to decline (normally rejected before a card).                                                               | Support only representable nonpersistent form acceptance. Show app/server, request/schema and exact generated content, including defaults. If no true nonpersistent option exists, or persistence is ambiguous, app-only. URL/forms needing user data stay app-only.     |
-| Claude `canUseTool`                                                         | `behavior: "allow"` with exact `updatedInput`, `user_temporary`; once adds no `updatedPermissions`. Session choice adds permission updates.                                                        | Support once; show actual tool name and effective input, not its title. Session/disk rules are excluded. `fullAccessOverride: "ask_rule"` stays app-only, including decline.                                                                                             |
-| Claude MCP elicitation                                                      | Supported form path reuses the Codex elicitation acceptance helper; unsupported/URL forms are declined.                                                                                            | Same representability/nonpersistence requirement; exact generated form content is part of the grant.                                                                                                                                                                     |
-| ACP command permission                                                      | `allow_once` is selected, **and** `makeAcpClientPolicyGrants.recordApproval` enables command execution for the remainder of that provider turn. ACP cannot bind the grant to one terminal command. | Support explicit turn consent only. Show the requested tool call and the broader permission to execute additional commands in that turn; expiry names the provider turn.                                                                                                 |
-| ACP file read/change and other known permission kinds                       | Selects offered `allow_once`; T3's extra client-policy execution grant applies only to command kind. `allow_always` may persist beyond a session.                                                  | Support once only for a verified flavor/request profile with complete tool call, locations, inputs and native options. Unknown kinds, missing `allow_once` or unverifiable provider semantics stay app-only. Never fall back to `allow_always`.                          |
-| Antigravity, Grok, Fx, ACP registry agents                                  | Use the shared ACP adapter, with flavor-specific classification and question extraction.                                                                                                           | Inherit the ACP command turn grant and verified file profiles. Questions extracted from permission requests remain questions. New registry providers default unsupported until profiled; no inference from a familiar name.                                              |
-| Pi extension `confirm`                                                      | Sends `confirmed: true` once; `acceptForSession` adds a title/message-based T3 session grant. The arbitrary extension decides what true means.                                                     | Default app-only: a prompt is not proof of permission scope. Only a verified extension profile describing the action, input and lifetime can expose once. Other extension UI methods are questions.                                                                      |
-| OpenCode v1                                                                 | `accept` maps to `permission.reply(..., reply: "once")`; both session/always map to native `always`.                                                                                               | Support only a verified version/profile whose native once semantics are known, with permission, patterns/resources, metadata and request/session identity shown. Unknown coalescing or persistence => app-only. Never send `always`.                                     |
-| OpenCode v2                                                                 | Native reply `decision: "once"`; session/always additionally persist T3 rules for the asking subagent's project.                                                                                   | Same verified-once gate; show action/resources/save proposals and asking session/project. Accept writes no standing rules. Decline may send a steer and reject; disclose that effect.                                                                                    |
-| Muse                                                                        | Sends the selected native `choiceId` and `currentRequirementId`. Decision names alone do not establish scope: an `approved` choice can have a different scope. Decline may map to abort.           | Support only an offered choice with explicit `scope: "once"`, complete subject/raw args/requirement revision and no amendment. Show abort semantics when that is the offered decline. Session/localPersistent and unknown scopes stay app-only.                          |
-| Cursor SDK                                                                  | No interactive approval callback; `respondToRuntimeRequest` returns unsupported.                                                                                                                   | App-only/unsupported, never synthesize a native permission request.                                                                                                                                                                                                      |
-| Future/other adapters                                                       | Unspecified.                                                                                                                                                                                       | Deny MCP accept until an explicit provider profile and protocol-effect tests exist.                                                                                                                                                                                      |
+**Initial Phase 1 support is local Codex `item/permissions/requestApproval`
+only**, for a verified raw native version/profile, with exact turn consent
+and both accept/decline through the guarded service. All other profiles are
+app-only initially. The matrix records conditions for later support, not
+permission to enable them in this implementation. A nonpersistent Chrome
+elicitation profile needs its own verified reply/lifetime tests before a
+later enablement; it is not inferred from form labels or defaults.
+
+| Provider/request                                                            | Actual accept and lifetime                                                                                                                                                                         | Profile requirements (permissions row only in initial Phase 1)                                                                                                                                                                                                                                                       |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Codex `item/commandExecution/requestApproval`, legacy `execCommandApproval` | Native `accept` / legacy `approved`; does not enter T3's session allowance. `acceptForSession` and `acceptAlways` do.                                                                              | App-only initially. Later profile requirements: Support request-once only when the native contract is known. Show full command/argv, cwd, requested execution/network/filesystem authority and policy-amendment proposal; do not use `reason ?? command` as the permission. No amendment/session choice.             |
+| Codex `item/fileChange/requestApproval`, legacy `applyPatchApproval`        | Nonempty `grantRoot` requests session-wide root writes with uncertain native semantics (`schema.gen.ts:49278`, `:47113`); native accept does not narrow it.                                        | App-only initially and always app-only for nonempty `grantRoot`, for both methods. Rootless support additionally requires verified complete proposed changes and native lifetime; never classify a root grant as once.                                                                                               |
+| Codex `item/permissions/requestApproval`                                    | Returns the **whole** requested permissions with `scope: "turn"`; decline returns empty permissions.                                                                                               | Support `effectiveScope: "turn"` only with explicit per-request turn consent and full filesystem read/write paths, network fields from the verified raw profile; unknown raw fields make it app-only. Plain “approve once” is refused. Never infer from mapped command/file-read/file-change kind.                   |
+| Codex `mcpServer/elicitation/request`                                       | Form accept uses `toMcpElicitationResponse`; no requested persistence. URL accept maps to decline (normally rejected before a card).                                                               | App-only initially. Later profile requirements: Support only representable nonpersistent form acceptance. Show app/server, request/schema and exact generated content, including defaults. If no true nonpersistent option exists, or persistence is ambiguous, app-only. URL/forms needing user data stay app-only. |
+| Claude `canUseTool`                                                         | `behavior: "allow"` with exact `updatedInput`, `user_temporary`; once adds no `updatedPermissions`. Session choice adds permission updates.                                                        | App-only initially. Later profile requirements: Support once; show actual tool name and effective input, not its title. Session/disk rules are excluded. `fullAccessOverride: "ask_rule"` stays app-only, including decline.                                                                                         |
+| Claude MCP elicitation                                                      | Supported form path reuses the Codex elicitation acceptance helper; unsupported/URL forms are declined.                                                                                            | App-only initially. Later profile requirements: Same representability/nonpersistence requirement; exact generated form content is part of the grant.                                                                                                                                                                 |
+| ACP command permission                                                      | `allow_once` is selected, **and** `makeAcpClientPolicyGrants.recordApproval` enables command execution for the remainder of that provider turn. ACP cannot bind the grant to one terminal command. | App-only initially. Later profile requirements: Support explicit turn consent only. Show the requested tool call and the broader permission to execute additional commands in that turn; expiry names the provider turn.                                                                                             |
+| ACP file read/change and other known permission kinds                       | Selects offered `allow_once`; T3's extra client-policy execution grant applies only to command kind. `allow_always` may persist beyond a session.                                                  | App-only initially. Later profile requirements: Support once only for a verified flavor/request profile with complete tool call, locations, inputs and native options. Unknown kinds, missing `allow_once` or unverifiable provider semantics stay app-only. Never fall back to `allow_always`.                      |
+| Antigravity, Grok, Fx, ACP registry agents                                  | Use the shared ACP adapter, with flavor-specific classification and question extraction.                                                                                                           | App-only initially. Later profile requirements: Inherit the ACP command turn grant and verified file profiles. Questions extracted from permission requests remain questions. New registry providers default unsupported until profiled; no inference from a familiar name.                                          |
+| Pi extension `confirm`                                                      | Sends `confirmed: true` once; `acceptForSession` adds a title/message-based T3 session grant. The arbitrary extension decides what true means.                                                     | Default app-only: a prompt is not proof of permission scope. Only a verified extension profile describing the action, input and lifetime can expose once. Other extension UI methods are questions.                                                                                                                  |
+| OpenCode v1                                                                 | `accept` maps to `permission.reply(..., reply: "once")`; both session/always map to native `always`.                                                                                               | App-only initially. Later profile requirements: Support only a verified version/profile whose native once semantics are known, with permission, patterns/resources, metadata and request/session identity shown. Unknown coalescing or persistence => app-only. Never send `always`.                                 |
+| OpenCode v2                                                                 | Native reply `decision: "once"`; session/always additionally persist T3 rules for the asking subagent's project.                                                                                   | App-only initially. Later profile requirements: Same verified-once gate; show action/resources/save proposals and asking session/project. Accept writes no standing rules. Decline may send a steer and reject; disclose that effect.                                                                                |
+| Muse                                                                        | Sends the selected native `choiceId` and `currentRequirementId`. Decision names alone do not establish scope: an `approved` choice can have a different scope. Decline may map to abort.           | App-only initially. Later profile requirements: Support only an offered choice with explicit `scope: "once"`, complete subject/raw args/requirement revision and no amendment. Show abort semantics when that is the offered decline. Session/localPersistent and unknown scopes stay app-only.                      |
+| Cursor SDK                                                                  | No interactive approval callback; `respondToRuntimeRequest` returns unsupported.                                                                                                                   | App-only/unsupported, never synthesize a native permission request.                                                                                                                                                                                                                                                  |
+| Future/other adapters                                                       | Unspecified.                                                                                                                                                                                       | Deny MCP accept until an explicit provider profile and protocol-effect tests exist.                                                                                                                                                                                                                                  |
 
 Evidence: Codex mappings at
 `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts:563`,
@@ -1077,15 +1113,47 @@ and `EffectWorker.ts:389` (provider response).
    EventSink SQL transaction. The app and MCP race has exactly one native
    winner. If the app or another operation won, this receipt is
    `refused: already_answered`; do not report submission.
-7. The effect carries the original incarnation/session/generation/grant
-   digest. The adapter rechecks its immutable pending payload under its
-   response gate before resolving its deferred/sending the native reply.
-   An update cannot redirect an already-committed response to new authority.
-   Add a trusted internal delivery-result command so receipt/outbox completion
-   is recorded durably; adapter acknowledgement is not proof of tool execution.
-   Provider acknowledgement moves the receipt to `delivered`; terminal
-   delivery failure records `delivery_failed` and the native failure
-   event. An interrupted/ambiguous network send is `delivery_unknown`.
+7. The guarded effect also carries the authenticated approval principal,
+   authorization identity/revision and original credential/mode ceiling,
+   alongside incarnation/session/generation/grant binding. Immediately
+   before irreversible adapter handoff, **delivery admission** rechecks
+   current approval authority, credential caps, effective modes and current
+   immutable native binding. Admission and removal serialize on the same
+   authority gate. Keep the adapter response gate held through this check
+   and handoff; follow a fixed thread/native-admission -> adapter-response
+   -> authority-gate lock order, and never acquire those locks in reverse.
+   Local receipt SQL may run under that gate; provider/network waits may not.
+8. Admission durably records `delivery_admitted` with the checked revision
+   and passes a command-bound admission token into the provider response
+   path. Before admission, removal wins and withholds delivery. After this
+   boundary the native handoff may be irreversible and cannot be recalled;
+   describe that boundary honestly, including a crash before write evidence.
+   Revalidation is not an earlier check outside the removal gate.
+9. Carry a typed result through deferred handoff, queue admission and the
+   actual writer. Codex's current `respondToRuntimeRequest` only resolves a
+   deferred (`CodexAdapterV2.ts:7716`); `protocol.ts:248,339,482` subsequently
+   encodes, queues and writes. Add stable command/native-response IDs and
+   completion/failure hooks to the owned client/protocol writer. Queueing
+   produces pending evidence, completed transport write produces
+   `response_written`, and only an actual correlated peer acknowledgment
+   can produce `provider_acknowledged`. Preserve actual provider differences;
+   do not wrap the existing adapter return as a delivery acknowledgment.
+10. A trusted delivery-result command persists receipt/outbox evidence.
+    Definite failure before handoff is `delivery_failed` (or the policy
+    refusal below); ambiguous or interrupted admitted writes are
+    `delivery_unknown`. These are typed terminal outcomes of the response
+    effect, not ordinary execution errors routed into EffectWorker's
+    generic retry policy (`EffectWorker.ts:819`). Suppress blind resend.
+
+**Withheld-response recovery.** A committed response denied at delivery
+admission becomes terminal `delivery_withheld`, with `authority_revoked`,
+`mode_changed` or `request_changed` as appropriate, and an app-visible
+attention state. If the exact native deferred is still live and proof says
+no handoff occurred, a guarded internal recovery command re-exposes it in
+the app with a new T3 request incarnation/revision. The old receipt and
+consent remain terminal and cannot resolve that incarnation. Otherwise
+show `request_lost` and the existing app restart/retry path. Uncertain or
+already admitted sends are never reopened as provably unanswered requests.
 
 The guarded expected fields and actor live on an internal
 `OrchestrationV2ServerCommand` variant/context, not an optional
@@ -1099,7 +1167,7 @@ native path so the UI cannot submit an unoffered answer either.
 against `CommandReceiptStore` and the effect outbox **before** resubmission.
 A prepared receipt with no command receipt may dispatch only while its
 original authority and exact request remain valid. A committed receipt
-with an unacknowledged effect is pending delivery, not completion. Recover
+with no completed-write evidence is pending delivery, not completion. Recover
 from native receipt acceptance even if the caller lost the HTTP response.
 If the provider session died, report `request_lost`/delivery failure;
 never claim the command ran.
@@ -1268,11 +1336,13 @@ permission** operation for one session/family; full session revocation
 continues to stop event delivery. All permission changes bump the live
 authority revision and publish a notice. `ApprovalAuthority` and
 `EnvironmentAuth` consult the row/cap on every respond and at native
-commit; an earlier authenticated invocation cannot retain removed rights.
+commit and again at serialized delivery admission; an earlier authenticated
+invocation cannot retain removed rights before either boundary.
 Keep the authoritative disable in the same transaction/admission gate as
 replacement issuance. If it fails, do not finish the sign-in claiming that
-older rights were removed. Test an old retained bearer, including an
-in-flight approval paused before commitment.
+older rights were removed. Test an old retained bearer, including
+in-flight approvals paused before commitment and after commitment but before
+delivery admission. Already admitted handoff is the explicit recall boundary.
 
 ### Audit records
 
@@ -1341,55 +1411,56 @@ design revision. Integrate Phase 0's reviewed auth/registration changes first;
 keep 080/081 and all probe behavior. Forwarding and facts are not Phase 1
 dependencies.
 
-| Files (new unless marked edit)                                                                                                                                                                                                                                                                          | Contract/work                                                                                                                                                                                                      |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `packages/contracts/src/approvals.ts`; edit `src/index.ts`, `src/orchestratorMcp.ts`                                                                                                                                                                                                                    | Grant/provider-profile union, request binding, consent, receipt-state/result and refusal schemas; discriminated action inputs with top-level retry ID                                                              |
-| Edit `packages/contracts/src/auth.ts`                                                                                                                                                                                                                                                                   | Independent approval scope, explicit grantor/consent options, live scope-removal command; no operate/full-access alias                                                                                             |
-| Edit `packages/contracts/src/orchestrationV2.ts`                                                                                                                                                                                                                                                        | Optional lenient read fields for grant/binding/delivery/audit; internal guarded server response command and effect, not public actor input                                                                         |
-| `packages/shared/src/approvalPresentation.ts`; edit `packages/shared/package.json`                                                                                                                                                                                                                      | Versioned canonical presentation/grant/operation hashing; explicit subpath export                                                                                                                                  |
-| `apps/server/src/approvals/{ApprovalService,ApprovalReceipts}.ts`                                                                                                                                                                                                                                       | One typed service for list/read/respond/reconcile; receipt SQL helpers participate in caller transactions                                                                                                          |
-| `apps/server/src/auth/ApprovalAuthority.ts`; edit `EnvironmentAuth.ts`, `EnvironmentAuthPolicy.ts`, `SessionStore.ts`, `McpOAuth.ts`, `mcpOAuthHttp.ts`, `RpcAuthorization.ts`, `apps/server/src/ws.ts`                                                                                                 | Persist/strip live opt-in; atomic sign-in downgrade; owner-authorized removal; admission gate; both browser and pairing-code consent                                                                               |
-| Edit `apps/web/src/components/auth/ConnectAgentSurface.tsx`, `apps/web/src/components/settings/{SessionPermissions,ConnectionsSettings,SavedEnvironmentRows}.tsx`                                                                                                                                       | Separate checkbox and current approval state/removal, including desktop's shared UI and one-click sign-in path                                                                                                     |
-| `apps/server/src/mcp/toolkits/approvals/{tools,handlers}.ts`; edit `mcp/{McpHttpServer,McpInvocationContext,McpToolAccess}.ts`                                                                                                                                                                          | Register thin toolkit, correct list/read vs respond authority, task-only classification, remote refusal; reuse both negotiated protocols                                                                           |
-| Edit `apps/server/src/orchestration-v2/{Orchestrator,EventSink,ProjectionStore,EffectWorker,RuntimeRequestService,EffectOutbox,runtimeLayer}.ts`                                                                                                                                                        | Under-lock guards, trusted actor, atomic receipt commitment, stable guarded effects, delivery-result events and reconciliation; wire services once                                                                 |
-| Edit `packages/provider-core/src/server/ProviderAdapter.ts`; `apps/server/src/orchestration-v2/Adapters/{CodexAdapterV2,ClaudeAdapterV2}.ts`; `apps/server/src/provider/CodexMcpElicitation.ts`                                                                                                         | Expected binding/response command ID, immutable native grant capture, accurate Codex/Claude descriptors and guarded delivery                                                                                       |
-| Edit `packages/provider-acp/src/server/{adapter,clientPolicy}.ts`, `packages/provider-pi/src/server/adapter.ts`, `packages/provider-opencode/src/server/{adapter,OpenCodeRuntime}.ts`, `packages/provider-opencode/src/server/v2/adapter.ts`, `packages/provider-muse/src/server/{adapter,protocol}.ts` | Descriptor/profile support and delivery guards per matrix; preserve native authority semantics; Pi defaults app-only. Shared ACP descriptors cover flavor adapters; add explicit profile decisions for each flavor |
-| Edit `apps/web/src/components/chat/TimelinePendingApprovalRow.tsx`, `apps/mobile/src/features/threads/PendingApprovalCard.tsx`                                                                                                                                                                          | Show complete permission/effective lifetime, safe attribution and delivery state; no misleading once label                                                                                                         |
-| `apps/server/src/persistence/Migrations/082_AgentApprovalAuthorityAndReceipts.ts`; edit `Migrations.ts`, `lan/NativeMaintenance.test.ts`, `scripts/lan/home-repair.ts`, home-repair migration fixtures/tests                                                                                            | Additive 082 schema and preservation checks; fresh/080/081 upgrades supported                                                                                                                                      |
-| Extend `scripts/lan/agent-events-e2e.ts`; test fixtures under `apps/server/src/orchestration-v2/testkit/`                                                                                                                                                                                               | Phase-selectable approval harness without callbacks, real accounts, paid models, live installs or live links                                                                                                       |
+| Files (new unless marked edit)                                                                                                                                                                               | Contract/work                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/contracts/src/approvals.ts`; edit `src/index.ts`, `src/orchestratorMcp.ts`                                                                                                                         | Grant/provider-profile union, request binding, consent, receipt-state/result and refusal schemas; discriminated action inputs with top-level retry ID                                                                                                     |
+| Edit `packages/contracts/src/auth.ts`                                                                                                                                                                        | Independent approval scope, explicit grantor/consent options, live scope-removal command; no operate/full-access alias                                                                                                                                    |
+| Edit `packages/contracts/src/orchestrationV2.ts`                                                                                                                                                             | Optional lenient read fields for grant/binding/delivery/audit; internal guarded server response command and effect, not public actor input                                                                                                                |
+| `packages/shared/src/approvalPresentation.ts`; edit `packages/shared/package.json`                                                                                                                           | Versioned canonical presentation/grant/operation hashing; explicit subpath export                                                                                                                                                                         |
+| `apps/server/src/approvals/{ApprovalService,ApprovalReceipts}.ts`                                                                                                                                            | One typed service for list/read/respond/reconcile; receipt SQL helpers participate in caller transactions                                                                                                                                                 |
+| `apps/server/src/auth/ApprovalAuthority.ts`; edit `EnvironmentAuth.ts`, `EnvironmentAuthPolicy.ts`, `SessionStore.ts`, `McpOAuth.ts`, `mcpOAuthHttp.ts`, `RpcAuthorization.ts`, `apps/server/src/ws.ts`      | Persist/strip live opt-in; atomic sign-in downgrade; owner-authorized removal; admission gate; both browser and pairing-code consent                                                                                                                      |
+| Edit `apps/web/src/components/auth/ConnectAgentSurface.tsx`, `apps/web/src/components/settings/{SessionPermissions,ConnectionsSettings,SavedEnvironmentRows}.tsx`                                            | Separate checkbox and current approval state/removal, including desktop's shared UI and one-click sign-in path                                                                                                                                            |
+| `apps/server/src/mcp/toolkits/approvals/{tools,handlers}.ts`; edit `mcp/{McpHttpServer,McpInvocationContext,McpToolAccess}.ts`                                                                               | Register thin toolkit, correct list/read vs respond authority, task-only classification, remote refusal; reuse both negotiated protocols                                                                                                                  |
+| Edit `apps/server/src/orchestration-v2/{Orchestrator,EventSink,ProjectionStore,EffectWorker,RuntimeRequestService,EffectOutbox,runtimeLayer}.ts`                                                             | Under-lock guards, trusted actor, atomic receipt commitment, stable guarded effects, delivery-result events and reconciliation; wire services once                                                                                                        |
+| Edit `packages/provider-core/src/server/ProviderAdapter.ts`; `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`                                                                                   | Guarded response command/admission identity, typed handoff/write/uncertain outcomes and verified Codex permission descriptor. Shared fallback keeps all other profiles app-only without changing their native behavior.                                   |
+| Edit `packages/effect-codex-app-server/src/{client,protocol}.ts`, `_internal/shared.ts` where needed; extend `client.test.ts`, `protocol.test.ts`, `_internal/shared.test.ts`                                | Raw closed-profile validation before decoding, safe unsupported evidence, command-bound writer completion/failure and cancellation outcomes. Preserve unrelated decoding; do not hand-edit generated schemas. Other provider-package support is deferred. |
+| Edit `apps/web/src/components/chat/TimelinePendingApprovalRow.tsx`, `apps/mobile/src/features/threads/PendingApprovalCard.tsx`                                                                               | Show complete permission/effective lifetime, safe attribution and delivery state; no misleading once label                                                                                                                                                |
+| `apps/server/src/persistence/Migrations/082_AgentApprovalAuthorityAndReceipts.ts`; edit `Migrations.ts`, `lan/NativeMaintenance.test.ts`, `scripts/lan/home-repair.ts`, home-repair migration fixtures/tests | Additive 082 schema and preservation checks; fresh/080/081 upgrades supported                                                                                                                                                                             |
+| Extend `scripts/lan/agent-events-e2e.ts`; test fixtures under `apps/server/src/orchestration-v2/testkit/`                                                                                                    | Phase-selectable approval harness without callbacks, real accounts, paid models, live installs or live links                                                                                                                                              |
 
 Cursor remains explicitly unsupported. Native SDK version/profile uncertainty
 must result in app-only behavior, not a guessed grant. Phase 1 can ship a
-verified supported subset as long as every provider has the explicit outcome
-in the matrix and advertises it accurately. Mobile sign-in uses the same
-hosted consent surface; if its connection entry bypasses that page, route it
+verified Codex permissions subset only. The shared unsupported fallback and
+profile tests enforce app-only for every other provider/request in the matrix.
+Mobile sign-in uses the same hosted consent surface; if its connection entry bypasses that page, route it
 through the shared consent API before exposing approvals. The new server
 scope-removal operation uses the existing access-management permission and
 typed client-runtime RPC command wrapper; neither read-only nor MCP approve
 alone grants session-management authority.
 
 Build order: define contracts and migration; implement authority/removal and
-provider descriptors; implement the guarded native transaction/receipt
-recovery; expose MCP and UI; run focused tests and the local approval harness.
+raw Codex validation and descriptor; implement the guarded transaction,
+serialized delivery admission and native write evidence/recovery; expose MCP
+and UI only after these gates pass; run focused tests and the local harness.
 No editor, live release, model run or event delivery is needed to prove this
 phase.
 
 ## Security analysis
 
-| Constraint                    | Enforcement                                                                                                                                                                                        |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Exact provider authority      | The digest includes native permission and selected reply. Only verified once grants and expressly consented turn grants are supported; unknown/session/persistent/ask-rule requests stay app-only. |
-| Apply-time consent            | Expected incarnation, session/generation, presentation revision/digest, grant and offered decision revalidated under native thread admission and at adapter delivery.                              |
-| Single native winner          | UI and MCP resolve through the same native lock and EventSink transaction. A loser gets `already_answered`, never a success receipt.                                                               |
-| Recoverable retries           | Immutable operation/retry key, stable command ID, prepared/committed/delivery states and command/outbox reconciliation; no pre-dispatch success marker.                                            |
-| Immediate local removal       | Approval commit and authority revocation serialize; old bearer tokens lose approval scope on the next check and cannot commit a paused response after removal.                                     |
-| Trusted actor                 | Authenticated principal/immediate link are server-derived. Human words and upstream client identity are labelled assertions. Public commands cannot forge `resolvedBy`.                            |
-| Forwarded authority           | Current source grant, outbound write cap, destination link approval cap, link/client provenance or explicit thread delegation, modes and native checks all intersect.                              |
-| No forwarding chain           | Every linked caller naming another remote environment is refused, including Full access.                                                                                                           |
-| Event confidentiality         | Phase 0 outside-sharing admission plus current per-fact read authorization; relayed access uncertainty holds delivery. No secrets in payloads; prompt/result text is untrusted data.               |
-| Callback transport            | Phase 0 owns HTTPS verification, Standard Webhooks, actual-address validation/pinning, redirect refusal and expiry/revocation. This revision does not change that implementation.                  |
-| Owners never authorize/filter | No owner argument. Reducer, relay, matcher and wake deliver all authorized owners; directory/assignment coordinates are historical metadata only.                                                  |
-| Preservation                  | Additive migrations; independent non-work row/payload/secret checks; legacy ACK/generation contract retained until verified cutover and separately approved cleanup.                               |
+| Constraint                    | Enforcement                                                                                                                                                                          |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Exact provider authority      | Initial verified Codex permissions profile only; complete raw payload validated before lossy decoding and bound to exact turn consent. Every other profile stays app-only.           |
+| Apply-time consent            | Expected incarnation, session/generation, presentation revision/digest, grant and offered decision revalidated under native thread admission and at adapter delivery.                |
+| Single native winner          | UI and MCP resolve through the same native lock and EventSink transaction. A loser gets `already_answered`, never a success receipt.                                                 |
+| Recoverable retries           | Immutable operation/retry key, stable command ID, prepared/committed/delivery states and command/outbox reconciliation; no pre-dispatch success marker.                              |
+| Immediate local removal       | Commit and delivery admission serialize with removal and recheck live authority/caps/modes/binding; retained tokens and paused calls cannot cross either boundary after revocation.  |
+| Trusted actor                 | Authenticated principal/immediate link are server-derived. Human words and upstream client identity are labelled assertions. Public commands cannot forge `resolvedBy`.              |
+| Forwarded authority           | Current source grant, outbound write cap, destination link approval cap, link/client provenance or explicit thread delegation, modes and native checks all intersect.                |
+| No forwarding chain           | Every linked caller naming another remote environment is refused, including Full access.                                                                                             |
+| Event confidentiality         | Phase 0 outside-sharing admission plus current per-fact read authorization; relayed access uncertainty holds delivery. No secrets in payloads; prompt/result text is untrusted data. |
+| Callback transport            | Phase 0 owns HTTPS verification, Standard Webhooks, actual-address validation/pinning, redirect refusal and expiry/revocation. This revision does not change that implementation.    |
+| Owners never authorize/filter | No owner argument. Reducer, relay, matcher and wake deliver all authorized owners; directory/assignment coordinates are historical metadata only.                                    |
+| Preservation                  | Additive migrations; independent non-work row/payload/secret checks; legacy ACK/generation contract retained until verified cutover and separately approved cleanup.                 |
 
 Residual trust: T3 cannot prove the dot's account of Dan's consent. B
 authenticates A's link, not the dot or Dan; a compromised A can lie within
@@ -1449,17 +1520,17 @@ outside-sharing path.
   orchestration schema tests: reject public actor/attestation fields,
   malformed/unknown grant profiles, nonconsented turn scope and session/
   persistent decisions; old read projections decode as app-only.
-- Existing `CodexAdapterV2.test.ts`, `ClaudeAdapterV2.test.ts`,
-  `AcpAdapterV2.test.ts` and flavor tests, `PiAdapterV2.test.ts`,
-  `OpenCode2AdapterV2.test.ts` plus provider-package adapter tests:
-  inspect actual native replies and local grant effects. Codex permissions
-  reproduce the entire permission payload with turn scope only after turn
-  consent. ACP command once enables the rest of the turn and expires at its
-  boundary; file once must not set execution grants. Claude once adds no
-  permission update. Elicitation defaults must not accidentally persist.
-  Pi arbitrary confirms remain app-only. Muse `approved` with non-once
-  scope is refused; supported choice/requirement IDs match exactly.
-  OpenCode accept writes no standing rule. Cursor remains unsupported.
+- Existing `CodexAdapterV2.test.ts` and owned Codex `client.test.ts`,
+  `_internal/shared.test.ts`, `protocol.test.ts`: verified permissions
+  return the exact complete payload and turn scope only after turn consent.
+  Unknown raw authority fields at top-level, permission, filesystem and
+  network nesting stay app-only before any lossy decode. Both file methods
+  with nonempty `grantRoot` are refused, and rootless/command/elicitation/
+  other-provider profiles stay app-only initially. Exercise the actual
+  writer: deferred completion and queue insertion cannot advance write
+  evidence; failure before enqueue, queue-to-write interruption, completed
+  write and ambiguous post-write failure produce distinct outcomes. No
+  peer-acknowledged result exists without a genuine peer acknowledgment.
 - `apps/server/src/approvals/ApprovalService.test.ts`,
   `ApprovalReceipts.test.ts`: exact retry before pending checks, argument
   change under one key, two clients with the same key, crash after prepare,
@@ -1472,6 +1543,11 @@ outside-sharing path.
   in a new session/incarnation; offered decision removed; modes increase;
   provider payload changes before effect delivery. Check returned code and
   exact resulting native authority, not just a mock handler call.
+  Pause after EventSink commit but before delivery admission; remove rights,
+  narrow caps/modes or replace binding, then resume. No native handoff may
+  occur; persist `delivery_withheld` and safely reopen only a provably unsent
+  live request under a fresh incarnation. An admitted uncertain send must
+  bypass generic effect-worker retries and must not reopen as unanswered.
 - `mcp/toolkits/approvals/handlers.test.ts`: one representative allowed
   local flow; action validation, task/thread/read-only refusal, local
   `environmentId`, remote `forwarding_unavailable`, ask-rule app-only,
@@ -1507,6 +1583,10 @@ outside-sharing path.
   Dan/Gavin/unassigned/unknown owners, reassignment, rename with unchanged
   assignment, directory absent/unreachable, rebuild after rename, delayed
   delivery before owner-change arrival, and unavailable fresh routing.
+  Extend `FleetUsers.test.ts` for unchanged successful refresh, stale
+  last-good values, absent/invalid/unavailable results and observation
+  generation/time. Persist each observation before source commitment binds
+  its journal reference; missing freshness never guesses current routing.
   All authorized events arrive at one subscription without owner filtering.
 - Extend Phase 0 store/delivery tests for facts in the same sequence space:
   pruning while payloads are pinned, exact expiry, immutable occurrence
@@ -1563,11 +1643,11 @@ with the build-tools Node directory on PATH/PATHEXT.
    A test fixture may create a deliberately approval-capable pairing code;
    the ordinary code must remain insufficient. No callback subscription
    or Phase 2 catalog is required.
-2. Start an operator-created devReplay `approval` scenario through A's
-   local API. Poll `list/read` to the exact incarnation/binding/digest.
-   ACP command approval must describe turn-wide execution; once consent
-   fails, explicit turn consent succeeds, the adapter receives the exact
-   native option and the replay completes. A new request tests decline.
+2. Use a local fake Codex app-server permission-request fixture through
+   A's actual provider and protocol path. Read its exact incarnation, raw
+   verified profile, binding and digest. Once consent fails; explicit turn
+   consent sends the exact permission payload. Observe actual write evidence
+   separately from deferred/queue handoff. A new request tests decline.
 3. Use wrong digest, wrong scope, missing opt-in, unsupported profile and
    ask-rule fixtures. Nothing resolves. Race a paused MCP response with an
    app response and with a presentation/grant update; prove one accurate
@@ -1583,11 +1663,16 @@ with the build-tools Node directory on PATH/PATHEXT.
 6. **Mandatory local revocation:** retain old tokens, complete sign-in
    without approvals, and try an old bearer; it cannot respond. Pause a call
    before native commit, remove its approval permission, release it and
-   assert no response effect. Separately revoke a whole disposable session
-   and prove subsequent calls fail. Phase 2 adds a queued-delivery stop test.
-7. Use the existing fake Codex app-server fixture for complete permissions/
-   elicitation/command/file payloads without a paid run. It validates
-   outbound grant effects, including no accidental persistent defaults.
+   assert no response effect. Also pause a committed effect before delivery
+   admission, remove permission/caps or narrow modes, and assert no native
+   write, a withheld receipt and safe app recovery. Separately revoke a whole
+   disposable session and prove subsequent calls fail. Phase 2 adds a queued-delivery stop test.
+7. Use the existing fake Codex app-server fixture for complete permissions,
+   unknown raw permission fields and command/file/elicitation payloads
+   without a paid run. Unsupported profiles, including both file-change
+   methods with `grantRoot`, never send an MCP response. Inject writer
+   failures before/after queueing and after write, proving truthful evidence
+   and no blind retries or accidental persistent defaults.
    The same local harness reports the supported/unsupported provider matrix.
 
 **Phase 2 command:** `--phase facts`. Reuse the approval checks and add
@@ -1662,7 +1747,7 @@ receipts) plus the dot's own message in the subscribed chat, with timestamps.
 | L1 Subscribe           | Dan asks the dot, in a fresh chat, to "watch T3 for anything that needs me"                                                                                  | `events/subscribe` for `t3.task_activity` with `{}` arguments; verification is 2xx; the subscription is stored                                                       |
 | L2 Wake (phase 0)      | After ≥ 30 min of chat idle, the operator runs `t3 agent-events probe` with a random nonce. It is a `probe` fact delivered only to that subscription         | 2xx delivered **and** the dot posts in that chat, unprompted, mentioning the nonce. Record latency. Repeat once                                                      |
 | L3 Approval wake       | Phase 2: operator starts a supported disposable local approval on BuildMachine                                                                               | All-owner event delivered; dot wakes and reports exact permission, duration and digest; launch is independent evidence                                               |
-| L4 Approval submit     | Phase 1 by polling, or Phase 2 after L3: Dan consents to the displayed grant/scope                                                                           | Receipt reaches native committed then adapter-delivered state; truthful once/turn label; observe provider continuation separately                                    |
+| L4 Approval submit     | Phase 1 by polling, or Phase 2 after L3: Dan consents to the displayed grant/scope                                                                           | Receipt reaches committed then response_written with command-bound evidence; truthful turn label; observe provider continuation separately                           |
 | L4b Decline and replay | Dan declines a second request, then retries the first operation                                                                                              | Native decline; exact retry returns same receipt; new key gives already_answered; nothing runs twice                                                                 |
 | L5 Forwarded (Phase 3) | Operator creates a fresh CryoFrog probe, explicitly delegates this link/client/thread through the approval-specific target guard; A has its usable link to B | Event wake independent of linked launch; B commits one response; both receipts correlate; removal or unrelated thread/client refuses, including Full access          |
 | L6 Owners              | Operator creates Dan/Gavin/unassigned probes, reassigns Gavin's to Dan, renames one directory label and delays a delivery                                    | All events delivered with source assignment/directory coordinates; old fact owner unchanged; dot resolves current owner before person-specific notification          |
@@ -1807,6 +1892,24 @@ their sections/code are not edited in this revision.
 | 15. Invalid forwarded harness provenance     | Explicit A → B usable link; link/client-started success and unrelated-thread refusal under both access levels; explicitly delegated operator probe keeps wake independent of launch                                                |
 | Additional validation                        | Crash barriers, same-key changed args, actual provider grant effects, old-token/in-flight removal, full-access chaining, expired/revoked peer, retention during retries and delayed owner routing; disposable revocation mandatory |
 | SSRF tests                                   | Phase 0 builder/reviewer owns actual socket-address, mixed DNS and IPv4-in-IPv6 tests; no duplicate transport work here                                                                                                            |
+
+### Sol follow-up review at `16d8c8bfbd`
+
+The initial Phase 1 implementation is narrowed to verified local Codex
+permissions requests. This revision addresses its five findings:
+
+1. Both file approval methods with nonempty `grantRoot` stay app-only;
+   rootless file support is also deferred pending verified changes/lifetime.
+2. Validate the complete raw request before excess fields are discarded;
+   include owned Codex client/decoder files and nested-unknown-field tests.
+3. Serialize current authority/caps/modes/binding checks with removal at
+   delivery admission, carry authorization identity/revision, and persist
+   withheld responses with a guarded fresh-incarnation app recovery path.
+4. Add command-bound protocol writer completion/failure evidence; distinguish
+   handoff, written and actual peer acknowledgment, and keep uncertain sends
+   outside generic execution retries. No unsupported adapter is enabled.
+5. Before Phase 2 journaling, add/persist the FleetUsers observation feed,
+   including unchanged confirmation and failed/absent observations.
 
 ## Appendix: upstream Ideas discussion draft
 

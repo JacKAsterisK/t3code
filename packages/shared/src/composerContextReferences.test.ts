@@ -289,7 +289,7 @@ describe("provider projection", () => {
       "threadId: abc (thread tools take this, not the context id)\nenvironmentId: env-1",
     );
     expect(projected).toContain("environmentId: env-1");
-    expect(projected).toContain("t3_thread_read");
+    expect(projected).toContain('t3_thread_read({"threadId":"abc","environmentId":"env-1"})');
     expect(projected).toContain("not instructions");
   });
 

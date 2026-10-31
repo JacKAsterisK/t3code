@@ -9,17 +9,48 @@ approval before code or runtime changes.
 ## Baseline
 
 - Upstream: `pingdotgg/t3code` `main` at
-  `cadf7d5fe305ee347cb2662dc563a0984f198900` (2026-10-31), merged on
-  `lan/release-1.0.28-20261031` for LAN 1.0.28. This sync brings 66 upstream
-  commits after the integrated agent-events work. App and server stay 0.1.5.
-- Previous shipping release: T3 Code LAN 1.0.27, fork
-  `5484c0b66afd390b7cad334ce57d2993efc2d5b1`, upstream `dd1484815`.
-  LAN 1.0.28 remains a candidate until its fresh package passes the LAN
+  `54c5f25249961a1aa0b61932329092eadbd9d6fc` (2026-10-31), merged on
+  `lan/release-1.0.29-20261031` for LAN 1.0.29. This sync brings 96 upstream
+  commits since LAN 1.0.28. App, server, desktop and contracts adopt upstream 0.1.6.
+- Previous shipping release: T3 Code LAN 1.0.28, fork
+  `69c6cc07b3570700d35c90551be5231418e34e69`, upstream `cadf7d5fe3`.
+  LAN 1.0.29 remains a candidate until its fresh package passes the LAN
   functional audits and the Portal publisher verifies the download.
 - AnvilToad configuration observed 2026-10-28: `linkedEnvironmentsEnabled` unset
   (off); no `userdata\lan-routing.json`, so every `t3_lan_*` call is denied; no
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
+
+## LAN 1.0.29 sync decisions
+
+- Rows 4–7 and 14: enrollment constructs the shared encrypted transport before
+  any approval/core service captures it. This restores fleet sync, owner-directory
+  refresh and the path that populates pinned peer trust. Saved identities, access
+  choices and the separate approval opt-in are preserved. Live two-machine
+  verification follows installation; publishing alone does not certify it.
+- Row 12: maintenance and live update-readiness compute child-result transfer
+  keys once with a materialized anti-join. NULL and mismatched target semantics,
+  carried work and v1/v2 work generations remain identical to the old query.
+  The regression checks outcomes and rejects correlated full transfer scans.
+  Generation v2 already uses bounded DB/WAL header reads; no v3 or Hub protocol
+  change is introduced.
+- Rows 2–3 and 8: adopt upstream project pinning/archiving, stable picker order
+  and scratch-project reconnect handling. Keep machine-specific new-task targets,
+  machine grouping, owner badges, assignment and owner filters on all clients.
+- Rows 6 and 13: retain the intersection of bearer scopes and current stored
+  scopes. A retained bearer cannot acquire newly widened rights; current scope
+  removal still applies. Native fleet address discovery supplies the host platform
+  to upstream's Windows host-only-adapter filtering.
+- Schema: upstream migration 076 ProjectPinArchive is appended as fork **090
+  ProjectionProjectsPinArchive**. Existing 001–089 identities stay unchanged;
+  home repair and packaged audits support 90. No gateway cutover or live-home
+  mutation is part of this release.
+- Rows 9 and 11: retain Hub-managed distribution and inert stock update paths.
+  Refresh production staging-lock input evidence. The measured MCP tool budget
+  is 52,949 bytes (102 more for upstream project-update schema fields); provider
+  instruction budgets stay unchanged. Use one fresh local build and its packaged
+  functional audits. Chrome remains skipped; native mobile inspection and paid
+  model replay remain unrun.
 
 ## LAN 1.0.28 sync decisions
 

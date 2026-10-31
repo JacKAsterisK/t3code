@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "mode": "exact-root-lock-projection",
   "sourceInputs": {
-    "apps/desktop/package.json": "0579640cd8bc174d7d8a368cb5c9e1d6326bdb2356893b0dd0dd53cc99ad17fd",
-    "apps/server/package.json": "9d82a7b2efa9cf97f3bc9d6714413b0b16ae953bb0491bb327df50e8fe7c47ff",
+    "apps/desktop/package.json": "c1bcd34c68f5d299d4f7162622c7e77af85e0732e660c7789561c11ff561d7f0",
+    "apps/server/package.json": "402a81b49b7a647090ac69714ecef73919e19cadd5cb08464571c7db47d95b1b",
     "package.json": "6a867d7e2b689de95a140821f1d69b32d2893e4829cedb90dac07aeb134017ad",
     "patches/@ff-labs__fff-node@0.11.0.patch": "cc71fcec015f4d39bc96ae2e2bf6b0ca678124c722c66a7841efce9d34b5983c",
     "patches/node-pty@1.2.0-beta.15.patch": "f1e680afec85f650699ea756f91f469844ec4c976f4f168492a45c6b3f67d651",
-    "pnpm-lock.yaml": "b10bae4624c59deafff916a255fe18a0d05d8bbb2132e19fecc24fd11e966f75",
+    "pnpm-lock.yaml": "4d986ee359c34c36ed7e5d420ce96d12abc6d786008bf3fb1fc884d772e5b7eb",
     "pnpm-workspace.yaml": "a95e3cfa6fd6b3f9b53c0bfb1e2dc9d6bcc94d27b027cf3ce1d19e005d168cc7"
   },
   "stages": {

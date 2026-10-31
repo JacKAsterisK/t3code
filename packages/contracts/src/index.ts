@@ -74,3 +74,4 @@ export * from "./clientRpcPermissions.ts";
 export * from "./lanTasks.ts";
 export * from "./lanToolParameters.ts";
 export * from "./nativeActivation.ts";
+export * from "./agentEvents.ts";

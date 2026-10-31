@@ -1279,6 +1279,12 @@ export const ServerSettings = Schema.Struct({
    */
   linkedEnvironmentsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
+   * T3 Code LAN: MCP Events (`2026-07-28` on `/mcp`, `events/*` and webhook delivery) for outside
+   * agents. Off by default, per machine. `/mcp` reads it at startup for the protocol list and per
+   * request for the event methods, so turning it on needs a restart; turning it off stops delivery.
+   */
+  agentEventsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
    * T3 Code LAN: the fleet links this machine to its fleet peers as linked environments and
    * renews those links. On by default; an explicit `false` in settings.json turns it off for one
    * machine. It turns linked environments on only while `fleetLinkedEnvironmentsActive`.
@@ -1650,6 +1656,7 @@ export const ServerSettingsPatch = Schema.Struct({
   snoozePresets: Schema.optionalKey(SnoozePresetSettings),
   guestSharingEnabled: Schema.optionalKey(Schema.Boolean),
   linkedEnvironmentsEnabled: Schema.optionalKey(Schema.Boolean),
+  agentEventsEnabled: Schema.optionalKey(Schema.Boolean),
   fleetLinkedEnvironmentsEnabled: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({

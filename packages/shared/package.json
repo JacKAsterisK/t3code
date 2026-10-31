@@ -7,6 +7,10 @@
       "types": "./src/fleetTlsCertificate.ts",
       "import": "./src/fleetTlsCertificate.ts"
     },
+    "./publicAddress": {
+      "types": "./src/publicAddress.ts",
+      "import": "./src/publicAddress.ts"
+    },
     "./fleetTlsProxy": {
       "types": "./src/fleetTlsProxy.ts",
       "import": "./src/fleetTlsProxy.ts"

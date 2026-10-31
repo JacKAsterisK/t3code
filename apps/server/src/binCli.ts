@@ -9,6 +9,7 @@ import * as CliError from "effect/cli/CliError";
 import * as NetService from "@t3tools/shared/Net";
 import packageJson from "../package.json" with { type: "json" };
 import { acpMcpBridgeCommand, acpMcpCallCommand } from "./cli/acpMcpBridge.ts";
+import { agentEventsCommand } from "./cli/agentEvents.ts";
 import { authCommand } from "./cli/auth.ts";
 import { environmentCommand } from "./cli/environment.ts";
 import { appCommand } from "./cli/app.ts";
@@ -76,6 +77,8 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       appCommand,
       pairCommand,
       authCommand,
+      // T3 Code LAN: MCP Events status and wake probes.
+      agentEventsCommand,
       environmentCommand,
       browserCommand,
       projectCommand,

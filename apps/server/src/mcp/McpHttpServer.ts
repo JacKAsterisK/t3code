@@ -63,6 +63,7 @@ import { ThreadToolkit } from "./toolkits/thread/tools.ts";
 import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
+import * as McpEventsEndpoint from "./events/McpEventsEndpoint.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
@@ -203,6 +204,8 @@ const linkedEnvironmentsOff = HttpServerResponse.jsonUnsafe(
 const makeMcpAuthMiddleware = Effect.gen(function* () {
   const registry = yield* McpSessionRegistry.McpSessionRegistry;
   const clients = yield* Effect.serviceOption(McpClientAuthenticator);
+  // T3 Code LAN: MCP Events, answered after auth, only for requests effect itself would admit.
+  const events = yield* Effect.serviceOption(McpEventsEndpoint.McpEventsEndpoint);
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const linksEnabled = serverSettings.getSettings.pipe(
     Effect.map((settings) => settings.linkedEnvironmentsEnabled),
@@ -234,13 +237,12 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
     if (limited === undefined) return invalidModeLimit;
     const linkedEnvironments = yield* linksEnabled;
     if (limited.client?.linked === true && !linkedEnvironments) return linkedEnvironmentsOff;
-    return yield* httpEffect.pipe(
-      Effect.provideService(McpInvocationContext.McpInvocationContext, {
-        ...limited,
-        linkedEnvironments,
-      }),
+    const scope = { ...limited, linkedEnvironments };
+    const inner = httpEffect.pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
       Effect.map(normalizeMcpHttpResponse),
     );
+    return yield* Option.isSome(events) ? events.value.handle(request, scope, inner) : inner;
   }) satisfies McpAuthMiddleware;
 }).pipe(Effect.withSpan("McpHttpServer.makeAuthMiddleware"));
 
@@ -1148,13 +1150,22 @@ export const layerDeviceToolkit = Layer.mergeAll(
   layerDeviceScreenshotRegistration,
 );
 
-export const layerMcpTransport = McpServer.layerHttp({
-  name: "T3 Code",
-  version: packageJson.version,
-  path: "/mcp",
-  protocols: [McpProtocol.v2025_06_18],
-  allowSessionTermination: true,
-}).pipe(Layer.provide(layerMcpAuthMiddleware));
+/** T3 Code LAN: `2026-07-28` joins `2025-06-18` only when agent events were on at startup. */
+export const layerMcpTransport = Layer.unwrap(
+  Effect.gen(function* () {
+    const events = yield* Effect.serviceOption(McpEventsEndpoint.McpEventsEndpoint);
+    const withEvents = Option.isSome(events) && events.value.statelessEnabled;
+    return McpServer.layerHttp({
+      name: "T3 Code",
+      version: packageJson.version,
+      path: "/mcp",
+      protocols: withEvents
+        ? [McpProtocol.v2025_06_18, McpProtocol.v2026_07_28]
+        : [McpProtocol.v2025_06_18],
+      allowSessionTermination: true,
+    }).pipe(Layer.provide(layerMcpAuthMiddleware));
+  }),
+);
 
 /** The LAN fork's fleet tools, advertised beside `layerTools`. */
 const layerLanToolkit = toolkitRegistration(LanToolkit, LanHandlers.layer).pipe(

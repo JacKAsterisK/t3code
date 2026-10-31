@@ -696,11 +696,17 @@ function inspectWork(
       rememberWork(row);
     }
     const childResultRows = db
-      .prepare(`SELECT thread.thread_id,json_extract(thread.payload_json,'$.lineage.parentThreadId') AS parent_thread_id FROM orchestration_v2_projection_threads AS thread
+      .prepare(`WITH results AS MATERIALIZED (
+        SELECT json_extract(payload_json,'$.sourceThreadId') AS source_thread_id,
+          json_extract(payload_json,'$.targetThreadId') AS target_thread_id
+        FROM orchestration_v2_projection_context_transfers
+        WHERE json_extract(payload_json,'$.type')='subagent_result'
+      )
+      SELECT thread.thread_id,json_extract(thread.payload_json,'$.lineage.parentThreadId') AS parent_thread_id FROM orchestration_v2_projection_threads AS thread
       WHERE json_extract(thread.payload_json,'$.lineage.relationshipToParent')='subagent'
       AND json_extract(thread.payload_json,'$.forkedFrom.type')='node'
       AND EXISTS (SELECT 1 FROM orchestration_v2_projection_runs AS run WHERE run.thread_id=thread.thread_id AND run.status IN ('completed','interrupted','failed','cancelled','rolled_back'))
-      AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_context_transfers AS transfer WHERE json_extract(transfer.payload_json,'$.type')='subagent_result' AND json_extract(transfer.payload_json,'$.sourceThreadId')=thread.thread_id AND json_extract(transfer.payload_json,'$.targetThreadId')=json_extract(thread.payload_json,'$.lineage.parentThreadId'))`)
+      AND NOT EXISTS (SELECT 1 FROM results WHERE results.source_thread_id=thread.thread_id AND results.target_thread_id=json_extract(thread.payload_json,'$.lineage.parentThreadId'))`)
       .all();
     const childResults = childResultRows.length;
     for (const row of childResultRows) rememberWork(row);

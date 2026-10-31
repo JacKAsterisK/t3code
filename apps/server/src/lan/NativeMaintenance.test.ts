@@ -1850,3 +1850,164 @@ effectIt.effect(
       }
     }).pipe(Effect.provide(Layer.mergeAll(testLayer, NodeServices.layer)), Effect.scoped),
 );
+
+effectIt.effect("preserves child-result generations without correlated transfer scans", () =>
+  Effect.gen(function* () {
+    const { dbPath, insert } = yield* fixture;
+    const cases = [
+      {
+        id: "matched",
+        parent: "parent",
+        result: { type: "subagent_result", sourceThreadId: "matched", targetThreadId: "parent" },
+        pending: false,
+      },
+      { id: "missing", parent: "parent", result: null, pending: true },
+      {
+        id: "wrong-target",
+        parent: "parent",
+        result: {
+          type: "subagent_result",
+          sourceThreadId: "wrong-target",
+          targetThreadId: "other",
+        },
+        pending: true,
+      },
+      {
+        id: "wrong-kind",
+        parent: "parent",
+        result: {
+          type: "context_transfer",
+          sourceThreadId: "wrong-kind",
+          targetThreadId: "parent",
+        },
+        pending: true,
+      },
+      {
+        id: "null-parent",
+        parent: null,
+        result: { type: "subagent_result", sourceThreadId: "null-parent", targetThreadId: null },
+        pending: true,
+      },
+      {
+        id: "null-target",
+        parent: "parent",
+        result: { type: "subagent_result", sourceThreadId: "null-target", targetThreadId: null },
+        pending: true,
+      },
+      {
+        id: "missing-parent",
+        parent: undefined,
+        result: { type: "subagent_result", sourceThreadId: "missing-parent" },
+        pending: true,
+      },
+      {
+        id: "wrong-source",
+        parent: "parent",
+        result: { type: "subagent_result", sourceThreadId: "other", targetThreadId: "parent" },
+        pending: true,
+      },
+      { id: "ordinary-fork", parent: "parent", relationship: "fork", result: null, pending: false },
+      { id: "thread-fork", parent: "parent", origin: "thread", result: null, pending: false },
+      { id: "no-terminal-run", parent: "parent", terminal: false, result: null, pending: false },
+      {
+        id: "duplicate",
+        parent: "parent",
+        result: { type: "subagent_result", sourceThreadId: "duplicate", targetThreadId: "parent" },
+        pending: false,
+      },
+    ];
+    for (const row of cases) {
+      yield* insert("orchestration_v2_projection_threads", "fixture", {
+        thread_id: row.id,
+        payload_json: JSON.stringify({
+          lineage: {
+            relationshipToParent: row.relationship ?? "subagent",
+            parentThreadId: row.parent,
+          },
+          forkedFrom: { type: row.origin ?? "node" },
+        }),
+      });
+      if (row.terminal !== false)
+        yield* insert("orchestration_v2_projection_runs", "completed", {
+          run_id: row.id,
+          thread_id: row.id,
+        });
+      if (row.result !== null)
+        yield* insert("orchestration_v2_projection_context_transfers", "consumed", {
+          context_transfer_id: row.id,
+          payload_json: JSON.stringify(row.result),
+        });
+    }
+    for (let index = 0; index < 96; index++)
+      yield* insert("orchestration_v2_projection_context_transfers", "consumed", {
+        context_transfer_id: "unrelated-" + index,
+        payload_json: JSON.stringify({
+          type: "subagent_result",
+          sourceThreadId: "unrelated-" + index,
+          targetThreadId: "parent",
+        }),
+      });
+    yield* insert("orchestration_v2_projection_context_transfers", "consumed", {
+      context_transfer_id: "duplicate-again",
+      payload_json: JSON.stringify(cases.at(-1)!.result),
+    });
+    const expected = cases.filter((row) => row.pending).length;
+    const legacySql =
+      "SELECT thread.thread_id,json_extract(thread.payload_json,'$.lineage.parentThreadId') AS parent_thread_id FROM orchestration_v2_projection_threads AS thread\n      WHERE json_extract(thread.payload_json,'$.lineage.relationshipToParent')='subagent'\n      AND json_extract(thread.payload_json,'$.forkedFrom.type')='node'\n      AND EXISTS (SELECT 1 FROM orchestration_v2_projection_runs AS run WHERE run.thread_id=thread.thread_id AND run.status IN ('completed','interrupted','failed','cancelled','rolled_back'))\n      AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_context_transfers AS transfer WHERE json_extract(transfer.payload_json,'$.type')='subagent_result' AND json_extract(transfer.payload_json,'$.sourceThreadId')=thread.thread_id AND json_extract(transfer.payload_json,'$.targetThreadId')=json_extract(thread.payload_json,'$.lineage.parentThreadId'))";
+    const prepare = NodeSqlite.DatabaseSync.prototype.prepare;
+    let useLegacy = true;
+    let actualSql = "";
+    using _statements = vi
+      .spyOn(NodeSqlite.DatabaseSync.prototype, "prepare")
+      .mockImplementation(function (this: NodeSqlite.DatabaseSync, sql: string) {
+        if (
+          !sql.startsWith("EXPLAIN") &&
+          sql.includes("subagent_result") &&
+          sql.includes("$.lineage.parentThreadId")
+        ) {
+          if (useLegacy) return prepare.call(this, legacySql);
+          actualSql = sql;
+        }
+        return prepare.call(this, sql);
+      });
+    for (const version of [undefined, 2] as const) {
+      useLegacy = true;
+      const before = NativeMaintenance.inspectNativeUpdateWork(dbPath, version);
+      useLegacy = false;
+      const after = NativeMaintenance.inspectNativeUpdateWork(dbPath, version);
+      assert.equal(after.restartContinuations, 0);
+      assert.equal(after.carriedWork.restartContinuations, expected);
+      assert.deepEqual(after, before);
+    }
+    assert.equal(readinessWork(dbPath).carriedWork.restartContinuations, expected);
+    assert.equal(NativeMaintenance.inspectStoppedRepairWork(dbPath).restartContinuations, expected);
+    assert.isNotEmpty(actualSql);
+    const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const plan = db
+        .prepare("EXPLAIN QUERY PLAN " + actualSql)
+        .all()
+        .map((row) => ({
+          id: Number(row.id),
+          parent: Number(row.parent),
+          detail: String(row.detail),
+        }));
+      const parents = (id: number): string[] => {
+        const row = plan.find((candidate) => candidate.id === id);
+        return row === undefined ? [] : [row.detail, ...parents(row.parent)];
+      };
+      for (const row of plan.filter((row) =>
+        /^SCAN (transfer|orchestration_v2_projection_context_transfers)\b/.test(row.detail),
+      )) {
+        const lineage = parents(row.parent);
+        assert.isFalse(
+          lineage.some((detail) => detail.startsWith("CORRELATED")) &&
+            !lineage.some((detail) => detail.startsWith("MATERIALIZE")),
+          "A child result must not rescan transfers for every thread",
+        );
+      }
+    } finally {
+      db.close();
+    }
+  }).pipe(Effect.provide(Layer.mergeAll(testLayer, NodeServices.layer)), Effect.scoped),
+);

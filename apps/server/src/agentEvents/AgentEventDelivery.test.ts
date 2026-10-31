@@ -4,6 +4,7 @@ import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
@@ -20,6 +21,8 @@ import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import {
+  startReceiver,
+  receiverTransport,
   allowed,
   layerAuthority,
   layerDatabase,
@@ -31,6 +34,8 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as AgentEventAuthority from "./AgentEventAuthority.ts";
 import * as AgentEventDelivery from "./AgentEventDelivery.ts";
 import * as Store from "./AgentEventStore.ts";
+import * as Facts from "./AgentFactStore.ts";
+import * as FactAuthority from "./AgentFactAuthority.ts";
 import { decodeWebhookSecret } from "./identity.ts";
 import { type PostOutcome, WebhookTransport } from "./WebhookSender.ts";
 
@@ -153,7 +158,120 @@ const deliverDue = Effect.gen(function* () {
 const deliveryOf = (eventId: string) =>
   Store.findDelivery(SUB, eventId).pipe(Effect.map((row) => row!));
 
+const fact = (sequence: number): Facts.FactData => ({
+  schema: "t3.agent-event/1",
+  kind: "approval",
+  factKey: `request-${sequence}`,
+  summary: "Approval needed",
+  textIsUntrusted: true,
+  environment: { id: "environment-a", label: "Machine A" },
+  thread: { id: "thread-a" },
+  run: null,
+  owner: { id: "gavin", label: "Gavin" },
+  origin: {
+    environmentId: "environment-a",
+    sourceGeneration: "generation-a",
+    sourceKind: "orchestration",
+    sourceSequence: sequence,
+    transitionOrdinal: 0,
+    threadSequence: sequence,
+    occurredAt: "2026-01-01T00:00:00.000Z",
+  },
+  relay: null,
+  detail: {},
+});
+
 describe("delivery schedule", () => {
+  it.effect(
+    "waits for per-fact authority, delivers immutable data when allowed and abandons only the refused fact",
+    () =>
+      run((h) =>
+        Effect.gen(function* () {
+          yield* subscribeRow();
+          const first = yield* Facts.appendFact({ data: fact(1), recordedAt: start });
+          assert.deepEqual(yield* deliverDue, ["deferred"]);
+          assert.deepEqual(yield* Ref.get(h.posts), []);
+          assert.strictEqual(
+            (yield* deliveryOf(first.eventId)).lastError,
+            "fact_authority_unavailable",
+          );
+          yield* TestClock.adjust("30 seconds");
+          assert.deepEqual(
+            yield* deliverDue.pipe(
+              Effect.provideService(FactAuthority.AgentFactAuthority, {
+                check: () => Effect.succeed({ _tag: "Allowed" }),
+              }),
+            ),
+            ["delivered"],
+          );
+          const posted = (yield* Ref.get(h.posts))[0]!;
+          assert.strictEqual(posted.body.includes('"label":"Gavin"'), true);
+          assert.strictEqual(posted.body.includes('"occurredAt":"2026-01-01T00:00:00.000Z"'), true);
+          const second = yield* Facts.appendFact({ data: fact(2), recordedAt: start + 30_000 });
+          assert.deepEqual(
+            yield* deliverDue.pipe(
+              Effect.provideService(FactAuthority.AgentFactAuthority, {
+                check: () => Effect.succeed({ _tag: "Refused", reason: "thread_unreadable" }),
+              }),
+            ),
+            ["abandoned"],
+          );
+          assert.strictEqual((yield* deliveryOf(second.eventId)).lastError, "thread_unreadable");
+          assert.strictEqual((yield* Store.findSubscription(SUB))!.state, "active");
+          assert.strictEqual((yield* Ref.get(h.posts)).length, 1);
+        }),
+      ),
+  );
+
+  it.effect("rechecks per-fact authority at transport dispatch after initial admission", () =>
+    run(() =>
+      Effect.gen(function* () {
+        yield* subscribeRow();
+        const appended = yield* Facts.appendFact({ data: fact(1), recordedAt: start });
+        const readable = yield* Ref.make<FactAuthority.FactAuthorityVerdict>({ _tag: "Allowed" });
+        const claims = yield* Store.claimDue(start, 1);
+        let posted = false;
+        const transport = WebhookTransport.of({
+          post: (input) =>
+            Effect.gen(function* () {
+              yield* Ref.set(readable, { _tag: "Refused", reason: "thread_unreadable" });
+              assert.isDefined(input.canDispatch);
+              if (!(yield* input.canDispatch!))
+                return { _tag: "Deferred", reason: "authority_unavailable" } as const;
+              posted = true;
+              return respond(200);
+            }),
+        });
+        const outcome = yield* AgentEventDelivery.attempt(claims[0]!).pipe(
+          Effect.provideService(FactAuthority.AgentFactAuthority, {
+            check: () => Ref.get(readable),
+          }),
+          Effect.provideService(WebhookTransport, transport),
+        );
+        assert.equal(outcome, "abandoned");
+        assert.isFalse(posted);
+        assert.strictEqual((yield* deliveryOf(appended.eventId)).state, "abandoned");
+        assert.equal((yield* deliveryOf(appended.eventId)).attempts, 0);
+      }),
+    ),
+  );
+
+  it.effect("does not dispatch a delivery once its 48-hour lifetime is exhausted", () =>
+    run((h) =>
+      Effect.gen(function* () {
+        yield* subscribeRow({ expiresAt: start + 7 * 24 * HOUR });
+        yield* probe("old-payload");
+        yield* TestClock.adjust("48 hours");
+        assert.deepEqual(yield* deliverDue, ["abandoned"]);
+        assert.deepEqual(yield* Ref.get(h.posts), []);
+        assert.strictEqual(
+          (yield* deliveryOf("old-payload")).lastError,
+          "delivery_retention_expired",
+        );
+      }),
+    ),
+  );
+
   it("backs off 5 s, 30 s, 2 min, 10 min, 30 min, 1 h, 2 h, 4 h, then 8 h", () => {
     assert.deepStrictEqual(
       [1, 2, 3, 4, 5, 6, 7, 8, 9, 20].map(AgentEventDelivery.backoffMs),
@@ -838,3 +956,66 @@ describe("AgentEventDelivery.attempt", () => {
     );
   });
 });
+
+it.live.each(["unavailable", "refused", "expiry", "prepare-expiry"] as const)(
+  "post-DNS origin %s never records a callback failure or consumes an attempt",
+  (mode) =>
+    run(() =>
+      Effect.gen(function* () {
+        const receiver = yield* startReceiver();
+        let connections = 0;
+        receiver.server.on("connection", () => {
+          connections++;
+        });
+        yield* subscribeRow({
+          expiresAt: start + (mode.endsWith("expiry") ? 15_000 : 120_000),
+          callbackUrl: `https://callback.test:${receiver.port}`,
+        });
+        const event = yield* Facts.appendFact({ data: fact(1), recordedAt: start });
+        const claim = (yield* Store.claimDue(start, 1))[0]!;
+        const proving = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let checks = 0;
+        const transport = receiverTransport(receiver.ca);
+        const fiber = yield* AgentEventDelivery.attempt(claim).pipe(
+          Effect.provideService(WebhookTransport, transport),
+          Effect.provideService(FactAuthority.AgentFactAuthority, {
+            check: () =>
+              Effect.gen(function* () {
+                checks++;
+                if (checks === 1 && mode !== "prepare-expiry") return { _tag: "Allowed" } as const;
+                yield* Deferred.succeed(proving, undefined);
+                yield* Deferred.await(release);
+                return mode === "refused"
+                  ? ({ _tag: "Refused", reason: "thread_unreadable" } as const)
+                  : ({ _tag: "Unavailable" } as const);
+              }),
+          }),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(proving);
+        yield* TestClock.adjust(10_000);
+        assert.isUndefined(fiber.pollUnsafe());
+        if (mode.endsWith("expiry")) yield* TestClock.adjust(5_000);
+        else if (mode === "refused") yield* Deferred.succeed(release, undefined);
+        else yield* TestClock.adjust(20_000);
+        assert.equal(
+          yield* Fiber.join(fiber),
+          mode.endsWith("expiry") ? "skipped" : mode === "refused" ? "abandoned" : "deferred",
+        );
+        const row = yield* deliveryOf(event.eventId);
+        assert.equal(connections, 0);
+        assert.equal(receiver.received.length, 0);
+        assert.equal(row.attempts, 0);
+        assert.isNull(row.lastStatus);
+        assert.equal(
+          row.lastError,
+          mode === "unavailable"
+            ? "fact_authority_unavailable"
+            : mode === "refused"
+              ? "thread_unreadable"
+              : null,
+        );
+      }).pipe(Effect.scoped),
+    ).pipe(Effect.provide(TestClock.layer())),
+);

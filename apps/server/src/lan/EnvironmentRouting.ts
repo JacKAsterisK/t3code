@@ -470,7 +470,12 @@ const make = Effect.gen(function* () {
   ) {
     const auth = yield* authorize(scope, input.environmentId, false, input.runtimeCeiling);
     yield* allowedThread(auth, input.threadId);
-    const checkpoint = yield* store.checkpoint(auth.id, input.environmentId, input.threadId);
+    const admission = yield* store.admission({
+      principal: auth.id,
+      environmentId: input.environmentId,
+      threadId: input.threadId,
+    });
+    const checkpoint = admission.checkpoint;
     if (
       input.replayFromStart !== true &&
       input.after !== undefined &&
@@ -498,13 +503,12 @@ const make = Effect.gen(function* () {
       native.observe(auth.scope, request),
     );
     if (result.threadId !== input.threadId) return yield* invalidDestination();
-    const deliverySourceId =
-      result.status === "ok"
-        ? yield* store.ingest(auth.id, input.environmentId, result, {
-            reset: input.replayFromStart === true,
-            expectedDeliverySourceId: checkpoint?.deliverySourceId ?? null,
-          })
-        : result.sourceId;
+    const committed = yield* store.observe(auth.id, input.environmentId, result, {
+      reset: input.replayFromStart === true,
+      expectedDeliverySourceId: checkpoint?.deliverySourceId ?? null,
+      admission,
+    });
+    const { deliverySourceId, pending } = committed;
     if (auth.route.origin !== null && result.status === "ok") {
       yield* remote
         .call(auth.route, "t3_lan_events_ack", {
@@ -515,16 +519,12 @@ const make = Effect.gen(function* () {
         })
         .pipe(Effect.ignore);
     }
-    const pending =
-      result.status === "ok"
-        ? yield* store.pending(auth.id, input.environmentId, input.threadId, deliverySourceId)
-        : [];
     return {
       environmentId: input.environmentId,
       result: {
-        ...result,
+        ...committed.page,
         sourceId: deliverySourceId,
-        nextCursor: { ...result.nextCursor, sourceId: deliverySourceId },
+        nextCursor: { ...committed.page.nextCursor, sourceId: deliverySourceId },
         delivery: {
           events: pending.slice(0, 100),
           hasMore: pending.length > 100,

@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Native write evidence requires the Node Writable completion callback.
+import type * as NodeStream from "node:stream";
+
+import * as Deferred from "effect/Deferred";
 import * as NodeUtil from "node:util";
 
 import * as Cause from "effect/Cause";
@@ -121,3 +125,124 @@ export const makeTerminationError = (
         });
       }),
   });
+
+export interface NativeWriteResult {
+  readonly commandId: string;
+  readonly state: "response_written" | "delivery_failed" | "delivery_unknown";
+  readonly boundary: "node_write_callback" | "not_started" | "write_interrupted";
+}
+
+export interface AcknowledgedWriter {
+  readonly write: (
+    commandId: string,
+    message: string,
+    deduplicate?: boolean,
+  ) => Effect.Effect<NativeWriteResult>;
+}
+
+export const makeAcknowledgedWriter = Effect.fn("CodexNativeWriter.make")(function* (
+  writable: NodeStream.Writable,
+) {
+  let failedWriter = false;
+  const markFailed = () => {
+    failedWriter = true;
+  };
+  writable.on("error", markFailed);
+  writable.once("close", () => writable.off("error", markFailed));
+  type WriteEntry = {
+    readonly commandId: string;
+    readonly message: string;
+    readonly done: Deferred.Deferred<NativeWriteResult>;
+    cancelled: boolean;
+    started: boolean;
+  };
+  const completedOrPending = new Map<string, WriteEntry>();
+  const writes = yield* Queue.unbounded<WriteEntry>();
+  // The worker, rather than the caller, owns the callback wait and message ordering.
+  yield* Stream.fromQueue(writes).pipe(
+    Stream.runForEach(
+      Effect.fn("CodexNativeWriter.write")(function* (entry) {
+        if (entry.cancelled || failedWriter || writable.destroyed || writable.writableEnded) {
+          yield* Deferred.succeed(entry.done, {
+            commandId: entry.commandId,
+            state: "delivery_failed" as const,
+            boundary: "not_started" as const,
+          });
+          return;
+        }
+        const result = yield* Effect.callback<NativeWriteResult>((resume) => {
+          entry.started = true;
+          let settled = false;
+          const finish = (state: NativeWriteResult["state"]) => {
+            if (settled) return;
+            settled = true;
+            if (state !== "response_written") failedWriter = true;
+            writable.off("error", failed);
+            writable.off("close", closed);
+            resume(
+              Effect.succeed({
+                commandId: entry.commandId,
+                state,
+                boundary: "node_write_callback",
+              }),
+            );
+          };
+          const failed = () => finish("delivery_unknown");
+          const closed = () => finish("delivery_unknown");
+          writable.once("error", failed);
+          writable.once("close", closed);
+          try {
+            writable.write(entry.message, (error) =>
+              finish(error ? "delivery_unknown" : "response_written"),
+            );
+          } catch {
+            finish("delivery_unknown");
+          }
+          return Effect.sync(() => {
+            writable.off("error", failed);
+            writable.off("close", closed);
+          });
+        }).pipe(
+          Effect.onInterrupt(() =>
+            Deferred.succeed(entry.done, {
+              commandId: entry.commandId,
+              state: "delivery_unknown" as const,
+              boundary: "write_interrupted" as const,
+            }),
+          ),
+        );
+        yield* Deferred.succeed(entry.done, result);
+      }),
+    ),
+    Effect.forkScoped,
+  );
+  return {
+    write: Effect.fn("CodexNativeWriter.submit")(function* (
+      commandId: string,
+      message: string,
+      deduplicate = true,
+    ) {
+      const previous = deduplicate ? completedOrPending.get(commandId) : undefined;
+      if (previous !== undefined)
+        return previous.message === message
+          ? yield* Deferred.await(previous.done)
+          : { commandId, state: "delivery_failed" as const, boundary: "not_started" as const };
+      const done = yield* Deferred.make<NativeWriteResult>();
+      const entry = { commandId, message, done, cancelled: false, started: false };
+      if (deduplicate) completedOrPending.set(commandId, entry);
+      yield* Queue.offer(writes, entry);
+      return yield* Deferred.await(done).pipe(
+        Effect.onInterrupt(() =>
+          Effect.gen(function* () {
+            entry.cancelled = true;
+            yield* Deferred.succeed(done, {
+              commandId,
+              state: entry.started ? ("delivery_unknown" as const) : ("delivery_failed" as const),
+              boundary: entry.started ? ("write_interrupted" as const) : ("not_started" as const),
+            });
+          }),
+        ),
+      );
+    }),
+  } satisfies AcknowledgedWriter;
+});

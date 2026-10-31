@@ -1,8 +1,11 @@
+import * as ApprovalAuthority from "./ApprovalAuthority.ts";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   AuthAccessTokenType,
-  AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
   AuthStandardClientScopes,
+  AuthOrchestrationApproveScope,
+  AuthAccessWriteScope,
   type AuthAccessTokenResult,
   type AuthBrowserSessionResult,
   type AuthClientMetadata,
@@ -497,7 +500,7 @@ export class EnvironmentAuth extends Context.Service<
     /** `principal` is who asked; a fleet machine's code stays attributed to it. */
     readonly issuePairingCredential: (
       input?: AuthCreatePairingCredentialInput,
-      principal?: { readonly subject: string },
+      principal?: { readonly subject: string; readonly scopes?: ReadonlySet<AuthEnvironmentScope> },
     ) => Effect.Effect<AuthPairingCredentialResult, ServerAuthInternalError>;
     readonly issueStartupPairingCredential: () => Effect.Effect<
       AuthPairingCredentialResult,
@@ -554,6 +557,8 @@ export class EnvironmentAuth extends Context.Service<
       readonly client: AuthClientMetadata;
       /** The subject of whoever approved it, which the session stays attributed to. */
       readonly approvalSubject?: string;
+      readonly approvals?: boolean;
+      readonly applicationId?: string;
     }) => Effect.Effect<
       {
         readonly sessionId: AuthSessionId;
@@ -569,6 +574,7 @@ export class EnvironmentAuth extends Context.Service<
     readonly consumeMcpApprovalCode: (
       code: string,
       access: AuthMcpClientAccess,
+      approvals?: boolean,
     ) => Effect.Effect<
       { readonly subject: string },
       ServerAuthMcpApprovalCodeError | ServerAuthInternalError
@@ -725,6 +731,8 @@ export const make = Effect.gen(function* () {
     accessCap,
   );
   const mcpGrants = yield* McpOAuthGrants.McpOAuthGrants;
+  const approvalAuthority = yield* ApprovalAuthority.ApprovalAuthority;
+  const approvalSql = yield* SqlClient.SqlClient;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const crypto = yield* Crypto.Crypto;
   const descriptor = yield* policy.getDescriptor();
@@ -1135,34 +1143,59 @@ export const make = Effect.gen(function* () {
     );
 
   const revokeSession: EnvironmentAuth["Service"]["revokeSession"] = (sessionId) =>
-    sessions.revoke(sessionId).pipe(
-      Effect.flatMap((removed) =>
-        mcpGrants
-          .revokeSession(sessionId)
-          .pipe(Effect.map((revokedGrant) => removed || revokedGrant)),
-      ),
-      Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })),
-      Effect.withSpan("EnvironmentAuth.revokeSession"),
-    );
+    approvalAuthority
+      .withGate(
+        approvalSql.withTransaction(
+          sessions.revoke(sessionId).pipe(
+            Effect.tap(() => approvalAuthority.remove(sessionId, false)),
+            Effect.flatMap((removed) =>
+              mcpGrants
+                .revokeSession(sessionId)
+                .pipe(Effect.map((revokedGrant) => removed || revokedGrant)),
+            ),
+            Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })),
+            Effect.withSpan("EnvironmentAuth.revokeSession"),
+          ),
+        ),
+      )
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause })));
 
   const revokeOtherSessionsExcept = (sessionId: AuthSessionId) =>
-    sessions.revokeAllExcept(sessionId).pipe(
-      Effect.mapError((cause) => new ServerAuthOtherSessionsRevocationError({ cause })),
-      Effect.withSpan("EnvironmentAuth.revokeOtherSessionsExcept"),
+    approvalAuthority.withGate(
+      sessions.revokeAllExcept(sessionId).pipe(
+        Effect.mapError((cause) => new ServerAuthOtherSessionsRevocationError({ cause })),
+        Effect.withSpan("EnvironmentAuth.revokeOtherSessionsExcept"),
+      ),
     );
 
-  const issuePairingCredential: EnvironmentAuth["Service"]["issuePairingCredential"] = (
-    input,
-    principal,
-  ) =>
-    issuePairingCredentialForSubject({
-      scopes: input?.scopes ?? AuthStandardClientScopes,
+  const issuePairingCredential: EnvironmentAuth["Service"]["issuePairingCredential"] = Effect.fn(
+    "EnvironmentAuth.issuePairingCredential",
+  )(function* (input, principal) {
+    const scopes = input?.scopes ?? AuthStandardClientScopes;
+    if (
+      input?.approvalGrant === true &&
+      (principal === undefined ||
+        principal.scopes?.has(AuthAccessWriteScope) !== true ||
+        CredentialAttribution.isMcpClientSubject(principal.subject))
+    )
+      return yield* new ServerAuthSessionTokenIssueError({
+        cause: "Approval-capable codes require an authenticated access manager.",
+      });
+    return yield* issuePairingCredentialForSubject({
+      scopes:
+        input?.approvalGrant === true
+          ? [
+              ...scopes.filter((scope) => scope !== AuthOrchestrationApproveScope),
+              AuthOrchestrationApproveScope,
+            ]
+          : scopes,
       subject:
         (principal === undefined
           ? undefined
           : CredentialAttribution.derivedSubject(principal.subject)) ?? "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
-    }).pipe(Effect.withSpan("EnvironmentAuth.issuePairingCredential"));
+    });
+  });
 
   const issueStartupPairingCredential: EnvironmentAuth["Service"]["issueStartupPairingCredential"] =
     () => {
@@ -1360,11 +1393,12 @@ export const make = Effect.gen(function* () {
                     sharesOutside,
                   }) satisfies McpClientSession,
               ),
-              Effect.mapError(
-                () =>
-                  new ServerAuthInvalidCredentialError({
-                    diagnostic: "The MCP task grant is invalid or revoked.",
-                  }),
+              Effect.mapError((cause) =>
+                cause._tag === "CredentialAccessUnavailable"
+                  ? new ServerAuthSessionCredentialValidationError({ cause })
+                  : new ServerAuthInvalidCredentialError({
+                      diagnostic: "The MCP task grant is invalid or revoked.",
+                    }),
               ),
             )
           : Effect.fail(
@@ -1378,28 +1412,55 @@ export const make = Effect.gen(function* () {
   };
 
   const issueMcpClientSession: EnvironmentAuth["Service"]["issueMcpClientSession"] = (input) =>
-    sessions
-      .issue({
-        subject:
-          input.approvalSubject === undefined
-            ? MCP_CLIENT_SUBJECT
-            : CredentialAttribution.mcpClientSubject(input.approvalSubject),
-        method: "bearer-access-token",
-        scopes: mcpClientScopes(input.access),
-        ttl: MCP_CLIENT_SESSION_TTL,
-        ...(input.access === "read-only" ? {} : { runtimeModeCeiling: input.access }),
-        peerLink: input.peerLink,
-        client: { ...input.client, label: input.label, deviceType: "bot" },
-      })
-      .pipe(
-        Effect.map((issued) => ({
-          sessionId: issued.sessionId,
-          token: issued.token,
-          expiresAt: issued.expiresAt,
-        })),
-        Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
-        Effect.withSpan("EnvironmentAuth.issueMcpClientSession"),
-      );
+    (input.peerLink || (input.approvals === true && input.access !== "read-only")
+      ? approvalAuthority.withGate
+      : <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          approvalAuthority.withoutFamilyApproval(
+            input.applicationId ?? "legacy-unregistered",
+            input.approvalSubject ?? "",
+            effect,
+          ))(
+      approvalSql.withTransaction(
+        sessions
+          .issue({
+            subject:
+              input.approvalSubject === undefined
+                ? MCP_CLIENT_SUBJECT
+                : CredentialAttribution.mcpClientSubject(input.approvalSubject),
+            method: "bearer-access-token",
+            deferNotice: true,
+            scopes: mcpClientScopes(input.access, {
+              approvals: input.approvals === true,
+            }),
+            ttl: MCP_CLIENT_SESSION_TTL,
+            ...(input.access === "read-only" ? {} : { runtimeModeCeiling: input.access }),
+            peerLink: input.peerLink,
+            client: { ...input.client, label: input.label, deviceType: "bot" },
+          })
+          .pipe(
+            Effect.tap((issued) =>
+              approvalAuthority.register({
+                sessionId: issued.sessionId,
+                applicationId: input.applicationId ?? `legacy:${issued.sessionId}`,
+                grantorSubject: input.approvalSubject ?? "",
+                runtimeModeCeiling: input.access,
+                peerLink: input.peerLink,
+                enabled: input.approvals === true && input.access !== "read-only",
+              }),
+            ),
+            Effect.map((issued) => ({
+              sessionId: issued.sessionId,
+              token: issued.token,
+              expiresAt: issued.expiresAt,
+            })),
+            Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
+            Effect.withSpan("EnvironmentAuth.issueMcpClientSession"),
+          ),
+      ),
+    ).pipe(
+      Effect.tap((issued) => sessions.notifyScopeChange(issued.sessionId)),
+      Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
+    );
 
   const authenticateBrowserSession: EnvironmentAuth["Service"]["authenticateBrowserSession"] = (
     request,
@@ -1420,8 +1481,11 @@ export const make = Effect.gen(function* () {
   const consumeMcpApprovalCode: EnvironmentAuth["Service"]["consumeMcpApprovalCode"] = (
     code,
     access,
+    approvals = false,
   ) =>
-    resolveBootstrapGrant(code.trim(), { requiredScopes: mcpClientScopes(access) }).pipe(
+    resolveBootstrapGrant(code.trim(), {
+      requiredScopes: mcpClientScopes(access, { approvals }),
+    }).pipe(
       Effect.catchTags({
         ServerAuthInvalidCredentialError: () =>
           Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "unknown_or_used" })),
@@ -1468,6 +1532,7 @@ export const make = Effect.gen(function* () {
 export const layer = Layer.effect(EnvironmentAuth, make).pipe(
   Layer.provideMerge(McpOAuthGrants.layer),
   Layer.provideMerge(PairingGrantStore.layer),
+  Layer.provideMerge(ApprovalAuthority.layer),
   Layer.provideMerge(SessionStore.layer),
   Layer.provideMerge(EnvironmentAuthPolicy.layer),
 );

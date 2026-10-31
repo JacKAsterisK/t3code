@@ -3,6 +3,8 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { randomToken } from "./identity.ts";
+import * as FactReplay from "./AgentFactReplay.ts";
+import * as FactRetention from "./AgentFactRetention.ts";
 
 /**
  * T3 Code LAN: MCP Events persistence (migration 081). Plain functions over the SQL client so the
@@ -310,8 +312,10 @@ export const requeueAfter = Effect.fn("AgentEventStore.requeueAfter")(function* 
   readonly now: number;
 }) {
   const sql = yield* SqlClient.SqlClient;
-  const includeDelivered = input.includeDelivered ? 1 : 0;
-  yield* sql`
+  return yield* sql.withTransaction(
+    Effect.gen(function* () {
+      const includeDelivered = input.includeDelivered ? 1 : 0;
+      yield* sql`
     INSERT INTO agent_event_deliveries (subscription_id, event_id, log_seq, state, queued_at, next_attempt_at)
     SELECT subscription_id, event_id, log_seq, 'pending', ${input.now}, ${input.now}
     FROM agent_event_probes
@@ -322,6 +326,9 @@ export const requeueAfter = Effect.fn("AgentEventStore.requeueAfter")(function* 
       finished_at = NULL
     WHERE agent_event_deliveries.state NOT IN ('pending', 'sending')
       AND (${includeDelivered} = 1 OR agent_event_deliveries.state <> 'delivered')`;
+      yield* FactReplay.requeueFacts(input);
+    }),
+  );
 });
 
 /** After a restart nothing is in flight: an interrupted send goes again with the same event id. */
@@ -377,9 +384,17 @@ export const loadEvent = Effect.fn("AgentEventStore.loadEvent")(function* (logSe
     readonly eventId: string;
     readonly occurredAt: number;
     readonly dataJson: string;
+    readonly originEnvironmentId: string | null;
+    readonly originGeneration: string | null;
+    readonly threadId: string | null;
+    readonly relayedFrom: string | null;
   }>`
-    SELECT event_id AS "eventId", occurred_at AS "occurredAt", data_json AS "dataJson"
-    FROM agent_event_probes WHERE log_seq = ${logSeq}`;
+    SELECT event_id AS "eventId", occurred_at AS "occurredAt", data_json AS "dataJson",
+      origin_environment_id AS "originEnvironmentId", origin_generation AS "originGeneration", thread_id AS "threadId", relayed_from AS "relayedFrom"
+    FROM (
+      SELECT log_seq, event_id, occurred_at, data_json, origin_environment_id, origin_generation, thread_id, relayed_from FROM agent_event_facts WHERE source_kind <> 'gateway'
+      UNION ALL SELECT log_seq, event_id, occurred_at, data_json, NULL, NULL, NULL, NULL FROM agent_event_probes
+    ) WHERE log_seq = ${logSeq}`;
   return rows[0];
 });
 
@@ -468,8 +483,6 @@ export const referencedSecretRefs = Effect.fn("AgentEventStore.referencedSecretR
 });
 
 const RETENTION = {
-  logMs: 14 * 24 * 60 * 60_000,
-  logRows: 50_000,
   deliveriesMs: 7 * 24 * 60 * 60_000,
   endedSubscriptionsMs: 7 * 24 * 60 * 60_000,
 } as const;
@@ -483,18 +496,10 @@ export const prune = Effect.fn("AgentEventStore.prune")(function* (now: number) 
   const sql = yield* SqlClient.SqlClient;
   return yield* sql.withTransaction(
     Effect.gen(function* () {
-      const state = yield* logState();
-      const pruned = yield* sql<{ readonly logSeq: number }>`
-        DELETE FROM agent_event_probes
-        WHERE (created_at < ${now - RETENTION.logMs}
-               OR log_seq <= ${state.headSeq - RETENTION.logRows})
-          AND NOT EXISTS (
-            SELECT 1 FROM agent_event_deliveries d
-            WHERE d.log_seq = agent_event_probes.log_seq AND d.state IN ('pending', 'sending'))
-        RETURNING log_seq AS "logSeq"`;
-      const highest = pruned.reduce((max, row) => Math.max(max, row.logSeq), 0);
-      if (highest + 1 > state.floorSeq)
-        yield* sql`UPDATE agent_event_log_state SET floor_seq = ${highest + 1} WHERE id = 1`;
+      yield* logState();
+      const { abandonedSubscriptions } = yield* FactRetention.pruneLog(now);
+      for (const subscriptionId of abandonedSubscriptions)
+        yield* recomputeWatermark(subscriptionId, now);
       yield* sql`
         DELETE FROM agent_event_deliveries
         WHERE state NOT IN ('pending', 'sending') AND finished_at < ${now - RETENTION.deliveriesMs}`;

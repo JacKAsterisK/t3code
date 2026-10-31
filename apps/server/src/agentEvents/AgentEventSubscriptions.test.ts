@@ -508,6 +508,9 @@ describe("cursors, replay and truncated", () => {
         yield* TestClock.setTime(now);
         const sub = yield* subscribe(clientScope(), params());
         yield* probe(sub.id, "t3e1_1", now - 20 * DAY);
+        // An old payload replayed now still has its full 48-hour delivery horizon.
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`UPDATE agent_event_deliveries SET queued_at = ${now}, next_attempt_at = ${now}`;
         yield* Store.prune(now);
         assert.isDefined(yield* Store.loadEvent(1));
         assert.strictEqual((yield* Store.logState()).floorSeq, 1);

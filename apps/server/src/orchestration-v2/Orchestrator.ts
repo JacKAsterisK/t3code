@@ -1,3 +1,12 @@
+import { ApprovalFailureCode } from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
+import * as ApprovalAuthority from "../auth/ApprovalAuthority.ts";
+import * as ApprovalDestinationGuard from "../approvals/ApprovalDestinationGuard.ts";
+import type { ApprovalGuard } from "@t3tools/contracts";
+import * as ApprovalPresentation from "../approvals/ApprovalPresentation.ts";
+import { ApprovalAuditActor } from "../approvals/ApprovalContext.ts";
+import * as Struct from "effect/Struct";
+import { canonicalApprovalJson } from "@t3tools/shared/approvalPresentation";
 import * as FleetUsers from "../lan/FleetUsers.ts";
 import * as NativeUpdateGate from "../lan/NativeUpdateGate.ts";
 import type {
@@ -175,9 +184,14 @@ import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 
+const isApprovalRuntimeMode = Schema.is(RuntimeMode);
+const isApprovalInteractionMode = Schema.is(ProviderInteractionMode);
+
 const isMessageQuestionAnswer = Schema.is(
   Schema.Union([TrimmedNonEmptyString, Schema.NonEmptyArray(TrimmedNonEmptyString)]),
 );
+
+const isApprovalFailureCode = Schema.is(ApprovalFailureCode);
 
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
@@ -567,6 +581,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "queued-run.cancel":
     case "queued-run.edit":
     case "runtime-request.respond":
+    case "approval.delivery.record":
     case "runtime-request.delivery.fail":
     case "thread.user-input.dismiss":
     case "checkpoint.rollback":
@@ -1028,6 +1043,21 @@ function lastDeliveredRunForProviderThread(
 }
 
 const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(function* () {
+  const approvalAuthority = yield* Effect.serviceOption(ApprovalAuthority.ApprovalAuthority);
+  const destinationGuard = yield* Effect.serviceOption(
+    ApprovalDestinationGuard.ApprovalDestinationGuard,
+  );
+  const checkApprovalAuthority = (guard: ApprovalGuard, threadId: ThreadId) =>
+    guard.destination === undefined
+      ? Option.isSome(approvalAuthority)
+        ? approvalAuthority.value.check(guard.sessionId, guard.authorityRevision)
+        : Effect.fail(new ApprovalAuthority.ApprovalAuthorityError({ reason: "authority_revoked" }))
+      : Option.isSome(destinationGuard)
+        ? destinationGuard.value.check(guard, threadId)
+        : Effect.fail(
+            new ApprovalAuthority.ApprovalAuthorityError({ reason: "authority_revoked" }),
+          );
+  const approvalCrypto = yield* Effect.serviceOption(Crypto.Crypto);
   const nativeUpdateAdmission = yield* NativeUpdateGate.captureAdmission();
   const checkpointService = yield* CheckpointServiceV2;
   const commandPolicy = yield* CommandPolicyV2;
@@ -8731,7 +8761,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   const dispatchRuntimeRequestRespond = Effect.fn("Orchestrator.dispatchRuntimeRequestRespond")(
     function* (
-      command: Extract<OrchestrationV2Command, { readonly type: "runtime-request.respond" }>,
+      command: Extract<OrchestrationV2ServerCommand, { readonly type: "runtime-request.respond" }>,
       events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
       effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
     ) {
@@ -8752,7 +8782,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
-          cause: `Runtime request ${command.requestId} is ${runtimeRequest.status}.`,
+          cause:
+            "approvalGuard" in command
+              ? { approvalCode: "already_answered" }
+              : `Runtime request ${command.requestId} is ${runtimeRequest.status}.`,
         });
       }
       if (runtimeRequest.responseCapability.type === "not_resumable") {
@@ -8870,9 +8903,116 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       }
 
+      const guard = "approvalGuard" in command ? command.approvalGuard : undefined;
+      const approvalRefusal = (approvalCode: string) =>
+        new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: { approvalCode },
+        });
+      if (
+        approvalTurnItem?.type === "approval_request" &&
+        (command.decision === undefined ||
+          (approvalTurnItem.options === undefined
+            ? guard !== undefined
+            : !approvalTurnItem.options.some((option) => option.decision === command.decision)))
+      )
+        return yield* approvalRefusal("decision_not_offered");
+      if (guard !== undefined) {
+        if (Option.isNone(approvalCrypto) || providerSession?.driver !== "codex")
+          return yield* approvalRefusal("ui_only");
+        const approvalThread = yield* projectionStore
+          .getThread(command.threadId)
+          .pipe(mapDispatchError(command));
+        if (Option.isNone(approvalAuthority)) return yield* approvalRefusal("authority_revoked");
+        const currentAuthority = yield* checkApprovalAuthority(guard, command.threadId).pipe(
+          Effect.catch((error) =>
+            error.reason === "storage_unavailable"
+              ? Effect.fail(
+                  new OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause: error,
+                  }),
+                )
+              : approvalRefusal(
+                  error.reason === "mode_changed" ? "mode_changed" : "authority_revoked",
+                ),
+          ),
+        );
+        if (
+          !isApprovalRuntimeMode(guard.runtimeModeCeiling) ||
+          !isApprovalRuntimeMode(currentAuthority.runtimeModeCeiling) ||
+          !isApprovalInteractionMode(guard.interactionModeCeiling)
+        )
+          return yield* approvalRefusal("mode_changed");
+        const committedLimits = {
+          runtimeMode: guard.runtimeModeCeiling,
+          interactionMode: guard.interactionModeCeiling,
+        };
+        if (
+          exceededDispatchModeLimit(committedLimits, approvalThread) !== undefined ||
+          exceededDispatchModeLimit(
+            { ...committedLimits, runtimeMode: currentAuthority.runtimeModeCeiling },
+            approvalThread,
+          ) !== undefined
+        )
+          return yield* approvalRefusal("mode_changed");
+        const approvalSettings = yield* serverSettings.getSettings.pipe(mapDispatchError(command));
+        if (
+          !resolveProjectProviderInstanceEnabled(
+            approvalSettings,
+            approvalThread.projectId,
+            approvalThread.providerInstanceId,
+          )
+        )
+          return yield* approvalRefusal("provider_unavailable");
+        if (
+          approvalTurnItem?.type !== "approval_request" ||
+          runtimeRequest.approval === undefined ||
+          runtimeRequest.responseCapability.type !== "live"
+        )
+          return yield* approvalRefusal("ui_only");
+        const current = yield* ApprovalPresentation.presentation({
+          environmentId: guard.environmentId,
+          threadId: command.threadId,
+          request: runtimeRequest,
+          item: approvalTurnItem,
+        }).pipe(
+          Effect.provideService(Crypto.Crypto, approvalCrypto.value),
+          mapDispatchError(command),
+        );
+        if (current === undefined) return yield* approvalRefusal("ui_only");
+        const expected = guard.expected;
+        if (
+          expected.requestIncarnation !== current.expected.requestIncarnation ||
+          expected.providerSessionId !== current.expected.providerSessionId ||
+          expected.providerGeneration !== current.expected.providerGeneration ||
+          providerSessionId !== current.expected.providerSessionId
+        )
+          return yield* approvalRefusal("request_changed");
+        if (
+          canonicalApprovalJson(expected) !== canonicalApprovalJson(current.expected) ||
+          guard.grantDigest !== current.grantDigest
+        )
+          return yield* approvalRefusal("presentation_changed");
+        if (command.decision !== "accept" && command.decision !== "decline")
+          return yield* approvalRefusal("decision_not_offered");
+        if (
+          command.decision === "accept" &&
+          (guard.consent.effectiveScope !== current.grant.effectiveScope ||
+            guard.consent.grantDigest !== current.grantDigest)
+        )
+          return yield* approvalRefusal("scope_consent_required");
+      }
+      const actor = guard?.actor ?? (yield* ApprovalAuditActor);
       const now = yield* DateTime.now;
       const resolvedRequest = {
-        ...runtimeRequest,
+        ...Struct.omit(runtimeRequest, ["approvalDelivery", "approvalReceiptId", "resolvedBy"]),
+        ...(actor === undefined ? {} : { resolvedBy: actor }),
+        ...(guard === undefined
+          ? {}
+          : { approvalReceiptId: guard.receiptId, approvalDelivery: "committed" as const }),
         status: "resolved" as const,
         resolvedAt: now,
         ...(command.decision === undefined ? {} : { decision: command.decision }),
@@ -8992,7 +9132,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               }),
           occurredAt: now,
           payload: {
-            ...approvalTurnItem,
+            ...(approvalTurnItem.type === "approval_request"
+              ? Struct.omit(approvalTurnItem, ["approvalDelivery", "resolvedBy"])
+              : approvalTurnItem),
+            ...(approvalTurnItem.type !== "approval_request" || actor === undefined
+              ? {}
+              : { resolvedBy: actor }),
+            ...(approvalTurnItem.type !== "approval_request" || guard === undefined
+              ? {}
+              : { approvalDelivery: "committed" as const }),
             ...(approvalTurnItem.type === "user_input_request" && answers !== undefined
               ? {
                   questionAnswer: {
@@ -9072,6 +9220,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           threadId: command.threadId,
           request: {
             type: "runtime-request.respond",
+            ...(guard === undefined ? {} : { approvalGuard: guard }),
             providerSessionId,
             requestId: command.requestId,
             ...(command.decision === undefined ? {} : { decision: command.decision }),
@@ -12955,6 +13104,73 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "prepared-run.retry":
         yield* dispatchPreparedRunRetry(command, events);
         break;
+      case "approval.delivery.record": {
+        const context = yield* projectionStore
+          .getRuntimeResponseContext(command.threadId, command.requestId)
+          .pipe(mapDispatchError(command));
+        if (
+          context.request === undefined ||
+          context.request.approvalReceiptId !== command.receiptId
+        )
+          break;
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "runtime-request.updated",
+          threadId: command.threadId,
+          nodeId: context.request.nodeId,
+          occurredAt: now,
+          payload: {
+            ...context.request,
+            approvalDelivery: command.state,
+            ...(command.recover === undefined
+              ? {}
+              : {
+                  approval: command.recover,
+                  status: "pending" as const,
+                  resolvedAt: null,
+                  approvalReceiptId: undefined,
+                  decision: undefined,
+                  resolvedBy: undefined,
+                }),
+          },
+        });
+        if (command.recover !== undefined && context.node !== undefined)
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "node.updated",
+            threadId: command.threadId,
+            occurredAt: now,
+            payload: { ...context.node, status: "waiting", completedAt: null },
+          });
+        if (context.item?.type === "approval_request")
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "turn-item.updated",
+            threadId: command.threadId,
+            occurredAt: now,
+            payload: {
+              ...context.item,
+              approvalDelivery: command.state,
+              updatedAt: now,
+              ...(command.recover === undefined
+                ? {}
+                : {
+                    approval: command.recover,
+                    status: "waiting" as const,
+                    completedAt: null,
+                    resolvedBy: undefined,
+                  }),
+            },
+          });
+        break;
+      }
       case "runtime-request.respond":
         yield* dispatchRuntimeRequestRespond(command, events, effects);
         break;
@@ -13255,6 +13471,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       Effect.catch((cause) =>
         Effect.gen(function* () {
           if (cause._tag === "OrchestratorThreadAboveModeLimitError") return yield* cause;
+          if (
+            "approvalGuard" in command &&
+            command.approvalGuard !== undefined &&
+            !(
+              cause._tag === "OrchestratorDispatchError" &&
+              typeof cause.cause === "object" &&
+              cause.cause !== null &&
+              "approvalCode" in cause.cause &&
+              isApprovalFailureCode(cause.cause.approvalCode)
+            )
+          )
+            return yield* cause;
           const rejectedAt = yield* DateTime.now;
           const receipt = yield* eventSink
             .commitRejectedCommand({
@@ -13263,6 +13491,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               commandType: command.type,
               rejectedAt,
               error: cause instanceof Error ? cause.message : String(cause),
+              ...(command.type !== "runtime-request.respond" ||
+              !("approvalGuard" in command) ||
+              command.approvalGuard === undefined
+                ? {}
+                : {
+                    approvalGuard: command.approvalGuard,
+                    approvalFailureCode:
+                      cause._tag === "OrchestratorDispatchError" &&
+                      typeof cause.cause === "object" &&
+                      cause.cause !== null &&
+                      "approvalCode" in cause.cause &&
+                      isApprovalFailureCode(cause.cause.approvalCode)
+                        ? cause.cause.approvalCode
+                        : ("native_rejected" as const),
+                  }),
             })
             .pipe(
               Effect.mapError(
@@ -13324,6 +13567,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const acceptedAt = plan.events.at(-1)?.occurredAt ?? (yield* DateTime.now);
     const committed = yield* eventSink
       .commitCommand({
+        ...("approvalGuard" in command ? { approvalGuard: command.approvalGuard } : {}),
         commandId: command.commandId,
         threadId: commandThreadId(command),
         commandType: command.type,
@@ -13385,7 +13629,38 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     function* (command: OrchestrationV2ServerCommand) {
       const dispatch = threadDispatch.withLock(
         commandThreadId(command),
-        dispatchWithReceiptEffect(command),
+        "approvalGuard" in command
+          ? Option.isNone(approvalAuthority)
+            ? Effect.fail(
+                new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause: { approvalCode: "authority_revoked" },
+                }),
+              )
+            : approvalAuthority.value.withGate(
+                checkApprovalAuthority(command.approvalGuard, command.threadId).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestratorDispatchError({
+                        commandId: command.commandId,
+                        commandType: command.type,
+                        cause:
+                          cause.reason === "storage_unavailable"
+                            ? cause
+                            : {
+                                approvalCode:
+                                  cause.reason === "mode_changed"
+                                    ? "mode_changed"
+                                    : "authority_revoked",
+                                cause,
+                              },
+                      }),
+                  ),
+                  Effect.andThen(dispatchWithReceiptEffect(command)),
+                ),
+              )
+          : dispatchWithReceiptEffect(command),
       );
       // Answering a message-mode question can also start a follow-up.
       if (

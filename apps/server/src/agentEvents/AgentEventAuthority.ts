@@ -63,7 +63,11 @@ const make = Effect.gen(function* () {
         return { _tag: "Refused", reason: "session_inactive" } as const;
       const scopes = Option.isNone(cap)
         ? session.scopes
-        : yield* cap.value.scopes({ subject: session.subject, scopes: session.scopes });
+        : yield* cap.value.scopes({
+            sessionId: session.sessionId,
+            subject: session.subject,
+            scopes: session.permissions ?? session.scopes,
+          });
       if (scopes === undefined) return { _tag: "Refused", reason: "session_inactive" } as const;
       if (!scopes.includes(AuthOrchestrationReadScope))
         return { _tag: "Refused", reason: "read_scope_lost" } as const;

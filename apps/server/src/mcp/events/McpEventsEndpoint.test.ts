@@ -213,7 +213,14 @@ describe("MCP Events endpoint", () => {
         (events.events as ReadonlyArray<{ name: string; delivery: ReadonlyArray<string> }>).map(
           (event) => [event.name, event.delivery],
         ),
-        [["t3.task_activity", ["webhook"]]],
+        [
+          "t3.task_activity",
+          "t3.approval_needed",
+          "t3.question_asked",
+          "t3.task_blocked",
+          "t3.run_finished",
+          "t3.owner_changed",
+        ].map((name) => [name, ["webhook"]]),
       );
       // 2026 tools keep working beside it.
       const tools = yield* post({
@@ -309,7 +316,7 @@ describe("MCP Events endpoint", () => {
         headers: session,
       });
       assert.strictEqual(list.status, 200);
-      assert.strictEqual((resultOf(list.text)!.events as ReadonlyArray<unknown>).length, 1);
+      assert.strictEqual((resultOf(list.text)!.events as ReadonlyArray<unknown>).length, 6);
       // The session's tools still work.
       const call = yield* post({
         body: JSON.stringify({

@@ -121,6 +121,12 @@ describe("authorization grants", () => {
       expected: false,
     },
     {
+      label: "approval never inherits an old operate grant",
+      session: { authenticated: true, scopes: ["orchestration:operate"], auth: {} },
+      scope: "orchestration:approve",
+      expected: false,
+    },
+    {
       label: "no parent for scopes that were never split",
       session: { authenticated: true, scopes: ["orchestration:operate"], auth: {} },
       scope: "access:write",

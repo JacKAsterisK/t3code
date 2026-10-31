@@ -39,6 +39,10 @@ describe("declining approvals before sending", () => {
   const second: ThreadPendingApproval = {
     ...approval,
     requestId: RuntimeRequestId.make("second-approval"),
+    options: [
+      { decision: "accept", label: "Allow" },
+      { decision: "cancel", label: "Cancel" },
+    ],
   };
 
   it("declines every pending approval before the send continues", async () => {
@@ -57,7 +61,7 @@ describe("declining approvals before sending", () => {
     expect(send).not.toHaveBeenCalled();
     resolve(AsyncResult.success(undefined));
     await submission;
-    expect(respond).toHaveBeenCalledWith(second.requestId, "decline");
+    expect(respond).toHaveBeenCalledWith(second.requestId, "cancel");
     expect(send).toHaveBeenCalledOnce();
   });
 
@@ -102,6 +106,15 @@ describe("declining approvals before sending", () => {
       true,
     );
     expect(respond.mock.calls).toEqual([[approval.requestId, "decline", "Safer please."]]);
+    respond.mockClear();
+    expect(
+      await sendApprovalFeedback(
+        { ...second, supportsFeedback: true },
+        "Use a safer path",
+        respond,
+      ),
+    ).toBe(false);
+    expect(respond).not.toHaveBeenCalled();
   });
 
   it("keeps feedback unsent when unsupported, stale, empty or rejected", async () => {

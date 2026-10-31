@@ -1,14 +1,54 @@
+import * as Schema from "effect/Schema";
+
+/** Immutable directory coordinates captured by the server with a native source commit. */
+export const AgentEventDirectoryReference = Schema.Struct({
+  sourceGeneration: Schema.String,
+  directoryGeneration: Schema.String,
+});
+export type AgentEventDirectoryReference = typeof AgentEventDirectoryReference.Type;
+
+export const AgentEventCurrentOwner = Schema.Struct({
+  state: Schema.Literals(["assigned", "unassigned", "unknown_user"]),
+  id: Schema.NullOr(Schema.String),
+  label: Schema.NullOr(Schema.String),
+  assignmentRevision: Schema.NullOr(Schema.Number),
+  sourceGeneration: Schema.NullOr(Schema.String),
+  directoryGeneration: Schema.NullOr(Schema.String),
+  directoryDigest: Schema.NullOr(Schema.String),
+  directoryStatus: Schema.Literals([
+    "fresh",
+    "stale",
+    "unavailable",
+    "invalid",
+    "absent",
+    "never_read",
+    "unknown",
+  ]),
+  directoryObservedAt: Schema.NullOr(Schema.String),
+  directoryCheckedAt: Schema.NullOr(Schema.String),
+  asOfSourceSequence: Schema.Number,
+  readAt: Schema.String,
+  routingReady: Schema.Boolean,
+});
+export type AgentEventCurrentOwner = typeof AgentEventCurrentOwner.Type;
+
 /**
- * T3 Code LAN: MCP Events (docs/maintenance/agent-events-and-approvals.md). Phase 0 delivers only
- * operator probes on `t3.task_activity`. Probes take sequences in the log phase 2 facts will
- * share, so cursors stay valid; later phases add kinds, not a new envelope or cursor.
+ * T3 Code LAN: MCP Events (docs/maintenance/agent-events-and-approvals.md).
+ * Operator probes and task facts share one delivery log, envelope and replay cursor.
  */
 
 export const AGENT_EVENTS_PROTOCOL_VERSION = "2026-07-28" as const;
 export const AGENT_EVENT_PAYLOAD_SCHEMA = "t3.agent-event/1" as const;
 
 const AgentEventTaskActivity = "t3.task_activity" as const;
-export const AGENT_EVENT_NAMES = [AgentEventTaskActivity] as const;
+export const AGENT_EVENT_NAMES = [
+  AgentEventTaskActivity,
+  "t3.approval_needed",
+  "t3.question_asked",
+  "t3.task_blocked",
+  "t3.run_finished",
+  "t3.owner_changed",
+] as const;
 export type AgentEventName = (typeof AGENT_EVENT_NAMES)[number];
 
 const AGENT_EVENT_KINDS = [
@@ -192,6 +232,36 @@ export const AGENT_EVENT_CATALOG: ReadonlyArray<AgentEventDefinition> = [
     inputSchema: agentEventArgumentsJsonSchema,
     payloadSchema: agentEventPayloadJsonSchema,
   },
+  ...(
+    [
+      [
+        "t3.approval_needed",
+        "A provider approval is waiting, or its shown permissions changed. Read its current grant and your rights before answering.",
+      ],
+      [
+        "t3.question_asked",
+        "A question or secret request is waiting. Enter secrets in T3; never put a secret in an event response.",
+      ],
+      [
+        "t3.task_blocked",
+        "A task needs help: a provider usage limit, a lost request, or an answer whose delivery failed or is uncertain.",
+      ],
+      [
+        "t3.run_finished",
+        "A task run completed, failed, was interrupted or was cancelled. Delegated child results are excluded unless requested.",
+      ],
+      [
+        "t3.owner_changed",
+        "A task's owner changed. Owner labels describe the event; they do not grant access or establish current routing.",
+      ],
+    ] as const
+  ).map(([name, description]) => ({
+    name,
+    description,
+    delivery: ["webhook"] as const,
+    inputSchema: agentEventArgumentsJsonSchema,
+    payloadSchema: agentEventPayloadJsonSchema,
+  })),
 ];
 
 export interface AgentEventEnvelope {

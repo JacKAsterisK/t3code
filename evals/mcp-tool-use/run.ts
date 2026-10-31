@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { ApprovalToolkit } from "../../apps/server/src/mcp/toolkits/approvals/tools.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 /**
  * Replays small fake threads on a Claude or Codex model to check T3's MCP tool use. A trimmed
@@ -353,6 +354,7 @@ export const normalizeToolInput = (name: string, input: unknown) =>
 // McpHttpServer advertises each tool's JSON schema, and Claude Code passes the MCP name,
 // description, and schema through unchanged.
 const t3SourceTools: ReadonlyArray<Tool.Any> = [
+  ApprovalToolkit,
   OrchestratorToolkit,
   ThreadToolkit,
   AttachmentToolkit,

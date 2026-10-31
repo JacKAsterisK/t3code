@@ -858,6 +858,15 @@ const make = Effect.fn("makeWithDatabase")(function* (
   const compiler = Statement.makeCompilerSqlite();
   const isFileDatabase = options.filename !== ":memory:" && options.filename !== "";
 
+  const commitCleanups = new WeakMap<Connection, Effect.Effect<void, SqlError>>();
+  const pendingCommitCleanups = new WeakMap<Connection, Effect.Effect<void, SqlError>>();
+  const available = (connection: Connection) =>
+    Effect.suspend(() =>
+      (pendingCommitCleanups.get(connection) ?? Effect.void).pipe(
+        Effect.tap(() => Effect.sync(() => pendingCommitCleanups.delete(connection))),
+      ),
+    );
+
   const makeConnection = Effect.gen(function* () {
     const scope = yield* Effect.scope;
     const db = yield* Effect.try({
@@ -1049,7 +1058,7 @@ const make = Effect.fn("makeWithDatabase")(function* (
         runStatement(statement, params, "values"),
       );
 
-    return identity<Connection>({
+    const connection = identity<Connection>({
       execute(sql, params, rowTransform) {
         return rowTransform ? Effect.map(run(sql, params), rowTransform) : run(sql, params);
       },
@@ -1074,6 +1083,15 @@ const make = Effect.fn("makeWithDatabase")(function* (
         return Stream.die(new UnsupportedNodeSqliteOperationError());
       },
     });
+    commitCleanups.set(
+      connection,
+      Effect.suspend(() =>
+        db.isTransaction
+          ? Effect.asVoid(connection.executeUnprepared("ROLLBACK", [], undefined))
+          : Effect.void,
+      ),
+    );
+    return connection;
   });
 
   const semaphore = yield* Semaphore.make(1);
@@ -1150,7 +1168,7 @@ const make = Effect.fn("makeWithDatabase")(function* (
       readonly connection: Connection;
     },
     use: (connection: Connection) => Effect.Effect<A, E, R>,
-  ): Effect.Effect<A, E, R> =>
+  ): Effect.Effect<A, E | SqlError, R> =>
     Effect.withFiber((fiber) => {
       const clock = fiber.getRef(Clock.Clock);
       const start = clock.monotonicTimeNanosUnsafe();
@@ -1164,7 +1182,7 @@ const make = Effect.fn("makeWithDatabase")(function* (
         ) {
           annotateAcquired(fiber, acquired(target, clock, start), ownerAtWaitStart);
         }
-        return use(target.connection);
+        return Effect.flatMap(available(target.connection), () => use(target.connection));
       });
       const useOwnedConnection =
         target.name === "writer"
@@ -1232,7 +1250,10 @@ const make = Effect.fn("makeWithDatabase")(function* (
         });
         return Effect.as(
           // A scheduler yield after taking the permit must not precede its release finalizer.
-          Effect.provideService(acquire, Scheduler.PreventSchedulerYield, true),
+          Effect.andThen(
+            Effect.provideService(acquire, Scheduler.PreventSchedulerYield, true),
+            available(target.connection),
+          ),
           target.connection,
         );
       }),
@@ -1244,6 +1265,17 @@ const make = Effect.fn("makeWithDatabase")(function* (
     borrower,
     compiler,
     transactionAcquirer,
+    onCommitFailure: (connection) => {
+      const cleanup =
+        commitCleanups.get(connection) ??
+        Effect.asVoid(connection.executeUnprepared("ROLLBACK", [], undefined));
+      return Effect.onExit(cleanup, (exit) =>
+        Effect.sync(() => {
+          if (Exit.isSuccess(exit)) pendingCommitCleanups.delete(connection);
+          else pendingCommitCleanups.set(connection, cleanup);
+        }),
+      );
+    },
     // BEGIN IMMEDIATE avoids read-then-write SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot resolve.
     beginTransaction: options.readonly === true ? "BEGIN" : "BEGIN IMMEDIATE",
     spanAttributes: [

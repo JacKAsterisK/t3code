@@ -1,4 +1,9 @@
 import type {
+  ApprovalNativeDescriptor,
+  ApprovalActor,
+  ApprovalReceiptState,
+} from "@t3tools/contracts";
+import type {
   EnvironmentId,
   ThreadId,
   OrchestrationV2ThreadProjection,
@@ -20,6 +25,13 @@ export type ApprovalResponder = (
   feedback?: string,
 ) => Promise<AtomCommandResult<unknown, unknown> | undefined>;
 
+const declineDecision = (approval: ThreadPendingApproval): ProviderApprovalDecision | undefined =>
+  approval.options === undefined || approval.options.some((option) => option.decision === "decline")
+    ? "decline"
+    : approval.options.some((option) => option.decision === "cancel")
+      ? "cancel"
+      : undefined;
+
 /** Feedback belongs to the displayed request, which may be a native child's tool call. */
 export async function sendApprovalFeedback(
   approval: ThreadPendingApproval,
@@ -28,6 +40,7 @@ export async function sendApprovalFeedback(
 ): Promise<boolean> {
   if (!approval.supportsFeedback || approval.responseCapability !== "live" || !feedback.trim())
     return false;
+  if (declineDecision(approval) !== "decline") return false;
   return (await respond(approval.requestId, "decline", feedback.trim()))?._tag === "Success";
 }
 
@@ -39,12 +52,17 @@ export async function declinePendingApprovals(
   for (const approval of approvals) {
     // A request the provider can no longer answer has nothing to decline.
     if (approval.responseCapability !== "live") continue;
-    if ((await respond(approval.requestId, "decline"))?._tag !== "Success") return false;
+    const decision = declineDecision(approval);
+    if (decision === undefined || (await respond(approval.requestId, decision))?._tag !== "Success")
+      return false;
   }
   return true;
 }
 
 export interface ThreadPendingApproval {
+  readonly approval?: ApprovalNativeDescriptor;
+  readonly resolvedBy?: ApprovalActor;
+  readonly approvalDelivery?: ApprovalReceiptState;
   readonly requestId: RuntimeRequestId;
   readonly requestKind: ProviderRequestKind;
   readonly createdAt: string;
@@ -257,6 +275,11 @@ export function derivePendingThreadRequests(
       (candidate) => candidate.type === "approval_request" && candidate.requestId === request.id,
     );
     approvals.push({
+      ...(request.approval === undefined ? {} : { approval: request.approval }),
+      ...(request.resolvedBy === undefined ? {} : { resolvedBy: request.resolvedBy }),
+      ...(request.approvalDelivery === undefined
+        ? {}
+        : { approvalDelivery: request.approvalDelivery }),
       requestId: request.id,
       requestKind: request.kind,
       createdAt: DateTime.formatIso(request.createdAt),

@@ -1,5 +1,7 @@
+import * as ApprovalAuthority from "./ApprovalAuthority.ts";
 import {
   AuthAccessWriteScope,
+  AuthOrchestrationApproveScope,
   type AuthMcpApprovalDecision,
   type AuthMcpAuthorizationRequest,
   type AuthMcpAuthorizationServerMetadata,
@@ -59,7 +61,11 @@ const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const CODE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const CODE_VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]{43,128}$/;
 
-const MCP_OAUTH_SCOPES = [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
+const MCP_OAUTH_SCOPES = [
+  AuthOrchestrationReadScope,
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationApproveScope,
+];
 
 export interface McpOAuthUrls {
   readonly issuer: string;
@@ -228,6 +234,7 @@ interface PendingCode {
   readonly renewable: boolean;
   /** The subject of the pairing code or browser session that approved it. */
   readonly approvalSubject: string | undefined;
+  readonly approvals: boolean;
 }
 
 export type ApprovalDecision = Exclude<AuthMcpApprovalDecision, { readonly _tag: "deny" }>;
@@ -290,6 +297,7 @@ export const redirectForError = (error: McpOAuthRedirectError, issuer: string) =
 
 const make = Effect.gen(function* () {
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+  const approvalAuthority = yield* ApprovalAuthority.ApprovalAuthority;
   const grants = yield* McpOAuthGrants.McpOAuthGrants;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const crypto = yield* Crypto.Crypto;
@@ -489,6 +497,7 @@ const make = Effect.gen(function* () {
     authorization: AuthorizationRequest,
     access: AuthMcpClientAccess,
     approvalSubject: string | undefined,
+    approvals: boolean,
   ) {
     const now = yield* Clock.currentTimeMillis;
     const code = Buffer.from(yield* crypto.randomBytes(32).pipe(Effect.orDie)).toString(
@@ -508,6 +517,7 @@ const make = Effect.gen(function* () {
         taskOnly: authorization.taskOnly,
         renewable: authorization.renewable,
         approvalSubject,
+        approvals,
       });
       return next;
     });
@@ -521,10 +531,21 @@ const make = Effect.gen(function* () {
         description: "Task-only access is limited to Auto or a lower mode.",
       });
     }
+    const approvals = decision.approvals === true;
+    if (
+      approvals &&
+      (decision.access === "read-only" ||
+        input.authorization.taskOnly ||
+        (input.authorization.client.peerLink && decision._tag !== "pairing-code"))
+    )
+      return yield* new McpOAuthPageError({
+        description:
+          "Permission approvals require task access; a peer link also needs an approval-capable pairing code.",
+      });
     let approvalSubject: string | undefined;
     if (decision._tag === "pairing-code") {
       ({ subject: approvalSubject } = yield* environmentAuth
-        .consumeMcpApprovalCode(decision.code, decision.access)
+        .consumeMcpApprovalCode(decision.code, decision.access, approvals)
         .pipe(
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
             Effect.logError("MCP approval code check failed.", { cause }).pipe(
@@ -543,7 +564,8 @@ const make = Effect.gen(function* () {
       if (
         session === undefined ||
         !timingSafeEqualBase64Url(decision.csrfToken, session.csrfToken) ||
-        !mcpClientScopes(decision.access).every((scope) => session.scopes.includes(scope))
+        !mcpClientScopes(decision.access).every((scope) => session.scopes.includes(scope)) ||
+        (approvals && CredentialAttribution.isMcpClientSubject(session?.subject ?? ""))
       ) {
         return yield* new McpOAuthPageError({
           description: "Your session cannot approve this request. Enter a pairing code instead.",
@@ -551,7 +573,7 @@ const make = Effect.gen(function* () {
       }
       approvalSubject = session.subject;
     }
-    const code = yield* mintCode(input.authorization, decision.access, approvalSubject);
+    const code = yield* mintCode(input.authorization, decision.access, approvalSubject, approvals);
     yield* Effect.logInfo("Approved an MCP client sign-in.", {
       client: input.authorization.client.name,
       access: decision.access,
@@ -682,24 +704,31 @@ const make = Effect.gen(function* () {
         return yield* fail("invalid_grant", "The authorization code is invalid or expired.");
       }
       if (pending.taskOnly) {
-        return yield* grants
-          .issue({
+        return yield* approvalAuthority
+          .withoutFamilyApproval(
             clientId,
-            resource: urls.resource,
-            access: pending.access,
-            client: { ...deriveAuthClientMetadata({ request }), label: pending.clientName },
-            renewable: pending.renewable,
-            // A grant acts for the fleet machine whose credential approved it, if any.
-            subject: CredentialAttribution.mcpClientSubject(pending.approvalSubject ?? ""),
-          })
+            pending.approvalSubject ?? "",
+            grants
+              .issue({
+                clientId,
+                resource: urls.resource,
+                access: pending.access,
+                client: { ...deriveAuthClientMetadata({ request }), label: pending.clientName },
+                renewable: pending.renewable,
+                // A grant acts for the fleet machine whose credential approved it, if any.
+                subject: CredentialAttribution.mcpClientSubject(pending.approvalSubject ?? ""),
+              })
+              .pipe(Effect.map(grantResult)),
+          )
           .pipe(
-            Effect.map(grantResult),
             Effect.mapError(() => fail("invalid_grant", "The task grant could not be issued.")),
           );
       }
       const issued = yield* environmentAuth
         .issueMcpClientSession({
           label: pending.clientName,
+          approvals: pending.approvals,
+          applicationId: pending.clientId,
           access: pending.access,
           peerLink: pending.peerLink,
           client: deriveAuthClientMetadata({ request }),
@@ -732,7 +761,7 @@ const make = Effect.gen(function* () {
         access_token: issued.token,
         token_type: "Bearer",
         expires_in: Math.max(0, Math.floor((issued.expiresAt.epochMilliseconds - now) / 1000)),
-        scope: encodeOAuthScope(mcpClientScopes(pending.access)),
+        scope: encodeOAuthScope(mcpClientScopes(pending.access, { approvals: pending.approvals })),
       };
     },
   );

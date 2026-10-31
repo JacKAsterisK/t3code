@@ -19,7 +19,6 @@ import {
   globalIdleCompaction,
   withIdleCompaction,
 } from "@t3tools/contracts";
-import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
@@ -51,6 +50,7 @@ import {
   fallbackTextGenerationModelSelection,
   isModelSelectionProviderEnabled,
 } from "@t3tools/shared/serverSettings";
+import * as Gate from "./auth/ApprovalAdmissionGate.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as FleetAccessPolicy from "./lan/FleetAccessPolicy.ts";
 import { secretProviderDefinitions } from "./secrets/secretProviderDefinitions.ts";
@@ -228,6 +228,17 @@ export class ServerSettingsService extends Context.Service<
 
     readonly getSettings: Effect.Effect<ServerSettings, ServerSettingsError>;
 
+    /** Published authority flags only; never reads files or secrets while admission is held. */
+    readonly getAdmissionSettings?: Effect.Effect<
+      {
+        readonly linkedEnvironmentsEnabled: boolean;
+        readonly fleetLinkedEnvironmentsEnabled: boolean;
+        readonly agentEventsEnabled: boolean;
+        readonly generation: number;
+      },
+      ServerSettingsError
+    >;
+
     readonly updateSettings: (
       patch: ServerSettingsPatch,
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
@@ -267,6 +278,9 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
       ? { providerHealthRefreshInterval: providerHealthRefreshInterval as Duration.Duration }
       : {}),
   });
+  const { withGate } = yield* Gate.ApprovalAdmissionGate;
+  const changes = yield* PubSub.unbounded<ServerSettings>();
+  const revision = yield* Ref.make(0);
   const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);
   const writeSemaphore = yield* Semaphore.make(1);
   const fleetLinks = yield* makeFleetLinkReads;
@@ -279,7 +293,14 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
       Ref.get(currentSettingsRef).pipe(
         Effect.flatMap(update),
         Effect.flatMap(normalizeServerSettings),
-        Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
+        Effect.tap((nextSettings) =>
+          withGate(
+            Ref.set(currentSettingsRef, nextSettings).pipe(
+              Effect.andThen(Ref.update(revision, (value) => value + 1)),
+              Effect.andThen(PubSub.publish(changes, nextSettings)),
+            ),
+          ),
+        ),
         Effect.flatMap(fleetLinks.resolve),
       ),
     );
@@ -288,6 +309,11 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
     start: Effect.void,
     ready: Effect.void,
     getSettings,
+    getAdmissionSettings: getSettings.pipe(
+      Effect.flatMap((current) =>
+        Ref.get(revision).pipe(Effect.map((generation) => ({ ...current, generation }))),
+      ),
+    ),
     updateSettings: (patch) =>
       updateTestSettings((currentSettings) =>
         Effect.succeed(applyServerSettingsPatch(currentSettings, patch)),
@@ -302,13 +328,13 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
       ),
     withSettingsSnapshot: (use) =>
       writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
-    streamChanges: Stream.empty,
-    subscribeChanges: Effect.succeed(Stream.empty),
+    streamChanges: Stream.fromPubSub(changes),
+    subscribeChanges: PubSub.subscribe(changes).pipe(Effect.map(Stream.fromSubscription)),
   } satisfies ServerSettingsService["Service"];
 });
 
 export const layerTest = (overrides: DeepPartial<ServerSettings> = {}) =>
-  Layer.effect(ServerSettingsService, makeTest(overrides));
+  Layer.effect(ServerSettingsService, makeTest(overrides)).pipe(Layer.provideMerge(Gate.layer));
 
 // Accept retired token delivery only on load so one old value cannot reset all settings.
 const PersistedResponseStreamingMode = Schema.Union([
@@ -667,7 +693,8 @@ const make = Effect.gen(function* () {
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const sql = yield* SqlClient.SqlClient;
   const writeSemaphore = yield* Semaphore.make(1);
-  const cacheKey = "settings" as const;
+  const { withGate } = yield* Gate.ApprovalAdmissionGate;
+  const admissionGeneration = yield* Ref.make(0);
   const changesPubSub = yield* PubSub.unbounded<ServerSettings>();
   const startedRef = yield* Ref.make(false);
   const startedDeferred = yield* Deferred.make<void, ServerSettingsError>();
@@ -894,16 +921,43 @@ const make = Effect.gen(function* () {
     return { settings: migrated, parseFailure };
   });
 
-  const settingsCache = yield* Cache.makeWith((_key: typeof cacheKey) => loadSettingsFromDisk, {
-    capacity: 1,
-    timeToLive: (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero),
-  });
-
-  const getSettingsFromCache = Cache.get(settingsCache, cacheKey).pipe(
-    Effect.map((loaded) => loaded.settings),
+  const settingsCache = yield* Ref.make<Effect.Success<typeof loadSettingsFromDisk> | undefined>(
+    undefined,
   );
-  const reloadSettings = Cache.invalidate(settingsCache, cacheKey).pipe(
-    Effect.andThen(Cache.get(settingsCache, cacheKey)),
+  const loadLock = yield* Semaphore.make(1);
+  const publishSettings = (loaded: Effect.Success<typeof loadSettingsFromDisk>) =>
+    withGate(
+      Effect.gen(function* () {
+        const previous = yield* Ref.get(settingsCache);
+        if (
+          previous?.settings.linkedEnvironmentsEnabled !==
+            loaded.settings.linkedEnvironmentsEnabled ||
+          previous?.settings.fleetLinkedEnvironmentsEnabled !==
+            loaded.settings.fleetLinkedEnvironmentsEnabled ||
+          previous?.settings.agentEventsEnabled !== loaded.settings.agentEventsEnabled
+        )
+          yield* Ref.update(admissionGeneration, (value) => value + 1);
+        yield* Ref.set(settingsCache, loaded);
+      }),
+    );
+  const isLoadedSettings = (
+    loaded: Effect.Success<typeof loadSettingsFromDisk> | undefined,
+  ): loaded is Effect.Success<typeof loadSettingsFromDisk> => loaded !== undefined;
+  const getLoadedSettings = Ref.get(settingsCache).pipe(
+    Effect.filterOrElse(isLoadedSettings, () =>
+      loadLock.withPermit(
+        Ref.get(settingsCache).pipe(
+          Effect.filterOrElse(isLoadedSettings, () =>
+            loadSettingsFromDisk.pipe(Effect.tap(publishSettings)),
+          ),
+        ),
+      ),
+    ),
+  );
+  const getSettingsFromCache = getLoadedSettings.pipe(Effect.map((loaded) => loaded.settings));
+  const reloadSettings = loadSettingsFromDisk.pipe(
+    Effect.tap(publishSettings),
+    loadLock.withPermit,
   );
 
   const materializeSettingsSecrets = Effect.fn("serverSettings.materializeSettingsSecrets")(
@@ -1160,9 +1214,13 @@ const make = Effect.gen(function* () {
             return materializedExit.value;
           }).pipe(Effect.ensuring(invalidateMaterialized)),
         );
-        yield* Cache.set(settingsCache, cacheKey, { settings: next, parseFailure: Option.none() });
-        materialized = { source: next, value: materializedNext };
-        yield* emitChange(next);
+        yield* withGate(
+          Effect.gen(function* () {
+            yield* publishSettings({ settings: next, parseFailure: Option.none() });
+            materialized = { source: next, value: materializedNext };
+            yield* emitChange(next);
+          }),
+        );
         return yield* fleetLinks.resolve(materializedNext);
       }),
     );
@@ -1279,6 +1337,24 @@ const make = Effect.gen(function* () {
     start,
     ready: Deferred.await(startedDeferred),
     getSettings: getMaterializedSettings,
+    getAdmissionSettings: Ref.get(settingsCache).pipe(
+      Effect.flatMap((loaded) =>
+        loaded === undefined
+          ? Effect.fail(new ServerSettingsError({ settingsPath, operation: "read-file" }))
+          : Effect.succeed(loaded.settings),
+      ),
+      Effect.flatMap(fleetLinks.resolve),
+      Effect.flatMap((current) =>
+        Ref.get(admissionGeneration).pipe(
+          Effect.map((generation) => ({
+            linkedEnvironmentsEnabled: current.linkedEnvironmentsEnabled,
+            fleetLinkedEnvironmentsEnabled: current.fleetLinkedEnvironmentsEnabled,
+            agentEventsEnabled: current.agentEventsEnabled,
+            generation,
+          })),
+        ),
+      ),
+    ),
     updateSettings: (patch) =>
       updateAndPersistSettings((current) =>
         ensureSecretProviderWritesAllowed(patch, settingsPath).pipe(
@@ -1306,4 +1382,4 @@ const make = Effect.gen(function* () {
   } satisfies ServerSettingsService["Service"];
 });
 
-export const layer = Layer.effect(ServerSettingsService, make);
+export const layer = Layer.effect(ServerSettingsService, make).pipe(Layer.provideMerge(Gate.layer));

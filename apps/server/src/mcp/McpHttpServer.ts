@@ -1,3 +1,16 @@
+import * as ApprovalService from "../approvals/ApprovalService.ts";
+import * as ApprovalReceiver from "../approvals/ApprovalReceiver.ts";
+import * as ApprovalForwarding from "../approvals/ApprovalForwarding.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
+import * as FactSignals from "../agentEvents/AgentFactRelaySignals.ts";
+import { withIncomingLaunchProvenance } from "../approvals/ApprovalLaunchProvenance.ts";
+import { AgentFactRelayToolkit } from "./toolkits/agentFactRelay/tools.ts";
+import * as AgentFactRelayHandlers from "./toolkits/agentFactRelay/handlers.ts";
+import { ApprovalToolkit } from "./toolkits/approvals/tools.ts";
+import * as ApprovalHandlers from "./toolkits/approvals/handlers.ts";
+import { LinkApprovalToolkit } from "./toolkits/approvals/linkTools.ts";
+import * as LinkApprovalHandlers from "./toolkits/approvals/linkHandlers.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -207,9 +220,17 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
   // T3 Code LAN: MCP Events, answered after auth, only for requests effect itself would admit.
   const events = yield* Effect.serviceOption(McpEventsEndpoint.McpEventsEndpoint);
   const serverSettings = yield* ServerSettings.ServerSettingsService;
-  const linksEnabled = serverSettings.getSettings.pipe(
-    Effect.map((settings) => settings.linkedEnvironmentsEnabled),
+  const factSignals = yield* Effect.serviceOption(FactSignals.AgentFactRelaySignals);
+  const eventsAtStartup = yield* serverSettings.getSettings.pipe(
+    Effect.map((settings) => settings.agentEventsEnabled),
     Effect.orElseSucceed(() => false),
+  );
+  const admissionSettings = serverSettings.getSettings.pipe(
+    Effect.map((settings) => ({
+      linkedEnvironments: settings.linkedEnvironmentsEnabled,
+      agentEventsEnabled: eventsAtStartup && settings.agentEventsEnabled,
+    })),
+    Effect.orElseSucceed(() => ({ linkedEnvironments: false, agentEventsEnabled: false })),
   );
   return Effect.fn("McpHttpServer.authenticateRequest")(function* (httpEffect) {
     const request = yield* HttpServerRequest.HttpServerRequest;
@@ -235,14 +256,21 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
     }
     const limited = withModeLimit(invocation, request);
     if (limited === undefined) return invalidModeLimit;
-    const linkedEnvironments = yield* linksEnabled;
+    const { linkedEnvironments, agentEventsEnabled } = yield* admissionSettings;
     if (limited.client?.linked === true && !linkedEnvironments) return linkedEnvironmentsOff;
-    const scope = { ...limited, linkedEnvironments };
+    const scope = withIncomingLaunchProvenance(
+      { ...limited, linkedEnvironments, agentEventsEnabled },
+      request.headers,
+    );
     const inner = httpEffect.pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
       Effect.map(normalizeMcpHttpResponse),
     );
-    return yield* Option.isSome(events) ? events.value.handle(request, scope, inner) : inner;
+    return yield* (Option.isSome(events) ? events.value.handle(request, scope, inner) : inner).pipe(
+      Effect.tap(() =>
+        agentEventsEnabled && Option.isSome(factSignals) ? factSignals.value.poll : Effect.void,
+      ),
+    );
   }) satisfies McpAuthMiddleware;
 }).pipe(Effect.withSpan("McpHttpServer.makeAuthMiddleware"));
 
@@ -1106,6 +1134,17 @@ export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorHandlers.layer,
 ).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
 
+const layerAgentFactRelayToolkit = toolkitRegistration(
+  AgentFactRelayToolkit,
+  AgentFactRelayHandlers.layer,
+);
+
+export const layerApprovalToolkit = toolkitRegistration(ApprovalToolkit, ApprovalHandlers.layer);
+export const layerLinkApprovalToolkit = toolkitRegistration(
+  LinkApprovalToolkit,
+  LinkApprovalHandlers.layer,
+);
+
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 
 const layerWorktreeToolkitRegistration = toolkitRegistration(
@@ -1185,6 +1224,9 @@ const layerLanToolkit = toolkitRegistration(LanToolkit, LanHandlers.layer).pipe(
 export const layerTools = Layer.mergeAll(
   layerPreviewToolkit,
   layerOrchestratorToolkit,
+  layerApprovalToolkit,
+  layerAgentFactRelayToolkit,
+  layerLinkApprovalToolkit,
   layerThreadToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,
@@ -1197,5 +1239,12 @@ export const layerTools = Layer.mergeAll(
 );
 
 export const layer = Layer.mergeAll(layerLanToolkit, layerTools).pipe(
+  Layer.provideMerge(ApprovalReceiver.layer),
+  Layer.provideMerge(ApprovalForwarding.layer),
+  Layer.provideMerge(
+    ApprovalService.layer.pipe(
+      Layer.provide(Layer.merge(ProjectionStore.layer, CommandReceiptStore.layer)),
+    ),
+  ),
   Layer.provideMerge(layerMcpTransport),
 );

@@ -1,3 +1,7 @@
+import { makeNodeClient } from "effect-codex-app-server/node";
+import { acknowledgedResponse } from "effect-codex-app-server/protocol";
+import type { ApprovalNativeDescriptor } from "@t3tools/contracts";
+import { canonicalApprovalJson } from "@t3tools/shared/approvalPresentation";
 import { pipe } from "effect/Function";
 import * as DocumentText from "../../provider/DocumentText.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
@@ -1273,6 +1277,11 @@ type PendingCodexRuntimeRequest =
       readonly type: "approval";
       readonly requestKind: ProviderRequestKind;
       readonly decision: Deferred.Deferred<ProviderApprovalDecision, never>;
+      descriptor?: ApprovalNativeDescriptor;
+      guarded?: NonNullable<
+        ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput["guardedResponse"]
+      >;
+      readonly responseGate?: Semaphore.Semaphore;
     }
   | {
       readonly type: "user_input";
@@ -1502,13 +1511,11 @@ export const layerAppServerClientFactory: Layer.Layer<
 > = Layer.effect(
   CodexAppServerClientFactory,
   Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const { native: nativeEventLogger } = yield* ProviderEventLoggers.ProviderEventLoggers;
     const agentScope = yield* AgentScope;
 
     return CodexAppServerClientFactory.of({
       open: Effect.fn("CodexAdapterV2.open")(function* (input) {
-        const scope = yield* Scope.Scope;
         const environment = {
           ...codexAppServerEnvironment(input.environment),
           ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
@@ -1521,17 +1528,6 @@ export const layerAppServerClientFactory: Layer.Layer<
           env: environment,
           threadId: input.threadId,
         }).pipe(Effect.provideService(AgentScope, agentScope));
-        const handle = yield* spawner.spawn(command).pipe(
-          Effect.provideService(Scope.Scope, scope),
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapter.ProviderAdapterOpenSessionError({
-                driver: CODEX_PROVIDER,
-                providerSessionId: input.providerSessionId,
-                cause,
-              }),
-          ),
-        );
         const protocolLogger = makeCodexAppServerProtocolLogger({
           nativeEventLogger,
           threadId: input.threadId,
@@ -1545,9 +1541,18 @@ export const layerAppServerClientFactory: Layer.Layer<
                 logOutgoing: true,
                 logger: protocolLogger,
               };
-        const context = yield* Layer.build(CodexClient.layerChildProcess(handle, clientOptions));
-        return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
-          Effect.provide(context),
+        return yield* makeNodeClient(command, {
+          ...clientOptions,
+          platform: yield* HostProcess.Platform,
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapter.ProviderAdapterOpenSessionError({
+                driver: CODEX_PROVIDER,
+                providerSessionId: input.providerSessionId,
+                cause,
+              }),
+          ),
         );
       }),
     });
@@ -1833,9 +1838,46 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           new Map<ProviderTurnId, ActiveCodexProviderRetry>(),
         );
         const planIds = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact["id"]>());
+        const approvalGeneration = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
         const pendingRuntimeRequests = yield* Ref.make(
           new Map<string, PendingCodexRuntimeRequest>(),
         );
+        type GuardedReply = NonNullable<
+          ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput["guardedResponse"]
+        >;
+        type GuardedOutcome = {
+          readonly state: Parameters<GuardedReply["onResult"]>[0];
+          readonly evidence: Parameters<GuardedReply["onResult"]>[1];
+        };
+        const approvalResponses = new Map<
+          string,
+          { readonly binding: string; outcome?: GuardedOutcome }
+        >();
+        let sessionClosed = false;
+        const guardedWrites = new Map<
+          string,
+          { readonly nativeRequestId: string | number; readonly reply: GuardedReply }
+        >();
+        const abandonUnclaimedWrites = Effect.fn("CodexAdapterV2.abandonUnclaimedWrites")(
+          function* (nativeRequestId?: string | number) {
+            for (const { nativeRequestId: id, reply } of Array.from(guardedWrites.values()))
+              if (nativeRequestId === undefined || id === nativeRequestId)
+                yield* reply.onResult("delivery_unknown", {
+                  commandId: reply.commandId,
+                  boundary: "write_interrupted",
+                });
+          },
+        );
+        yield* Scope.addFinalizer(
+          scope,
+          Effect.sync(() => {
+            sessionClosed = true;
+          }).pipe(Effect.andThen(abandonUnclaimedWrites())),
+        );
+        yield* client.handleServerNotification("serverRequest/resolved", (payload) =>
+          abandonUnclaimedWrites(payload.requestId),
+        );
+
         /** Codex acceptForSession covers only the exact command or patch, not future commands. */
         const sessionApprovals = new Map<
           string,
@@ -5356,65 +5398,124 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           }).pipe(Effect.orDie),
         );
 
-        yield* client.handleServerRequest("item/permissions/requestApproval", (payload) =>
-          Effect.gen(function* () {
-            const context = yield* awaitActiveTurn(payload.turnId);
-            if (context === undefined) {
-              return yield* toProtocolError(
-                `No active Codex turn context for permissions approval turn ${payload.turnId}.`,
-                payload,
-              );
-            }
+        yield* client.handleServerRequest(
+          "item/permissions/requestApproval",
+          (payload, nativeContext) =>
+            Effect.gen(function* () {
+              const context = yield* awaitActiveTurn(payload.turnId);
+              if (context === undefined) {
+                return yield* toProtocolError(
+                  `No active Codex turn context for permissions approval turn ${payload.turnId}.`,
+                  payload,
+                );
+              }
 
-            const requestKind = providerRequestKindFromPermissions(payload.permissions);
-            const artifacts = yield* buildApprovalRequestArtifacts({
-              context,
-              nativeItemId: payload.itemId,
-              nativeRequestId: payload.itemId,
-              requestKind,
-              ...(payload.reason === undefined ? {} : { prompt: payload.reason }),
-            });
-            const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
-            yield* Ref.update(pendingRuntimeRequests, (current) => {
-              const updated = new Map(current);
-              updated.set(String(artifacts.request.id), {
+              const requestKind = providerRequestKindFromPermissions(payload.permissions);
+              const originalArtifacts = yield* buildApprovalRequestArtifacts({
+                context,
+                nativeItemId: payload.itemId,
+                nativeRequestId: payload.itemId,
+                requestKind,
+                ...(payload.reason === undefined ? {} : { prompt: payload.reason }),
+              });
+              const evidence = nativeContext.permissionEvidence;
+              const responseGate = yield* Semaphore.make(1);
+              const descriptor: ApprovalNativeDescriptor | undefined =
+                evidence?.supported === true
+                  ? {
+                      requestIncarnation: yield* crypto.randomUUIDv4().pipe(Effect.orDie),
+                      providerSessionId: input.providerSessionId,
+                      providerGeneration: approvalGeneration,
+                      presentationRevision: 1,
+                      nativeRequestId: nativeContext.nativeRequestId,
+                      grant: {
+                        version: 1,
+                        profile: evidence.profile,
+                        provider: "codex",
+                        providerVersion: evidence.providerVersion,
+                        nativeMethod: "item/permissions/requestApproval",
+                        nativeDecision: { permissions: evidence.raw.permissions, scope: "turn" },
+                        permission: evidence.raw,
+                        resources: { cwd: evidence.raw.cwd, permissions: evidence.raw.permissions },
+                        effectiveScope: "turn",
+                        persistence: "none",
+                        supported: true,
+                        appliesTo: `The complete requested permissions for provider turn ${evidence.raw.turnId}`,
+                        expiresWhen: `Provider turn ${evidence.raw.turnId} ends`,
+                      },
+                    }
+                  : undefined;
+              const artifacts = {
+                ...originalArtifacts,
+                request: {
+                  ...originalArtifacts.request,
+                  ...(descriptor === undefined ? {} : { approval: descriptor }),
+                  ...(evidence?.supported === false ? { approvalUnsupported: evidence } : {}),
+                },
+                turnItem: {
+                  ...originalArtifacts.turnItem,
+                  options: [
+                    { decision: "accept" as const, label: "Allow for this turn" },
+                    { decision: "decline" as const, label: "Decline" },
+                  ],
+                  ...(descriptor === undefined ? {} : { approval: descriptor }),
+                },
+              };
+              const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
+              const pendingApproval: Extract<PendingCodexRuntimeRequest, { type: "approval" }> = {
                 type: "approval",
                 requestKind,
                 decision,
+                responseGate,
+                ...(descriptor === undefined ? {} : { descriptor }),
+              };
+              yield* Ref.update(pendingRuntimeRequests, (current) => {
+                const updated = new Map(current);
+                updated.set(String(artifacts.request.id), pendingApproval);
+                return updated;
               });
-              return updated;
-            });
-            yield* emitProviderEvent({
-              type: "node.updated",
-              driver: CODEX_PROVIDER,
-              node: artifacts.node,
-            });
-            yield* emitProviderEvent({
-              type: "turn_item.updated",
-              driver: CODEX_PROVIDER,
-              turnItem: artifacts.turnItem,
-            });
-            yield* emitProviderEvent({
-              type: "runtime_request.updated",
-              driver: CODEX_PROVIDER,
-              threadId: artifacts.node.threadId,
-              runtimeRequest: artifacts.request,
-            });
+              yield* emitProviderEvent({
+                type: "node.updated",
+                driver: CODEX_PROVIDER,
+                node: artifacts.node,
+              });
+              yield* emitProviderEvent({
+                type: "turn_item.updated",
+                driver: CODEX_PROVIDER,
+                turnItem: artifacts.turnItem,
+              });
+              yield* emitProviderEvent({
+                type: "runtime_request.updated",
+                driver: CODEX_PROVIDER,
+                threadId: artifacts.node.threadId,
+                runtimeRequest: artifacts.request,
+              });
 
-            const resolved = yield* Deferred.await(decision).pipe(
-              Effect.ensuring(
-                Ref.update(pendingRuntimeRequests, (current) => {
-                  const updated = new Map(current);
-                  updated.delete(String(artifacts.request.id));
-                  return updated;
-                }),
-              ),
-            );
-            return permissionsResponseFromDecision({
-              decision: resolved,
-              permissions: payload.permissions,
-            });
-          }).pipe(Effect.orDie),
+              const resolved = yield* Deferred.await(decision).pipe(
+                Effect.ensuring(
+                  Ref.update(pendingRuntimeRequests, (current) => {
+                    const updated = new Map(current);
+                    updated.delete(String(artifacts.request.id));
+                    return updated;
+                  }),
+                ),
+              );
+              const value = permissionsResponseFromDecision({
+                decision: resolved,
+                permissions: descriptor?.grant.permission.permissions ?? payload.permissions,
+              });
+              const guarded = pendingApproval.guarded;
+              return guarded === undefined
+                ? value
+                : acknowledgedResponse(
+                    value,
+                    guarded.commandId,
+                    (result) => guarded.onResult(result.state, result),
+                    Effect.sync(() => {
+                      guardedWrites.delete(guarded.commandId);
+                    }),
+                  );
+            }).pipe(Effect.orDie),
         );
 
         yield* client.handleServerRequest("mcpServer/elicitation/request", (payload) =>
@@ -7679,6 +7780,32 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ),
           respondToRuntimeRequest: Effect.fn("CodexAdapterV2.respondToRuntimeRequest")(
             function* (requestInput) {
+              const guardedInput = requestInput.guardedResponse;
+              const binding =
+                guardedInput === undefined
+                  ? undefined
+                  : canonicalApprovalJson({
+                      requestId: requestInput.requestId,
+                      decision: requestInput.decision,
+                      descriptor: guardedInput.descriptor,
+                    });
+              const previous =
+                guardedInput === undefined
+                  ? undefined
+                  : approvalResponses.get(guardedInput.commandId);
+              if (previous !== undefined && guardedInput !== undefined) {
+                if (previous.binding !== binding)
+                  return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                    driver: CODEX_PROVIDER,
+                    requestId: requestInput.requestId,
+                    cause: toProtocolError(
+                      "Approval command identity was reused with different immutable arguments.",
+                    ),
+                  });
+                if (previous.outcome !== undefined)
+                  yield* guardedInput.onResult(previous.outcome.state, previous.outcome.evidence);
+                return;
+              }
               const pending = (yield* Ref.get(pendingRuntimeRequests)).get(
                 String(requestInput.requestId),
               );
@@ -7712,6 +7839,91 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     `Codex ${pending.requestKind} request ${requestInput.requestId} requires an approval decision.`,
                   ),
                 });
+              }
+              const record: { readonly binding: string; outcome?: GuardedOutcome } = {
+                binding: binding ?? "",
+              };
+              const guarded =
+                guardedInput === undefined
+                  ? undefined
+                  : {
+                      ...guardedInput,
+                      onResult: (
+                        state: Parameters<GuardedReply["onResult"]>[0],
+                        evidence: Parameters<GuardedReply["onResult"]>[1],
+                        recover?: ApprovalNativeDescriptor,
+                      ) =>
+                        Effect.suspend(() => {
+                          if (record.outcome !== undefined) return Effect.void;
+                          record.outcome = { state, evidence };
+                          guardedWrites.delete(guardedInput.commandId);
+                          return guardedInput.onResult(state, evidence, recover);
+                        }),
+                    };
+              if (guarded !== undefined) {
+                approvalResponses.set(guarded.commandId, record);
+                if (
+                  pending.descriptor === undefined ||
+                  pending.responseGate === undefined ||
+                  canonicalApprovalJson(pending.descriptor) !==
+                    canonicalApprovalJson(guarded.descriptor)
+                ) {
+                  yield* guarded.onResult("delivery_withheld", {
+                    commandId: guarded.commandId,
+                    boundary: "not_started",
+                  });
+                  return;
+                }
+                yield* pending.responseGate.withPermit(
+                  Effect.gen(function* () {
+                    const admitted = yield* guarded.admit(
+                      Effect.gen(function* () {
+                        if (
+                          sessionClosed ||
+                          (yield* Ref.get(pendingRuntimeRequests)).get(
+                            String(requestInput.requestId),
+                          ) !== pending ||
+                          pending.guarded !== undefined ||
+                          Deferred.isDoneUnsafe(pending.decision)
+                        )
+                          return false;
+                        pending.guarded = guarded;
+                        guardedWrites.set(guarded.commandId, {
+                          nativeRequestId: pending.descriptor!.nativeRequestId,
+                          reply: guarded,
+                        });
+                        return yield* Deferred.succeed(pending.decision, requestInput.decision!);
+                      }),
+                    );
+                    if (admitted) return;
+                    if (
+                      sessionClosed ||
+                      (yield* Ref.get(pendingRuntimeRequests)).get(
+                        String(requestInput.requestId),
+                      ) !== pending ||
+                      pending.guarded !== undefined ||
+                      Deferred.isDoneUnsafe(pending.decision)
+                    ) {
+                      yield* guarded.onResult("delivery_unknown", {
+                        commandId: guarded.commandId,
+                        boundary: "delivery_admission",
+                      });
+                      return;
+                    }
+                    const fresh = {
+                      ...pending.descriptor!,
+                      requestIncarnation: yield* crypto.randomUUIDv4().pipe(Effect.orDie),
+                      presentationRevision: pending.descriptor!.presentationRevision + 1,
+                    };
+                    pending.descriptor = fresh;
+                    yield* guarded.onResult(
+                      "delivery_withheld",
+                      { commandId: guarded.commandId, boundary: "not_started" },
+                      fresh,
+                    );
+                  }),
+                );
+                return;
               }
               yield* Deferred.succeed(pending.decision, requestInput.decision);
             },

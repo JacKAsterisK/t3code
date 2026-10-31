@@ -7,6 +7,7 @@ import {
   AuthFilesystemWriteScope,
   type AuthGrantScope,
   AuthOrchestrationOperateScope,
+  AuthOrchestrationApproveScope,
   AuthOrchestrationReadScope,
   AuthPreviewOperateScope,
   AuthProvidersManageScope,
@@ -27,6 +28,12 @@ export const AUTH_SCOPE_OPTIONS: ReadonlyArray<{
     scope: AuthOrchestrationReadScope,
     title: "View environment",
     description: "Read threads, status, checkpoints, and configuration.",
+  },
+  {
+    scope: AuthOrchestrationApproveScope,
+    title: "Answer permission requests",
+    description:
+      "Respond to verified local provider permissions with consent for each exact grant and duration.",
   },
   {
     scope: AuthOrchestrationOperateScope,

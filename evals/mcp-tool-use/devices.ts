@@ -790,6 +790,8 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
       ),
       Layer.provideMerge(config),
       Layer.provideMerge(files),
+      // Authored shell worlds use POSIX paths independently of the runner host.
+      Layer.provideMerge(Path.layer),
     ),
   );
   type Entry = Parameters<McpServer.McpServer["Service"]["addTool"]>[0];

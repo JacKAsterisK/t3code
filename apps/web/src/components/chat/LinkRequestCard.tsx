@@ -1,3 +1,4 @@
+import { Checkbox } from "../ui/checkbox";
 import { pipe } from "effect/Function";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -215,6 +216,7 @@ function LinkRequestDialog(props: {
   const [address, setAddress] = useState(item.url ?? "");
   const [access, setAccess] = useState<AuthMcpClientAccess>(() => linkRequestDefaultAccess(item));
   const [pairingCode, setPairingCode] = useState("");
+  const [approvals, setApprovals] = useState(false);
   const [step, setStep] = useState<LinkStep>("machine");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -237,7 +239,11 @@ function LinkRequestDialog(props: {
   const connected = usePreparedConnection(targetId);
   const mayMint = useEnvironmentScope(targetId, AuthAccessWriteScope);
   const canMint =
-    targetId !== null && Option.isSome(connected) && mayMint && !mintFailed.has(targetId);
+    targetId !== null &&
+    Option.isSome(connected) &&
+    mayMint &&
+    !mintFailed.has(targetId) &&
+    !approvals;
   const needsAddress =
     target.kind === "address" || (target.kind === "machine" && target.urls.length === 0);
   // An address the agent gave is already filled in; only one the user must type is asked for.
@@ -293,6 +299,7 @@ function LinkRequestDialog(props: {
           : { ...target, urls: needsAddress ? [address.trim()] : target.urls },
       access,
       pairingCode: code,
+      approvals: approvals && access !== "read-only",
     });
   };
 
@@ -419,6 +426,17 @@ function LinkRequestDialog(props: {
                       </label>
                     )}
                     <LinkAccessPicker value={access} onChange={setAccess} disabled={busy} />
+                    <label className="flex items-start gap-2 text-xs">
+                      <Checkbox
+                        checked={approvals && access !== "read-only"}
+                        disabled={busy || access === "read-only"}
+                        onCheckedChange={(checked) => setApprovals(checked === true)}
+                      />
+                      <span>
+                        Request approval permission with an approval-capable pairing code. The
+                        destination owner must separately bind the new sign-in.
+                      </span>
+                    </label>
                   </>
                 )}
               </>

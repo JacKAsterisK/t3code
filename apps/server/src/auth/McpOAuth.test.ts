@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  AuthAccessWriteScope,
   AuthMcpClientAccess,
   AuthStandardClientScopes,
   type AuthCreatePairingCredentialInput,
@@ -121,7 +122,7 @@ const postJson = (path: string, body: unknown, cookie?: string) =>
 const decide = (
   handler: Handler,
   authorization: Record<string, string>,
-  decision: Record<string, string>,
+  decision: Record<string, string | boolean>,
   cookie?: string,
 ) =>
   handler(postJson("/oauth/mcp/decision", { authorization, decision }, cookie)).pipe(
@@ -722,3 +723,235 @@ it("matches loopback redirects on everything but the port, and https redirects e
   expect(matches("https://bot.example/cb", "https://bot.example/cb?x=1")).toBe(false);
   expect(matches("https://bot.example/cb", "https://evil.example/cb")).toBe(false);
 });
+
+it.live(
+  "separates approval consent from Full access and removes old same-family bearer rights",
+  () =>
+    withRoutes((handler, auth) =>
+      Effect.gen(function* () {
+        const clientId = yield* registeredClientId(handler);
+        const params = authorizeParams(clientId);
+        const ordinary = yield* auth.issuePairingCredential();
+        const refused = yield* decide(handler, params, {
+          _tag: "pairing-code",
+          access: "full-access",
+          code: ordinary.credential,
+          approvals: true,
+        });
+        expect(refused.status).toBe(400);
+        const ownerPairing = yield* auth.issuePairingCredential();
+        const ownerResponse = yield* handler(
+          postJson("/api/auth/browser-session", { credential: ownerPairing.credential }),
+        );
+        const cookie = ownerResponse.headers.getSetCookie()[0]!.split(";", 1)[0]!;
+        const details = yield* handler(postJson("/oauth/mcp/approval", params, cookie)).pipe(
+          Effect.flatMap(json<{ csrfToken: string; canGrantApprovals: boolean }>),
+        );
+        expect(details.canGrantApprovals).toBe(true);
+        const signin = (approvals: boolean, taskOnly = false) =>
+          Effect.gen(function* () {
+            const currentParams = { ...params, ...(taskOnly ? { task_only: "true" } : {}) };
+            const currentDetails = yield* handler(
+              postJson("/oauth/mcp/approval", currentParams, cookie),
+            ).pipe(Effect.flatMap(json<{ csrfToken: string }>));
+            const approved = yield* decide(
+              handler,
+              currentParams,
+              {
+                _tag: "browser-session",
+                access: taskOnly ? "auto" : "full-access",
+                csrfToken: currentDetails.csrfToken,
+                approvals,
+              },
+              cookie,
+            );
+            expect(approved.status).toBe(200);
+            const code = new URL(approved.redirectTo!).searchParams.get("code")!;
+            const response = yield* handler(
+              at(
+                "/oauth/mcp/token",
+                form({
+                  grant_type: "authorization_code",
+                  code,
+                  client_id: clientId,
+                  redirect_uri: params.redirect_uri,
+                  code_verifier: verifier,
+                }),
+              ),
+            );
+            expect(response.status).toBe(200);
+            return yield* json<{ access_token: string; scope: string }>(response);
+          });
+        const enabled = yield* signin(true);
+        expect(enabled.scope.split(" ")).toContain("orchestration:approve");
+        const granted = yield* auth.listSessions();
+        expect(granted.some((session) => session.scopes.includes("orchestration:approve"))).toBe(
+          true,
+        );
+        const disabled = yield* signin(false);
+        expect(disabled.scope.split(" ")).not.toContain("orchestration:approve");
+        const after = yield* auth.listSessions();
+        expect(after.every((session) => !session.scopes.includes("orchestration:approve"))).toBe(
+          true,
+        );
+        const old = yield* auth.authenticateMcpClient(
+          HttpServerRequest.fromWeb(
+            at("/mcp", {
+              headers: { authorization: `Bearer ${enabled.access_token}` },
+            }),
+          ),
+        );
+        expect(old.access).toBe("full-access");
+        expect(after.filter((session) => session.client.deviceType === "bot")).toHaveLength(2);
+        yield* signin(true);
+        expect(
+          (yield* auth.listSessions()).some((session) =>
+            session.scopes.includes("orchestration:approve"),
+          ),
+        ).toBe(true);
+        yield* signin(false, true);
+        expect(
+          (yield* auth.listSessions()).every(
+            (session) => !session.scopes.includes("orchestration:approve"),
+          ),
+        ).toBe(true);
+      }),
+    ),
+);
+
+it.live(
+  "explicit peer approval consent issues a new code-authorized peer without widening the old token",
+  () =>
+    withRoutes((handler, auth) =>
+      Effect.gen(function* () {
+        const registered = yield* handler(
+          postJson("/oauth/mcp/register", {
+            client_name: "Native peer",
+            redirect_uris: [REDIRECT],
+            software_id: MCP_PEER_LINK_SOFTWARE_ID,
+            grant_types: ["authorization_code"],
+            token_endpoint_auth_method: "none",
+          }),
+        ).pipe(Effect.flatMap(json<{ client_id: string }>));
+        const params = authorizeParams(registered.client_id);
+        const owner = yield* auth.issueSession({
+          scopes: [...AuthStandardClientScopes, AuthAccessWriteScope],
+        });
+        const principal = yield* auth.authenticateHttpRequest(
+          HttpServerRequest.fromWeb(
+            at("/api/auth/session", { headers: { authorization: `Bearer ${owner.token}` } }),
+          ),
+        );
+        const issueApprovalCode = () =>
+          auth.issuePairingCredential(
+            { approvalGrant: true },
+            {
+              subject: principal.subject,
+              scopes: new Set(principal.scopes),
+            },
+          );
+        const exchange = (code: string) =>
+          handler(
+            at(
+              "/oauth/mcp/token",
+              form({
+                grant_type: "authorization_code",
+                code,
+                client_id: registered.client_id,
+                redirect_uri: params.redirect_uri,
+                code_verifier: verifier,
+              }),
+            ),
+          ).pipe(Effect.flatMap(json<{ access_token: string; scope: string }>));
+        const ordinary = yield* auth.issuePairingCredential();
+        const original = yield* decide(handler, params, {
+          _tag: "pairing-code",
+          access: "full-access",
+          code: ordinary.credential,
+        });
+        expect(original.status).toBe(200);
+        const old = yield* exchange(new URL(original.redirectTo!).searchParams.get("code")!);
+        expect(old.scope.split(" ")).not.toContain("orchestration:approve");
+        const oldPeer = yield* auth.authenticateMcpClient(
+          HttpServerRequest.fromWeb(
+            at("/mcp", { headers: { authorization: `Bearer ${old.access_token}` } }),
+          ),
+        );
+        expect(oldPeer.peerLink).toBe(true);
+        const insufficient = yield* auth.issuePairingCredential();
+        expect(
+          (yield* decide(handler, params, {
+            _tag: "pairing-code",
+            access: "full-access",
+            code: insufficient.credential,
+            approvals: true,
+          })).status,
+        ).toBe(400);
+        const approvalCode = yield* issueApprovalCode();
+        expect(
+          (yield* decide(handler, params, {
+            _tag: "pairing-code",
+            access: "read-only",
+            code: approvalCode.credential,
+            approvals: true,
+          })).status,
+        ).toBe(400);
+        const ownerPairing = yield* auth.issuePairingCredential();
+        const browser = yield* handler(
+          postJson("/api/auth/browser-session", { credential: ownerPairing.credential }),
+        );
+        const cookie = browser.headers.getSetCookie()[0]!.split(";", 1)[0]!;
+        const details = yield* handler(postJson("/oauth/mcp/approval", params, cookie)).pipe(
+          Effect.flatMap(json<{ csrfToken: string; canGrantApprovals: boolean }>),
+        );
+        expect(details.canGrantApprovals).toBe(false);
+        expect(
+          (yield* decide(
+            handler,
+            params,
+            {
+              _tag: "browser-session",
+              access: "full-access",
+              csrfToken: details.csrfToken,
+              approvals: true,
+            },
+            cookie,
+          )).status,
+        ).toBe(400);
+        const optedIn = yield* decide(handler, params, {
+          _tag: "pairing-code",
+          access: "full-access",
+          code: approvalCode.credential,
+          approvals: true,
+        });
+        expect(optedIn.status).toBe(200);
+        const granted = yield* exchange(new URL(optedIn.redirectTo!).searchParams.get("code")!);
+        expect(granted.scope.split(" ")).toContain("orchestration:approve");
+        const newPeer = yield* auth.authenticateMcpClient(
+          HttpServerRequest.fromWeb(
+            at("/mcp", { headers: { authorization: `Bearer ${granted.access_token}` } }),
+          ),
+        );
+        expect(newPeer.peerLink).toBe(true);
+        expect(newPeer.sessionId).not.toBe(oldPeer.sessionId);
+        const retained = (yield* auth.listSessions()).find(
+          (session) => session.sessionId === oldPeer.sessionId,
+        )!;
+        expect(retained.scopes).not.toContain("orchestration:approve");
+        expect(
+          (yield* auth.authenticateMcpClient(
+            HttpServerRequest.fromWeb(
+              at("/mcp", { headers: { authorization: `Bearer ${old.access_token}` } }),
+            ),
+          )).sessionId,
+        ).toBe(oldPeer.sessionId);
+        const consumed = yield* decide(handler, params, {
+          _tag: "pairing-code",
+          access: "full-access",
+          code: approvalCode.credential,
+          approvals: true,
+        });
+        expect(consumed.status).toBe(400);
+      }),
+    ),
+);

@@ -63,6 +63,15 @@ test("imports full fork history/cards/attachments through events with collision 
       stagedTargetHomeDirectory: staged,
       expectedReviewGeneration: plan.reviewGeneration,
     });
+    const assignments = rows(staged, "agent_event_owner_assignments").filter((row) =>
+      result.importedThreadIds.includes(String(row.thread_id)),
+    );
+    expect(assignments.map((row) => row.thread_id).sort()).toEqual(
+      [...result.importedThreadIds].sort(),
+    );
+    expect(assignments.every((row) => row.owner_id === null)).toBe(true);
+    expect(rows(staged, "agent_event_source_directories").length).toBeGreaterThan(0);
+    expect(rows(staged, "agent_event_deliveries")).toEqual([]);
     expect(result.importedThreadIds).toHaveLength(2);
     expect(result.newProjectIds).toHaveLength(1);
     expect(result.proof.existingRowsGenerationAfter).toBe(

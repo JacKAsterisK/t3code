@@ -134,6 +134,10 @@ export const layer = HttpApiBuilder.group(
               ? {}
               : {
                   csrfToken: session.csrfToken,
+                  canGrantApprovals:
+                    !resolved.taskOnly &&
+                    !resolved.client.peerLink &&
+                    !session.subject.startsWith("mcp-client"),
                   oneClickAccess: AuthMcpClientAccess.literals.filter(
                     (access) =>
                       (!resolved.taskOnly || access !== "full-access") &&

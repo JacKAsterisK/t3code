@@ -393,6 +393,13 @@ export const layerExecutor: Layer.Layer<
                 threadId: effect.threadId,
                 providerSessionId: effect.request.providerSessionId,
                 requestId: effect.request.requestId,
+                ...(effect.request.approvalGuard === undefined
+                  ? {}
+                  : {
+                      approvalGuard: effect.request.approvalGuard,
+                      commandId: effect.commandId,
+                      effectId: effect.id,
+                    }),
                 ...(effect.request.decision === undefined
                   ? {}
                   : { decision: effect.request.decision }),

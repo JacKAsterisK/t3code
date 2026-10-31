@@ -1,3 +1,8 @@
+import * as ApprovalDelegations from "../approvals/ApprovalDelegations.ts";
+import * as ApprovalGate from "../auth/ApprovalAdmissionGate.ts";
+import * as McpInvocation from "../mcp/McpInvocationContext.ts";
+import * as Context from "effect/Context";
+import { EnvironmentId } from "@t3tools/contracts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
@@ -32,6 +37,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -115,6 +121,7 @@ const claudeAdapter = {
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 
 interface HarnessOptions {
+  readonly approvalDestination?: ApprovalDelegations.ApprovalDestinationAccess["Service"];
   readonly closeTerminal?: TerminalManager.TerminalManager["Service"]["close"];
   readonly adapters?: ReadonlyArray<ProviderAdapter.ProviderAdapterV2["Service"]>;
   readonly managedFolders?: Layer.Layer<ManagedProjectFolders.ManagedProjectFolders>;
@@ -133,12 +140,25 @@ interface HarnessOptions {
 
 function makeHarness(options: HarnessOptions = {}) {
   const layerDatabase = SqlitePersistence.layerMemory;
+  const layerApproval =
+    options.approvalDestination === undefined
+      ? Layer.empty
+      : ApprovalDelegations.layer.pipe(
+          Layer.provideMerge(
+            Layer.succeed(
+              ApprovalDelegations.ApprovalDestinationAccess,
+              options.approvalDestination,
+            ),
+          ),
+          Layer.provideMerge(layerDatabase),
+          Layer.provide(NodeCrypto.layer),
+        );
   const layerRegistry = ProviderAdapterRegistry.layerFromAdapters(options.adapters ?? [adapter]);
   const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
     { name: "thread-launch" },
     layerRegistry,
     { databaseLayer: layerDatabase, runEffectWorker: false },
-  );
+  ).pipe(Layer.provide(layerApproval));
   const layerServerSettings = ServerSettings.layerTest(options.serverSettings);
   const layerReceipts = CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase));
   const layerThreadManagement = ThreadManagement.layer.pipe(
@@ -229,6 +249,7 @@ function makeHarness(options: HarnessOptions = {}) {
         layerExternalServices,
         layerThreadManagement,
         layerReceipts,
+        layerApproval,
         IdAllocator.layer,
       ),
     ),
@@ -266,6 +287,7 @@ function makeHarness(options: HarnessOptions = {}) {
       layerThreadManagement,
       layerTitleRegeneration,
       layerOutbox,
+      layerApproval,
       layerDatabase,
       layerExternalServices,
     ),
@@ -2384,3 +2406,183 @@ it.effect("replays an accepted send after the project disables the instance", ()
     }
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
 });
+
+it.effect(
+  "shared launches atomically retain authenticated link/client origin without granting approval scope",
+  () =>
+    Effect.gen(function* () {
+      const gateContext = yield* Layer.build(ApprovalGate.layer);
+      const gate = Context.get(gateContext, ApprovalGate.ApprovalAdmissionGate);
+      const peer = yield* Ref.make<ApprovalDelegations.LiveApprovalPeer | undefined>(undefined);
+      const lookupUnavailable = yield* Ref.make(false);
+      const policyEnabled = yield* Ref.make(false);
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const pauseFolder = yield* Ref.make(false);
+      const port = ApprovalDelegations.ApprovalDestinationAccess.of({
+        withGate: gate.withGate,
+        owner: (sessionId) =>
+          Effect.succeed(sessionId === "owner" ? { subject: "owner" } : undefined),
+        peer: Effect.fn("ThreadLaunchFixture.peer")(function* (sessionId: string) {
+          if (yield* Ref.get(lookupUnavailable))
+            return yield* new ApprovalDelegations.ApprovalDelegationError({
+              reason: "storage_unavailable",
+            });
+          return sessionId === "launch-peer" ? yield* Ref.get(peer) : undefined;
+        }),
+        policy: () =>
+          Ref.get(policyEnabled).pipe(Effect.map((enabled) => ({ enabled, revision: 1 }))),
+      });
+      const harness = makeHarness({
+        approvalDestination: port,
+        managedFolders: Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+          namedProjectsRoot: "/projects",
+          isScratchProject: () => Effect.succeed(false),
+          folderForThread: () =>
+            Effect.gen(function* () {
+              if (yield* Ref.get(pauseFolder)) {
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(release);
+              }
+              return Option.none();
+            }),
+        }),
+      });
+      yield* Effect.gen(function* () {
+        const delegations = yield* ApprovalDelegations.ApprovalDelegations;
+        const launches = yield* ThreadLaunch.ThreadLaunchService;
+        const sql = yield* SqlClient.SqlClient;
+        const linkId = yield* delegations.createLink("owner", "source-machine");
+        yield* Ref.set(peer, {
+          linkIdentityId: linkId,
+          sourceEnvironmentId: "source-machine",
+          credentialRevision: 1,
+          expiresAt: 100000,
+          access: "full-access",
+          scopes: ["orchestration:read", "orchestration:operate"],
+          runtimeModeCeiling: "full-access",
+          interactionModeCeiling: "default",
+        });
+        const scope: McpInvocation.McpInvocationScope = {
+          environmentId: EnvironmentId.make("destination-machine"),
+          capabilities: new Set(["orchestration"]),
+          issuedAt: 0,
+          requestNamespace: "peer",
+          thread: undefined,
+          linkedEnvironments: true,
+          client: {
+            sessionId: "launch-peer",
+            label: "Source machine",
+            linked: true,
+            access: "full-access",
+            assertedInitiatingClientId: "opaque-client-one",
+          },
+        };
+        const request = {
+          ...launchInput({ command: "command:provenance", thread: "thread:provenance" }),
+          createdBy: "agent" as const,
+          creationSource: "mcp" as const,
+          linkOrigin: { sessionId: "launch-peer", label: "Source machine" },
+        };
+        const beforeProjects = yield* sql`SELECT * FROM projection_projects`;
+        yield* Ref.set(lookupUnavailable, true);
+        const failed = yield* launches
+          .launch(request)
+          .pipe(Effect.provideService(McpInvocation.McpInvocationContext, scope), Effect.exit);
+        yield* Ref.set(lookupUnavailable, false);
+        assert.equal(failed._tag, "Failure");
+        assert.deepEqual(yield* sql`SELECT * FROM projection_projects`, beforeProjects);
+        assert.equal(
+          (yield* sql`SELECT * FROM orchestration_v2_projection_threads WHERE thread_id = ${request.threadId}`)
+            .length,
+          0,
+        );
+        assert.equal((yield* sql`SELECT * FROM agent_thread_approval_origins`).length, 0);
+        assert.equal(
+          (yield* sql`SELECT * FROM orchestration_events WHERE command_id = ${request.commandId}`)
+            .length,
+          0,
+        );
+        const launched = yield* launches
+          .launch(request)
+          .pipe(Effect.provideService(McpInvocation.McpInvocationContext, scope));
+        const origins =
+          yield* sql`SELECT * FROM agent_thread_approval_origins WHERE thread_id = ${launched.threadId}`;
+        assert.equal(origins.length, 1);
+        assert.equal(origins[0]!.initiating_client_id, "opaque-client-one");
+        assert.equal(origins[0]!.link_identity_id, linkId);
+        const source = (yield* sql<{
+          sequence: number;
+        }>`SELECT sequence FROM orchestration_events WHERE command_id = ${request.commandId} AND event_type = 'thread.created'`)[0]!;
+        assert.equal(origins[0]!.created_sequence, source.sequence);
+        const authenticate = (clientId: string) =>
+          delegations
+            .authenticate(clientId)
+            .pipe(Effect.provideService(McpInvocation.McpInvocationContext, scope));
+        assert.equal(
+          (yield* delegations
+            .check(yield* authenticate("opaque-client-one"), launched.threadId)
+            .pipe(Effect.flip)).reason,
+          "link_not_approved",
+        );
+        yield* Ref.update(peer, (current) => ({
+          ...current!,
+          scopes: [...current!.scopes, "orchestration:approve" as const],
+        }));
+        yield* Ref.set(policyEnabled, true);
+        assert.equal(
+          (yield* delegations.check(yield* authenticate("opaque-client-one"), launched.threadId))
+            .basis,
+          "origin",
+        );
+        assert.equal(
+          (yield* delegations
+            .check(yield* authenticate("opaque-client-two"), launched.threadId)
+            .pipe(Effect.flip)).reason,
+          "thread_not_delegated",
+        );
+        yield* launches.launch(request).pipe(
+          Effect.provideService(McpInvocation.McpInvocationContext, {
+            ...scope,
+            client: { ...scope.client!, assertedInitiatingClientId: "opaque-client-two" },
+          }),
+        );
+        assert.deepEqual(
+          yield* sql`SELECT * FROM agent_thread_approval_origins WHERE thread_id = ${launched.threadId}`,
+          origins,
+        );
+
+        yield* Ref.set(pauseFolder, true);
+        const blockedRequest = {
+          ...request,
+          commandId: CommandId.make("command:revoked-origin"),
+          threadId: ThreadId.make("thread:revoked-origin"),
+        };
+        const blocked = yield* launches
+          .launch(blockedRequest)
+          .pipe(
+            Effect.provideService(McpInvocation.McpInvocationContext, scope),
+            Effect.forkScoped,
+          );
+        yield* Deferred.await(entered);
+        yield* gate.withGate(Ref.set(peer, undefined));
+        yield* Deferred.succeed(release, undefined);
+        assert.equal((yield* Fiber.await(blocked))._tag, "Failure");
+        assert.equal(
+          (yield* sql`SELECT * FROM orchestration_v2_projection_threads WHERE thread_id = ${blockedRequest.threadId}`)
+            .length,
+          0,
+        );
+        assert.equal(
+          (yield* sql`SELECT * FROM orchestration_events WHERE command_id = ${blockedRequest.commandId} AND event_type = 'thread.created'`)
+            .length,
+          0,
+        );
+        assert.equal(
+          (yield* sql`SELECT * FROM agent_thread_approval_origins WHERE thread_id = ${blockedRequest.threadId}`)
+            .length,
+          0,
+        );
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.scoped),
+);

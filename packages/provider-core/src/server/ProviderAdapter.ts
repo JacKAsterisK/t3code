@@ -1,3 +1,4 @@
+import type { ApprovalNativeDescriptor, ApprovalDeliveryEvidence } from "@t3tools/contracts";
 import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
 import {
   ChatAttachment,
@@ -472,6 +473,16 @@ export interface ProviderAdapterV2InterruptInput {
 }
 
 export interface ProviderAdapterV2RuntimeRequestResponseInput {
+  readonly guardedResponse?: {
+    readonly commandId: string;
+    readonly descriptor: ApprovalNativeDescriptor;
+    readonly admit: (handoff: Effect.Effect<boolean>) => Effect.Effect<boolean>;
+    readonly onResult: (
+      state: "response_written" | "delivery_failed" | "delivery_unknown" | "delivery_withheld",
+      evidence: ApprovalDeliveryEvidence,
+      recover?: ApprovalNativeDescriptor,
+    ) => Effect.Effect<void>;
+  };
   readonly requestId: RuntimeRequestId;
   readonly decision?: ProviderApprovalDecision;
   readonly feedback?: string;

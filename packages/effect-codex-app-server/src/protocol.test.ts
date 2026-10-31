@@ -1,3 +1,8 @@
+import * as Scope from "effect/Scope";
+import * as Exit from "effect/Exit";
+// @effect-diagnostics nodeBuiltinImport:off -- This regression verifies the real Node Writable completion callback through protocol dispatch.
+import * as NodeStream from "node:stream";
+import { makeAcknowledgedWriter } from "./_internal/stdio.ts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -760,3 +765,104 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
     }),
   );
 });
+
+it.effect("an acknowledged response stays pending until its native write callback completes", () =>
+  Effect.gen(function* () {
+    const { stdio, input } = yield* makeInMemoryStdio();
+    const started = yield* Queue.unbounded<string>();
+    let callback: ((error?: Error | null) => void) | undefined;
+    const writable = new NodeStream.Writable({
+      write(chunk, _encoding, done) {
+        callback = done;
+        Queue.offerUnsafe(started, chunk.toString());
+      },
+    });
+    const writer = yield* makeAcknowledgedWriter(writable);
+    const result = yield* Deferred.make<unknown>();
+    yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+      stdio,
+      acknowledgedWriter: writer,
+      onRequest: () =>
+        Effect.succeed(
+          CodexProtocol.acknowledgedResponse(
+            { permissions: {}, scope: "turn" },
+            "approval:42",
+            (evidence) => Deferred.succeed(result, evidence).pipe(Effect.asVoid),
+          ),
+        ),
+    });
+    yield* Queue.offer(
+      input,
+      encodeJsonl({ id: 42, method: "item/permissions/requestApproval", params: {} }),
+    );
+    assert.deepEqual(JSON.parse(yield* Queue.take(started)), {
+      id: 42,
+      result: { permissions: {}, scope: "turn" },
+    });
+    assert.isFalse(yield* Deferred.isDone(result));
+    writable.emit("drain");
+    assert.isFalse(yield* Deferred.isDone(result));
+    callback!();
+    assert.deepEqual(yield* Deferred.await(result), {
+      commandId: "approval:42",
+      state: "response_written",
+      boundary: "node_write_callback",
+    });
+    assert.isFalse(writable.writableEnded);
+  }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "claims delivery ownership before asynchronous response logging and reports interrupted uncertainty",
+  () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const claimed = yield* Deferred.make<void>();
+      const logging = yield* Deferred.make<void>();
+      const never = yield* Deferred.make<void>();
+      const result = yield* Deferred.make<unknown>();
+      let writes = 0;
+      const writable = new NodeStream.Writable({
+        write(_chunk, _encoding, done) {
+          writes++;
+          done();
+        },
+      });
+      const writer = yield* makeAcknowledgedWriter(writable);
+      const protocolScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(protocolScope, Exit.void));
+      yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        acknowledgedWriter: writer,
+        logOutgoing: true,
+        logger: (event) =>
+          event.direction === "outgoing" && event.stage === "decoded"
+            ? Deferred.succeed(logging, undefined).pipe(Effect.andThen(Deferred.await(never)))
+            : Effect.void,
+        onRequest: () =>
+          Effect.succeed(
+            CodexProtocol.acknowledgedResponse(
+              { permissions: {}, scope: "turn" },
+              "approval:owned",
+              (evidence) => Deferred.succeed(result, evidence).pipe(Effect.asVoid),
+              Deferred.succeed(claimed, undefined).pipe(Effect.asVoid),
+            ),
+          ),
+      }).pipe(Effect.provideService(Scope.Scope, protocolScope));
+      yield* Queue.offer(
+        input,
+        encodeJsonl({ id: 42, method: "item/permissions/requestApproval", params: {} }),
+      );
+      yield* Deferred.await(logging);
+      assert.isTrue(yield* Deferred.isDone(claimed));
+      assert.isFalse(yield* Deferred.isDone(result));
+      assert.strictEqual(writes, 0);
+      yield* Scope.close(protocolScope, Exit.void);
+      assert.deepEqual(yield* Deferred.await(result), {
+        commandId: "approval:owned",
+        state: "delivery_unknown",
+        boundary: "write_interrupted",
+      });
+      assert.strictEqual(writes, 0);
+    }).pipe(Effect.scoped),
+);

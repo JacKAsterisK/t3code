@@ -1,3 +1,4 @@
+import { ApprovalGuard } from "@t3tools/contracts";
 import {
   CheckpointId,
   CheckpointScopeId,
@@ -77,6 +78,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("runtime-request.respond"),
+    approvalGuard: Schema.optionalKey(ApprovalGuard),
     providerSessionId: ProviderSessionId,
     requestId: RuntimeRequestId,
     decision: Schema.optional(ProviderApprovalDecision),

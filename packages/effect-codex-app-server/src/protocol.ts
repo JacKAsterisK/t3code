@@ -12,6 +12,7 @@ import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 
 import * as CodexError from "./errors.ts";
+import type { AcknowledgedWriter, NativeWriteResult } from "./_internal/stdio.ts";
 import { JsonRpcId, JsonRpcResponseEnvelope } from "./_internal/shared.ts";
 const isJsonRpcId = Schema.is(JsonRpcId);
 const isJsonRpcResponseEnvelope = Schema.is(JsonRpcResponseEnvelope);
@@ -20,6 +21,29 @@ const MAX_BUFFERED_RAW_MESSAGES = 32;
 // Bound JSONL lines before joining and parsing; the LF delimiter is excluded.
 const MAX_INCOMING_MESSAGE_BYTES = 128 * 1024 * 1024;
 const EXIT_STATUS_GRACE = "250 millis";
+
+const responseMarker = Symbol("CodexAcknowledgedResponse");
+export interface CodexAcknowledgedResponse<A = unknown> {
+  readonly [responseMarker]: true;
+  readonly value: A;
+  readonly commandId: string;
+  readonly onWrite: (result: NativeWriteResult) => Effect.Effect<void>;
+  readonly onProtocolClaim?: Effect.Effect<void>;
+}
+export const acknowledgedResponse = <A>(
+  value: A,
+  commandId: string,
+  onWrite: (result: NativeWriteResult) => Effect.Effect<void>,
+  onProtocolClaim?: Effect.Effect<void>,
+): CodexAcknowledgedResponse<A> => ({
+  [responseMarker]: true,
+  value,
+  commandId,
+  onWrite,
+  ...(onProtocolClaim === undefined ? {} : { onProtocolClaim }),
+});
+export const isAcknowledgedResponse = (value: unknown): value is CodexAcknowledgedResponse =>
+  typeof value === "object" && value !== null && responseMarker in value;
 
 export interface CodexAppServerProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";
@@ -40,6 +64,7 @@ export interface CodexAppServerIncomingRequest {
 
 export interface CodexAppServerPatchedProtocolOptions {
   readonly stdio: Stdio.Stdio;
+  readonly acknowledgedWriter?: AcknowledgedWriter;
   readonly terminationError?: Effect.Effect<CodexError.CodexAppServerError>;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
@@ -163,13 +188,29 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
   ): Effect.fn.Return<CodexAppServerPatchedProtocol, never, Scope.Scope> {
     const protocolScope = yield* Scope.Scope;
     const requestHandlerScope = yield* Scope.fork(protocolScope, "parallel");
-    const outgoing = yield* Queue.unbounded<string, Cause.Done<void>>();
+    const outgoing = yield* Queue.unbounded<
+      { readonly encoded: string; readonly response?: CodexAcknowledgedResponse },
+      Cause.Done<void>
+    >();
     const incomingNotifications =
       yield* Queue.sliding<CodexAppServerIncomingNotification>(MAX_BUFFERED_RAW_MESSAGES);
     const incomingRequests =
       yield* Queue.sliding<CodexAppServerIncomingRequest>(MAX_BUFFERED_RAW_MESSAGES);
     const pending = yield* Ref.make(new Map<string, CodexAppServerPendingRequest>());
     const nextRequestId = yield* Ref.make(1);
+    const pendingResponseWrites = new Map<string, CodexAcknowledgedResponse>();
+    yield* Effect.addFinalizer(() =>
+      Effect.forEach(
+        [...pendingResponseWrites.values()],
+        (response) =>
+          response.onWrite({
+            commandId: response.commandId,
+            state: "delivery_unknown",
+            boundary: "write_interrupted",
+          }),
+        { discard: true },
+      ),
+    );
     const maxIncomingMessageBytes = options.maxIncomingMessageBytes ?? MAX_INCOMING_MESSAGE_BYTES;
     const remainder: Array<string> = [];
     let remainderBytes = 0;
@@ -230,9 +271,17 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
 
     const offerOutgoing =
       /* Every protocol write reaches this helper; request spans cover the operation. */
-      Effect.fnUntraced(function* (message: Record<string, unknown>) {
+      Effect.fnUntraced(function* (
+        message: Record<string, unknown>,
+        response?: CodexAcknowledgedResponse,
+      ) {
         const failure = yield* Ref.get(terminationFailure);
         if (Option.isSome(failure)) return yield* failure.value;
+        if (response !== undefined) {
+          // Register before yielding ownership, logging or encoding. Teardown now has a command-bound owner.
+          pendingResponseWrites.set(response.commandId, response);
+          yield* response.onProtocolClaim ?? Effect.void;
+        }
 
         yield* logProtocol({
           direction: "outgoing",
@@ -245,7 +294,10 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
           stage: "raw",
           payload: encoded,
         });
-        const accepted = yield* Queue.offer(outgoing, encoded);
+        const accepted = yield* Queue.offer(outgoing, {
+          encoded,
+          ...(response === undefined ? {} : { response }),
+        });
         if (!accepted) {
           const closed = yield* Ref.get(terminationFailure);
           return yield* Option.getOrElse(
@@ -279,8 +331,32 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
         return [handler(pendingRequest), next] as const;
       }).pipe(Effect.flatten);
 
-    const respond = (requestId: string | number, result: unknown) =>
-      offerOutgoing(toProtocolMessage(requestId, { result }));
+    const respond = (requestId: string | number, result: unknown) => {
+      if (!isAcknowledgedResponse(result))
+        return offerOutgoing(toProtocolMessage(requestId, { result }));
+      if (options.acknowledgedWriter === undefined)
+        return result.onWrite({
+          commandId: result.commandId,
+          state: "delivery_failed",
+          boundary: "not_started",
+        });
+      return offerOutgoing(toProtocolMessage(requestId, { result: result.value }), result).pipe(
+        Effect.onInterrupt(() =>
+          result.onWrite({
+            commandId: result.commandId,
+            state: "delivery_unknown",
+            boundary: "write_interrupted",
+          }),
+        ),
+        Effect.tapError(() =>
+          result.onWrite({
+            commandId: result.commandId,
+            state: "delivery_failed",
+            boundary: "not_started",
+          }),
+        ),
+      );
+    };
 
     const respondError = (
       requestId: string | number,
@@ -479,7 +555,39 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       Effect.forkScoped,
     );
 
-    yield* Stream.fromQueue(outgoing).pipe(Stream.run(options.stdio.stdout()), Effect.forkScoped);
+    let writeOrdinal = 0;
+    yield* (
+      options.acknowledgedWriter === undefined
+        ? Stream.fromQueue(outgoing).pipe(
+            Stream.map((entry) => entry.encoded),
+            Stream.run(options.stdio.stdout()),
+          )
+        : Stream.fromQueue(outgoing).pipe(
+            Stream.runForEach(
+              Effect.fn("CodexProtocol.write")(function* (entry) {
+                const commandId = entry.response?.commandId ?? `protocol:${++writeOrdinal}`;
+                const result = yield* options
+                  .acknowledgedWriter!.write(commandId, entry.encoded, entry.response !== undefined)
+                  .pipe(
+                    Effect.onInterrupt(
+                      () =>
+                        entry.response?.onWrite({
+                          commandId,
+                          state: "delivery_unknown",
+                          boundary: "write_interrupted",
+                        }) ?? Effect.void,
+                    ),
+                  );
+                yield* entry.response?.onWrite(result) ?? Effect.void;
+                pendingResponseWrites.delete(commandId);
+                if (result.state !== "response_written")
+                  yield* handleTermination(() =>
+                    Effect.succeed(new CodexError.CodexAppServerInputStreamEndedError({})),
+                  );
+              }),
+            ),
+          )
+    ).pipe(Effect.forkScoped);
 
     const request = Effect.fn("CodexAppServerProtocol.request")(function* (
       method: string,

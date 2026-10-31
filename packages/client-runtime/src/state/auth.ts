@@ -1,3 +1,4 @@
+import { createApprovalAdministrationAtoms } from "./approvalAdministration.ts";
 import type {
   AuthAccessSnapshot,
   AuthAccessStreamEvent,
@@ -5,11 +6,12 @@ import type {
 } from "@t3tools/contracts";
 import { WS_METHODS } from "@t3tools/contracts";
 import * as Stream from "effect/Stream";
+import * as Effect from "effect/Effect";
 import { Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import { subscribe } from "../rpc/client.ts";
-import { createEnvironmentSubscriptionAtomFamily } from "./runtime.ts";
+import { createEnvironmentRpcCommand, createEnvironmentSubscriptionAtomFamily } from "./runtime.ts";
 
 export const EMPTY_AUTH_ACCESS_SNAPSHOT: AuthAccessSnapshot = {
   pairingLinks: [],
@@ -78,7 +80,15 @@ function projectAuthAccessSnapshot(
 export function createAuthEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
+  const administration = createApprovalAdministrationAtoms(runtime);
   return {
+    administration,
+    removeApprovalPermission: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:auth:remove-approval-permission",
+      tag: WS_METHODS.authRemoveApprovalPermission,
+      onSettled: ({ environmentId }, registry) =>
+        Effect.sync(() => registry.refresh(administration.inspect({ environmentId, input: {} }))),
+    }),
     accessChanges: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:auth-access-changes",
       subscribe: (_input: null) =>

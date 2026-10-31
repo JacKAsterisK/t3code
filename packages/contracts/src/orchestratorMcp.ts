@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
+import { AgentEventCurrentOwner } from "./agentEvents.ts";
 import { AuthMcpClientAccess } from "./auth.ts";
 import { FleetUserId } from "./lanFleet.ts";
 import {
@@ -506,6 +507,7 @@ export const OrchestratorMcpThreadTimelineItem = Schema.Struct({
 export type OrchestratorMcpThreadTimelineItem = typeof OrchestratorMcpThreadTimelineItem.Type;
 
 export const OrchestratorMcpThreadReadResult = Schema.Struct({
+  ownerCoordinates: Schema.optionalKey(Schema.NullOr(AgentEventCurrentOwner)),
   thread: OrchestratorMcpThreadDetail,
   recentRuns: Schema.Array(OrchestratorMcpThreadRun),
   items: Schema.Array(OrchestratorMcpThreadTimelineItem),
@@ -878,6 +880,29 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
   "OrchestratorMcpFailure",
   {
     code: Schema.Literals([
+      "approvals_not_granted",
+      "thread_caller_refused",
+      "task_only_refused",
+      "request_not_found",
+      "not_an_approval",
+      "not_live",
+      "request_changed",
+      "presentation_changed",
+      "decision_not_offered",
+      "scope_consent_required",
+      "scope_unsupported",
+      "ui_only",
+      "idempotency_conflict",
+      "already_answered",
+      "authority_revoked",
+      "forwarding_unavailable",
+      "forwarding_chain_refused",
+      "link_not_approved",
+      "thread_not_delegated",
+      "mode_changed",
+      "request_lost",
+      "native_rejected",
+
       "capability_denied",
       "parent_not_active",
       "provider_unavailable",

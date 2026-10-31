@@ -50,6 +50,25 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
           {props.approval.detail}
         </Text>
       ) : null}
+      {props.approval.approval ? (
+        <View className="gap-1">
+          <Text className="font-sans text-xs text-warning-foreground">
+            Permission lasts for this provider turn. {props.approval.approval.grant.expiresWhen}.
+          </Text>
+          <Text selectable className="font-mono text-xs text-foreground-secondary">
+            {JSON.stringify(props.approval.approval.grant.permission, null, 2)}
+          </Text>
+        </View>
+      ) : (
+        <Text className="font-sans text-xs text-foreground-muted">
+          This provider request can be answered in the app only.
+        </Text>
+      )}
+      {props.approval.approvalDelivery === "delivery_withheld" ? (
+        <Text className="font-sans text-xs text-warning-foreground">
+          The previous response was withheld. This fresh request needs a new decision.
+        </Text>
+      ) : null}
       {props.approval.reason ? (
         <Text className="font-sans text-xs leading-normal text-warning-foreground">
           {props.approval.reason}

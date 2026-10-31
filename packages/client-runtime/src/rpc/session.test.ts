@@ -741,161 +741,168 @@ describe("RpcSessionFactory", () => {
     ),
   );
 
-  it.effect.each([{ failure: "defect" as const }, { failure: "typed" as const }])(
-    "keeps durable config state alive after an owned $failure failure",
-    ({ failure }) =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const { factory, sockets } = yield* makeFactory({ environmentThemes: true });
-          const firstSession = yield* factory.connect(PREPARED);
-          const firstReady = yield* Effect.forkChild(firstSession.ready);
-          const firstSocket = yield* awaitSocket(sockets);
-          firstSocket.open();
-          yield* completeInitialConfig(firstSocket, ENCODED_THEME_SERVER_CONFIG, {
-            environmentThemes: true,
-          });
-          yield* Fiber.join(firstReady);
+  it.effect.each([
+    { failure: "defect" as const },
+    { failure: "typed" as const },
+    { failure: "transient" as const },
+  ])("keeps durable config state alive after an owned $failure failure", ({ failure }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { factory, sockets } = yield* makeFactory({ environmentThemes: true });
+        const firstSession = yield* factory.connect(PREPARED);
+        const firstReady = yield* Effect.forkChild(firstSession.ready);
+        const firstSocket = yield* awaitSocket(sockets);
+        firstSocket.open();
+        yield* completeInitialConfig(firstSocket, ENCODED_THEME_SERVER_CONFIG, {
+          environmentThemes: true,
+        });
+        yield* Fiber.join(firstReady);
 
-          const activeSession = yield* SubscriptionRef.make(Option.some(firstSession));
-          const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
-            target: TARGET,
-            state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
-            session: activeSession,
-            prepared: yield* SubscriptionRef.make(Option.some(PREPARED)),
-            connect: Effect.void,
-            disconnect: Effect.void,
-            retryNow: Effect.void,
-          } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
-          const cache = Persistence.EnvironmentCacheStore.of({
-            loadShell: () => Effect.succeedNone,
-            saveShell: () => Effect.void,
-            loadThread: () => Effect.succeedNone,
-            saveThread: () => Effect.void,
-            removeThread: () => Effect.void,
-            loadServerConfig: () => Effect.succeedNone,
-            saveServerConfig: () => Effect.void,
-            loadVcsRefs: () => Effect.succeedNone,
-            saveVcsRefs: () => Effect.void,
-            removeVcsRefs: () => Effect.void,
-            clearVcsRefs: () => Effect.void,
-            clear: () => Effect.void,
-          });
-          const configState = yield* makeEnvironmentServerConfigState({
-            environmentThemes: true,
-          }).pipe(
-            Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
-            Effect.provideService(Persistence.EnvironmentCacheStore, cache),
+        const activeSession = yield* SubscriptionRef.make(Option.some(firstSession));
+        const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
+          target: TARGET,
+          state: yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE),
+          session: activeSession,
+          prepared: yield* SubscriptionRef.make(Option.some(PREPARED)),
+          connect: Effect.void,
+          disconnect: Effect.void,
+          retryNow: Effect.void,
+        } satisfies EnvironmentSupervisor.EnvironmentSupervisor["Service"]);
+        const cache = Persistence.EnvironmentCacheStore.of({
+          loadShell: () => Effect.succeedNone,
+          saveShell: () => Effect.void,
+          loadThread: () => Effect.succeedNone,
+          saveThread: () => Effect.void,
+          removeThread: () => Effect.void,
+          loadServerConfig: () => Effect.succeedNone,
+          saveServerConfig: () => Effect.void,
+          loadVcsRefs: () => Effect.succeedNone,
+          saveVcsRefs: () => Effect.void,
+          removeVcsRefs: () => Effect.void,
+          clearVcsRefs: () => Effect.void,
+          clear: () => Effect.void,
+        });
+        const configState = yield* makeEnvironmentServerConfigState({
+          environmentThemes: true,
+        }).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.provideService(Persistence.EnvironmentCacheStore, cache),
+        );
+        const awaitConfig = (predicate: (config: ServerConfigType) => boolean) =>
+          SubscriptionRef.changes(configState).pipe(
+            Stream.filter(Option.isSome),
+            Stream.map((projection) => projection.value.config),
+            Stream.filter(predicate),
+            Stream.runHead,
+            Effect.map(Option.getOrThrow),
           );
-          const awaitConfig = (predicate: (config: ServerConfigType) => boolean) =>
-            SubscriptionRef.changes(configState).pipe(
-              Stream.filter(Option.isSome),
-              Stream.map((projection) => projection.value.config),
-              Stream.filter(predicate),
-              Stream.runHead,
-              Effect.map(Option.getOrThrow),
-            );
 
-          const firstThemes = [
-            {
-              id: "first-theme",
-              name: "First theme",
-              appearance: "dark" as const,
-              canvas: "#111111",
-              accent: "#ffffff",
-            },
-          ];
-          const firstThemeState = yield* awaitConfig(
-            (config) => config.environmentThemes?.[0]?.id === "first-theme",
-          ).pipe(Effect.forkChild);
-          yield* publishConfigEvents(firstSocket, [
-            {
-              version: 1,
-              type: "environmentThemesUpdated",
-              payload: { themes: firstThemes },
-            },
-          ]);
-          expect((yield* Fiber.join(firstThemeState)).environmentThemes).toEqual(firstThemes);
+        const firstThemes = [
+          {
+            id: "first-theme",
+            name: "First theme",
+            appearance: "dark" as const,
+            canvas: "#111111",
+            accent: "#ffffff",
+          },
+        ];
+        const firstThemeState = yield* awaitConfig(
+          (config) => config.environmentThemes?.[0]?.id === "first-theme",
+        ).pipe(Effect.forkChild);
+        yield* publishConfigEvents(firstSocket, [
+          {
+            version: 1,
+            type: "environmentThemesUpdated",
+            payload: { themes: firstThemes },
+          },
+        ]);
+        expect((yield* Fiber.join(firstThemeState)).environmentThemes).toEqual(firstThemes);
 
-          const firstClosed = yield* firstSession.closed.pipe(Effect.exit, Effect.forkChild);
-          const firstRequest = yield* awaitRequest(firstSocket);
-          firstSocket.serverMessage(
-            failure === "defect"
-              ? encodeJson({
-                  _tag: "Defect",
-                  defect: encodeDefect(new Error("config stream died")),
-                })
-              : encodeJson({
-                  _tag: "Exit",
-                  requestId: firstRequest.id,
-                  exit: {
-                    _tag: "Failure",
-                    cause: [
-                      {
-                        _tag: "Fail",
-                        error: {
-                          _tag: "EnvironmentAuthorizationError",
-                          message: "config subscription rejected",
-                          requiredScope: "orchestration:read",
-                        },
+        const firstClosed = yield* firstSession.closed.pipe(Effect.exit, Effect.forkChild);
+        const firstRequest = yield* awaitRequest(firstSocket);
+        firstSocket.serverMessage(
+          failure === "defect"
+            ? encodeJson({
+                _tag: "Defect",
+                defect: encodeDefect(new Error("config stream died")),
+              })
+            : encodeJson({
+                _tag: "Exit",
+                requestId: firstRequest.id,
+                exit: {
+                  _tag: "Failure",
+                  cause: [
+                    {
+                      _tag: "Fail",
+                      error: {
+                        _tag: "EnvironmentAuthorizationError",
+                        message: "config subscription rejected",
+                        requiredScope: "orchestration:read",
+                        ...(failure === "transient" ? { retryable: true } : {}),
                       },
-                    ],
-                  },
-                }),
-          );
-          const firstClosedExit = yield* Fiber.join(firstClosed);
-          expect(Exit.isFailure(firstClosedExit)).toBe(true);
-          if (failure === "typed" && Exit.isFailure(firstClosedExit)) {
-            expect(Cause.squash(firstClosedExit.cause)).toBeInstanceOf(ConnectionBlockedError);
-            expect(Cause.squash(firstClosedExit.cause)).toMatchObject({ reason: "permission" });
-          }
-          yield* SubscriptionRef.set(activeSession, Option.none());
-
-          const recoveredConfig = {
-            ...THEME_SERVER_CONFIG,
-            environment: {
-              ...THEME_SERVER_CONFIG.environment,
-              label: "Recovered environment",
-            },
-          } satisfies ServerConfigType;
-          const secondSession = yield* factory.connect(PREPARED);
-          const secondReady = yield* Effect.forkChild(secondSession.ready);
-          const secondSocket = yield* awaitSocket(sockets, 1);
-          secondSocket.open();
-          yield* completeInitialConfig(secondSocket, encodeServerConfig(recoveredConfig), {
-            environmentThemes: true,
+                    },
+                  ],
+                },
+              }),
+        );
+        const firstClosedExit = yield* Fiber.join(firstClosed);
+        expect(Exit.isFailure(firstClosedExit)).toBe(true);
+        if (failure === "typed" && Exit.isFailure(firstClosedExit)) {
+          expect(Cause.squash(firstClosedExit.cause)).toBeInstanceOf(ConnectionBlockedError);
+          expect(Cause.squash(firstClosedExit.cause)).toMatchObject({ reason: "permission" });
+        }
+        if (failure === "transient" && Exit.isFailure(firstClosedExit)) {
+          expect(Cause.squash(firstClosedExit.cause)).toBeInstanceOf(ConnectionTransientError);
+          expect(Cause.squash(firstClosedExit.cause)).toMatchObject({
+            reason: "remote-unavailable",
           });
-          yield* Fiber.join(secondReady);
+        }
+        yield* SubscriptionRef.set(activeSession, Option.none());
 
-          const recoveredState = yield* awaitConfig(
-            (config) => config.environment.label === "Recovered environment",
-          ).pipe(Effect.forkChild);
-          yield* SubscriptionRef.set(activeSession, Option.some(secondSession));
-          expect((yield* Fiber.join(recoveredState)).environmentThemes).toEqual(firstThemes);
+        const recoveredConfig = {
+          ...THEME_SERVER_CONFIG,
+          environment: {
+            ...THEME_SERVER_CONFIG.environment,
+            label: "Recovered environment",
+          },
+        } satisfies ServerConfigType;
+        const secondSession = yield* factory.connect(PREPARED);
+        const secondReady = yield* Effect.forkChild(secondSession.ready);
+        const secondSocket = yield* awaitSocket(sockets, 1);
+        secondSocket.open();
+        yield* completeInitialConfig(secondSocket, encodeServerConfig(recoveredConfig), {
+          environmentThemes: true,
+        });
+        yield* Fiber.join(secondReady);
 
-          const recoveredThemes = [
-            {
-              id: "recovered-theme",
-              name: "Recovered theme",
-              appearance: "dark" as const,
-              canvas: "#000000",
-              accent: "#eeeeee",
-            },
-          ];
-          const liveRecoveredState = yield* awaitConfig(
-            (config) => config.environmentThemes?.[0]?.id === "recovered-theme",
-          ).pipe(Effect.forkChild);
-          yield* publishConfigEvents(secondSocket, [
-            {
-              version: 1,
-              type: "environmentThemesUpdated",
-              payload: { themes: recoveredThemes },
-            },
-          ]);
-          expect((yield* Fiber.join(liveRecoveredState)).environmentThemes).toEqual(
-            recoveredThemes,
-          );
-        }),
-      ),
+        const recoveredState = yield* awaitConfig(
+          (config) => config.environment.label === "Recovered environment",
+        ).pipe(Effect.forkChild);
+        yield* SubscriptionRef.set(activeSession, Option.some(secondSession));
+        expect((yield* Fiber.join(recoveredState)).environmentThemes).toEqual(firstThemes);
+
+        const recoveredThemes = [
+          {
+            id: "recovered-theme",
+            name: "Recovered theme",
+            appearance: "dark" as const,
+            canvas: "#000000",
+            accent: "#eeeeee",
+          },
+        ];
+        const liveRecoveredState = yield* awaitConfig(
+          (config) => config.environmentThemes?.[0]?.id === "recovered-theme",
+        ).pipe(Effect.forkChild);
+        yield* publishConfigEvents(secondSocket, [
+          {
+            version: 1,
+            type: "environmentThemesUpdated",
+            payload: { themes: recoveredThemes },
+          },
+        ]);
+        expect((yield* Fiber.join(liveRecoveredState)).environmentThemes).toEqual(recoveredThemes);
+      }),
+    ),
   );
 
   it.effect("rejects a server config for a different environment", () =>

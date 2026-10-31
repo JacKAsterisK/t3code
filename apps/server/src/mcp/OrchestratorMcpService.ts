@@ -1,4 +1,5 @@
 import * as FleetUsers from "../lan/FleetUsers.ts";
+import * as AgentEventOwners from "../agentEvents/AgentEventOwners.ts";
 import {
   CommandId,
   type RunId,
@@ -985,6 +986,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   // T3 Code LAN: owner names for thread results; without a users file, owners show by id.
   const fleetUsers = yield* Effect.serviceOption(FleetUsers.FleetUsers);
+  const ownerCoordinates = yield* Effect.serviceOption(AgentEventOwners.AgentEventOwners);
   const currentFleetUsers = Option.isSome(fleetUsers)
     ? fleetUsers.value.current
     : Effect.succeed(FleetUsers.NO_FLEET_USERS);
@@ -2942,6 +2944,18 @@ const make = Effect.gen(function* () {
         }
       }
       return {
+        ownerCoordinates: Option.isSome(ownerCoordinates)
+          ? yield* ownerCoordinates.value
+              .read(input.threadId)
+              .pipe(
+                Effect.mapError(() =>
+                  failure(
+                    "orchestration_error",
+                    "Current owner coordinates could not be established.",
+                  ),
+                ),
+              )
+          : null,
         thread: threadDetail(
           scope,
           target,

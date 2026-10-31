@@ -24,7 +24,15 @@ import {
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import { useMemo, useRef, useState } from "react";
-import { Modal, Platform, Pressable, ScrollView, View, type ColorValue } from "react-native";
+import {
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  View,
+  Switch,
+  type ColorValue,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
@@ -238,6 +246,7 @@ function LinkRequestSheet(props: {
   const [address, setAddress] = useState(item.url ?? "");
   const [access, setAccess] = useState<AuthMcpClientAccess>(() => linkRequestDefaultAccess(item));
   const [pairingCode, setPairingCode] = useState("");
+  const [approvals, setApprovals] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mintFailed, setMintFailed] = useState<ReadonlySet<EnvironmentId>>(new Set());
@@ -258,7 +267,11 @@ function LinkRequestSheet(props: {
   const connected = usePreparedConnection(targetId);
   const mayMint = useEnvironmentScope(targetId, AuthAccessWriteScope);
   const canMint =
-    targetId !== null && Option.isSome(connected) && mayMint && !mintFailed.has(targetId);
+    targetId !== null &&
+    Option.isSome(connected) &&
+    mayMint &&
+    !mintFailed.has(targetId) &&
+    !approvals;
   const needsAddress =
     target.kind === "address" || (target.kind === "machine" && target.urls.length === 0);
   const useExisting = target.kind === "machine" && target.linked;
@@ -293,6 +306,7 @@ function LinkRequestSheet(props: {
           : { ...target, urls: needsAddress ? [address.trim()] : target.urls },
       access,
       pairingCode: code,
+      approvals: approvals && access !== "read-only",
     });
   };
 
@@ -420,6 +434,18 @@ function LinkRequestSheet(props: {
                 </Text>
               </View>
             )}
+            <View className="gap-2">
+              <Text className="text-sm text-foreground">
+                Request approval permission with an approval-capable pairing code. The destination
+                owner must separately bind the new sign-in.
+              </Text>
+              <Switch
+                accessibilityLabel="Request approval permission"
+                value={approvals && access !== "read-only"}
+                disabled={busy || access === "read-only"}
+                onValueChange={setApprovals}
+              />
+            </View>
             <SettingsSection title="What agents here may do there">
               {ACCESS_CHOICES.map((choice, index) => (
                 <SettingsChoiceRow

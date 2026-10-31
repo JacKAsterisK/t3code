@@ -1054,9 +1054,10 @@ is a read tool:
   `2025-06-18`), inserts each fact with `INSERT OR IGNORE` by `event_id` and
   sets `relayed_from`. It stores `(peer_epoch, peer_seq)` in the same
   transaction.
+- **First follow.** `after: null` starts at the peer's current head without replaying retained facts, matching a new subscription. The initial read uses `waitMs: 0`; facts emitted after that head, including newly emitted bootstrap/pending facts, are ordinary new facts. Existing pending requests remain inspectable through approval read/list; old facts are never relabelled as new occurrences.
 - **Restart.** It resumes from the stored cursor.
-- **History lost on the peer.** A new peer epoch, or a cursor below its
-  floor, replays from the peer's floor. IDs dedupe. It also records one
+- **History lost on the peer.** A new peer epoch, a cursor below its
+  floor, or a same-epoch cursor ahead of a restored head replays from the peer's floor. IDs dedupe. It also records one
   `source_status: gap` fact, because events between the old cursor and the
   floor are gone.
 - **Peer state changes.** An old peer that lacks the tool becomes

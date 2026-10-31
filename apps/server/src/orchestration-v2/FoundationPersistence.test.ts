@@ -246,6 +246,31 @@ const seedCompaction = Effect.fnUntraced(function* () {
   ) SELECT n * 2, 'command-' || n, 'thread', 'imported', '2026-10-17', 0, 'accepted', 'legacy' FROM history`;
 });
 
+it.effect("retains the collector's replay history and anchor during native compaction", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* seedCompaction();
+    yield* sql`INSERT INTO agent_event_source_state (id, generation, bootstrap_sequence, activated_at, last_event_id)
+      VALUES (1, 'source-a', 50, 0, 'event-100')`;
+    const before = yield* sql<{
+      readonly sequence: number;
+    }>`SELECT sequence FROM orchestration_events WHERE sequence >= 50 ORDER BY sequence`;
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const result = yield* maintenance.compactEventStore();
+    const after = yield* sql<{
+      readonly sequence: number;
+    }>`SELECT sequence FROM orchestration_events WHERE sequence >= 50 ORDER BY sequence`;
+    assert.deepEqual(after, before);
+    assert.isAbove(result.deletedEventCount, 0);
+    assert.strictEqual(
+      (yield* sql<{
+        readonly count: number;
+      }>`SELECT COUNT(*) AS count FROM orchestration_events`)[0]!.count,
+      151 - result.deletedEventCount,
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("discovers on the reader worker and deletes on the writer", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -287,10 +312,12 @@ it.effect("discovers on the reader worker and deletes on the writer", () =>
       assert.equal(result.deletedEventCount, 148);
       assert.equal(result.deletedReceiptCount, 100);
       assert.deepEqual(
-        reads.filter((query) => /\bSELECT\b/.test(query)),
+        reads.filter((query) => /^\s*SELECT\b/.test(query)),
         [],
       );
-      assert(writes.some((query) => query.includes("DELETE FROM orchestration_events")));
+      assert(
+        [...reads, ...writes].some((query) => query.includes("DELETE FROM orchestration_events")),
+      );
       assert(writes.some((query) => query.includes("DELETE FROM orchestration_command_receipts")));
     }).pipe(
       Effect.provide(

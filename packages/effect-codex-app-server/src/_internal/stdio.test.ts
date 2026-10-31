@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off -- These regressions exercise the real Node Writable callback boundary.
+import * as NodeStream from "node:stream";
+
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -17,6 +20,7 @@ import {
   makeInMemoryStdio,
   makeStderrTail,
   makeChildStdio,
+  makeAcknowledgedWriter,
 } from "./stdio.ts";
 
 describe("Codex App Server child process termination", () => {
@@ -197,4 +201,83 @@ describe("Codex App Server stderr excerpt", () => {
     assert.isTrue(tail.endsWith("Error: last"));
     assert.equal(stderrExcerpt(tail), "Error: last");
   });
+});
+
+describe("command-bound native stdin writes", () => {
+  it.effect("waits for the actual callback, preserves ordering and keeps stdin open", () =>
+    Effect.gen(function* () {
+      const started = yield* Queue.unbounded<string>();
+      const callbacks: Array<(error?: Error | null) => void> = [];
+      const writable = new NodeStream.Writable({
+        highWaterMark: 1,
+        write(chunk, _encoding, callback) {
+          callbacks.push(callback);
+          Queue.offerUnsafe(started, chunk.toString());
+        },
+      });
+      const writer = yield* makeAcknowledgedWriter(writable);
+      const first = yield* writer.write("approval:one", "one\n").pipe(Effect.forkScoped);
+      assert.equal(yield* Queue.take(started), "one\n");
+      assert.isUndefined(first.pollUnsafe());
+      const second = yield* writer.write("approval:two", "two\n").pipe(Effect.forkScoped);
+      assert.equal(callbacks.length, 1);
+      callbacks[0]!();
+      assert.deepEqual(yield* Fiber.join(first), {
+        commandId: "approval:one",
+        state: "response_written",
+        boundary: "node_write_callback",
+      });
+      assert.equal(yield* Queue.take(started), "two\n");
+      assert.isFalse(writable.writableEnded);
+      callbacks[1]!();
+      assert.equal((yield* Fiber.join(second)).state, "response_written");
+      assert.isFalse(writable.writableEnded);
+      assert.equal((yield* writer.write("approval:one", "one\n")).state, "response_written");
+      assert.equal((yield* writer.write("approval:one", "different\n")).state, "delivery_failed");
+      assert.equal(callbacks.length, 2);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("interruption does not let a later message overtake the native callback", () =>
+    Effect.gen(function* () {
+      const started = yield* Queue.unbounded<string>();
+      const callbacks: Array<(error?: Error | null) => void> = [];
+      const writable = new NodeStream.Writable({
+        write(chunk, _encoding, callback) {
+          callbacks.push(callback);
+          Queue.offerUnsafe(started, chunk.toString());
+        },
+      });
+      const writer = yield* makeAcknowledgedWriter(writable);
+      const first = yield* writer.write("interrupted", "first").pipe(Effect.forkScoped);
+      yield* Queue.take(started);
+      yield* Fiber.interrupt(first);
+      const second = yield* writer.write("next", "second").pipe(Effect.forkScoped);
+      assert.equal(callbacks.length, 1);
+      callbacks[0]!();
+      assert.equal(yield* Queue.take(started), "second");
+      callbacks[1]!();
+      assert.equal((yield* Fiber.join(second)).state, "response_written");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("records uncertain callback failure and interruption without resending", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      let callback: ((error?: Error | null) => void) | undefined;
+      const writable = new NodeStream.Writable({
+        write(_chunk, _encoding, done) {
+          callback = done;
+          Deferred.doneUnsafe(started, Effect.void);
+        },
+      });
+      const writer = yield* makeAcknowledgedWriter(writable);
+      const pending = yield* writer.write("approval:failure", "reply\n").pipe(Effect.forkScoped);
+      yield* Deferred.await(started);
+      callback!(new Error("native failure"));
+      assert.equal((yield* Fiber.join(pending)).state, "delivery_unknown");
+      const next = yield* writer.write("approval:next", "next\n");
+      assert.equal(next.state, "delivery_failed");
+    }).pipe(Effect.scoped),
+  );
 });

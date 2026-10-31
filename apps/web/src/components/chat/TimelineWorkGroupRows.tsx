@@ -1,3 +1,4 @@
+import { TimelineApprovalDeliveryRow } from "./TimelineApprovalDeliveryRow";
 import { TimelinePendingApprovalRow } from "./TimelinePendingApprovalRow";
 import { WorkLogButton, WorkLogList, WorkLogRow } from "./WorkLog";
 import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
@@ -498,6 +499,8 @@ export function LiveWorkEntryTimelineRow({
   const pendingApproval =
     item?.type === "approval_request" ? ctx.pendingApprovals.get(item.requestId) : undefined;
   if (pendingApproval) return <TimelinePendingApprovalRow approval={pendingApproval} />;
+  if (item?.type === "approval_request" && item.approvalDelivery !== undefined)
+    return <TimelineApprovalDeliveryRow item={item} />;
 
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
   const thoughtLine = row.thought && !row.expanded ? liveThoughtLine(row.thought.detail ?? "") : "";

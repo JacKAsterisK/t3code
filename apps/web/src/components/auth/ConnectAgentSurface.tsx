@@ -1,3 +1,4 @@
+import { Checkbox } from "../ui/checkbox";
 import {
   type AuthMcpApprovalDecision,
   type AuthMcpApprovalDetails,
@@ -81,14 +82,23 @@ function readAuthorizationRequest(): AuthMcpAuthorizationRequest {
 }
 
 /** Sessions can grant only scopes they hold. */
-function oneClickApproves(details: AuthMcpApprovalDetails, access: AuthMcpClientAccess) {
-  return details.csrfToken !== undefined && (details.oneClickAccess ?? []).includes(access);
+function oneClickApproves(
+  details: AuthMcpApprovalDetails,
+  access: AuthMcpClientAccess,
+  approvals = false,
+) {
+  return (
+    details.csrfToken !== undefined &&
+    (details.oneClickAccess ?? []).includes(access) &&
+    (!approvals || details.canGrantApprovals === true)
+  );
 }
 
 export function ConnectAgentSurface() {
   const [authorization] = useState(readAuthorizationRequest);
   const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
   const [access, setAccess] = useState<AuthMcpClientAccess>("read-only");
+  const [approvals, setApprovals] = useState(false);
   const [pairingCode, setPairingCode] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [pending, setPending] = useState<"approve" | "deny" | null>(null);
@@ -120,12 +130,13 @@ export function ConnectAgentSurface() {
     setPending(choice);
     setErrorMessage("");
     const { csrfToken } = loaded.details;
+    const grantApprovals = approvals && access !== "read-only" && !loaded.details.taskOnly;
     const decision: AuthMcpApprovalDecision =
       choice === "deny"
         ? { _tag: "deny" }
-        : csrfToken !== undefined && oneClickApproves(loaded.details, access)
-          ? { _tag: "browser-session", access, csrfToken }
-          : { _tag: "pairing-code", access, code: pairingCode.trim() };
+        : csrfToken !== undefined && oneClickApproves(loaded.details, access, grantApprovals)
+          ? { _tag: "browser-session", access, csrfToken, approvals: grantApprovals }
+          : { _tag: "pairing-code", access, code: pairingCode.trim(), approvals: grantApprovals };
     const answer = await runApproval((client) =>
       client.mcpOAuth.decision({ payload: { authorization, decision } }),
     );
@@ -161,7 +172,11 @@ export function ConnectAgentSurface() {
   }
 
   const { details } = loaded;
-  const oneClick = oneClickApproves(details, access);
+  const oneClick = oneClickApproves(
+    details,
+    access,
+    approvals && access !== "read-only" && !details.taskOnly,
+  );
   const canApprove = pending === null && (oneClick || pairingCode.trim().length > 0);
 
   return (
@@ -250,6 +265,24 @@ export function ConnectAgentSurface() {
             </p>
           </div>
         )}
+
+        {!details.taskOnly && access !== "read-only" ? (
+          <label className="flex items-start gap-3 text-sm">
+            <Checkbox
+              checked={approvals}
+              onCheckedChange={(checked) => setApprovals(checked === true)}
+              disabled={pending !== null}
+            />
+            <span>
+              Also let this agent answer permission requests. Each approval must name the permission
+              and its duration. Broader permissions require my explicit consent for that request.
+            </span>
+          </label>
+        ) : null}
+        <p className="text-xs text-muted-foreground">
+          Signing in without this permission removes earlier approval permission for this
+          application under your consenting authority. Other access stays available.
+        </p>
 
         {errorMessage ? (
           <Alert variant="error">

@@ -36,6 +36,7 @@
         "verify-windows-desktop-artifact.ts",
         // Bundled repair and synthetic verification CLIs are invoked by filename.
         "lan/home-repair-native.ts",
+        "lan/agent-events-e2e.ts",
         "lan/home-repair.fixture-builder.ts",
         "lan/home-repair.windows-smoke.ts",
         "lan/home-repair-cancel.fixture-builder.ts",

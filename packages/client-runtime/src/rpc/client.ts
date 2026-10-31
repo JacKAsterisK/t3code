@@ -111,6 +111,7 @@ export const isRpcClientError = Schema.is(RpcClientError.RpcClientError);
 const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 
 const MAX_EXPECTED_FAILURE_RETRY_DELAY_MS = 30_000;
+const DEFAULT_SCOPE_RETRY_DELAY = Duration.seconds(1);
 
 export type EnvironmentRpcInput<TTag extends EnvironmentRpcTag> = Parameters<RpcMethod<TTag>>[0];
 
@@ -373,18 +374,24 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                         );
                         const isAuthorizationFailure = cause.reasons.some(
                           (reason) =>
-                            reason._tag === "Fail" && isEnvironmentAuthorizationError(reason.error),
+                            reason._tag === "Fail" &&
+                            isEnvironmentAuthorizationError(reason.error) &&
+                            reason.error.retryable !== true,
                         );
-                        if (
-                          options.retryExpectedFailureAfter === undefined ||
-                          isAuthorizationFailure
-                        ) {
-                          return handled;
-                        }
+                        const retryAfter =
+                          options.retryExpectedFailureAfter ??
+                          (cause.reasons.some(
+                            (reason) =>
+                              reason._tag === "Fail" &&
+                              isEnvironmentAuthorizationError(reason.error) &&
+                              reason.error.retryable === true,
+                          )
+                            ? DEFAULT_SCOPE_RETRY_DELAY
+                            : undefined);
+                        if (retryAfter === undefined || isAuthorizationFailure) return handled;
                         const retryDelay = Duration.millis(
                           Math.min(
-                            Duration.toMillis(options.retryExpectedFailureAfter) *
-                              2 ** expectedFailureRetries,
+                            Duration.toMillis(retryAfter) * 2 ** expectedFailureRetries,
                             MAX_EXPECTED_FAILURE_RETRY_DELAY_MS,
                           ),
                         );

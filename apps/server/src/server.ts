@@ -44,7 +44,6 @@ import * as LanFleet from "./lan/LanFleet.ts";
 import * as FleetMcpOrigin from "./lan/FleetMcpOrigin.ts";
 import * as FleetGrantAttribution from "./lan/FleetGrantAttribution.ts";
 import * as FleetPeerHttpClient from "./lan/FleetPeerHttpClient.ts";
-import * as FleetCredentialAccess from "./lan/FleetCredentialAccess.ts";
 import * as FleetPeerLinks from "./lan/FleetPeerLinks.ts";
 import * as FleetTransport from "./lan/FleetTransport.ts";
 import * as AgentScopeLive from "./process/agentScope.ts";
@@ -82,6 +81,9 @@ import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrid
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpEventsEndpoint from "./mcp/events/McpEventsEndpoint.ts";
+import * as AgentFactRelayRuntime from "./agentEvents/AgentFactRelayRuntime.ts";
+import * as AgentEventOwners from "./agentEvents/AgentEventOwners.ts";
+import * as ApprovalRuntime from "./approvals/ApprovalRuntime.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
@@ -521,7 +523,7 @@ const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(Server
 
 const layerAuth = EnvironmentAuth.layer.pipe(
   // T3 Code LAN: each fleet machine's credentials are capped at its current fleet access.
-  Layer.provide(FleetCredentialAccess.layerCap),
+  Layer.provideMerge(ApprovalRuntime.layerCap),
   Layer.provideMerge(layerPersistence),
   Layer.provide(layerServerEnvironment),
   Layer.provide(ServerSecretStore.layer),
@@ -560,6 +562,7 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
 );
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
+  Layer.provideMerge(ApprovalRuntime.layerAdministration),
   Layer.provide(layerScheduledTaskWebhookOrigin),
   Layer.provide(ProviderEventIngestor.layerAnalytics),
   Layer.provide(layerCheckpointStore),
@@ -623,6 +626,7 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 );
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
+  AgentEventOwners.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
   AgentAwarenessRelay.layer,
   HeldHooksWaker.layer,
   layerThreadSettlementWorker,
@@ -788,7 +792,19 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
     // T3 Code LAN: MCP Events for outside agents, when agentEventsEnabled was on at startup.
-    Layer.provide(McpEventsEndpoint.layerLive),
+    Layer.provide(
+      Layer.mergeAll(
+        McpEventsEndpoint.layerLive,
+        AgentFactRelayRuntime.layerBackground.pipe(Layer.provide(McpEventsEndpoint.layerLive)),
+      ).pipe(
+        Layer.provideMerge(
+          AgentFactRelayRuntime.layerServices.pipe(
+            Layer.provideMerge(ApprovalRuntime.layerDestination),
+            Layer.provideMerge(ProjectionStoreV2.layer),
+          ),
+        ),
+      ),
+    ),
   ),
   // Follows delegated tasks running in linked environments, including after a restart.
   Layer.effectDiscard(
@@ -822,13 +838,13 @@ const layerMakeRoutes = Layer.mergeAll(
       FleetGrantAttribution.layer,
       FleetGrantAttribution.layerSigner,
       // The same cap as EnvironmentAuth's, by layer memoization, for each WebSocket RPC call.
-      FleetCredentialAccess.layerCap,
-      FleetCredentialAccess.layerRevocation,
-    ),
+      ApprovalRuntime.layerBackground,
+    ).pipe(Layer.provide(ApprovalRuntime.layerCap)),
   ),
   // Links to other environments, shared by Settings (WebSocket) and agents (/mcp).
   Layer.provide(
     PeerForwarding.layer.pipe(
+      Layer.provideMerge(ApprovalRuntime.layerSourceAuthority),
       Layer.provideMerge(PeerMcpClient.layer),
       // T3 Code LAN: this machine's own list caps every write it sends over a link.
       Layer.provide(FleetPeerLinks.layerWriteCeiling),

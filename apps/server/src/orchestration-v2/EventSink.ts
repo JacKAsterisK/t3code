@@ -1,3 +1,9 @@
+import * as FleetUsers from "../lan/FleetUsers.ts";
+import * as SourceCapture from "../agentEvents/AgentEventSourceCapture.ts";
+import * as OwnerJournal from "../agentEvents/AgentEventOwnerJournal.ts";
+import type { ApprovalGuard, ApprovalFailureCode } from "@t3tools/contracts";
+import { ApprovalCreationProvenance } from "../approvals/ApprovalLaunchProvenance.ts";
+import * as ApprovalReceipts from "../approvals/ApprovalReceipts.ts";
 import {
   CommandId,
   type OrchestrationV2Run,
@@ -136,6 +142,7 @@ export interface EventSinkV2Shape {
     EventSinkV2Error
   >;
   readonly commitCommand: (input: {
+    readonly approvalGuard?: ApprovalGuard;
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
     readonly commandType: string;
@@ -158,6 +165,8 @@ export interface EventSinkV2Shape {
     EventSinkV2Error
   >;
   readonly commitRejectedCommand: (input: {
+    readonly approvalGuard?: ApprovalGuard;
+    readonly approvalFailureCode?: ApprovalFailureCode;
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
     readonly commandType: string;
@@ -214,6 +223,7 @@ const layerBase: Layer.Layer<
   EventSinkV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const fleetUsers = yield* Effect.serviceOption(FleetUsers.FleetUsers);
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
     const eventStore = yield* EventStore.EventStoreV2;
@@ -256,8 +266,8 @@ const layerBase: Layer.Layer<
 
     // Serialize commit and publish; reordered publication makes clients drop earlier sequences.
     const publishLane = yield* Semaphore.make(1);
-    const commitThenPublish = <A, E, R>(
-      transaction: Effect.Effect<A, E, R>,
+    const commitThenPublish = <A, E>(
+      transaction: Effect.Effect<A, E, SqlClient.SqlClient>,
       publish: (committed: A) => Effect.Effect<void>,
     ) =>
       Effect.uninterruptibleMask((restore) => {
@@ -273,14 +283,17 @@ const layerBase: Layer.Layer<
         // Cancellation may roll back the transaction's work. Once it commits,
         // every subscriber must hear about it before this writer can exit.
         // Otherwise a failed child run can leave its parent's task running.
-        return sql
-          .withTransaction(Effect.tap(restore(transaction), () => takeLane))
-          .pipe(
-            Effect.tap(publish),
-            Effect.ensuring(
-              Effect.suspend(() => (holdsLane ? publishLane.release(1) : Effect.void)),
-            ),
-          );
+        const commit = SourceCapture.withTransaction(
+          Effect.tap(restore(transaction), () => takeLane),
+        ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+        return (
+          Option.isSome(fleetUsers)
+            ? commit.pipe(Effect.provideService(FleetUsers.FleetUsers, fleetUsers.value))
+            : commit
+        ).pipe(
+          Effect.tap(publish),
+          Effect.ensuring(Effect.suspend(() => (holdsLane ? publishLane.release(1) : Effect.void))),
+        );
       });
 
     // A user can answer after terminal normalization reads the pending request.
@@ -355,6 +368,23 @@ const layerBase: Layer.Layer<
     const applyStoredEvents =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(function* (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) {
+        for (const stored of storedEvents) {
+          if (stored.agentEventDirectory !== undefined)
+            yield* OwnerJournal.bindDirectoryReference({
+              reference: stored.agentEventDirectory,
+              sourceSequences: [stored.sequence],
+            });
+          if (
+            stored.agentEventDirectory !== undefined &&
+            (stored.event.type === "thread.created" || stored.event.type === "thread.owner-set")
+          )
+            yield* OwnerJournal.recordAssignment({
+              threadId: stored.event.threadId,
+              sourceGeneration: stored.agentEventDirectory.sourceGeneration,
+              sequence: stored.sequence,
+              ownerId: stored.event.payload.ownerId ?? null,
+            });
+        }
         yield* Effect.forEach(storedEvents, (stored) => projectionStore.apply(stored.event), {
           concurrency: 1,
         });
@@ -632,108 +662,138 @@ const layerBase: Layer.Layer<
         return { receipt: existing.value, storedEvents };
       });
 
-    const commitCommandEffect = Effect.fn("orchestrationV2.EventSink.commitCommand")(function* (
-      input: Parameters<EventSinkV2Shape["commitCommand"]>[0],
-    ) {
-      const result = yield* commitThenPublish(
-        Effect.gen(function* () {
-          const reserved = yield* commandReceipts.insertIfAbsent({
-            commandId: input.commandId,
-            threadId: input.threadId,
-            commandType: input.commandType,
-            acceptedAt: input.acceptedAt,
-            resultSequence: 0,
-            status: "accepted",
-            error: null,
-          });
-          if (!reserved) {
-            const existing = yield* existingCommandResult(input.commandId);
-            return { ...existing, committed: false as const, cancelledEffectIds: [] };
-          }
-
-          const runId = input.updateDelegatedCompletionOnlyRunId;
-          const normalized = yield* normalizeEvents(
-            runId === undefined
-              ? input.events
-              : yield* updateDelegatedCompletionOnly(input.events, (id) => id === runId),
-          );
-          const storedEvents = yield* eventStore.append({
-            commandId: input.commandId,
-            events: normalized,
-          });
-          // A Stop that changes nothing can still queue the stop of its delegated tasks.
-          const sequence =
-            storedEvents.at(-1)?.sequence ??
-            (input.effects.length === 0
-              ? undefined
-              : yield* eventStore.latestSequence({ threadId: input.threadId }));
-          if (sequence === undefined) {
-            return yield* Effect.die(
-              new Error(`Command ${input.commandId} produced no orchestration events.`),
-            );
-          }
-          const outcomes = yield* applyStoredEvents(storedEvents);
-          yield* effectOutbox.enqueue(input.effects);
-          const receipt: CommandReceiptStore.CommandReceiptV2 = {
-            commandId: input.commandId,
-            threadId: input.threadId,
-            commandType: input.commandType,
-            acceptedAt: input.acceptedAt,
-            resultSequence: sequence,
-            status: "accepted",
-            error: null,
-          };
-          yield* commandReceipts.upsert(receipt);
-          const cancelledEffectIds =
-            input.cancelUnsettledEffects === undefined
-              ? []
-              : yield* effectOutbox.cancelUnsettled({
-                  threadId: input.threadId,
-                  ...input.cancelUnsettledEffects,
-                });
-          return { receipt, storedEvents, outcomes, committed: true as const, cancelledEffectIds };
-        }),
-        (result) =>
+    const commitCommandEffect = Effect.fn("orchestrationV2.EventSink.commitCommand")(
+      function* (input: Parameters<EventSinkV2Shape["commitCommand"]>[0]) {
+        const result = yield* commitThenPublish(
           Effect.gen(function* () {
-            yield* effectOutbox.signalCancellations(result.cancelledEffectIds);
-            if (result.committed && input.effects.length > 0) {
-              yield* effectOutbox.notifyAvailable(input.effects.length);
+            const reserved = yield* commandReceipts.insertIfAbsent({
+              commandId: input.commandId,
+              threadId: input.threadId,
+              commandType: input.commandType,
+              acceptedAt: input.acceptedAt,
+              resultSequence: 0,
+              status: "accepted",
+              error: null,
+            });
+            if (!reserved) {
+              const existing = yield* existingCommandResult(input.commandId);
+              return { ...existing, committed: false as const, cancelledEffectIds: [] };
             }
-            if (result.committed) yield* publishStoredEvents(result.storedEvents, result.outcomes);
+
+            const runId = input.updateDelegatedCompletionOnlyRunId;
+            const normalized = yield* normalizeEvents(
+              runId === undefined
+                ? input.events
+                : yield* updateDelegatedCompletionOnly(input.events, (id) => id === runId),
+            );
+            const storedEvents = yield* eventStore.append({
+              commandId: input.commandId,
+              events: normalized,
+            });
+            // A Stop that changes nothing can still queue the stop of its delegated tasks.
+            const sequence =
+              storedEvents.at(-1)?.sequence ??
+              (input.effects.length === 0
+                ? undefined
+                : yield* eventStore.latestSequence({ threadId: input.threadId }));
+            if (sequence === undefined) {
+              return yield* Effect.die(
+                new Error(`Command ${input.commandId} produced no orchestration events.`),
+              );
+            }
+            const outcomes = yield* applyStoredEvents(storedEvents);
+            const provenance = yield* ApprovalCreationProvenance;
+            if (provenance !== undefined)
+              yield* Effect.forEach(storedEvents, provenance.record, { discard: true });
+            yield* effectOutbox.enqueue(input.effects);
+            const receipt: CommandReceiptStore.CommandReceiptV2 = {
+              commandId: input.commandId,
+              threadId: input.threadId,
+              commandType: input.commandType,
+              acceptedAt: input.acceptedAt,
+              resultSequence: sequence,
+              status: "accepted",
+              error: null,
+            };
+            yield* commandReceipts.upsert(receipt);
+            if (input.approvalGuard !== undefined)
+              yield* ApprovalReceipts.commit(input.approvalGuard, input.commandId, sequence).pipe(
+                Effect.provideService(SqlClient.SqlClient, sql),
+              );
+            const cancelledEffectIds =
+              input.cancelUnsettledEffects === undefined
+                ? []
+                : yield* effectOutbox.cancelUnsettled({
+                    threadId: input.threadId,
+                    ...input.cancelUnsettledEffects,
+                  });
+            return {
+              receipt,
+              storedEvents,
+              outcomes,
+              committed: true as const,
+              cancelledEffectIds,
+            };
           }),
-      );
-      return {
-        receipt: result.receipt,
-        storedEvents: result.storedEvents,
-        committed: result.committed,
-        cancelledEffectCount: result.cancelledEffectIds.length,
-      };
-    });
+          (result) =>
+            Effect.gen(function* () {
+              yield* effectOutbox.signalCancellations(result.cancelledEffectIds);
+              if (result.committed && input.effects.length > 0) {
+                yield* effectOutbox.notifyAvailable(input.effects.length);
+              }
+              if (result.committed)
+                yield* publishStoredEvents(result.storedEvents, result.outcomes);
+            }),
+        );
+        return {
+          receipt: result.receipt,
+          storedEvents: result.storedEvents,
+          committed: result.committed,
+          cancelledEffectCount: result.cancelledEffectIds.length,
+        };
+      },
+      (effect) =>
+        Effect.flatMap(ApprovalCreationProvenance, (provenance) =>
+          provenance === undefined ? effect : provenance.withAdmission(effect),
+        ),
+    );
 
     const commitRejectedCommandEffect = Effect.fn(
       "orchestrationV2.EventSink.commitRejectedCommand",
-    )(function* (input: Parameters<EventSinkV2Shape["commitRejectedCommand"]>[0]) {
-      return yield* sql.withTransaction(
-        Effect.gen(function* () {
-          const sequence = yield* eventStore.latestSequence({ threadId: input.threadId });
-          const receipt: CommandReceiptStore.CommandReceiptV2 = {
-            commandId: input.commandId,
-            threadId: input.threadId,
-            commandType: input.commandType,
-            acceptedAt: input.rejectedAt,
-            resultSequence: sequence,
-            status: "rejected",
-            error: input.error,
-          };
-          const inserted = yield* commandReceipts.insertIfAbsent(receipt);
-          if (inserted) {
-            return receipt;
-          }
-          const existing = yield* commandReceipts.getByCommandId(input.commandId);
-          return Option.getOrElse(existing, () => receipt);
-        }),
-      );
-    });
+    )(
+      function* (input: Parameters<EventSinkV2Shape["commitRejectedCommand"]>[0]) {
+        return yield* sql.withTransaction(
+          Effect.gen(function* () {
+            const sequence = yield* eventStore.latestSequence({ threadId: input.threadId });
+            const receipt: CommandReceiptStore.CommandReceiptV2 = {
+              commandId: input.commandId,
+              threadId: input.threadId,
+              commandType: input.commandType,
+              acceptedAt: input.rejectedAt,
+              resultSequence: sequence,
+              status: "rejected",
+              error: input.error,
+            };
+            const inserted = yield* commandReceipts.insertIfAbsent(receipt);
+            const result = inserted
+              ? receipt
+              : Option.getOrElse(
+                  yield* commandReceipts.getByCommandId(input.commandId),
+                  () => receipt,
+                );
+            if (result.status === "rejected" && input.approvalGuard !== undefined)
+              yield* ApprovalReceipts.transition(
+                input.commandId,
+                "refused",
+                { commandId: input.commandId, boundary: "not_started" },
+                input.approvalFailureCode ?? "native_rejected",
+              );
+            return result;
+          }),
+        );
+      },
+      Effect.provideService(SqlClient.SqlClient, sql),
+    );
 
     const existingProjectReceipt = (commandId: CommandId) =>
       commandReceipts.getProjectByCommandId(commandId).pipe(

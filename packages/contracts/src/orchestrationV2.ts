@@ -1,3 +1,12 @@
+import { AgentEventDirectoryReference } from "./agentEvents.ts";
+import {
+  ApprovalUnsupportedEvidence,
+  closedApprovalStruct,
+  ApprovalNativeDescriptor,
+  ApprovalActor,
+  ApprovalGuard,
+  ApprovalReceiptState,
+} from "./approvals.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
@@ -1189,6 +1198,11 @@ export function latestProviderTurnForAttempt<
 }
 
 export const OrchestrationV2RuntimeRequest = Schema.Struct({
+  approvalUnsupported: Schema.optionalKey(ApprovalUnsupportedEvidence),
+  approval: Schema.optionalKey(ApprovalNativeDescriptor),
+  resolvedBy: Schema.optional(ApprovalActor),
+  approvalDelivery: Schema.optionalKey(ApprovalReceiptState),
+  approvalReceiptId: Schema.optional(Schema.String),
   id: RuntimeRequestId,
   nodeId: NodeId,
   providerTurnId: Schema.NullOr(ProviderTurnId),
@@ -1668,6 +1682,9 @@ export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("approval_request"),
+    approval: Schema.optionalKey(ApprovalNativeDescriptor),
+    resolvedBy: Schema.optional(ApprovalActor),
+    approvalDelivery: Schema.optionalKey(ApprovalReceiptState),
     requestId: RuntimeRequestId,
     requestKind: ProviderRequestKind,
     prompt: Schema.optional(Schema.String),
@@ -2239,6 +2256,7 @@ export const OrchestrationV2ShellStreamItem = Schema.Union([
 export type OrchestrationV2ShellStreamItem = typeof OrchestrationV2ShellStreamItem.Type;
 
 export const OrchestrationV2StoredEvent = Schema.Struct({
+  agentEventDirectory: Schema.optionalKey(AgentEventDirectoryReference),
   sequence: NonNegativeInt,
   commandId: Schema.NullOr(CommandId),
   event: OrchestrationV2DomainEvent,
@@ -2499,6 +2517,9 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("approval_request"),
+    approval: Schema.optionalKey(ApprovalNativeDescriptor),
+    resolvedBy: Schema.optional(ApprovalActor),
+    approvalDelivery: Schema.optionalKey(ApprovalReceiptState),
     requestId: RuntimeRequestId,
     requestKind: ProviderRequestKind,
     prompt: Schema.optional(Schema.String),
@@ -3248,7 +3269,7 @@ export const OrchestrationV2Command = Schema.Union([
     // Replaces all attachments; absent preserves them for older clients editing text.
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
   }),
-  Schema.Struct({
+  closedApprovalStruct({
     type: Schema.Literal("runtime-request.respond"),
     commandId: CommandId,
     threadId: ThreadId,
@@ -3349,6 +3370,28 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("runtime-request.respond"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: RuntimeRequestId,
+    decision: ProviderApprovalDecision,
+    feedback: Schema.optionalKey(Schema.String),
+    answers: Schema.optionalKey(ProviderUserInputAnswers),
+    attachmentsByQuestionId: Schema.optionalKey(UserInputAttachments),
+    approvalGuard: ApprovalGuard,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("approval.delivery.record"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: RuntimeRequestId,
+    receiptId: Schema.String,
+    state: ApprovalReceiptState,
+    failureCode: Schema.optionalKey(Schema.String),
+    recover: Schema.optionalKey(ApprovalNativeDescriptor),
+  }),
+
   // Guest share commands the server issues after checking T3 Connect and the guest token.
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.open"),

@@ -11,6 +11,8 @@ import * as CodexRpc from "./_generated/meta.gen.ts";
 import * as CodexSchema from "./_generated/schema.gen.ts";
 import * as CodexError from "./errors.ts";
 import * as CodexProtocol from "./protocol.ts";
+import { inspectPermissionRequest, type PermissionRequestEvidence } from "./permissions.ts";
+import type { AcknowledgedWriter } from "./_internal/stdio.ts";
 import {
   decodeNotificationPayload,
   decodeOptionalPayload,
@@ -20,11 +22,17 @@ import {
 import { makeChildStdio, makeStderrTail, makeTerminationError } from "./_internal/stdio.ts";
 
 export interface CodexAppServerClientOptions {
+  readonly acknowledgedWriter?: AcknowledgedWriter;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   readonly logger?: (
     event: CodexProtocol.CodexAppServerProtocolLogEvent,
   ) => Effect.Effect<void, never>;
+}
+
+export interface ServerRequestContext {
+  readonly nativeRequestId: string | number;
+  readonly permissionEvidence?: PermissionRequestEvidence;
 }
 
 interface CodexAppServerClientRaw {
@@ -53,8 +61,10 @@ export class CodexAppServerClient extends Context.Service<
       method: M,
       handler: (
         payload: CodexRpc.ServerRequestParamsByMethod[M],
+        context: ServerRequestContext,
       ) => Effect.Effect<
-        CodexRpc.ServerRequestResponsesByMethod[M],
+        | CodexRpc.ServerRequestResponsesByMethod[M]
+        | CodexProtocol.CodexAcknowledgedResponse<CodexRpc.ServerRequestResponsesByMethod[M]>,
         CodexError.CodexAppServerError
       >,
     ) => Effect.Effect<void>;
@@ -81,6 +91,7 @@ export class CodexAppServerClient extends Context.Service<
 
 type ServerRequestHandler = (
   payload: unknown,
+  context: ServerRequestContext,
 ) => Effect.Effect<unknown, CodexError.CodexAppServerError>;
 type ServerNotificationHandler = (
   payload: unknown,
@@ -101,6 +112,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
   terminationError?: Effect.Effect<CodexError.CodexAppServerError>,
 ): Effect.fn.Return<CodexAppServerClient["Service"], never, Scope.Scope> {
   const requestHandlers = new Map<string, ServerRequestHandler>();
+  let providerVersion: string | undefined;
   const termination = yield* Deferred.make<never, CodexError.CodexAppServerError>();
   const notificationHandlers = new Map<string, Array<ServerNotificationHandler>>();
   let unknownRequestHandler:
@@ -210,9 +222,48 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
       const responseSchema = getServerRequestResponseSchema(method);
       const handler = requestHandlers.get(method);
 
+      const context: ServerRequestContext = {
+        nativeRequestId: request.id,
+        ...(method === "item/permissions/requestApproval"
+          ? { permissionEvidence: inspectPermissionRequest(request.params, providerVersion) }
+          : {}),
+      };
       return decodeOptionalPayload(method, payloadSchema, request.params).pipe(
-        Effect.flatMap((decoded) => runHandler(handler, decoded, method)),
-        Effect.flatMap((result) => encodeOptionalPayload(method, responseSchema, result)),
+        Effect.flatMap((decoded) =>
+          runHandler(
+            handler === undefined ? undefined : (value) => handler(value, context),
+            decoded,
+            method,
+          ),
+        ),
+        Effect.flatMap((result): Effect.Effect<unknown, CodexError.CodexAppServerRequestError> =>
+          CodexProtocol.isAcknowledgedResponse(result)
+            ? encodeOptionalPayload(method, responseSchema, result.value).pipe(
+                Effect.map((value) =>
+                  CodexProtocol.acknowledgedResponse(
+                    value,
+                    result.commandId,
+                    result.onWrite,
+                    result.onProtocolClaim,
+                  ),
+                ),
+                Effect.onInterrupt(() =>
+                  result.onWrite({
+                    commandId: result.commandId,
+                    state: "delivery_unknown",
+                    boundary: "write_interrupted",
+                  }),
+                ),
+                Effect.tapError(() =>
+                  result.onWrite({
+                    commandId: result.commandId,
+                    state: "delivery_failed",
+                    boundary: "not_started",
+                  }),
+                ),
+              )
+            : encodeOptionalPayload(method, responseSchema, result),
+        ),
       );
     }
 
@@ -223,6 +274,9 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
 
   const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
     stdio,
+    ...(options.acknowledgedWriter === undefined
+      ? {}
+      : { acknowledgedWriter: options.acknowledgedWriter }),
     ...(terminationError ? { terminationError } : {}),
     ...(options.logIncoming !== undefined ? { logIncoming: options.logIncoming } : {}),
     ...(options.logOutgoing !== undefined ? { logOutgoing: options.logOutgoing } : {}),
@@ -238,6 +292,19 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
   ): Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexError.CodexAppServerError> =>
     encodeOptionalPayload(method, getClientRequestParamSchema(method), payload).pipe(
       Effect.flatMap((encoded) => transport.request(method, encoded)),
+      Effect.tap((raw) =>
+        Effect.sync(() => {
+          if (
+            method !== "initialize" ||
+            typeof raw !== "object" ||
+            raw === null ||
+            !("userAgent" in raw) ||
+            typeof raw.userAgent !== "string"
+          )
+            return;
+          providerVersion = /\/(\d+\.\d+\.\d+)(?:\s|$)/u.exec(raw.userAgent)?.[1];
+        }),
+      ),
       Effect.flatMap(
         (
           raw,

@@ -1,3 +1,4 @@
+import { AgentEventDirectoryReference } from "./agentEvents.ts";
 import * as Schema from "effect/Schema";
 
 import {
@@ -23,6 +24,7 @@ export const OrchestrationClientOrigin = Schema.Struct({
 export type OrchestrationClientOrigin = typeof OrchestrationClientOrigin.Type;
 
 export const ApplicationEventMetadata = Schema.Struct({
+  agentEventDirectory: Schema.optionalKey(AgentEventDirectoryReference),
   deferredTurn: Schema.optional(Schema.Boolean),
   providerTurnId: Schema.optional(TrimmedNonEmptyString),
   providerItemId: Schema.optional(ProviderItemId),

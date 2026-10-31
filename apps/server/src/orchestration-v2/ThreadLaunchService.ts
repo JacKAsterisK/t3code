@@ -1,3 +1,4 @@
+import * as ApprovalProvenance from "../approvals/ApprovalLaunchProvenance.ts";
 import * as NativeUpdateGate from "../lan/NativeUpdateGate.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -207,6 +208,7 @@ function failureDetail(error: unknown): string {
 
 const make = Effect.gen(function* () {
   const nativeUpdateAdmission = yield* NativeUpdateGate.captureAdmission();
+  const captureProvenance = yield* ApprovalProvenance.makeCapture;
   const projects = yield* ProjectService.ProjectService;
   const setupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
@@ -811,6 +813,9 @@ const make = Effect.gen(function* () {
 
   const launch: ThreadLaunchService["Service"]["launch"] = Effect.fn("ThreadLaunchService.launch")(
     function* (request) {
+      const provenance = yield* captureProvenance().pipe(
+        Effect.mapError(mapError(request, "resolve-project")),
+      );
       // Scratch has no Git repository. Normalize before folder allocation so
       // durable preparation and retries use the thread's own Scratch folder.
       const input: ThreadLaunchInput =
@@ -930,6 +935,7 @@ const make = Effect.gen(function* () {
                 creationSource: input.creationSource,
               });
         const claimed = yield* claimDispatch.pipe(
+          Effect.provideService(ApprovalProvenance.ApprovalCreationProvenance, provenance),
           Effect.mapError(
             mapError(
               input,

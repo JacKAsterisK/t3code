@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off -- The fixture uses a Windows junction without file-symlink privileges.
+import * as NodeFS from "node:fs";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -302,21 +305,38 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
-  it.effect("saves through a symlinked settings file without replacing the link", () =>
+  it.effect("saves through linked settings without replacing the link", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const platform = yield* HostProcess.Platform;
       const dotfiles = yield* fs.makeTempDirectoryScoped({ prefix: "t3-settings-dotfiles-" });
       const linkedSettingsPath = path.join(dotfiles, "settings.json");
       yield* fs.writeFileString(linkedSettingsPath, `{ "responseStreamingMode": "turn" }`);
-      yield* fs.remove(config.settingsPath, { force: true });
-      yield* fs.symlink(linkedSettingsPath, config.settingsPath);
+      const linkPath =
+        platform === "win32" ? path.join(config.baseDir, "linked-settings") : config.settingsPath;
+      const settingsPath = platform === "win32" ? path.join(linkPath, "settings.json") : linkPath;
+      if (platform === "win32") {
+        // Directory junctions exercise real linked-path writes without requiring Windows developer mode.
+        NodeFS.symlinkSync(dotfiles, linkPath, "junction");
+      } else {
+        yield* fs.remove(linkPath, { force: true });
+        yield* fs.symlink(linkedSettingsPath, linkPath);
+      }
+      const linkBefore = yield* fs.readLink(linkPath);
+      const service = yield* ServerSettingsModule.ServerSettingsService.pipe(
+        Effect.provide(
+          Layer.fresh(ServerSettingsModule.layer).pipe(
+            Layer.provide(ServerSecretStore.layer),
+            Layer.provide(Layer.succeed(ServerConfig.ServerConfig, { ...config, settingsPath })),
+          ),
+        ),
+      );
 
       yield* service.updateSettings({ responseStreamingMode: "paragraph" });
 
-      assert.equal(yield* fs.readLink(config.settingsPath), linkedSettingsPath);
+      assert.equal(yield* fs.readLink(linkPath), linkBefore);
       const persisted = yield* decodeServerSettingsJson(
         yield* fs.readFileString(linkedSettingsPath),
       );

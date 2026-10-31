@@ -19,6 +19,7 @@ import {
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Ref from "effect/Ref";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -1204,11 +1205,13 @@ it.effect("lists pull request watch tools only to threads that are not delegated
 );
 
 it.effect(
-  "narrows an OAuth client's modes to the T3-Mode-Limit it sends, and never widens them",
+  "narrows authenticated modes and accepts asserted launch identity only from peer links",
   () =>
     Effect.scoped(
       Effect.gen(function* () {
         const clientToken = "client-payload.client-signature";
+        const linked = yield* Ref.make(false);
+        const seen = yield* Ref.make<McpInvocationContext.McpClientCaller | undefined>(undefined);
         const clientScope: McpInvocationContext.McpInvocationScope = {
           environmentId,
           requestNamespace: "client:linked",
@@ -1240,13 +1243,18 @@ it.effect(
             starts: McpToolAccess.startsThreads(
               (input) => input,
               (_, modes) =>
-                Effect.succeed({ modes: `${modes.runtimeMode}/${modes.interactionMode}` }),
+                McpInvocationContext.McpInvocationContext.pipe(
+                  Effect.tap((scope) => Ref.set(seen, scope.client)),
+                  Effect.as({ modes: `${modes.runtimeMode}/${modes.interactionMode}` }),
+                ),
               "stamped",
             ),
           }),
         ).pipe(
           Layer.provideMerge(
-            McpHttpServer.layerMcpTransport.pipe(Layer.provide(ServerSettings.layerTest())),
+            McpHttpServer.layerMcpTransport.pipe(
+              Layer.provide(ServerSettings.layerTest({ linkedEnvironmentsEnabled: true })),
+            ),
           ),
           Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
           Layer.provide(
@@ -1258,10 +1266,12 @@ it.effect(
           Layer.provide(
             Layer.succeed(McpHttpServer.McpClientAuthenticator, {
               authenticate: (request) =>
-                Effect.succeed(
-                  request.headers.authorization === `Bearer ${clientToken}`
-                    ? clientScope
-                    : undefined,
+                Ref.get(linked).pipe(
+                  Effect.map((peer) =>
+                    request.headers.authorization === `Bearer ${clientToken}`
+                      ? { ...clientScope, client: { ...clientScope.client!, linked: peer } }
+                      : undefined,
+                  ),
                 ),
             }),
           ),
@@ -1288,12 +1298,19 @@ it.effect(
           ),
         );
         /** Starts a thread as the client, with `limit` as T3-Mode-Limit; the HTTP status or the outcome. */
-        const start = (limit: string | undefined, args: Record<string, string> = {}) =>
+        const start = (
+          limit: string | undefined,
+          args: Record<string, string> = {},
+          assertedClient?: string,
+        ) =>
           Effect.gen(function* () {
             const headers = {
               accept: "application/json, text/event-stream",
               authorization: `Bearer ${clientToken}`,
               ...(limit === undefined ? {} : { "t3-mode-limit": limit }),
+              ...(assertedClient === undefined
+                ? {}
+                : { "t3-initiating-client-id": assertedClient }),
             };
             const initialize = yield* httpClient.post("/mcp", {
               headers,
@@ -1345,6 +1362,17 @@ it.effect(
         expect(yield* start("auto")).toBe(400);
         expect(yield* start("auto/default/extra")).toBe(400);
         expect(yield* start("root/default")).toBe(400);
+        expect(yield* start(undefined, {}, "forged-local-client")).toBe("auto/default");
+        expect((yield* Ref.get(seen))?.assertedInitiatingClientId).toBeUndefined();
+        yield* Ref.set(linked, true);
+        expect(yield* start(undefined, {}, "opaque-client-one")).toBe("auto/default");
+        expect((yield* Ref.get(seen))?.assertedInitiatingClientId).toBe("opaque-client-one");
+        expect(yield* start(undefined, {}, "opaque-client-two")).toBe("auto/default");
+        expect((yield* Ref.get(seen))?.assertedInitiatingClientId).toBe("opaque-client-two");
+        for (const invalid of [undefined, "x".repeat(513), "client with spaces"]) {
+          expect(yield* start(undefined, {}, invalid)).toBe("auto/default");
+          expect((yield* Ref.get(seen))?.assertedInitiatingClientId).toBeUndefined();
+        }
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

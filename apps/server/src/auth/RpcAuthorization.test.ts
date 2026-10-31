@@ -12,6 +12,7 @@ import {
   ThreadId,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  EnvironmentAuthorizationError,
   AuthSourceControlWriteScope,
   AuthTerminalReadScope,
   AuthTerminalOperateScope,
@@ -25,6 +26,7 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as RpcTest from "effect/rpc/RpcTest";
@@ -486,15 +488,13 @@ describe("thread owner authorization", () => {
     },
   ] as const;
 
-  const commandTypes = OrchestrationV2Command.members.flatMap((member) => {
-    const type = (member as { readonly fields: { readonly type: unknown } }).fields.type as {
-      readonly literal?: string;
-      readonly literals?: ReadonlyArray<string>;
-    };
-    const literals = type.literal === undefined ? (type.literals ?? []) : [type.literal];
-    expect(literals.length).toBeGreaterThan(0);
-    return literals;
-  });
+  // Widen the tuple to keep runtime enumeration independent of recursive type flattening.
+  const commandMembers: ReadonlyArray<
+    Schema.Constraint & { readonly Type: { readonly type: string } }
+  > = OrchestrationV2Command.members;
+  const commandTypes: ReadonlyArray<string> = Schema.Union(commandMembers).pipe(
+    Schema.toTaggedUnion("type"),
+  ).discriminants;
 
   it("lets read permission set an owner and nothing else a client can dispatch", () => {
     expect(readOnly).toEqual([
@@ -531,7 +531,10 @@ describe("thread owner authorization", () => {
   const client = (
     scopes: ReadonlyArray<AuthEnvironmentScope>,
     handled: Array<string>,
-    currentScopes?: Effect.Effect<ReadonlyArray<AuthEnvironmentScope> | undefined>,
+    currentScopes?: Effect.Effect<
+      ReadonlyArray<AuthEnvironmentScope> | undefined,
+      EnvironmentAuthorizationError
+    >,
   ) =>
     RpcTest.makeClient(group).pipe(
       Effect.provide(
@@ -577,11 +580,30 @@ describe("thread owner authorization", () => {
       const handled: Array<string> = [];
       const standard = fleetCredentialScopes("standard");
       let current: ReadonlyArray<AuthEnvironmentScope> | undefined = standard;
+      let unavailable = false;
       const rpc = yield* client(
         standard,
         handled,
-        Effect.sync(() => current),
+        Effect.suspend(() =>
+          unavailable
+            ? Effect.fail(
+                new EnvironmentAuthorizationError({
+                  message: "Current permissions are temporarily unavailable.",
+                  requiredScope: AuthOrchestrationOperateScope,
+                  retryable: true,
+                }),
+              )
+            : Effect.succeed(current),
+        ),
       );
+      yield* rpc[dispatch](writes[0]);
+      unavailable = true;
+      expect(yield* rpc[dispatch](writes[0]).pipe(Effect.flip)).toMatchObject({
+        _tag: "EnvironmentAuthorizationError",
+        retryable: true,
+      });
+      expect(handled).toEqual(["thread.pin"]);
+      unavailable = false;
       yield* rpc[dispatch](writes[0]);
       current = readOnly;
       yield* rpc[dispatch](ownerSet);
@@ -594,7 +616,7 @@ describe("thread owner authorization", () => {
       expect(yield* rpc[dispatch](ownerSet).pipe(Effect.flip)).toMatchObject({
         requiredPermission: AuthOrchestrationReadScope,
       });
-      expect(handled).toEqual(["thread.pin", THREAD_OWNER_COMMAND_TYPE]);
+      expect(handled).toEqual(["thread.pin", "thread.pin", THREAD_OWNER_COMMAND_TYPE]);
     }).pipe(Effect.scoped),
   );
 });

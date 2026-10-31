@@ -1,8 +1,11 @@
+// @effect-diagnostics nodeBuiltinImport:off -- The fake native peer spawns a real tool descendant to verify session-owned process-tree cleanup.
 import * as NodeOS from "node:os";
+import * as NodeChildProcess from "node:child_process";
 
 let nextServerRequestId = 10_000;
 let pendingSkillsListRequestId: number | string | null = null;
 let pendingUserInputRequestId: number | null = null;
+let pendingPermission: { clientId: number | string; nativeId: number } | undefined;
 
 const writeMessage = (message: unknown) => {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -42,7 +45,10 @@ const handleMethod = (message: Record<string, unknown>) => {
       if (Number.isFinite(stderrBytes) && stderrBytes > 0) {
         process.stderr.write("x".repeat(stderrBytes), () => {
           respond(message.id as number | string, {
-            userAgent: "mock-codex-app-server",
+            userAgent:
+              process.env.CODEX_APP_SERVER_TEST_PERMISSION_PROFILE === "1"
+                ? "Codex/0.159.0"
+                : "mock-codex-app-server",
             codexHome: process.cwd(),
             platformFamily: platform === "win32" ? "windows" : "unix",
             platformOs: platform === "darwin" ? "macos" : platform,
@@ -51,11 +57,88 @@ const handleMethod = (message: Record<string, unknown>) => {
         return;
       }
       respond(message.id as number | string, {
-        userAgent: "mock-codex-app-server",
+        userAgent:
+          process.env.CODEX_APP_SERVER_TEST_PERMISSION_PROFILE === "1"
+            ? "Codex/0.159.0"
+            : "mock-codex-app-server",
         codexHome: process.cwd(),
         platformFamily: platform === "win32" ? "windows" : "unix",
         platformOs: platform === "darwin" ? "macos" : platform,
       });
+      return;
+    }
+    case "thread/start": {
+      const thread = {
+        id: "thread-approval-harness",
+        sessionId: "thread-approval-harness",
+        projectId: null,
+        forkedFromId: null,
+        preview: "",
+        ephemeral: false,
+        modelProvider: "openai",
+        createdAt: 1,
+        updatedAt: 1,
+        status: { type: "idle" },
+        path: null,
+        cwd: process.cwd(),
+        cliVersion: "0.159.0",
+        source: "vscode",
+        threadSource: null,
+        agentNickname: null,
+        agentRole: null,
+        gitInfo: null,
+        name: null,
+        turns: [],
+      };
+      respond(message.id as number | string, {
+        thread,
+        model: "gpt-5.4",
+        modelProvider: "openai",
+        serviceTier: null,
+        cwd: process.cwd(),
+        instructionSources: [],
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false },
+        reasoningEffort: "medium",
+      });
+      return;
+    }
+    case "turn/start": {
+      const turn = {
+        id: "turn-approval-harness",
+        items: [],
+        itemsView: "notLoaded",
+        status: "inProgress",
+        error: null,
+        startedAt: 1,
+        completedAt: null,
+        durationMs: null,
+      };
+      respond(message.id as number | string, { turn });
+      writeMessage({
+        method: "turn/started",
+        params: { threadId: "thread-approval-harness", turn },
+      });
+      return;
+    }
+    case "test/spawnChild": {
+      const child = NodeChildProcess.spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: "ignore", windowsHide: true },
+      );
+      child.on("error", () =>
+        respondError(message.id as number | string, -32000, "fixture spawn failed"),
+      );
+      child.once("spawn", () => respond(message.id as number | string, { pid: child.pid }));
+      return;
+    }
+    case "test/permission": {
+      pendingPermission = {
+        clientId: message.id as number | string,
+        nativeId: sendRequest("item/permissions/requestApproval", message.params),
+      };
       return;
     }
     case "initialized": {
@@ -113,6 +196,12 @@ const handleMethod = (message: Record<string, unknown>) => {
 };
 
 const handleResponse = (message: Record<string, unknown>) => {
+  if (pendingPermission !== undefined && message.id === pendingPermission.nativeId) {
+    respond(pendingPermission.clientId, { nativeResponse: message.result });
+    pendingPermission = undefined;
+    return;
+  }
+
   if (message.id !== pendingUserInputRequestId) {
     return;
   }

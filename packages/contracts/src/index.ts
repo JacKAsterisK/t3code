@@ -75,3 +75,10 @@ export * from "./lanTasks.ts";
 export * from "./lanToolParameters.ts";
 export * from "./nativeActivation.ts";
 export * from "./agentEvents.ts";
+
+export * from "./approvals.ts";
+export * from "./approvalForwarding.ts";
+export * from "./fleetApprovalPolicy.ts";
+export * from "./agentEventRelay.ts";
+
+export * from "./approvalAdministration.ts";

@@ -68,6 +68,25 @@ export const TimelinePendingApprovalRow = memo(function TimelinePendingApprovalR
         {approval.appName ? (
           <span className="text-muted-foreground wrap-anywhere">{approval.appName}</span>
         ) : null}
+        {approval.approval ? (
+          <div className="space-y-1">
+            <span>
+              Permission lasts for this provider turn. {approval.approval.grant.expiresWhen}.
+            </span>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap select-text">
+              {JSON.stringify(approval.approval.grant.permission, null, 2)}
+            </pre>
+          </div>
+        ) : (
+          <span className="text-muted-foreground">
+            This provider request can be answered in the app only.
+          </span>
+        )}
+        {approval.approvalDelivery === "delivery_withheld" ? (
+          <span className="text-warning">
+            The previous response was withheld before handoff. This is a fresh request.
+          </span>
+        ) : null}
         {approval.reason ? (
           <span className="text-muted-foreground select-text wrap-anywhere">{approval.reason}</span>
         ) : null}

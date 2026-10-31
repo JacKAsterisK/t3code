@@ -13,7 +13,7 @@ pnpm mcp-tool-use --model claude-opus-5-5 --out runs/opus
 ```
 
 - `ANTHROPIC_API_KEY` in the repo root `.env` pays for Claude models and the Haiku shell simulator.
-- Codex models (`gpt-*` in `MODELS` in `run.ts`) go through a CLIProxyAPI server, set up as the `vibeproxy` model provider in `~/.codex/config.toml`. Keep the proxy under about 12 samples in flight across all runs.
+- Codex models (`gpt-*` in `MODELS` in `run.ts`) go through a CLIProxyAPI server. Set `T3_EVAL_PROXY_CONFIG` to a private JSON file with `url` and `headers`, or reuse the `vibeproxy` model provider in `~/.codex/config.toml`. Keep credential files outside the checkout and never print or commit them. Keep the proxy under about 12 samples in flight across all runs. Set `T3_EVAL_PYTHON` to a Python 3 executable if it is not available as `python3`.
 - Flags: `--case <ids>`, `--cases <file.ndjson>`, `--samples <n>` (default 2, and a 3rd when the first 2 disagree), `--concurrency <n>` (samples in flight, default 8), `--max-steps <n>`, `--effort <level>`, `--dry-run` (prints request bodies, no model calls), and `--context` (prints the size of T3's text and schemas, no key needed).
 - `--baseline <results.jsonl> --stop-on-regression` stops as soon as a case that passed every baseline sample fails. Use it to test one copy change against a baseline run.
 - Cost: the existing non-device suite costs about $9 on Sonnet and $17 on Opus. The 16 device cases at 3 samples each cost about $5.70–5.90 on Opus and $2.90–3.40 on Sonnet (main's text–#25661), including the Haiku shell simulator; dry runs cost $0. Results record token costs for the agent and shell simulator. Codex proxy charges are outside that total; only its shell simulator is priced here, about $0.60–0.70 for the device cases.
@@ -124,3 +124,10 @@ This API replay measures routing and recovery decisions. Screenshots return prod
 2. From `evals/`, run `pnpm mcp-tool-use:trim-capture <claude|codex> <capture.json> mcp-tool-use/templates/<claude|codex>.json.gz`. It keeps only what `run.ts` reads, and removes user instructions, the user's own skills and agents, account ids, and home paths.
 3. Read the output for user data before you commit it: `zcat <file> | less`.
 4. Run the full eval on the old and new templates, and compare.
+
+The approval cases in `cases/approvals.ndjson` cover turn-wide consent,
+uncertain delivery, forwarding status recovery, and exact destination delegation.
+They use the checkout's real approval tool schema. Validate with
+`pnpm mcp-tool-use --cases mcp-tool-use/cases/approvals.ndjson --dry-run`.
+Before merge, the primary runs those cases with `--samples 3 --model gpt-6.1-sol --out runs/approvals-sol`,
+then the required full model pass. Paid runs and the integrated client pass belong to the primary.

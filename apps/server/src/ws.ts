@@ -1,3 +1,8 @@
+import * as ApprovalAdministration from "./approvals/ApprovalAdministration.ts";
+import { ApprovalAdministrationError } from "@t3tools/contracts";
+import { AuthApprovalPermissionError } from "@t3tools/contracts";
+import * as ApprovalAuthority from "./auth/ApprovalAuthority.ts";
+import { ApprovalAuditActor } from "./approvals/ApprovalContext.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -29,6 +34,7 @@ import {
   AuthAccessWriteScope,
   AuthEnvironmentMaintainScope,
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   AuthProvidersManageScope,
   type AuthEnvironmentScope,
   type ScheduledTask,
@@ -1237,9 +1243,10 @@ export const layerWsRpc = (
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
   reportProfiles: ServerBrowser.ProfileReporter,
   // What the connection may use now, such as after its fleet access narrows; never more than at open.
-  currentScopes: Effect.Effect<ReadonlyArray<AuthEnvironmentScope>> = Effect.succeed(
-    currentSession.scopes,
-  ),
+  currentScopes: Effect.Effect<
+    ReadonlyArray<AuthEnvironmentScope>,
+    EnvironmentAuthorizationError
+  > = Effect.succeed(currentSession.scopes),
   // Whether the connection may administer the fleet, or hand access to someone outside it, now; a
   // fleet machine needs its own standard access, not an exception's
   // (`CredentialAccessCap.administersFleet`).
@@ -1408,6 +1415,10 @@ export const layerWsRpc = (
         ),
       );
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const approvalAdministration = yield* Effect.serviceOption(
+        ApprovalAdministration.ApprovalAdministration,
+      );
+      const approvalAuthority = yield* Effect.serviceOption(ApprovalAuthority.ApprovalAuthority);
       const lanFleet = yield* LanFleet.LanFleet;
       const sourceControlDiscovery = yield* SourceControlDiscovery.SourceControlDiscovery;
       const otlpEndpointCheck = yield* OtlpEndpointCheck.OtlpEndpointCheck;
@@ -1431,7 +1442,7 @@ export const layerWsRpc = (
         currentScopes,
         administersFleet,
         (scopes, administers) => administers && scopes.includes(AuthOrchestrationOperateScope),
-      );
+      ).pipe(Effect.orElseSucceed(() => false));
       const withVisibleWebhookUrls = (result: ScheduledTaskListResult) =>
         webhookUrlsVisible.pipe(
           Effect.map((visible): ScheduledTaskListResult =>
@@ -1989,7 +2000,14 @@ export const layerWsRpc = (
                             "creationSource" in command ? command.creationSource : "web",
                         }),
                       )
-                  ).pipe(Effect.provide(intakeContext)),
+                  ).pipe(
+                    Effect.provide(intakeContext),
+                    Effect.provideService(ApprovalAuditActor, {
+                      kind: "user",
+                      principalId: `session:${currentSessionId}`,
+                      label: currentSession.subject,
+                    }),
+                  ),
                 )
                 .pipe(
                   Effect.tap((result) =>
@@ -3316,6 +3334,20 @@ export const layerWsRpc = (
               return Stream.concat(rpcInitialItems(snapshotEvents), liveEvents);
             }),
           ),
+        [WS_METHODS.approvalAdministrationInspect]: () =>
+          Option.isNone(approvalAdministration)
+            ? Effect.fail(new ApprovalAdministrationError({ reason: "unavailable" }))
+            : approvalAdministration.value.inspect(currentSessionId),
+        [WS_METHODS.approvalAdministrationMutate]: (input) =>
+          Option.isNone(approvalAdministration)
+            ? Effect.fail(new ApprovalAdministrationError({ reason: "unavailable" }))
+            : approvalAdministration.value.mutate(currentSessionId, input),
+        [WS_METHODS.authRemoveApprovalPermission]: (input) =>
+          Option.isNone(approvalAuthority)
+            ? Effect.fail(new AuthApprovalPermissionError({}))
+            : approvalAuthority.value
+                .remove(input.sessionId, input.family)
+                .pipe(Effect.mapError(() => new AuthApprovalPermissionError({}))),
         [WS_METHODS.subscribeAuthAccess]: (_input) =>
           Stream.unwrap(
             Effect.gen(function* () {
@@ -3420,6 +3452,18 @@ export const layer = Layer.unwrap(
             failEnvironmentInternal("internal_error", error),
           ),
         );
+        const currentRpcScopes = Option.isSome(accessCap)
+          ? accessCap.value.scopes(session).pipe(
+              Effect.mapError(
+                () =>
+                  new EnvironmentAuthorizationError({
+                    message: "Current permissions could not be checked. Try this request again.",
+                    requiredScope: AuthOrchestrationReadScope,
+                    retryable: true,
+                  }),
+              ),
+            )
+          : undefined;
         const clientAnalyticsProps = readClientAnalyticsProps(request);
         yield* analytics.recordOwners(readClientOwners(request), "client");
         const reportProfiles = yield* serverBrowser.profileReporter;
@@ -3446,7 +3490,7 @@ export const layer = Layer.unwrap(
                           })
                           .pipe(Effect.ignore);
                   },
-                  Option.isSome(accessCap) ? accessCap.value.scopes(session) : undefined,
+                  currentRpcScopes,
                 ),
                 rpcInstrumentationLayer,
               ),
@@ -3462,14 +3506,12 @@ export const layer = Layer.unwrap(
               clientAnalyticsProps,
               serverBrowser,
               reportProfiles,
-              Option.isSome(accessCap)
-                ? accessCap.value
-                    .scopes(session)
-                    .pipe(
-                      Effect.map((granted) =>
-                        (granted ?? []).filter((scope) => session.scopes.includes(scope)),
-                      ),
-                    )
+              currentRpcScopes !== undefined
+                ? currentRpcScopes.pipe(
+                    Effect.map((granted) =>
+                      (granted ?? []).filter((scope) => session.scopes.includes(scope)),
+                    ),
+                  )
                 : undefined,
               Option.isSome(accessCap) ? accessCap.value.administersFleet(session) : undefined,
             ).pipe(

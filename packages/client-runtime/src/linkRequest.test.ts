@@ -77,6 +77,22 @@ describe("linkRequestAnswerInput", () => {
         pairingCode: "abc",
       }),
     ).toMatchObject({ answer: { urls: ["https://box.ts.net"] } });
+    for (const target of [vps, { url: "https://box.ts.net" }]) {
+      for (const [access, approvals, expected] of [
+        ["full-access", undefined, undefined],
+        ["full-access", true, true],
+        ["read-only", true, undefined],
+      ] as const) {
+        const answer = linkRequestAnswerInput(item, {
+          type: "link",
+          target,
+          access,
+          pairingCode: "abc",
+          ...(approvals === undefined ? {} : { approvals }),
+        })?.answer;
+        expect(answer?.type === "link" ? answer.approvals : undefined).toBe(expected);
+      }
+    }
   });
 
   it("refuses a blank code, a blank address, or a machine with no address", () => {

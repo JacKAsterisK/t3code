@@ -256,6 +256,7 @@ export function linkRequestAnswerInput(
           | { readonly url: string };
         readonly access: AuthMcpClientAccess;
         readonly pairingCode: string;
+        readonly approvals?: boolean;
       }
     | { readonly type: "use-existing"; readonly environmentId: EnvironmentId }
     | { readonly type: "decline" },
@@ -264,11 +265,16 @@ export function linkRequestAnswerInput(
   if (answer.type !== "link") return { ...base, answer };
   const pairingCode = answer.pairingCode.trim();
   if (pairingCode.length === 0) return null;
+  const approvals =
+    answer.approvals === true && answer.access !== "read-only" ? { approvals: true } : {};
   const { target } = answer;
   if ("url" in target) {
     const url = target.url.trim();
     if (url.length === 0) return null;
-    return { ...base, answer: { type: "link", urls: [url], access: answer.access, pairingCode } };
+    return {
+      ...base,
+      answer: { type: "link", urls: [url], access: answer.access, pairingCode, ...approvals },
+    };
   }
   const [first, ...rest] = target.urls;
   if (first === undefined) return null;
@@ -281,6 +287,7 @@ export function linkRequestAnswerInput(
       urls: [first, ...rest],
       access: answer.access,
       pairingCode,
+      ...approvals,
     },
   };
 }

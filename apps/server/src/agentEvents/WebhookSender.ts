@@ -41,7 +41,8 @@ export type PostOutcome =
       /** The address the connection reached. */
       readonly remoteAddress: string | undefined;
     }
-  | { readonly _tag: "Failed"; readonly reason: PostFailureReason };
+  | { readonly _tag: "Failed"; readonly reason: PostFailureReason }
+  | { readonly _tag: "Deferred"; readonly reason: "authority_unavailable" };
 
 export interface WebhookTransportOptions {
   readonly refuses: (address: string, family: number) => boolean;
@@ -124,82 +125,93 @@ export const makeTransport = (options: WebhookTransportOptions): WebhookTranspor
     );
     if (timeoutMs <= 0) return { _tag: "Failed", reason: "timeout" } as const;
     const host = url.hostname.startsWith("[") ? url.hostname.slice(1, -1) : url.hostname;
-    const attempt = Effect.gen(function* () {
-      const addresses = yield* Effect.promise(() =>
-        resolveAllowedAddresses(host, {
-          refuses: options.refuses,
-          ...(options.resolve === undefined ? {} : { resolve: options.resolve }),
-        }),
-      );
-      if (addresses === undefined) return { _tag: "Failed", reason: "address_refused" } as const;
-      if (canDispatch !== undefined && !(yield* canDispatch)) return yield* Effect.interrupt;
-      return yield* Effect.callback<PostOutcome>((resume) => {
-        if (expiresAt !== undefined && clock.currentTimeMillisUnsafe() >= expiresAt) {
-          resume(Effect.succeed({ _tag: "Failed", reason: "timeout" }));
-          return;
-        }
-        let request: ReturnType<typeof NodeHttps.request> | undefined;
-        let settled = false;
-        const finish = (outcome: PostOutcome) => {
-          if (settled) return;
-          settled = true;
-          resume(Effect.succeed(outcome));
-        };
-        try {
-          request = NodeHttps.request({
-            protocol: "https:",
-            host,
-            port: url.port === "" ? 443 : Number(url.port),
-            path: `${url.pathname}${url.search}`,
-            method: "POST",
-            headers: { ...headers, "content-length": String(Buffer.byteLength(body, "utf8")) },
-            agent: false,
-            ...(NodeNet.isIP(host) === 0 ? { servername: host } : {}),
-            ...(options.ca === undefined ? {} : { ca: options.ca }),
-            lookup: (_hostname, lookupOptions, callback) =>
-              lookupOptions.all
-                ? (callback as (error: null, addresses: Array<ResolvedAddress>) => void)(null, [
-                    ...addresses,
-                  ])
-                : callback(null, addresses[0]!.address, addresses[0]!.family),
-          });
-        } catch (error) {
-          return finish({ _tag: "Failed", reason: classify(error) });
-        }
-        request.on("response", (response) => {
-          const chunks: Array<Buffer> = [];
-          let size = 0;
-          const remoteAddress = response.socket?.remoteAddress;
-          response.on("data", (chunk: Buffer) => {
-            size += chunk.length;
-            if (size <= MAX_RESPONSE_BYTES) chunks.push(chunk);
-            else response.destroy();
-          });
-          const done = () =>
-            finish({
-              _tag: "Response",
-              status: response.statusCode ?? 0,
-              retryAfter:
-                typeof response.headers["retry-after"] === "string"
-                  ? response.headers["retry-after"]
-                  : undefined,
-              body: Buffer.concat(chunks).toString("utf8"),
-              remoteAddress,
-            });
-          response.on("end", done);
-          response.on("close", done);
-          response.on("error", done);
+    const remaining = () =>
+      expiresAt === undefined ? Infinity : expiresAt - clock.currentTimeMillisUnsafe();
+    const started = clock.currentTimeMillisUnsafe();
+    const resolved = yield* Effect.promise(() =>
+      resolveAllowedAddresses(host, {
+        refuses: options.refuses,
+        ...(options.resolve === undefined ? {} : { resolve: options.resolve }),
+      }),
+    ).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)));
+    if (Option.isNone(resolved)) return { _tag: "Failed", reason: "timeout" } as const;
+    const addresses = resolved.value;
+    if (addresses === undefined) return { _tag: "Failed", reason: "address_refused" } as const;
+    const sendBudget = timeoutMs - (clock.currentTimeMillisUnsafe() - started);
+    if (remaining() <= 0 || sendBudget <= 0) return { _tag: "Failed", reason: "timeout" } as const;
+    if (canDispatch !== undefined) {
+      // Origin proof may itself need bounded discovery/link I/O. It is never a callback failure.
+      const admitted = yield* canDispatch.pipe(Effect.timeoutOption(Math.min(30_000, remaining())));
+      if (remaining() <= 0) return { _tag: "Failed", reason: "timeout" } as const;
+      if (Option.isNone(admitted) || !admitted.value)
+        return { _tag: "Deferred", reason: "authority_unavailable" } as const;
+    }
+    const attempt = Effect.callback<PostOutcome>((resume) => {
+      if (expiresAt !== undefined && clock.currentTimeMillisUnsafe() >= expiresAt) {
+        resume(Effect.succeed({ _tag: "Failed", reason: "timeout" }));
+        return;
+      }
+      let request: ReturnType<typeof NodeHttps.request> | undefined;
+      let settled = false;
+      const finish = (outcome: PostOutcome) => {
+        if (settled) return;
+        settled = true;
+        resume(Effect.succeed(outcome));
+      };
+      try {
+        request = NodeHttps.request({
+          protocol: "https:",
+          host,
+          port: url.port === "" ? 443 : Number(url.port),
+          path: `${url.pathname}${url.search}`,
+          method: "POST",
+          headers: { ...headers, "content-length": String(Buffer.byteLength(body, "utf8")) },
+          agent: false,
+          ...(NodeNet.isIP(host) === 0 ? { servername: host } : {}),
+          ...(options.ca === undefined ? {} : { ca: options.ca }),
+          lookup: (_hostname, lookupOptions, callback) =>
+            lookupOptions.all
+              ? (callback as (error: null, addresses: Array<ResolvedAddress>) => void)(null, [
+                  ...addresses,
+                ])
+              : callback(null, addresses[0]!.address, addresses[0]!.family),
         });
-        request.on("error", (error) => finish({ _tag: "Failed", reason: classify(error) }));
-        request.end(body);
-        return Effect.sync(() => {
-          settled = true;
-          request?.destroy();
+      } catch (error) {
+        return finish({ _tag: "Failed", reason: classify(error) });
+      }
+      request.on("response", (response) => {
+        const chunks: Array<Buffer> = [];
+        let size = 0;
+        const remoteAddress = response.socket?.remoteAddress;
+        response.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size <= MAX_RESPONSE_BYTES) chunks.push(chunk);
+          else response.destroy();
         });
+        const done = () =>
+          finish({
+            _tag: "Response",
+            status: response.statusCode ?? 0,
+            retryAfter:
+              typeof response.headers["retry-after"] === "string"
+                ? response.headers["retry-after"]
+                : undefined,
+            body: Buffer.concat(chunks).toString("utf8"),
+            remoteAddress,
+          });
+        response.on("end", done);
+        response.on("close", done);
+        response.on("error", done);
+      });
+      request.on("error", (error) => finish({ _tag: "Failed", reason: classify(error) }));
+      request.end(body);
+      return Effect.sync(() => {
+        settled = true;
+        request?.destroy();
       });
     });
     return yield* attempt.pipe(
-      Effect.timeoutOption(Duration.millis(timeoutMs)),
+      Effect.timeoutOption(Duration.millis(Math.min(sendBudget, remaining()))),
       Effect.map(Option.getOrElse((): PostOutcome => ({ _tag: "Failed", reason: "timeout" }))),
     );
   }),
@@ -241,6 +253,7 @@ export class CallbackEndpointError extends Schema.TaggedError<CallbackEndpointEr
 export const failureReason = (
   outcome: PostOutcome,
 ): AgentEventCallbackFailureReason | undefined => {
+  if (outcome._tag === "Deferred") return undefined;
   if (outcome._tag === "Failed") return outcome.reason;
   if (outcome.status >= 300 && outcome.status < 400) return "redirect_refused";
   if (outcome.status < 200 || outcome.status >= 300) return `http_${outcome.status}`;

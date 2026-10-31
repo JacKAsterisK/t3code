@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- Ed25519 signs only schema-validated policy fields in a canonical order.
+import * as Gate from "../auth/ApprovalAdmissionGate.ts";
 import * as NodeCrypto from "node:crypto";
 import {
   AuthDiagnosticsReadScope,
@@ -540,6 +541,15 @@ export const credentialAccess = (credential: {
     : "read-only";
 
 export interface FleetAccessState {
+  /** Current verified keys only; absent until a fresh fleet read publishes under admission. */
+  readonly approvalTrust?: {
+    readonly fleetId: string;
+    readonly peers: ReadonlyArray<{
+      readonly machineId: string;
+      readonly environmentId: string;
+      readonly signingPublicKey: string;
+    }>;
+  };
   /** Zero until a machine saves the first policy; until then `defaultAccess` is the legacy setting. */
   readonly revision: number;
   readonly defaultAccess: Level;
@@ -666,6 +676,7 @@ const configurationError = () => new LanFleetError({ reason: "configuration" });
 const isFleetError = Schema.is(LanFleetError);
 
 const make = Effect.gen(function* () {
+  const gate = yield* Gate.ApprovalAdmissionGate;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;
@@ -900,16 +911,28 @@ const make = Effect.gen(function* () {
         candidates.some((entry) => entry.fleetId === input.fleetId);
       const seed: SeedRead = listed ? { _tag: "absent" } : yield* readSeed(input);
       const readiness = seed._tag === "valid" ? yield* seedReadiness(input) : undefined;
-      const updated = stateOf(
-        cache,
-        evaluation,
-        input.legacyAccess,
-        unavailable || seed._tag === "unavailable",
-        seed._tag === "valid" ? "waiting" : seed._tag === "invalid" ? "invalid" : undefined,
-        readiness === undefined || readiness.ready
-          ? undefined
-          : { machineIds: readiness.machineIds },
-      );
+      const updated = {
+        ...stateOf(
+          cache,
+          evaluation,
+          input.legacyAccess,
+          unavailable || seed._tag === "unavailable",
+          seed._tag === "valid" ? "waiting" : seed._tag === "invalid" ? "invalid" : undefined,
+          readiness === undefined || readiness.ready
+            ? undefined
+            : { machineIds: readiness.machineIds },
+        ),
+        approvalTrust: {
+          fleetId: input.fleetId,
+          peers: trustedPeers(input.peers)
+            .filter((peer) => peer.enabled)
+            .map((peer) => ({
+              machineId: peer.machineId,
+              environmentId: peer.environmentId,
+              signingPublicKey: peer.signingPublicKey,
+            })),
+        },
+      };
       const previous = yield* SubscriptionRef.get(state);
       if (seed._tag === "invalid" && previous.seed !== "invalid")
         yield* Effect.logWarning(
@@ -925,7 +948,7 @@ const make = Effect.gen(function* () {
           { notYetOn1026: updated.seedPending.machineIds },
         );
       if (JSON.stringify(updated) !== JSON.stringify(previous))
-        yield* SubscriptionRef.set(state, updated);
+        yield* gate.withGate(SubscriptionRef.set(state, updated));
       return {
         state: updated,
         directory,
@@ -1252,7 +1275,7 @@ const make = Effect.gen(function* () {
       }
       const previous = yield* SubscriptionRef.get(state);
       if (previous.member === true)
-        yield* SubscriptionRef.set(state, { ...previous, member: false });
+        yield* gate.withGate(SubscriptionRef.set(state, { ...previous, member: false }));
     }),
   );
 
@@ -1274,4 +1297,4 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(FleetAccess, make);
+export const layer = Layer.effect(FleetAccess, make).pipe(Layer.provideMerge(Gate.layer));

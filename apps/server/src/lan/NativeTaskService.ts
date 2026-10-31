@@ -2,18 +2,17 @@ import {
   CommandId,
   MessageId,
   OrchestratorMcpFailure,
+  OrchestrationV2ThreadProjection,
   ProviderRequestKind,
   ThreadId,
   type LanTaskLaunchInput,
   type LanTaskLaunchResult,
-  type LanTaskObservation,
   type LanTaskObserveInput,
   type LanTaskObserveResult,
   type LanTaskRequestsInput,
   type LanTaskRequestsResult,
   type LanTaskRespondInput,
   type LanTaskRespondResult,
-  type OrchestrationV2StoredEvent,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -43,6 +42,9 @@ import {
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import type { DispatchModeRefusal } from "../orchestration-v2/DispatchModeLimit.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
+import { captureNativeObservations } from "../agentEvents/AgentFactDeriver.ts";
+import * as CompatibilityFacts from "../agentEvents/AgentGatewayCompatibilityFacts.ts";
+import * as InternalFacts from "../agentEvents/AgentInternalFacts.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { runOutcome } from "../orchestration-v2/RestartBackgroundNote.ts";
@@ -93,41 +95,22 @@ function canonical(value: unknown): unknown {
 }
 
 const isApproval = Schema.is(ProviderRequestKind);
+const encodeControls = Schema.encodeEffect(
+  Schema.fromJsonString(
+    OrchestrationV2ThreadProjection.mapFields(
+      ({ thread, runs, messages, subagents, providerThreads, runtimeRequests, nodes }) => ({
+        thread,
+        runs,
+        messages,
+        subagents,
+        providerThreads,
+        runtimeRequests,
+        nodes,
+      }),
+    ),
+  ),
+);
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
-
-function observation(stored: OrchestrationV2StoredEvent): LanTaskObservation | undefined {
-  const { event, sequence } = stored;
-  const common = { eventId: event.id, sequence, runId: event.runId ?? null };
-  if (event.type === "run.updated" || event.type === "run.created") {
-    // A terminal run can still have queued work or a pending restart continuation.
-    return {
-      ...common,
-      runId: event.payload.id,
-      requestId: null,
-      status: event.payload.status,
-      kind: ThreadManagement.isTerminalRunStatus(event.payload.status)
-        ? "run_terminal"
-        : "run_state",
-    };
-  }
-  if (
-    event.type === "runtime-request.updated" &&
-    (event.payload.kind === "user_input" || isApproval(event.payload.kind))
-  ) {
-    return {
-      ...common,
-      requestId: event.payload.id,
-      status: event.payload.status,
-      kind:
-        event.payload.status !== "pending"
-          ? "request_state"
-          : event.payload.kind === "user_input"
-            ? "question"
-            : "approval",
-    };
-  }
-  return undefined;
-}
 
 const make = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -428,8 +411,8 @@ const make = Effect.gen(function* () {
         if (anchor === undefined) resetReason = "history_unavailable";
         else if (anchor.event.id !== input.after.anchorEventId) resetReason = "source_changed";
       }
-      if (resetReason !== null)
-        return {
+      if (resetReason !== null) {
+        const result: LanTaskObserveResult = {
           threadId: input.threadId,
           sourceId,
           status: "reset_required",
@@ -442,6 +425,12 @@ const make = Effect.gen(function* () {
           taskResultRunId: null,
           taskResultStatus: null,
         };
+        return yield* CompatibilityFacts.captureWorkSnapshot(scope.environmentId, result, {
+          resetReason,
+          firstEventId: first.event.id,
+          headSequence,
+        }).pipe(Effect.mapError(unavailable));
+      }
       const limit = Math.min(100, Math.max(1, input.limit ?? 100));
       const afterSequence = input.after?.sequence ?? 0;
       const rows = yield* events
@@ -479,15 +468,14 @@ const make = Effect.gen(function* () {
           ? "working"
           : progress.state;
       const resultRun = taskWorkState === "result_available" ? progress.resultRun : undefined;
-      return {
+      const result: LanTaskObserveResult = {
         threadId: input.threadId,
         sourceId,
         status: "ok",
         resetReason: null,
-        events: page.flatMap((stored) => {
-          const item = observation(stored);
-          return item === undefined ? [] : [item];
-        }),
+        events: yield* captureNativeObservations(scope.environmentId, page).pipe(
+          Effect.mapError(unavailable),
+        ),
         nextCursor: {
           sourceId,
           sequence: hasMore ? (page.at(-1)?.sequence ?? afterSequence) : headSequence,
@@ -499,7 +487,19 @@ const make = Effect.gen(function* () {
         taskResultRunId: resultRun?.id ?? null,
         taskResultStatus: resultRun === undefined ? null : runOutcome(resultRun),
       };
+      return yield* CompatibilityFacts.captureWorkSnapshot(scope.environmentId, result, {
+        ...(InternalFacts.fitsDataBudget(controls)
+          ? { controlsJson: yield* encodeControls(controls).pipe(Effect.mapError(unavailable)) }
+          : InternalFacts.overflowEvidence),
+        pendingRestart,
+        headSequence,
+        currentSequence,
+      }).pipe(Effect.mapError(unavailable));
     },
+    (effect) =>
+      sql
+        .withTransaction(effect)
+        .pipe(Effect.provideService(SqlClient.SqlClient, sql), Effect.mapError(unavailable)),
   );
 
   return NativeTaskService.of({

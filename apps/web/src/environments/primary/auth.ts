@@ -350,6 +350,7 @@ export async function submitServerAuthCredential(credential: string): Promise<vo
 export async function createServerPairingCredential(input?: {
   readonly label?: string;
   readonly scopes?: ReadonlyArray<AuthGrantScope>;
+  readonly approvalGrant?: boolean;
 }): Promise<AuthPairingCredentialResult> {
   const trimmedLabel = input?.label?.trim();
   try {
@@ -361,6 +362,7 @@ export async function createServerPairingCredential(input?: {
             payload: {
               ...(trimmedLabel ? { label: trimmedLabel } : {}),
               ...(input?.scopes ? { scopes: input.scopes } : {}),
+              ...(input?.approvalGrant === true ? { approvalGrant: true } : {}),
             },
           }),
         ),

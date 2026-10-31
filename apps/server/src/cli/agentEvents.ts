@@ -16,6 +16,12 @@ import * as Schema from "effect/Schema";
 import { Command, Flag, GlobalFlag } from "effect/cli";
 
 import * as AgentEventStore from "../agentEvents/AgentEventStore.ts";
+import * as FactRetention from "../agentEvents/AgentFactRetention.ts";
+import * as FactDeriver from "../agentEvents/AgentFactDeriver.ts";
+import * as FleetUsers from "../lan/FleetUsers.ts";
+import * as Gateway from "../lan/GatewayCompatibility.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as SourceStore from "../persistence/OrchestrationEventStore.ts";
 import { canonicalJson, eventIdFor, randomToken } from "../agentEvents/identity.ts";
 import { redactCallbackUrl } from "../agentEvents/WebhookSender.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -52,7 +58,7 @@ const runWithDatabase = Effect.fn("agentEvents.runWithDatabase")(function* <A, E
         SqlitePersistence.layerConfig,
         ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer)),
       ).pipe(
-        Layer.provide(ServerConfig.layer(config)),
+        Layer.provideMerge(ServerConfig.layer(config)),
         Layer.provide(Layer.succeed(References.MinimumLogLevel, quiet ? "Error" : config.logLevel)),
       ),
     ),
@@ -210,6 +216,7 @@ const statusCommand = Command.make("status", {
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
         const log = yield* AgentEventStore.logState();
+        const retention = yield* FactRetention.status();
         const subscriptions = yield* AgentEventStore.listSubscriptions();
         const report = yield* Effect.forEach(subscriptions, (row) =>
           Effect.gen(function* () {
@@ -249,6 +256,7 @@ const statusCommand = Command.make("status", {
           yield* Console.log(
             encodeJson({
               log: { epoch: log.epoch, head: log.headSeq, floor: log.floorSeq },
+              retention,
               subscriptions: report,
             }),
           );
@@ -256,6 +264,10 @@ const statusCommand = Command.make("status", {
         }
         const lines = [
           `Event log ${log.epoch}: head ${log.headSeq}, floor ${log.floorSeq}.`,
+          `Retention: ${retention.rows} payloads (${retention.bytes} bytes); pinned ${retention.pinnedRows} (${retention.pinnedBytes} bytes); soft-cap overrun ${retention.softCapOverrunRows}.`,
+          retention.source?.activatedAt == null
+            ? "Fact collector inactive."
+            : `Fact source ${retention.source.generation}: through ${retention.source.throughSequence}, pinned source rows ${retention.source.pinnedSourceRows}${retention.source.gapSequence === null ? "" : `, gap after ${retention.source.gapSequence}`}.`,
           ...(report.length === 0 ? ["No agent-event subscriptions."] : []),
         ];
         for (const subscription of report) {
@@ -283,7 +295,206 @@ const statusCommand = Command.make("status", {
   ),
 );
 
+const withDeriver = Effect.fn("agentEvents.withDeriver")(function* <A, E, R>(
+  run: Effect.Effect<A, E, R | FactDeriver.AgentFactDeriver>,
+) {
+  const environment = yield* ServerEnvironment.ServerEnvironment;
+  const descriptor = yield* environment.getDescriptor;
+  return yield* run.pipe(
+    Effect.provide(
+      FactDeriver.layer({ id: descriptor.environmentId, label: descriptor.label }).pipe(
+        Layer.provide(Layer.mergeAll(FleetUsers.layer, ProjectionStore.layer, SourceStore.layer)),
+      ),
+    ),
+  );
+});
+
+const rebuildCommand = Command.make("rebuild", { ...authLocationFlags, json: jsonFlag }).pipe(
+  Command.withDescription(
+    "Rebuild retained local event facts from their original source/checkpoints. Preserves event IDs, payloads and delivery state; changes the replay cursor epoch.",
+  ),
+  Command.withHandler((flags) =>
+    runWithDatabase(
+      flags,
+      withDeriver(
+        Effect.gen(function* () {
+          const service = yield* FactDeriver.AgentFactDeriver;
+          const result = yield* service.rebuild;
+          yield* Console.log(
+            flags.json
+              ? encodeJson(result)
+              : `Rebuilt ${result.restored} retained facts; cursor epoch ${result.cursorEpoch}.`,
+          );
+        }),
+      ),
+      flags.json,
+    ),
+  ),
+);
+
+const recoverCommand = Command.make("recover-source", {
+  ...authLocationFlags,
+  json: jsonFlag,
+  generation: Flag.String("generation").pipe(
+    Flag.withDescription("The current source generation shown by status."),
+  ),
+  through: Flag.Int("through").pipe(
+    Flag.withDescription("The current derived-through sequence shown by status."),
+  ),
+}).pipe(
+  Command.withDescription(
+    "Recover an event source gap with a new generation and a pending-attention snapshot. Intervening transitions stay unknown; stale recovery coordinates are refused.",
+  ),
+  Command.withHandler((flags) =>
+    runWithDatabase(
+      flags,
+      withDeriver(
+        Effect.gen(function* () {
+          const service = yield* FactDeriver.AgentFactDeriver;
+          const result = yield* service.rebootstrap({
+            generation: flags.generation,
+            throughSequence: flags.through,
+          });
+          yield* Console.log(
+            flags.json
+              ? encodeJson(result)
+              : `Recovered source ${result.generation} at snapshot ${result.bootstrapSequence}; intervening transitions remain unknown.`,
+          );
+        }),
+      ),
+      flags.json,
+    ),
+  ),
+);
+
+const maintenanceFlags = { ...authLocationFlags, json: jsonFlag };
+const expectedFlags = {
+  expectedMode: Flag.Literals("expected-mode", ["legacy", "shadow", "adapter"]),
+  expectedGeneration: Flag.Int("expected-generation").pipe(
+    Flag.withSchema(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  ),
+};
+const expectedState = (flags: {
+  readonly expectedMode: "legacy" | "shadow" | "adapter";
+  readonly expectedGeneration: number;
+}) => ({ mode: flags.expectedMode, generation: flags.expectedGeneration });
+
+const runCompatibility = Effect.fn("agentEvents.runCompatibility")(function* <A, E, R>(
+  flags: CliAuthLocationFlags & { readonly json: boolean },
+  run: Effect.Effect<A, E, R | Gateway.GatewayCompatibility>,
+) {
+  // A maintenance command always names its home. It never silently selects a running/default home.
+  if (Option.isNone(flags.baseDir))
+    return yield* new AgentEventsCliError({
+      detail: "Gateway maintenance requires an explicit --base-dir.",
+    });
+  const logLevel = yield* GlobalFlag.LogLevel;
+  const config = yield* resolveCliAuthConfig(flags, logLevel, { quietLogs: true });
+  const result = yield* run.pipe(
+    Effect.provide(
+      Gateway.layer.pipe(
+        Layer.provide(SqlitePersistence.layerConfig),
+        Layer.provide(ServerConfig.layer(config)),
+      ),
+    ),
+  );
+  yield* Console.log(encodeJson(result));
+});
+
+const compatibilityStatus = Command.make("status", maintenanceFlags).pipe(
+  Command.withHandler((flags) =>
+    runCompatibility(
+      flags,
+      Effect.flatMap(Gateway.GatewayCompatibility, (service) => service.evidence),
+    ),
+  ),
+);
+const compatibilityShadow = Command.make("start-shadow", {
+  ...maintenanceFlags,
+  ...expectedFlags,
+}).pipe(
+  Command.withHandler((flags) =>
+    runCompatibility(
+      flags,
+      Effect.flatMap(Gateway.GatewayCompatibility, (service) =>
+        service.startShadow(expectedState(flags)),
+      ),
+    ),
+  ),
+);
+const compatibilityBackup = Command.make("backup", {
+  ...maintenanceFlags,
+  ...expectedFlags,
+  destination: Flag.String("destination"),
+  shadowDigest: Flag.String("shadow-digest"),
+}).pipe(
+  Command.withHandler((flags) =>
+    runCompatibility(
+      flags,
+      Effect.flatMap(Gateway.GatewayCompatibility, (service) =>
+        service.createValidatedBackup({
+          expected: expectedState(flags),
+          destination: flags.destination,
+          shadowDigest: flags.shadowDigest,
+        }),
+      ),
+    ),
+  ),
+);
+const compatibilityCutover = Command.make("cutover", {
+  ...maintenanceFlags,
+  ...expectedFlags,
+  backupId: Flag.String("backup-id"),
+  manifestDigest: Flag.String("manifest-digest"),
+  shadowDigest: Flag.String("shadow-digest"),
+}).pipe(
+  Command.withHandler((flags) =>
+    runCompatibility(
+      flags,
+      Effect.flatMap(Gateway.GatewayCompatibility, (service) =>
+        service.cutover({
+          expected: expectedState(flags),
+          backupId: flags.backupId,
+          manifestDigest: flags.manifestDigest,
+          shadowDigest: flags.shadowDigest,
+        }),
+      ),
+    ),
+  ),
+);
+const compatibilityRollback = Command.make("rollback", {
+  ...maintenanceFlags,
+  ...expectedFlags,
+}).pipe(
+  Command.withHandler((flags) =>
+    runCompatibility(
+      flags,
+      Effect.flatMap(Gateway.GatewayCompatibility, (service) =>
+        service.rollback(expectedState(flags)),
+      ),
+    ),
+  ),
+);
+const compatibilityCommand = Command.make("compatibility").pipe(
+  Command.withDescription(
+    "Guarded gateway observe/ACK maintenance for an explicitly selected home; retains legacy tables.",
+  ),
+  Command.withSubcommands([
+    compatibilityStatus,
+    compatibilityShadow,
+    compatibilityBackup,
+    compatibilityCutover,
+    compatibilityRollback,
+  ]),
+);
+
 export const agentEventsCommand = Command.make("agent-events").pipe(
   Command.withDescription("Inspect MCP Events for outside agents and send test probes."),
-  Command.withSubcommands([probeCommand, statusCommand]),
+  Command.withSubcommands([
+    probeCommand,
+    statusCommand,
+    rebuildCommand,
+    recoverCommand,
+    compatibilityCommand,
+  ]),
 );

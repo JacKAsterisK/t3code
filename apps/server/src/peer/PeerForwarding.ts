@@ -18,6 +18,9 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import type * as Tool from "effect/ai/Tool";
 
+import * as ApprovalAuthority from "../auth/ApprovalAuthority.ts";
+import { initiatingClientForForward } from "../approvals/ApprovalLaunchProvenance.ts";
+import * as Option from "effect/Option";
 import { assertNotLinked } from "../mcp/linkOrigin.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { readCaller, unavailable } from "../mcp/threadAccess.ts";
@@ -98,6 +101,7 @@ export const remoteTarget = (scope: Scope, environmentId: EnvironmentId | undefi
 
 const make = Effect.gen(function* () {
   const peers = yield* PeerMcpClient.PeerMcpClient;
+  const approvalAuthority = yield* Effect.serviceOption(ApprovalAuthority.ApprovalAuthority);
   const links = yield* PeerLinks.PeerLinks;
   const crypto = yield* Crypto.Crypto;
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -159,8 +163,14 @@ const make = Effect.gen(function* () {
     if (toolName === LAUNCH_TOOL && args.ownerId === undefined && caller?.ownerId != null) {
       args.ownerId = caller.ownerId;
     }
+    const initiatingClientId = writes
+      ? yield* initiatingClientForForward(scope, Option.getOrUndefined(approvalAuthority)).pipe(
+          Effect.mapError(unavailable),
+        )
+      : undefined;
     return yield* peers.call({
       environmentId,
+      ...(initiatingClientId === undefined ? {} : { initiatingClientId }),
       tool: toolName,
       arguments: args,
       limits,

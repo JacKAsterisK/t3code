@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Native storage regressions use only newly created temporary databases.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { assert, it } from "@effect/vitest";
 import {
   EnvironmentId,
@@ -12,6 +16,7 @@ import {
   RuntimeRequestId,
   ThreadId,
   type LanTaskLaunchInput,
+  type LanTaskObserveResult,
   type OrchestrationV2Run,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2StoredEvent,
@@ -19,10 +24,17 @@ import {
   type RuntimeMode,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
+import * as DateTime from "effect/DateTime";
+import * as Gateway from "./GatewayCompatibility.ts";
+import * as Retention from "../agentEvents/AgentFactRetention.ts";
 import * as Context from "effect/Context";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as CompatibilityFacts from "../agentEvents/AgentGatewayCompatibilityFacts.ts";
+import * as Internal from "../agentEvents/AgentInternalFacts.ts";
 import * as Stream from "effect/Stream";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -34,11 +46,25 @@ import type { DispatchModeRefusal } from "../orchestration-v2/DispatchModeLimit.
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
-import Migration from "../persistence/Migrations/070_LanTaskMutations.ts";
+import { runMigrations } from "../persistence/Migrations.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as NativeTask from "./NativeTaskService.ts";
+
+const assertSnapshot = Effect.fn("fixture.assertNativeWorkSnapshot")(function* (
+  page: LanTaskObserveResult,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const row = (yield* sql<{
+    json: string;
+  }>`SELECT fact.data_json AS json FROM agent_gateway_compatibility_work_snapshots snapshot
+    JOIN agent_event_facts fact ON fact.event_id=snapshot.fact_id WHERE snapshot.thread_id=${page.threadId}`)[0]!;
+  const fact = yield* Internal.decodeJson(row.json);
+  assert.equal(fact.kind, "gateway_work_snapshot");
+  if (fact.kind !== "gateway_work_snapshot") return;
+  assert.deepEqual(yield* CompatibilityFacts.readPage(fact.payload.page), page);
+});
 
 const threadId = ThreadId.make("thread:lan-test");
 const shell = liveThreadShell(threadId, { runtimeMode: "approval-required" });
@@ -157,6 +183,7 @@ function facts(): Array<OrchestrationV2StoredEvent> {
 
 function layer(
   options: {
+    readonly filename?: string;
     readonly events?: ReadonlyArray<OrchestrationV2StoredEvent>;
     readonly launch?: ThreadLaunch.ThreadLaunchService["Service"]["launch"];
     readonly send?: OrchestratorMcp.OrchestratorMcpService["Service"]["sendToThread"];
@@ -171,8 +198,14 @@ function layer(
 ) {
   const events = options.events ?? facts();
   let sequenceReads = 0;
-  const database = Layer.effectDiscard(Migration).pipe(
-    Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
+  const database = Layer.effectDiscard(runMigrations()).pipe(
+    Layer.provideMerge(
+      NodeSqliteClient.layer({
+        filename: options.filename ?? ":memory:",
+        readerWorker: false,
+        checkpointWorker: false,
+      }),
+    ),
   );
   return NativeTask.layer.pipe(
     Layer.provideMerge(
@@ -471,6 +504,7 @@ it.effect("keeps a terminal run distinct from queued continuation work", () => {
   return Effect.gen(function* () {
     const service = yield* NativeTask.NativeTaskService;
     const observed = yield* service.observe(scope(), { threadId });
+    yield* assertSnapshot(observed);
     assert.deepEqual(
       observed.events.slice(-2).map((event) => [event.kind, event.runId, event.status]),
       [
@@ -499,6 +533,7 @@ it.effect("reports an available native task result only after work has settled",
   Effect.gen(function* () {
     const service = yield* NativeTask.NativeTaskService;
     const observed = yield* service.observe(scope(), { threadId });
+    yield* assertSnapshot(observed);
     assert.equal(observed.taskWorkState, "result_available");
     assert.equal(observed.taskResultRunId, RunId.make("run:lan-test"));
     assert.equal(observed.taskResultStatus, "completed");
@@ -509,6 +544,7 @@ it.effect("waits for native background child work after the top-level run ends",
   Effect.gen(function* () {
     const service = yield* NativeTask.NativeTaskService;
     const observed = yield* service.observe(scope(), { threadId });
+    yield* assertSnapshot(observed);
     assert.equal(observed.taskWorkState, "waiting_for_children");
     assert.equal(observed.taskResultRunId, null);
     assert.equal(observed.taskResultStatus, null);
@@ -547,6 +583,7 @@ it.effect("keeps a terminal run working while native restart delivery is pending
   Effect.gen(function* () {
     const service = yield* NativeTask.NativeTaskService;
     const observed = yield* service.observe(scope(), { threadId });
+    yield* assertSnapshot(observed);
     assert.equal(observed.taskWorkState, "working");
     assert.equal(observed.taskResultRunId, null);
     assert.equal(observed.taskResultStatus, null);
@@ -557,6 +594,7 @@ it.effect("defers completion when native state changes during observation", () =
   Effect.gen(function* () {
     const service = yield* NativeTask.NativeTaskService;
     const observed = yield* service.observe(scope(), { threadId });
+    yield* assertSnapshot(observed);
     assert.equal(observed.headSequence, 11);
     assert.equal(observed.taskWorkState, "working");
     assert.equal(observed.taskResultRunId, null);
@@ -640,4 +678,109 @@ it.effect("does not advertise a question response above the caller's current cei
       }),
     ),
   ),
+);
+
+it.effect(
+  "returns the native page with explicit unavailable evidence when controls exceed the private bound",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* NativeTask.NativeTaskService;
+      const result = yield* service.observe(scope(), { threadId });
+      assert.equal(result.status, "ok");
+      const sql = yield* SqlClient.SqlClient;
+      const row = (yield* sql<{
+        json: string;
+      }>`SELECT fact.data_json AS json FROM agent_gateway_compatibility_work_snapshots snapshot JOIN agent_event_facts fact ON fact.event_id=snapshot.fact_id`)[0]!;
+      const fact = yield* Internal.decodeJson(row.json);
+      const snapshot = yield* CompatibilityFacts.readWorkSnapshot(
+        (yield* sql<{
+          id: string;
+        }>`SELECT fact_id AS id FROM agent_gateway_compatibility_work_snapshots`)[0]!.id,
+      );
+      assert.deepEqual(snapshot.page, result);
+      assert.equal(fact.kind, "gateway_work_snapshot");
+      assert.deepEqual(snapshot.inputs, {
+        status: "unavailable",
+        reason: "overflow",
+        maxDataBytes: Internal.maxDataBytes,
+        pendingRestart: false,
+        headSequence: result.headSequence,
+        currentSequence: result.headSequence,
+      });
+    }).pipe(
+      Effect.provide(
+        layer({
+          controls: {
+            thread: { ...projection.thread, title: "oversized-title".repeat(1_300_000) },
+          },
+        }),
+      ),
+    ),
+);
+
+it.effect(
+  "native capture survives failed COMMIT and aged unchanged-page receipt reuse across file restart",
+  () =>
+    Effect.gen(function* () {
+      const directory = yield* Effect.acquireRelease(
+        Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-native-receipt-"))),
+        (directory) =>
+          Effect.sync(() => NodeFS.rmSync(directory, { recursive: true, force: true })),
+      );
+      const filename = NodePath.join(directory, "state.sqlite");
+      const controls = { runs: [run("running")] };
+      const observed = yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const service = yield* NativeTask.NativeTaskService;
+        const gateway = yield* Gateway.GatewayCompatibility.pipe(
+          Effect.provide(Gateway.layer.pipe(Layer.provide(NodeCrypto.layer))),
+        );
+        const target = {
+          principal: "native-regression",
+          environmentId: scope().environmentId,
+          threadId,
+        };
+        const error = yield* sql
+          .withTransaction(sql`INSERT INTO agent_gateway_compatibility_snapshots
+        (principal_id,environment_id,thread_id,fact_id) VALUES ('failed','temporary','temporary','missing-fact')`)
+          .pipe(Effect.flip);
+        assert.equal(error.reason._tag, "ConstraintError");
+        yield* TestClock.setTime(0);
+        const first = yield* service.observe(scope(), { threadId });
+        yield* gateway.observe(target, first, { expectedDeliverySourceId: null });
+        for (let day = 1; day <= 16; day++) {
+          yield* TestClock.setTime(day * 86_400_000);
+          controls.runs[0] = {
+            ...run("running"),
+            requestedAt: DateTime.makeUnsafe(day * 86_400_000),
+          };
+          assert.deepEqual(yield* service.observe(scope(), { threadId }), first);
+          yield* Retention.pruneLog(day * 86_400_000);
+        }
+        assert.deepEqual(
+          (yield* gateway.observe(target, first, { expectedDeliverySourceId: first.sourceId }))
+            .page,
+          first,
+        );
+        assert.deepEqual(yield* service.observe(scope(), { threadId }), first);
+        assert.deepEqual(
+          yield* sql`SELECT 1 FROM agent_gateway_compatibility_snapshots WHERE principal_id='failed'`,
+          [],
+        );
+        assert.deepEqual(yield* sql`PRAGMA foreign_key_check`, []);
+        return first;
+      }).pipe(Effect.provide(layer({ filename, controls })));
+      yield* Effect.gen(function* () {
+        const service = yield* NativeTask.NativeTaskService;
+        const sql = yield* SqlClient.SqlClient;
+        assert.deepEqual(yield* service.observe(scope(), { threadId }), observed);
+        const pointer = (yield* sql<{
+          fact_id: string | null;
+          receipt_json: string;
+        }>`SELECT fact_id,receipt_json FROM agent_gateway_compatibility_snapshots`)[0]!;
+        assert.isNull(pointer.fact_id);
+        assert.deepEqual(JSON.parse(pointer.receipt_json), observed);
+        assert.deepEqual(yield* sql`PRAGMA foreign_key_check`, []);
+      }).pipe(Effect.provide(layer({ filename, controls })));
+    }).pipe(Effect.scoped),
 );

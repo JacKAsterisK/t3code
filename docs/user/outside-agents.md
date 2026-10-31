@@ -130,3 +130,49 @@ A gateway may instead request renewable task access. The sign-in page identifies
 that request and limits it to Auto or a lower mode, within the machine and project
 policy configured for that gateway. It can renew for up to 90 days before you
 approve it again. Revoking its connection stops both access and renewal.
+
+### Answer provider permission requests
+
+Permission responses need the separate, unchecked approval option when signing
+in. Full access and ordinary pairing codes do not include it. To use a code,
+create an approval-capable agent code in **Settings → Sharing & access**, then
+select the approval option on the agent sign-in page too.
+
+An agent can read a request with `t3_approval_request`, show its complete
+permission and lifetime, and respond only after your consent. Initial support
+is local Codex 0.159.0 permissions requests with a verified native profile.
+Accept grants the requested permissions for the whole provider turn. Commands,
+file approvals, Chrome requests and other providers remain in the app.
+
+A committed response is still pending delivery. A written response confirms the
+native transport write; it does not confirm tool execution. An uncertain response
+needs inspection before another attempt. Remove approval permission for a session
+or this application's sign-ins in **Settings → Sharing & access**. Signing in
+without approval permission removes earlier approval rights in the same consent
+family, while other access remains available.
+
+### Approvals through a linked environment
+
+In the destination's **Sharing & access → Linked approval access** (or the
+mobile environment's settings), create an approval link identity for the exact
+source environment. On the source, request approval permission while linking
+and paste a deliberately approval-capable pairing code from the destination.
+This creates a new sign-in; existing link credentials keep their original rights.
+Back at the destination, select that exact new peer sign-in, bind it to the
+chosen link identity, and enable its approval policy. Fleet links also need
+this destination's current signed fleet approval policy. Full access alone
+never enables approvals.
+
+For an existing thread, select its exact ID, the stable link identity and the
+source agent's opaque client ID, then create a thread delegation. Find that
+client ID in the source's agent sign-ins; matching app names are insufficient.
+You can inspect and revoke delegations and bindings in the same settings.
+
+A fresh sign-in gets a fresh client ID. To retain an earlier identity, explicitly
+select the old and new source sign-ins under **Continue a source client identity**.
+Choose sign-ins for the same app with unchanged permission limits; changed
+authority needs a fresh identity and destination delegation.
+To renew a peer binding, pair again, then select both the new sign-in and the
+previous binding. These operations invalidate the old sign-in. Replacing a link
+identity ends its delegations and starts without approval permission. Original
+approval and creation records remain unchanged.

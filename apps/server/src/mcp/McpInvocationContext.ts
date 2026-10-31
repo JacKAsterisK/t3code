@@ -42,6 +42,7 @@ export interface McpClientCaller {
    * session as `linkOrigin`, and it changes only that work (`linkOrigin.ts`).
    */
   readonly linked?: boolean | undefined;
+  readonly assertedInitiatingClientId?: string;
   /**
    * Narrower modes the client asked for on this request (`T3-Mode-Limit`):
    * another environment passing on the limits of the agent it calls for.
@@ -113,6 +114,7 @@ export interface McpInvocationScope {
   readonly client: McpClientCaller | undefined;
   /** False while the Linked environments beta is off here; `/mcp` reads it per request. */
   readonly linkedEnvironments?: boolean;
+  readonly agentEventsEnabled?: boolean;
 }
 
 /**
@@ -152,6 +154,26 @@ export const hiddenFromThreads = (): boolean => {
   const fiber = Fiber.getCurrent();
   const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
   return scope?.thread === undefined;
+};
+
+/** Internal link protocols require the authenticated immediate peer, including for discovery. */
+export const hiddenUnlessLinkedPeer = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return (
+    scope?.linkedEnvironments === true &&
+    scope.thread === undefined &&
+    scope.client?.linked === true &&
+    scope.client.taskOnly !== true &&
+    scope.client.grantId === undefined
+  );
+};
+
+/** Fact relay discovery requires both Labs flags on this authenticated request. */
+export const hiddenUnlessFactRelayPeer = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope?.agentEventsEnabled === true && hiddenUnlessLinkedPeer();
 };
 
 /** `McpSchema.EnabledWhen` for tools that only serve links, hidden while the beta is off. */

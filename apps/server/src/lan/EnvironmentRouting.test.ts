@@ -18,6 +18,8 @@ import {
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -32,6 +34,8 @@ import * as Routing from "./EnvironmentRouting.ts";
 import * as Native from "./NativeTaskService.ts";
 import * as Remote from "./RemoteTaskTransport.ts";
 import * as Store from "./RoutingStore.ts";
+import * as Compatibility from "./GatewayCompatibility.ts";
+import { runMigrations } from "../persistence/Migrations.ts";
 const decodeArguments = Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.Unknown));
 const encodeObservation = Schema.encodeEffect(Schema.fromJsonString(LanTaskObservation));
 const decodeObservedDelivery = Schema.decodeUnknownEffect(
@@ -161,14 +165,17 @@ function layer(
     readonly remote?: Remote.RemoteTaskTransport["Service"]["call"];
     readonly read?: Native.NativeTaskService["Service"]["read"];
     readonly observe?: Native.NativeTaskService["Service"]["observe"];
+    readonly compatibility?: boolean;
     readonly fleetAccess?: "read-only" | "standard";
     // This machine, whatever its own level, is standard on the fleet machine behind `remoteId`.
     readonly standardOnRemote?: boolean;
   } = {},
 ) {
-  const database = Layer.effectDiscard(Migration.pipe(Effect.andThen(GenerationMigration))).pipe(
-    Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
-  );
+  const database = Layer.effectDiscard(
+    options.compatibility === true
+      ? runMigrations()
+      : Migration.pipe(Effect.andThen(GenerationMigration)),
+  ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
   const services = Layer.mergeAll(
     Store.layer.pipe(Layer.provide(database), Layer.provide(NodeCrypto.layer)),
     Layer.succeed(Registry.EnvironmentRegistry, {
@@ -792,4 +799,102 @@ it.effect("reports and drains a durable delivery backlog beyond one event page",
       }),
     ),
   ),
+);
+
+it.effect(
+  "shadows the actual routed observe/reset/ACK path and refuses an in-flight page after replay without a downstream ACK",
+  () =>
+    Effect.gen(function* () {
+      const arrived = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const blocked = yield* Ref.make(false);
+      const acknowledged = yield* Ref.make<ReadonlyArray<string>>([]);
+      const current = yield* Ref.make(page);
+      const remote = Effect.fn("test.compatibilityRemote")(function* (
+        _route: LanEnvironmentRoute,
+        tool: string,
+        input: unknown,
+      ) {
+        if (tool === "t3_lan_task_read") return { environmentId: remoteId, result: metadata };
+        if (tool === "t3_lan_events_ack") {
+          const args = yield* decodeArguments(input).pipe(Effect.mapError(fail));
+          yield* Ref.update(acknowledged, (ids) => [...ids, String(args.sourceId)]);
+          return { environmentId: remoteId, result: { acknowledged: true } };
+        }
+        const snapshot = yield* Ref.get(current);
+        if (yield* Ref.get(blocked)) {
+          yield* Deferred.succeed(arrived, undefined);
+          yield* Deferred.await(release);
+        }
+        return { environmentId: remoteId, result: snapshot };
+      });
+      yield* Effect.gen(function* () {
+        const router = yield* Routing.EnvironmentRouting;
+        const compatibility = yield* Compatibility.GatewayCompatibility;
+        yield* compatibility.startShadow({ mode: "legacy", generation: 0 });
+        const first = yield* decodeObservedDelivery(
+          (yield* router.observe(scope(), { environmentId: remoteId, threadId })).result,
+        );
+        assert.deepEqual(first.delivery.events, page.events);
+        yield* Ref.set(blocked, true);
+        const stale = yield* router
+          .observe(scope(), { environmentId: remoteId, threadId })
+          .pipe(Effect.flip, Effect.forkChild);
+        yield* Deferred.await(arrived);
+        yield* Ref.set(blocked, false);
+        const replayed = yield* decodeObservedDelivery(
+          (yield* router.observe(scope(), {
+            environmentId: remoteId,
+            threadId,
+            replayFromStart: true,
+          })).result,
+        );
+        assert.notEqual(replayed.sourceId, first.sourceId);
+        yield* router.acknowledge(scope(), {
+          environmentId: remoteId,
+          threadId,
+          sourceId: first.sourceId,
+          eventIds: [eventId],
+        });
+        yield* Deferred.succeed(release, undefined);
+        assert.equal((yield* Fiber.join(stale)).code, "orchestration_error");
+        assert.equal((yield* Ref.get(acknowledged)).length, 2);
+        yield* router.acknowledge(scope(), {
+          environmentId: remoteId,
+          threadId,
+          sourceId: replayed.sourceId,
+          eventIds: [eventId],
+        });
+        yield* Ref.set(current, {
+          ...page,
+          status: "reset_required",
+          resetReason: "source_changed",
+          events: [],
+          nextCursor: { sourceId, sequence: 0 },
+        });
+        const reset = yield* decodeObservedDelivery(
+          (yield* router.observe(scope(), { environmentId: remoteId, threadId })).result,
+        );
+        assert.equal(reset.status, "reset_required");
+        assert.deepEqual(reset.delivery.events, []);
+        assert.equal((yield* compatibility.evidence).shadows, 3);
+        const store = yield* Store.RoutingStore;
+        assert.deepEqual(yield* store.pending("grant:approved", remoteId, threadId), []);
+        process.stdout.write(
+          JSON.stringify({
+            proof: "gateway_compatibility",
+            scenario: "routed_disconnect_reset_ack_race",
+            shadowReads: 3,
+            downstreamAcks: 2,
+            stalePageCommitted: false,
+            obsoleteAckIgnored: true,
+            resetPreserved: true,
+          }) + "\n",
+        );
+      }).pipe(
+        Effect.provide(
+          layer({ compatibility: true, config: Effect.succeed(config(true)), remote }),
+        ),
+      );
+    }),
 );

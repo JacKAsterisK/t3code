@@ -3,6 +3,8 @@ import type * as NodeWorkerThreads from "node:worker_threads";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
+import * as Cause from "effect/Cause";
+import * as Exit from "effect/Exit";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -16,7 +18,10 @@ import * as SqliteClient from "./nodeSqliteClient.ts";
 
 const startedWorkers = vi.hoisted((): Array<NodeWorkerThreads.Worker> => []);
 const silentWorkers = vi.hoisted(() => ({ on: false, readyOnTerminate: false }));
-const failingWorkers = vi.hoisted(() => ({ message: undefined as string | undefined }));
+const failingWorkers = vi.hoisted(() => ({
+  message: undefined as string | undefined,
+  filename: undefined as string | undefined,
+}));
 
 vi.mock("node:worker_threads", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeWorkerThreads>();
@@ -27,7 +32,15 @@ vi.mock("node:worker_threads", async (importOriginal) => {
           ? ["setInterval(() => {}, 1 << 30);", { eval: true }]
           : failingWorkers.message !== undefined
             ? [`throw new Error(${JSON.stringify(failingWorkers.message)});`, { eval: true }]
-            : args) as ConstructorParameters<typeof actual.Worker>),
+            : failingWorkers.filename !== undefined
+              ? [
+                  args[0],
+                  {
+                    ...args[1],
+                    workerData: { ...args[1]?.workerData, filename: failingWorkers.filename },
+                  },
+                ]
+              : args) as ConstructorParameters<typeof actual.Worker>),
       );
       startedWorkers.push(this);
     }
@@ -349,7 +362,16 @@ it.effect("uses the writer when the reader cannot open the database", () =>
       yield* sql`PRAGMA journal_mode = WAL`;
       yield* sql`CREATE TABLE entries(name TEXT NOT NULL)`;
       yield* sql`INSERT INTO entries VALUES ('kept')`;
-      yield* (yield* FileSystem.FileSystem).remove(filename);
+      // Fail the reader's real read-only open without unlinking the writer's open file on Windows.
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          failingWorkers.filename = filename + ".missing";
+        }),
+        () =>
+          Effect.sync(() => {
+            failingWorkers.filename = undefined;
+          }),
+      );
       const startedBefore = startedWorkers.length;
 
       assert.equal(yield* sql.withTransaction(countEntries(sql)).pipe(SqliteClient.readOnly), 1);
@@ -374,7 +396,7 @@ it.effect("uses the writer when the reader cannot open the database", () =>
       yield* Fiber.join(holder);
       assert.equal(yield* Fiber.join(other), 1);
       assert.equal(startedWorkers.length, startedBefore + 1);
-    }),
+    }).pipe(Effect.scoped),
   ),
 );
 
@@ -460,4 +482,108 @@ it.effect.each([
         masked ? [[1], [2]] : [[2]],
       );
     }).pipe(Effect.provide(SqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("rolls back a failed deferred-FK COMMIT before reusing the same writer", () =>
+  Effect.gen(function* () {
+    const { filename, other } = yield* makeTempDatabase;
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE parent(id INTEGER PRIMARY KEY)`;
+      yield* sql`CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)`;
+      const failure = yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* sql`UPDATE counters SET value=99 WHERE id=1`;
+            yield* sql`INSERT INTO child VALUES (1,404)`;
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.equal(failure.reason._tag, "ConstraintError");
+      assert.equal(failure.reason.operation, "execute");
+      assert.match(String(failure.reason.cause), /FOREIGN KEY constraint failed/);
+      assert.deepEqual(yield* sql`SELECT value FROM counters`.values, [[0]]);
+      assert.deepEqual(yield* sql`SELECT * FROM child`, []);
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* sql`INSERT INTO parent VALUES (1)`;
+          yield* sql`INSERT INTO child VALUES (2,1)`;
+          yield* sql`UPDATE counters SET value=7 WHERE id=1`;
+        }),
+      );
+      assert.deepEqual(other.prepare("SELECT value FROM counters").all(), [{ value: 7 }]);
+      assert.deepEqual(other.prepare("SELECT id,parent_id FROM child").all(), [
+        { id: 2, parent_id: 1 },
+      ]);
+    }).pipe(
+      Effect.provide(
+        SqliteClient.layer({ filename, readerWorker: false, checkpointWorker: false }),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      assert.deepEqual(yield* sql`SELECT value FROM counters`.values, [[7]]);
+      assert.deepEqual(yield* sql`SELECT id,parent_id FROM child`, [{ id: 2, parent_id: 1 }]);
+      assert.deepEqual(yield* sql`PRAGMA foreign_key_check`, []);
+    }).pipe(
+      Effect.provide(
+        SqliteClient.layer({ filename, readerWorker: false, checkpointWorker: false }),
+      ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["statement", "transaction", "reserve"] as const)(
+  "refuses a %s lease until failed COMMIT cleanup can roll back",
+  (lease) =>
+    Effect.gen(function* () {
+      const { filename, other } = yield* makeTempDatabase;
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`CREATE TABLE parent(id INTEGER PRIMARY KEY)`;
+        yield* sql`CREATE TABLE child(parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)`;
+        let rejectRollback = true;
+        const prepare = NodeSqlite.DatabaseSync.prototype.prepare;
+        using _prepare = vi
+          .spyOn(NodeSqlite.DatabaseSync.prototype, "prepare")
+          .mockImplementation(function (this: NodeSqlite.DatabaseSync, text) {
+            if (rejectRollback && text === "ROLLBACK")
+              throw new Error("injected rollback unavailable");
+            return prepare.call(this, text);
+          });
+        const failed = yield* Effect.exit(
+          sql.withTransaction(
+            Effect.gen(function* () {
+              yield* sql`UPDATE counters SET value=99 WHERE id=1`;
+              yield* sql`INSERT INTO child VALUES (404)`;
+            }),
+          ),
+        );
+        assert(Exit.isFailure(failed));
+        assert.match(Cause.pretty(failed.cause), /FOREIGN KEY constraint failed/);
+        assert.match(Cause.pretty(failed.cause), /injected rollback unavailable/);
+        const query = sql`SELECT value FROM counters`.values;
+        const blocked =
+          lease === "statement"
+            ? query
+            : lease === "transaction"
+              ? sql.withTransaction(query)
+              : Effect.scoped(
+                  Effect.gen(function* () {
+                    const connection = yield* sql.reserve;
+                    return yield* connection.executeValues("SELECT value FROM counters", []);
+                  }),
+                );
+        const unavailable = yield* blocked.pipe(Effect.flip);
+        assert.match(String(unavailable.reason.cause), /injected rollback unavailable/);
+        rejectRollback = false;
+        yield* sql.withTransaction(sql`UPDATE counters SET value=7 WHERE id=1`);
+        assert.deepEqual(yield* sql`SELECT * FROM child`, []);
+        assert.deepEqual(other.prepare("SELECT value FROM counters").all(), [{ value: 7 }]);
+      }).pipe(
+        Effect.provide(
+          SqliteClient.layer({ filename, readerWorker: false, checkpointWorker: false }),
+        ),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
 );

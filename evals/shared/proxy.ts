@@ -1,18 +1,24 @@
-// Eval-only helper: it reads the local Codex config through python3 at startup.
-// @effect-diagnostics nodeBuiltinImport:off
+// Eval-only helper: reads process-local proxy credentials at startup.
+// @effect-diagnostics nodeBuiltinImport:off -- This eval CLI reads a private configuration file or invokes Python's TOML parser.
 import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as Schema from "effect/Schema";
 
 // Read credentials into memory only. Python's TOML parser avoids another runner dependency.
 const decodeProxyConfig = Schema.decodeUnknownSync(
   Schema.Struct({ url: Schema.String, headers: Schema.Record(Schema.String, Schema.String) }),
 );
-/** Reads the `vibeproxy` CLIProxyAPI provider from `~/.codex/config.toml`. */
-export const proxyConfig = () =>
-  decodeProxyConfig(
+/** An explicit private config is process-local; otherwise reuse the existing Codex proxy provider. */
+export const proxyConfig = () => {
+  const file = process.env.T3_EVAL_PROXY_CONFIG;
+  if (file !== undefined) {
+    const config = decodeProxyConfig(JSON.parse(NodeFS.readFileSync(file, "utf8")));
+    return { ...config, url: config.url.replace(/\/+$/u, "") };
+  }
+  return decodeProxyConfig(
     JSON.parse(
       NodeChildProcess.execFileSync(
-        "python3",
+        process.env.T3_EVAL_PYTHON ?? "python3",
         [
           "-c",
           `
@@ -31,3 +37,4 @@ print(json.dumps({'url': p['base_url'].rstrip('/'), 'headers': h}))
       ),
     ),
   );
+};

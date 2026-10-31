@@ -1,4 +1,10 @@
 import {
+  ApprovalAdministrationMutation,
+  ApprovalAdministrationSnapshot,
+  ApprovalAdministrationError,
+} from "./approvalAdministration.ts";
+import { AuthRemoveApprovalPermissionInput, AuthApprovalPermissionError } from "./auth.ts";
+import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -613,6 +619,9 @@ export const WS_METHODS = {
   subscribeServerConfig: "subscribeServerConfig",
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
+  approvalAdministrationInspect: "approvals.inspectAdministration",
+  approvalAdministrationMutate: "approvals.mutateAdministration",
+  authRemoveApprovalPermission: "auth.removeApprovalPermission",
   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
 } as const;
@@ -1958,6 +1967,21 @@ const WsScheduledTasksGetWebhookDeliveryRpc = Rpc.make(
   },
 );
 
+const WsApprovalAdministrationInspectRpc = Rpc.make(WS_METHODS.approvalAdministrationInspect, {
+  payload: Schema.Struct({}),
+  success: ApprovalAdministrationSnapshot,
+  error: Schema.Union([ApprovalAdministrationError, EnvironmentAuthorizationError]),
+});
+const WsApprovalAdministrationMutateRpc = Rpc.make(WS_METHODS.approvalAdministrationMutate, {
+  payload: ApprovalAdministrationMutation,
+  success: Schema.Struct({ distributed: Schema.NullOr(Schema.Boolean) }),
+  error: Schema.Union([ApprovalAdministrationError, EnvironmentAuthorizationError]),
+});
+const WsAuthRemoveApprovalPermissionRpc = Rpc.make(WS_METHODS.authRemoveApprovalPermission, {
+  payload: AuthRemoveApprovalPermissionInput,
+  success: Schema.Void,
+  error: Schema.Union([AuthApprovalPermissionError, EnvironmentAuthorizationError]),
+});
 const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -2174,6 +2198,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,
+  WsApprovalAdministrationInspectRpc,
+  WsApprovalAdministrationMutateRpc,
+  WsAuthRemoveApprovalPermissionRpc,
   WsSubscribeBackgroundPolicyRpc,
   WsSubscribeResourceTelemetryRpc,
   WsOrchestrationV2DispatchCommandRpc,

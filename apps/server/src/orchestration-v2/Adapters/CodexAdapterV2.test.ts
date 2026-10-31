@@ -1,3 +1,4 @@
+import * as Scope from "effect/Scope";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import {
   makeProviderTextDeltaCoalescer,
@@ -572,6 +573,7 @@ function codexReplayPreamble(input: {
   readonly prompt: string;
   readonly sentPrompt?: string;
   readonly effort?: string;
+  readonly providerVersion?: string;
 }): Array<CodexReplay.CodexAppServerReplayEntry> {
   return [
     {
@@ -598,7 +600,7 @@ function codexReplayPreamble(input: {
       frame: {
         id: 1,
         result: {
-          userAgent: "T3 Code/0.156.1",
+          userAgent: `T3 Code/${input.providerVersion ?? "0.156.1"}`,
           codexHome: "/tmp/codex-home",
           platformFamily: "unix",
           platformOs: "macos",
@@ -1141,6 +1143,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
     readChildMetadata?: Parameters<typeof withCodexReplayChildMetadata>[2],
     beforeEmitInbound?: CodexReplay.CodexAppServerReplayDriver["beforeEmitInbound"],
+    afterServerReply?: (result: unknown) => Effect.Effect<void>,
   ) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1175,6 +1178,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                   (client) =>
                     ({
                       ...client,
+                      handleServerRequest: (method, handler) =>
+                        client.handleServerRequest(method, (payload, context) =>
+                          handler(payload, context).pipe(
+                            Effect.tap((result) => afterServerReply?.(result) ?? Effect.void),
+                          ),
+                        ),
                       request: (method, params) =>
                         onRequest(method, params).pipe(
                           Effect.andThen(client.request(method, params)),
@@ -1267,6 +1276,297 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         awaitTerminal: (count: number) => changes.until(() => terminalEvents().length >= count),
       };
     });
+
+  it.effect.each(["accept", "decline"] as const)(
+    "preserves the verified raw permission grant and native turn reply for %s",
+    (decision) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = `verified-permission-${decision}`;
+          const nativeThreadId = `native-${scenario}`;
+          const nativeTurnId = `turn-${scenario}`;
+          const permissions = {
+            network: { enabled: true },
+            fileSystem: { write: ["/tmp/output"] },
+          };
+          const raw = {
+            cwd: "/repo",
+            itemId: "permission-item",
+            threadId: nativeThreadId,
+            turnId: nativeTurnId,
+            startedAtMs: 1,
+            permissions,
+          };
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({
+              scenario,
+              entries: [
+                ...codexReplayPreamble({
+                  nativeThreadId,
+                  nativeTurnId,
+                  prompt: "Request permissions",
+                  providerVersion: "0.159.0",
+                }),
+                {
+                  type: "emit_inbound",
+                  label: "permission request",
+                  frame: { id: 100, method: "item/permissions/requestApproval", params: raw },
+                },
+                {
+                  type: "expect_outbound",
+                  label: "exact turn reply",
+                  frame: {
+                    id: 100,
+                    result: {
+                      permissions: decision === "accept" ? permissions : {},
+                      scope: "turn",
+                    },
+                  },
+                },
+                {
+                  type: "emit_inbound",
+                  label: "completed",
+                  frame: {
+                    method: "turn/completed",
+                    params: {
+                      threadId: nativeThreadId,
+                      turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                    },
+                  },
+                },
+              ],
+            }),
+          );
+          yield* harness.runtime.startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make(scenario),
+              text: "Request permissions",
+            }),
+          );
+          const requests = () =>
+            harness.events.flatMap((event) =>
+              event.type === "runtime_request.updated" ? [event.runtimeRequest] : [],
+            );
+          yield* harness.until(() => requests().length > 0);
+          const request = requests().at(-1)!;
+          assert.deepEqual(request.approval?.grant.permission, raw);
+          assert.equal(request.approval?.nativeRequestId, 100);
+          assert.equal(request.approval?.grant.providerVersion, "0.159.0");
+          assert.equal(request.approval?.grant.effectiveScope, "turn");
+          yield* harness.runtime.respondToRuntimeRequest({ requestId: request.id, decision });
+          yield* harness.awaitTerminal(1);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect.each(["session_close", "native_resolved"] as const)(
+    "reports admitted uncertainty before client encoding on %s",
+    (trigger) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const beforeEncoding = yield* Deferred.make<void>();
+          const never = yield* Deferred.make<void>();
+          const reported = yield* Deferred.make<void>();
+          const sessionScope = yield* Scope.make();
+          const scenario = `admitted-before-encoding-${trigger}`;
+          const nativeThreadId = `native-${scenario}`;
+          const nativeTurnId = `turn-${scenario}`;
+          const raw = {
+            cwd: "/repo",
+            itemId: "permission-item",
+            threadId: nativeThreadId,
+            turnId: nativeTurnId,
+            startedAtMs: 1,
+            permissions: { network: { enabled: true } },
+          };
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({
+              scenario,
+              entries: [
+                ...codexReplayPreamble({
+                  nativeThreadId,
+                  nativeTurnId,
+                  prompt: "Permission",
+                  providerVersion: "0.159.0",
+                }),
+                {
+                  type: "emit_inbound",
+                  label: "permission",
+                  frame: { id: 100, method: "item/permissions/requestApproval", params: raw },
+                },
+                ...(trigger === "native_resolved"
+                  ? [
+                      {
+                        type: "emit_inbound" as const,
+                        label: "resolved",
+                        frame: {
+                          method: "serverRequest/resolved",
+                          params: { threadId: nativeThreadId, requestId: 100 },
+                        },
+                      },
+                    ]
+                  : []),
+              ],
+            }),
+            undefined,
+            undefined,
+            undefined,
+            (entry) => (entry.label === "resolved" ? Deferred.await(beforeEncoding) : Effect.void),
+            () =>
+              Deferred.succeed(beforeEncoding, undefined).pipe(
+                Effect.andThen(Deferred.await(never)),
+              ),
+          ).pipe(Effect.provideService(Scope.Scope, sessionScope));
+          yield* harness.runtime.startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make(scenario),
+              text: "Permission",
+            }),
+          );
+          const requests = () =>
+            harness.events.flatMap((event) =>
+              event.type === "runtime_request.updated" ? [event.runtimeRequest] : [],
+            );
+          yield* harness.until(() => requests().length > 0);
+          const request = requests().at(-1)!;
+          assert.isDefined(request.approval);
+          let admitted = false;
+          const reports: Array<{ readonly state: string; readonly commandId: string }> = [];
+          yield* harness.runtime.respondToRuntimeRequest({
+            requestId: request.id,
+            decision: "accept",
+            guardedResponse: {
+              commandId: "approval:encoding-gap",
+              descriptor: request.approval!,
+              admit: (handoff) =>
+                handoff.pipe(
+                  Effect.tap((accepted) =>
+                    Effect.sync(() => {
+                      admitted = accepted;
+                    }),
+                  ),
+                ),
+              onResult: (state, evidence) =>
+                Effect.sync(() => {
+                  reports.push({ state, commandId: evidence.commandId });
+                }).pipe(Effect.andThen(Deferred.succeed(reported, undefined)), Effect.asVoid),
+            },
+          });
+          yield* Deferred.await(beforeEncoding);
+          assert.isTrue(admitted);
+          if (trigger === "session_close") yield* Scope.close(sessionScope, Exit.void);
+          yield* Deferred.await(reported);
+          yield* Scope.close(sessionScope, Exit.void);
+          assert.deepEqual(reports, [
+            { state: "delivery_unknown", commandId: "approval:encoding-gap" },
+          ]);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect(
+    "app-only unverified permission requests retain their native turn lifetime and offered decisions",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = "unverified-permission-lifetime";
+          const nativeThreadId = `native-${scenario}`;
+          const nativeTurnId = `turn-${scenario}`;
+          const raw = {
+            cwd: "/repo",
+            itemId: "permission-item",
+            threadId: nativeThreadId,
+            turnId: nativeTurnId,
+            startedAtMs: 1,
+            permissions: { network: { enabled: true } },
+          };
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({
+              scenario,
+              entries: [
+                ...codexReplayPreamble({
+                  nativeThreadId,
+                  nativeTurnId,
+                  prompt: "Permission",
+                  providerVersion: "0.158.0",
+                }),
+                {
+                  type: "emit_inbound",
+                  label: "permission",
+                  frame: { id: 100, method: "item/permissions/requestApproval", params: raw },
+                },
+                {
+                  type: "expect_outbound",
+                  label: "turn decline",
+                  frame: { id: 100, result: { permissions: {}, scope: "turn" } },
+                },
+                {
+                  type: "emit_inbound",
+                  label: "completed",
+                  frame: {
+                    method: "turn/completed",
+                    params: {
+                      threadId: nativeThreadId,
+                      turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                    },
+                  },
+                },
+              ],
+            }),
+          );
+          yield* harness.runtime.startTurn(
+            makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make(scenario),
+              text: "Permission",
+            }),
+          );
+          const requests = () =>
+            harness.events.flatMap((event) =>
+              event.type === "runtime_request.updated" ? [event.runtimeRequest] : [],
+            );
+          yield* harness.until(() => requests().length > 0);
+          const request = requests().at(-1)!;
+          assert.isUndefined(request.approval);
+          const item = harness.events
+            .flatMap((event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "approval_request"
+                ? [event.turnItem]
+                : [],
+            )
+            .at(-1)!;
+          assert.deepEqual(item.options, [
+            { decision: "accept", label: "Allow for this turn" },
+            { decision: "decline", label: "Decline" },
+          ]);
+          yield* harness.runtime.respondToRuntimeRequest({
+            requestId: request.id,
+            decision: "decline",
+          });
+          yield* harness.awaitTerminal(1);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
 
   it.effect.each(["completed", "interrupted", "failed"] as const)(
     "finishes the latest todo-list display when its Codex turn is %s",

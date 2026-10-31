@@ -1,3 +1,5 @@
+import type { ApprovalGuard } from "@t3tools/contracts";
+import * as ApprovalDelivery from "../approvals/ApprovalDelivery.ts";
 import {
   ProviderApprovalDecision,
   ProviderSessionId,
@@ -50,6 +52,9 @@ const isRuntimeRequestResponseExecutionError = Schema.is(RuntimeRequestResponseE
 
 export interface RuntimeRequestServiceV2Shape {
   readonly respond: (input: {
+    readonly approvalGuard?: ApprovalGuard;
+    readonly commandId?: string;
+    readonly effectId?: string;
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
     readonly requestId: RuntimeRequestId;
@@ -73,10 +78,19 @@ export const layer: Layer.Layer<
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
-
+    const approvals = yield* Effect.serviceOption(ApprovalDelivery.ApprovalDelivery);
     return RuntimeRequestServiceV2.of({
       respond: Effect.fn("RuntimeRequestService.respond")(
         function* (input) {
+          if (input.approvalGuard !== undefined) {
+            if (Option.isSome(approvals)) return yield* approvals.value.respond(input);
+            return yield* new RuntimeRequestResponseExecutionError({
+              reason: "request-not-ready",
+              threadId: input.threadId,
+              providerSessionId: input.providerSessionId,
+              requestId: input.requestId,
+            });
+          }
           const request = yield* projections.getRuntimeRequest(input.threadId, input.requestId);
           if (request === undefined) {
             return yield* new RuntimeRequestResponseExecutionError({

@@ -1,3 +1,4 @@
+import { AgentEventCapture } from "./AgentEventCapture.ts";
 import {
   ApplicationEventMetadata,
   ApplicationProjectEvent,
@@ -214,6 +215,9 @@ const rowToV2StoredEvent = Effect.fn("OrchestrationEventStore.rowToV2StoredEvent
     sequence: row.sequence,
     commandId: row.command_id,
     event,
+    ...(values.agentEventDirectory === undefined
+      ? {}
+      : { agentEventDirectory: values.agentEventDirectory }),
   });
 });
 
@@ -441,6 +445,7 @@ const makeEventStore = Effect.gen(function* () {
       (event) =>
         Effect.gen(function* () {
           const encoded = yield* encodeV2EventJson(event);
+          const capture = yield* AgentEventCapture;
           const subagent =
             encoded.type === "subagent.updated"
               ? encoded.payload
@@ -499,7 +504,7 @@ const makeEventStore = Effect.gen(function* () {
               ${input.commandId ?? null},
               ${event.rawEventId === undefined ? "server" : "provider"},
               ${storedPayload},
-              ${yield* encodeJson(metadataForV2Event(event))},
+              ${yield* encodeJson({ ...metadataForV2Event(event), ...(capture === undefined ? {} : { agentEventDirectory: capture }) })},
               2
             )
             RETURNING sequence${
@@ -524,6 +529,7 @@ const makeEventStore = Effect.gen(function* () {
             sequence: rows[0]?.sequence,
             commandId: input.commandId ?? null,
             event,
+            ...(capture === undefined ? {} : { agentEventDirectory: capture }),
           });
         }),
       { concurrency: 1 },

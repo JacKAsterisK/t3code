@@ -68,6 +68,29 @@ const setup = Effect.gen(function* () {
 });
 
 describe("command permissions", () => {
+  it.effect("approval permission alone cannot remove another session's approval authority", () =>
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      for (const method of [
+        WS_METHODS.authRemoveApprovalPermission,
+        WS_METHODS.approvalAdministrationMutate,
+      ]) {
+        const remove = createCommandPermissions(runtime, method);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({ ...grant(false), permissions: ["orchestration:approve"] }),
+        );
+        expect(registry.get(remove.permissionAtom(env))).toBe(false);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({ ...grant(false), permissions: [AuthAccessWriteScope] }),
+        );
+        expect(registry.get(remove.permissionAtom(env))).toBe(true);
+        yield* remove.authorize(registry, env);
+      }
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("keeps fleet credential delivery behind the destination maintenance grant", () =>
     Effect.scoped(
       Effect.gen(function* () {

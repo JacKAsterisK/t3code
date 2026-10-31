@@ -28,6 +28,7 @@ export const ServerAuthSessionMethod = Schema.Literals([
 export type ServerAuthSessionMethod = typeof ServerAuthSessionMethod.Type;
 
 export const AuthOrchestrationReadScope = "orchestration:read" as const;
+export const AuthOrchestrationApproveScope = "orchestration:approve" as const;
 export const AuthOrchestrationOperateScope = "orchestration:operate" as const;
 export const AuthSettingsWriteScope = "settings:write" as const;
 export const AuthProvidersManageScope = "providers:manage" as const;
@@ -48,6 +49,7 @@ export const AuthRelayWriteScope = "relay:write" as const;
 export const AuthEnvironmentScope = Schema.Literals([
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
+  AuthOrchestrationApproveScope,
   AuthSettingsWriteScope,
   AuthProvidersManageScope,
   AuthEnvironmentMaintainScope,
@@ -111,7 +113,11 @@ const legacyParents: Partial<Record<AuthEnvironmentScope, AuthEnvironmentScope>>
 /** Keep permission denials decodable by clients with the original scope enum. */
 export function authScopeRequiredResponse(requiredPermission: AuthEnvironmentScope) {
   return {
-    requiredScope: legacyParents[requiredPermission] ?? requiredPermission,
+    // This is denial presentation only; approval never inherits a legacy grant.
+    requiredScope:
+      requiredPermission === AuthOrchestrationApproveScope
+        ? AuthOrchestrationOperateScope
+        : (legacyParents[requiredPermission] ?? requiredPermission),
     requiredPermission,
   };
 }
@@ -343,6 +349,8 @@ export class EnvironmentAuthorizationError extends Schema.TaggedError<Environmen
     message: Schema.String,
     requiredScope: AuthEnvironmentScope,
     requiredPermission: Schema.optionalKey(Schema.String),
+    /** The scope check failed before work began; retrying does not repeat an operation. */
+    retryable: Schema.optionalKey(Schema.Boolean),
   },
 ) {}
 
@@ -384,6 +392,7 @@ export const AuthRevokeClientSessionInput = Schema.Struct({
 export type AuthRevokeClientSessionInput = typeof AuthRevokeClientSessionInput.Type;
 
 export const AuthCreatePairingCredentialInput = Schema.Struct({
+  approvalGrant: Schema.optionalKey(Schema.Boolean),
   label: Schema.optionalKey(TrimmedNonEmptyString),
   scopes: Schema.optionalKey(AuthGrantScopes),
 });
@@ -409,17 +418,25 @@ export const AuthMcpClientAccess = Schema.Literals([
 export type AuthMcpClientAccess = typeof AuthMcpClientAccess.Type;
 
 /** The scopes an agent session gets for an access level, and a pairing code must carry. */
-export const mcpClientScopes = (access: AuthMcpClientAccess): ReadonlyArray<AuthGrantScope> =>
-  access === "read-only"
-    ? [AuthOrchestrationReadScope]
-    : access === "full-access"
-      ? [
-          AuthOrchestrationReadScope,
-          AuthOrchestrationOperateScope,
-          AuthSettingsWriteScope,
-          AuthSourceControlWriteScope,
-        ]
-      : [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
+export const mcpClientScopes = (
+  access: AuthMcpClientAccess,
+  options: { readonly approvals?: boolean } = {},
+): ReadonlyArray<AuthGrantScope> => {
+  const scopes: ReadonlyArray<AuthGrantScope> =
+    access === "read-only"
+      ? [AuthOrchestrationReadScope]
+      : access === "full-access"
+        ? [
+            AuthOrchestrationReadScope,
+            AuthOrchestrationOperateScope,
+            AuthSettingsWriteScope,
+            AuthSourceControlWriteScope,
+          ]
+        : [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
+  return options.approvals === true && access !== "read-only"
+    ? [...scopes, AuthOrchestrationApproveScope]
+    : scopes;
+};
 
 export const AuthMcpProtectedResourceMetadata = Schema.Struct({
   resource: Schema.String,
@@ -509,6 +526,7 @@ export const AuthMcpApprovalDetails = Schema.Struct({
   csrfToken: Schema.optionalKey(Schema.String),
   /** Only scopes held by this session qualify; others need a pairing code. Absent with `csrfToken`. */
   oneClickAccess: Schema.optionalKey(Schema.Array(AuthMcpClientAccess)),
+  canGrantApprovals: Schema.optionalKey(Schema.Boolean),
 });
 export type AuthMcpApprovalDetails = typeof AuthMcpApprovalDetails.Type;
 
@@ -521,10 +539,12 @@ export const AuthMcpApprovalDecision = Schema.Union([
   Schema.TaggedStruct("deny", {}),
   Schema.TaggedStruct("pairing-code", {
     access: AuthMcpClientAccess,
+    approvals: Schema.optionalKey(Schema.Boolean),
     code: TrimmedNonEmptyString,
   }),
   Schema.TaggedStruct("browser-session", {
     access: AuthMcpClientAccess,
+    approvals: Schema.optionalKey(Schema.Boolean),
     csrfToken: Schema.String,
   }),
 ]);
@@ -588,5 +608,19 @@ export class AuthMcpTokenError extends Schema.Error<AuthMcpTokenError>("AuthMcpT
 ) {
   override get message(): string {
     return this.error_description;
+  }
+}
+
+export const AuthRemoveApprovalPermissionInput = Schema.Struct({
+  sessionId: AuthSessionId,
+  family: Schema.Boolean,
+});
+export type AuthRemoveApprovalPermissionInput = typeof AuthRemoveApprovalPermissionInput.Type;
+export class AuthApprovalPermissionError extends Schema.TaggedError<AuthApprovalPermissionError>()(
+  "AuthApprovalPermissionError",
+  {},
+) {
+  override get message() {
+    return "Approval permission could not be removed.";
   }
 }

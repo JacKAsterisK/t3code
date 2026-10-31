@@ -199,6 +199,10 @@ const growthTables = new Set([
   "orchestration_v2_projection_nodes",
   "orchestration_v2_projection_plans",
   "orchestration_v2_turn_item_positions",
+  "agent_event_source_state",
+  "agent_event_directories",
+  "agent_event_source_directories",
+  "agent_event_owner_assignments",
 ]);
 function digestRows(
   db: NodeSqlite.DatabaseSync,

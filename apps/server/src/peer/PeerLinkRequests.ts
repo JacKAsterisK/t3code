@@ -285,6 +285,7 @@ const make = Effect.gen(function* () {
             ...(alternateUrls.length === 0 ? {} : { alternateUrls }),
             pairingCode: answer.pairingCode,
             access: answer.access,
+            ...(answer.approvals === true ? { approvals: true } : {}),
             ...(answer.environmentId === undefined
               ? {}
               : { expectedEnvironmentId: answer.environmentId }),

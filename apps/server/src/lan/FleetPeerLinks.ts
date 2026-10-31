@@ -402,13 +402,16 @@ const make = Effect.gen(function* () {
             ? "read-only"
             : payload.value.access;
         const linked = yield* peerLinks
-          .link({
-            url: origin,
-            expectedEnvironmentId: peer.environmentId,
-            expectedLabel: peer.label,
-            pairingCode: payload.value.credential,
-            access,
-          })
+          .link(
+            {
+              url: origin,
+              expectedEnvironmentId: peer.environmentId,
+              expectedLabel: peer.label,
+              pairingCode: payload.value.credential,
+              access,
+            },
+            { fleetMachineId: peer.machineId },
+          )
           .pipe(Effect.timeout(LINK_TIMEOUT), Effect.result);
         // The list may narrow while this machine signs in. The link is kept and receipted all the
         // same, first link or not: it reads, every write on it is refused here on every send
@@ -494,7 +497,10 @@ const make = Effect.gen(function* () {
     machineId: string,
     entry: Linking,
   ) {
-    yield* peerLinks.unlink(entry.environmentId);
+    yield* peerLinks.unlink(entry.environmentId, {
+      machineId,
+      ...(entry.link === undefined ? {} : { linkedAt: entry.link.linkedAt }),
+    });
     if (fleet !== undefined) {
       const files = Delivery.peerLinkFileNames(machineId, fleet.self.machineId);
       yield* removeShare(shareFile(fleet.deliveryDirectory, files.request));

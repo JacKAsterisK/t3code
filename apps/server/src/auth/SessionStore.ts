@@ -387,6 +387,8 @@ export class SessionStore extends Context.Service<
       readonly peerLink?: boolean;
       readonly replaceActiveForSubjectAndMethod?: boolean;
       readonly replaceSessionId?: AuthSessionId;
+      /** An enclosing transaction publishes its notice only after commit. */
+      readonly deferNotice?: boolean;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
     readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
     readonly issueWebSocketToken: (
@@ -414,6 +416,7 @@ export class SessionStore extends Context.Service<
     readonly awaitInvalidation: (
       sessionId: AuthSessionId,
     ) => Effect.Effect<void, SessionCredentialVerificationError>;
+    readonly notifyScopeChange: (sessionId: AuthSessionId) => Effect.Effect<void>;
     readonly revoke: (
       sessionId: AuthSessionId,
     ) => Effect.Effect<boolean, SessionCredentialInternalError>;
@@ -724,19 +727,20 @@ const make = Effect.gen(function* () {
           discard: true,
         });
       }
-      yield* emitUpsert(
-        toAuthClientSession({
-          sessionId,
-          subject: claims.sub,
-          scopes: claims.scopes,
-          method: claims.method,
-          client,
-          issuedAt,
-          expiresAt: sessionExpiresAt,
-          lastConnectedAt: null,
-          connected: false,
-        }),
-      );
+      if (!input?.deferNotice)
+        yield* emitUpsert(
+          toAuthClientSession({
+            sessionId,
+            subject: claims.sub,
+            scopes: claims.scopes,
+            method: claims.method,
+            client,
+            issuedAt,
+            expiresAt: sessionExpiresAt,
+            lastConnectedAt: null,
+            connected: false,
+          }),
+        );
 
       return {
         sessionId,
@@ -842,7 +846,7 @@ const make = Effect.gen(function* () {
         client: toClientMetadata(row.value.client),
         expiresAt: expiresAt.value,
         subject: claims.sub,
-        scopes: claims.scopes,
+        scopes: claims.scopes.filter((scope) => row.value.scopes.includes(scope)),
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
         ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
         ...(claims.plk === 1 ? { peerLink: true as const } : {}),
@@ -1083,6 +1087,14 @@ const make = Effect.gen(function* () {
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub);
     },
+    notifyScopeChange: Effect.fn("SessionStore.notifyScopeChange")((sessionId) =>
+      loadActiveSession(sessionId).pipe(
+        Effect.flatMap((session) =>
+          Option.isSome(session) ? emitUpsert(session.value) : emitRemoved(sessionId),
+        ),
+        Effect.ignoreCause,
+      ),
+    ),
     revoke,
     revokeAllExcept,
     markConnected,

@@ -25,6 +25,8 @@ import * as FleetAccessPolicy from "../lan/FleetAccessPolicy.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentEventAuthority from "./AgentEventAuthority.ts";
 import * as Store from "./AgentEventStore.ts";
+import * as FactAuthority from "./AgentFactAuthority.ts";
+import * as RelayAdmission from "./AgentFactRelayAdmission.ts";
 import { SECRET_REF_PREFIX } from "./identity.ts";
 import {
   failureReason,
@@ -100,6 +102,7 @@ export const attempt = Effect.fn("AgentEventDelivery.attempt")(function* (claim:
   readonly subscriptionId: string;
   readonly eventId: string;
 }) {
+  const sql = yield* SqlClient.SqlClient;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const authority = yield* AgentEventAuthority.AgentEventAuthority;
   const settings = yield* ServerSettings.ServerSettingsService;
@@ -112,7 +115,12 @@ export const attempt = Effect.fn("AgentEventDelivery.attempt")(function* (claim:
   const delivery = yield* Store.findDelivery(claim.subscriptionId, claim.eventId);
   if (subscription === undefined || delivery === undefined || delivery.state !== "sending")
     return "skipped" as const;
-  const release = (state: "pending" | "abandoned" | "rejected", error: string | null, at = now) =>
+  const release = (
+    state: "pending" | "abandoned" | "rejected",
+    error: string | null,
+    at = now,
+    releasedAt = now,
+  ) =>
     Store.finishAttempt({
       subscriptionId: claim.subscriptionId,
       eventId: claim.eventId,
@@ -121,19 +129,47 @@ export const attempt = Effect.fn("AgentEventDelivery.attempt")(function* (claim:
       nextAttemptAt: at,
       lastStatus: null,
       lastError: error,
-      now,
+      now: releasedAt,
     });
   // Delivery stops exactly at the granted expiry: no grace.
   if (subscription.state !== "active" || subscription.expiresAt <= now) {
     yield* release("pending", null);
     return "skipped" as const;
   }
-  const verdict = yield* authority.check({
-    sessionId: subscription.sessionId,
-    attributionSubject: subscription.attributionSubject,
-  });
+  const deliveryDeadline = delivery.queuedAt + AGENT_EVENT_LIMITS.abandonAfterMs;
+  if (now >= deliveryDeadline) {
+    yield* release("abandoned", "delivery_retention_expired");
+    return "abandoned" as const;
+  }
+  const verdict = yield* authority
+    .check({
+      sessionId: subscription.sessionId,
+      attributionSubject: subscription.attributionSubject,
+    })
+    .pipe(
+      Effect.timeoutOption(
+        Math.max(0, Math.min(30_000, subscription.expiresAt - now, deliveryDeadline - now)),
+      ),
+      Effect.map(
+        Option.getOrElse((): AgentEventAuthority.AuthorityVerdict => ({ _tag: "Unavailable" })),
+      ),
+    );
+  const authorityAt = yield* Clock.currentTimeMillis;
+  if (authorityAt >= deliveryDeadline) {
+    yield* release("abandoned", "delivery_retention_expired", authorityAt, authorityAt);
+    return "abandoned" as const;
+  }
+  if (authorityAt >= subscription.expiresAt) {
+    yield* release("pending", null, authorityAt, authorityAt);
+    return "skipped" as const;
+  }
   if (verdict._tag === "Unavailable") {
-    yield* release("pending", "authority_unavailable", now + UNAVAILABLE_RETRY_MS);
+    yield* release(
+      "pending",
+      "authority_unavailable",
+      authorityAt + UNAVAILABLE_RETRY_MS,
+      authorityAt,
+    );
     return "deferred" as const;
   }
   if (verdict._tag === "Refused") {
@@ -146,6 +182,112 @@ export const attempt = Effect.fn("AgentEventDelivery.attempt")(function* (claim:
     yield* release("abandoned", "event_not_retained");
     return "abandoned" as const;
   }
+  const factAuthority = yield* Effect.serviceOption(FactAuthority.AgentFactAuthority);
+  const relayAdmission = yield* Effect.serviceOption(RelayAdmission.AgentFactRelayAdmission);
+  const checkFact: Effect.Effect<FactAuthority.FactAuthorityVerdict> =
+    event.originEnvironmentId === null
+      ? Effect.succeed({ _tag: "Allowed" } as const)
+      : Option.isNone(factAuthority)
+        ? Effect.succeed({ _tag: "Unavailable" } as const)
+        : factAuthority.value.check({
+            sessionId: subscription.sessionId,
+            eventId: event.eventId,
+            attributionSubject: subscription.attributionSubject,
+            originEnvironmentId: event.originEnvironmentId,
+            originGeneration: event.originGeneration,
+            threadId: event.threadId,
+            relayedFrom: event.relayedFrom,
+          });
+  const checkAndRecord = (phase: "prepare" | "dispatch") =>
+    checkFact.pipe(
+      Effect.flatMap((verdict) => {
+        if (
+          verdict._tag !== "Allowed" ||
+          !("relayProof" in verdict) ||
+          verdict.relayProof === undefined
+        )
+          return Effect.succeed(verdict);
+        if (Option.isNone(relayAdmission) || event.originEnvironmentId === null)
+          return Effect.succeed({ _tag: "Unavailable" } as const);
+        return relayAdmission.value
+          .record({
+            subscriptionId: subscription.subscriptionId,
+            eventId: event.eventId,
+            originEnvironmentId: event.originEnvironmentId,
+            sessionId: subscription.sessionId,
+            attributionSubject: subscription.attributionSubject,
+            phase,
+            proof: verdict.relayProof,
+          })
+          .pipe(
+            Effect.map((recorded) => (recorded ? verdict : ({ _tag: "Unavailable" } as const))),
+          );
+      }),
+    );
+  const readable = yield* checkAndRecord("prepare").pipe(
+    Effect.timeoutOption(
+      Math.max(
+        0,
+        Math.min(
+          30_000,
+          subscription.expiresAt - (yield* Clock.currentTimeMillis),
+          deliveryDeadline - (yield* Clock.currentTimeMillis),
+        ),
+      ),
+    ),
+    Effect.map(
+      Option.getOrElse((): FactAuthority.FactAuthorityVerdict => ({ _tag: "Unavailable" })),
+    ),
+  );
+  const preparedAt = yield* Clock.currentTimeMillis;
+  if (preparedAt >= deliveryDeadline) {
+    yield* release("abandoned", "delivery_retention_expired", preparedAt, preparedAt);
+    return "abandoned" as const;
+  }
+  if (preparedAt >= subscription.expiresAt) {
+    yield* release("pending", null, preparedAt, preparedAt);
+    return "skipped" as const;
+  }
+  if (readable._tag === "Unavailable") {
+    yield* release(
+      "pending",
+      "fact_authority_unavailable",
+      preparedAt + UNAVAILABLE_RETRY_MS,
+      preparedAt,
+    );
+    return "deferred" as const;
+  }
+  if (readable._tag === "Refused") {
+    yield* release("abandoned", readable.reason);
+    return "abandoned" as const;
+  }
+  let dispatchRefusal: { readonly kind: "session" | "fact"; readonly reason: string } | undefined;
+  const canDispatch = Effect.gen(function* () {
+    if (!(yield* enabled)) return false;
+    const at = yield* Clock.currentTimeMillis;
+    if (at >= deliveryDeadline || at >= subscription.expiresAt) return false;
+    const current = yield* Store.findSubscription(subscription.subscriptionId);
+    if (
+      current?.state !== "active" ||
+      current.expiresAt <= at ||
+      current.sessionId !== subscription.sessionId
+    )
+      return false;
+    const fresh = yield* authority.check({
+      sessionId: subscription.sessionId,
+      attributionSubject: subscription.attributionSubject,
+    });
+    if (fresh._tag !== "Allowed") {
+      if (fresh._tag === "Refused") dispatchRefusal = { kind: "session", reason: fresh.reason };
+      return false;
+    }
+    const verdict = yield* checkAndRecord("dispatch");
+    if (verdict._tag === "Refused") dispatchRefusal = { kind: "fact", reason: verdict.reason };
+    return verdict._tag === "Allowed";
+  }).pipe(
+    Effect.catchCause(() => Effect.succeed(false)),
+    Effect.provideService(SqlClient.SqlClient, sql),
+  );
   const url = parseCallbackUrl(subscription.callbackUrl);
   const keys = [
     yield* secrets.get(subscription.secretRef),
@@ -176,6 +318,10 @@ export const attempt = Effect.fn("AgentEventDelivery.attempt")(function* (claim:
     return "rejected" as const;
   }
   const sendAt = yield* Clock.currentTimeMillis;
+  if (sendAt >= deliveryDeadline) {
+    yield* release("abandoned", "delivery_retention_expired", sendAt, sendAt);
+    return "abandoned" as const;
+  }
   if (sendAt >= subscription.expiresAt || !(yield* enabled)) {
     yield* release("pending", null);
     return "skipped" as const;
@@ -186,13 +332,35 @@ export const attempt = Effect.fn("AgentEventDelivery.attempt")(function* (claim:
     webhookId: event.eventId,
     keys: keys.flatMap((key) => (Option.isSome(key) ? [key.value] : [])),
     body,
-    expiresAt: subscription.expiresAt,
-    canDispatch: enabled,
+    expiresAt: Math.min(subscription.expiresAt, deliveryDeadline),
+    canDispatch,
   });
   const finishedAt = yield* Clock.currentTimeMillis;
+  if (finishedAt >= deliveryDeadline) {
+    yield* release("abandoned", "delivery_retention_expired", finishedAt, finishedAt);
+    return "abandoned" as const;
+  }
   if (finishedAt >= subscription.expiresAt || !(yield* enabled)) {
     yield* release("pending", null, finishedAt);
     return "skipped" as const;
+  }
+  if (outcome._tag === "Deferred") {
+    if (dispatchRefusal?.kind === "session") {
+      yield* release("pending", null, finishedAt, finishedAt);
+      yield* revoke(subscription.subscriptionId, dispatchRefusal.reason, finishedAt);
+      return "revoked" as const;
+    }
+    if (dispatchRefusal?.kind === "fact") {
+      yield* release("abandoned", dispatchRefusal.reason, finishedAt, finishedAt);
+      return "abandoned" as const;
+    }
+    yield* release(
+      "pending",
+      "fact_authority_unavailable",
+      finishedAt + UNAVAILABLE_RETRY_MS,
+      finishedAt,
+    );
+    return "deferred" as const;
   }
   const status = outcome._tag === "Response" ? outcome.status : null;
   const record = (
@@ -348,6 +516,14 @@ export const layer = Layer.effect(
       | WebhookTransport
       | ServerSettings.ServerSettingsService
     >();
+    const factAuthority = yield* Effect.serviceOption(FactAuthority.AgentFactAuthority);
+    const relayAdmission = yield* Effect.serviceOption(RelayAdmission.AgentFactRelayAdmission);
+    const factsContext = Option.isSome(factAuthority)
+      ? Context.add(context, FactAuthority.AgentFactAuthority, factAuthority.value)
+      : context;
+    const deliveryContext = Option.isSome(relayAdmission)
+      ? Context.add(factsContext, RelayAdmission.AgentFactRelayAdmission, relayAdmission.value)
+      : factsContext;
     const fleetAccess = yield* Effect.serviceOption(FleetAccessPolicy.FleetAccess);
     const enabled = settings.getSettings.pipe(
       Effect.map((current) => current.agentEventsEnabled),
@@ -434,7 +610,7 @@ export const layer = Layer.effect(
             Effect.andThen(Queue.offer(wakeups, undefined)),
           ),
         ),
-        Effect.provide(context),
+        Effect.provide(deliveryContext),
         quietly("delivery"),
       );
     // Disable cannot clear the fiber set between claiming rows and registering their sends.

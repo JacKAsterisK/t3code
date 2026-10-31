@@ -1,4 +1,7 @@
-import type { FleetAccess as FleetAccessLevel } from "@t3tools/contracts";
+import {
+  AuthOrchestrationApproveScope,
+  type FleetAccess as FleetAccessLevel,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -8,8 +11,12 @@ import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 
+import * as ApprovalPeerAccess from "../auth/ApprovalPeerAccess.ts";
+import * as Gate from "../auth/ApprovalAdmissionGate.ts";
+import * as Option from "effect/Option";
 import * as CredentialAttribution from "../auth/CredentialAttribution.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as ApprovalSigning from "./FleetApprovalPolicySigning.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import * as FleetContext from "./FleetContext.ts";
 import * as Delivery from "./FleetDelivery.ts";
@@ -46,6 +53,8 @@ const restrictsAnyone = (state: FleetAccessPolicy.FleetAccessState) =>
 
 const make = Effect.gen(function* () {
   const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
+  const gate = yield* Gate.ApprovalAdmissionGate;
+  const approvalPeers = yield* Effect.serviceOption(ApprovalPeerAccess.ApprovalPeerAccess);
   const trusted = yield* Ref.make<ReadonlySet<string> | undefined>(undefined);
 
   const machineOf = (root: string, state: FleetAccessPolicy.FleetAccessState) => {
@@ -112,32 +121,105 @@ const make = Effect.gen(function* () {
     );
 
   const readOnly = FleetAccessPolicy.fleetCredentialScopes("read-only");
-  const scopes: FleetCredentialAccess["Service"]["scopes"] = (credential) =>
-    limit(credential.subject, credential.taskGrant === true).pipe(
-      Effect.map((level) =>
-        level === undefined || level === "standard"
-          ? credential.scopes
-          : level === "none"
-            ? undefined
-            : credential.scopes.filter((scope) => readOnly.includes(scope)),
-      ),
+  const scopes: FleetCredentialAccess["Service"]["scopes"] = Effect.fn(
+    "FleetCredentialAccess.scopes",
+  )(function* (credential) {
+    const { level, state, machineId } = yield* attribution(
+      credential.subject,
+      credential.taskGrant === true,
     );
+    if (level === "none") return undefined;
+    let current =
+      level === "read-only"
+        ? credential.scopes.filter((scope) => readOnly.includes(scope))
+        : credential.scopes;
+    if (!current.includes(AuthOrchestrationApproveScope)) return current;
+    const classification =
+      credential.sessionId !== undefined && Option.isSome(approvalPeers)
+        ? yield* approvalPeers.value
+            .classification(credential.sessionId)
+            .pipe(
+              Effect.mapError(
+                (cause) => new CredentialAttribution.CredentialAccessUnavailable({ cause }),
+              ),
+            )
+        : undefined;
+    const linked =
+      credential.peerLink === true ||
+      (CredentialAttribution.attributionRoot(credential.subject) !== undefined &&
+        classification !== "local") ||
+      (CredentialAttribution.isMcpClientSubject(credential.subject) && classification !== "local");
+    if (linked || credential.taskGrant === true) {
+      const enabled =
+        credential.taskGrant !== true &&
+        credential.sessionId !== undefined &&
+        Option.isSome(approvalPeers)
+          ? yield* approvalPeers.value
+              .permits(credential.sessionId)
+              .pipe(
+                Effect.mapError(
+                  (cause) => new CredentialAttribution.CredentialAccessUnavailable({ cause }),
+                ),
+              )
+          : false;
+      const bindingResult =
+        credential.sessionId !== undefined && Option.isSome(approvalPeers)
+          ? yield* approvalPeers.value.fleetIdentity(credential.sessionId).pipe(
+              Effect.map((binding) => ({ valid: true, binding })),
+              Effect.mapError(
+                (cause) => new CredentialAttribution.CredentialAccessUnavailable({ cause }),
+              ),
+            )
+          : { valid: false, binding: undefined };
+      const binding = bindingResult.binding;
+      const destination = state.approvalTrust?.peers.find((p) => p.machineId === state.machineId);
+      const trust = yield* Ref.get(trusted);
+      const fleetPermits =
+        bindingResult.valid &&
+        (binding === undefined ||
+          (destination !== undefined &&
+            state.approvalTrust?.fleetId === binding.fleetId &&
+            ApprovalSigning.verify(binding.signedPolicy, {
+              fleetId: binding.fleetId,
+              destinationMachineId: binding.destinationMachineId,
+              publicKey: destination.signingPublicKey,
+            }) &&
+            binding.signedPolicy.grants.some(
+              (g) => g.callerMachineId === binding.callerMachineId && g.enabled,
+            ) &&
+            state.machineId === binding.destinationMachineId &&
+            (machineId === undefined || machineId === binding.callerMachineId) &&
+            state.member !== false &&
+            state.unavailable !== true &&
+            state.peers.some(
+              (p) =>
+                p.machineId === binding.callerMachineId &&
+                p.environmentId === binding.sourceEnvironmentId,
+            ) &&
+            (trust === undefined || trust.has(binding.callerMachineId)) &&
+            FleetAccessPolicy.callerAccess(state, binding.callerMachineId) === "standard"));
+      if (!enabled || !fleetPermits)
+        current = current.filter((scope) => scope !== AuthOrchestrationApproveScope);
+    }
+    return current;
+  });
 
   return FleetCredentialAccess.of({
     limit,
     scopes,
     administersFleet,
     setTrusted: Effect.fn("FleetCredentialAccess.setTrusted")((machineIds) =>
-      Ref.set(trusted, machineIds),
+      gate.withGate(Ref.set(trusted, new Set(machineIds))),
     ),
   });
 });
 
-export const layerServices = Layer.effect(FleetCredentialAccess, make);
-const layer = layerServices.pipe(Layer.provide(FleetAccessPolicy.layer));
+export const layerServices = Layer.effect(FleetCredentialAccess, make).pipe(
+  Layer.provideMerge(Gate.layer),
+);
 
 /** The cap EnvironmentAuth and the WebSocket RPC apply to every credential they verify. */
-export const layerCap = Layer.effect(
+export const layerCapServices = Layer.effect(
   CredentialAttribution.CredentialAccessCap,
   FleetCredentialAccess.pipe(
     Effect.map((access) =>
@@ -147,7 +229,7 @@ export const layerCap = Layer.effect(
       }),
     ),
   ),
-).pipe(Layer.provide(layer));
+);
 
 /**
  * Revokes the unused pairing codes fleet machines hold here above their access, and every session
@@ -192,7 +274,7 @@ export const revokeExcess = Effect.fn("FleetCredentialAccess.revokeExcess")(func
 });
 
 /** Revocation at startup, every ten minutes, and whenever the fleet policy or peers change. */
-export const layerRevocation = Layer.effectDiscard(
+export const layerRevocationServices = Layer.effectDiscard(
   Effect.gen(function* () {
     const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
     const services = yield* Effect.context<
@@ -213,7 +295,4 @@ export const layerRevocation = Layer.effectDiscard(
     yield* Effect.forkScoped(request.pipe(Effect.repeat(Schedule.spaced(PASS_INTERVAL))));
     yield* Effect.forkScoped(Stream.runForEach(fleetAccess.changes, () => request));
   }),
-).pipe(
-  Layer.provide(Layer.merge(layer, FleetContext.layer)),
-  Layer.provide(FleetAccessPolicy.layer),
 );

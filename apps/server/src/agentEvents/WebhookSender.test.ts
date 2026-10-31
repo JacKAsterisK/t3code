@@ -6,7 +6,6 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
-import * as Exit from "effect/Exit";
 
 import {
   receiverTransport,
@@ -113,8 +112,8 @@ describe("WebhookSender", () => {
           body: "{}",
           canDispatch: Effect.sync(() => enabled),
         };
-        const exit = yield* Effect.exit(transport.post(input));
-        assert.isTrue(Exit.hasInterrupts(exit));
+        const outcome = yield* transport.post(input);
+        assert.deepEqual(outcome, { _tag: "Deferred", reason: "authority_unavailable" });
         assert.strictEqual(receiver.received.length, 0);
       }),
     ),
@@ -468,3 +467,34 @@ describe("WebhookSender", () => {
     assert.isFalse(constantTimeEqual("abc", "abcd"));
   });
 });
+
+it.live("a stalled origin proof has its own bound and never becomes a callback timeout", () =>
+  Effect.gen(function* () {
+    const receiver = yield* startReceiver();
+    let connections = 0;
+    receiver.server.on("connection", () => {
+      connections++;
+    });
+    const proving = yield* Deferred.make<void>();
+    const transport = receiverTransport(receiver.ca);
+    const fiber = yield* transport
+      .post({
+        url: urlFor(receiver.port),
+        headers: {},
+        body: "{}",
+        expiresAt: 60_000,
+        canDispatch: Deferred.succeed(proving, undefined).pipe(Effect.andThen(Effect.never)),
+      })
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(proving);
+    yield* TestClock.adjust(10_000);
+    assert.isUndefined(fiber.pollUnsafe());
+    yield* TestClock.adjust(20_000);
+    assert.deepEqual(yield* Fiber.join(fiber), {
+      _tag: "Deferred",
+      reason: "authority_unavailable",
+    });
+    assert.equal(connections, 0);
+    assert.equal(receiver.received.length, 0);
+  }).pipe(Effect.provide(TestClock.layer()), Effect.scoped),
+);

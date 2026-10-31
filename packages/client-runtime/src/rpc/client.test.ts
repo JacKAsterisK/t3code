@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  EnvironmentAuthorizationError,
   type RelayClientInstallProgressEvent,
   type ServerLifecycleStreamEvent,
   WS_METHODS,
@@ -15,6 +16,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as TestClock from "effect/testing/TestClock";
 import { RpcClientError } from "effect/rpc";
 
 import {
@@ -399,3 +401,43 @@ describe("environment RPC", () => {
       }),
   );
 });
+
+it.effect("retries unavailable scope checks without replacing the session", () =>
+  Effect.gen(function* () {
+    const changes = yield* Queue.make<number>();
+    const failureObserved = yield* Deferred.make<void>();
+    let attempts = 0;
+    const unavailable = new EnvironmentAuthorizationError({
+      message: "Current permissions are temporarily unavailable.",
+      requiredScope: "orchestration:read",
+      retryable: true,
+    });
+    const client = {
+      [WS_METHODS.subscribeTerminalMetadata]: () => {
+        attempts++;
+        Queue.offerUnsafe(changes, attempts);
+        return attempts === 1 ? Stream.fail(unavailable) : Stream.never;
+      },
+    } as unknown as WsRpcProtocolClient;
+    const { activeSession, retryCount, supervisor } = yield* makeHarness();
+    yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+    const subscription = yield* subscribe(
+      WS_METHODS.subscribeTerminalMetadata,
+      {},
+      {
+        onExpectedFailure: () => Deferred.succeed(failureObserved, undefined).pipe(Effect.asVoid),
+      },
+    ).pipe(
+      Stream.runDrain,
+      Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+      Effect.forkChild,
+    );
+    expect(yield* Queue.take(changes)).toBe(1);
+    yield* Deferred.await(failureObserved);
+    yield* TestClock.adjust("1 second");
+    expect(attempts).toBe(2);
+    expect(yield* Queue.take(changes)).toBe(2);
+    expect(yield* Ref.get(retryCount)).toBe(0);
+    yield* Fiber.interrupt(subscription);
+  }),
+);

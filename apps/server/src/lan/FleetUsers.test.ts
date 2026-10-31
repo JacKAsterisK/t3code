@@ -2,11 +2,16 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import type { FleetUsersDirectory } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as Config from "../config.ts";
 import * as FleetUsers from "./FleetUsers.ts";
@@ -76,6 +81,176 @@ const danDirectory: FleetUsersDirectory = {
 };
 
 it.layer(NodeServices.layer)("fleet users", (it) => {
+  it.effect(
+    "observes unchanged confirmations and stale outcomes independently of directory changes",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* f.writeUsers(USERS_FILE);
+        const { users, stateDir } = yield* f.machine();
+        const observations = yield* Queue.unbounded<FleetUsers.FleetUsersObservation>();
+        yield* Stream.runForEach(users.observations, (value) =>
+          Queue.offer(observations, value),
+        ).pipe(Effect.forkScoped);
+        const initial = yield* Queue.take(observations);
+        assert.strictEqual(initial.status, "never_read");
+        assert.isNull(initial.observedAt);
+        assert.isNull(initial.lastGoodObservedAt);
+        assert.isNull(initial.directoryDigest);
+        const refresh = (rosterPath = f.rosterPath) =>
+          users.refresh({ rosterPath, machineId: DAN_MACHINE });
+
+        yield* TestClock.setTime(1_000);
+        yield* refresh();
+        const first = yield* Queue.take(observations);
+        assert.strictEqual(first.status, "fresh");
+        assert.strictEqual(first.observedAt, 1_000);
+        assert.strictEqual(first.lastGoodObservedAt, 1_000);
+        assert.match(first.directoryDigest!, /^[a-f0-9]{64}$/u);
+        assert.deepEqual(first.directory, danDirectory);
+
+        yield* TestClock.setTime(2_000);
+        yield* refresh();
+        const confirmed = yield* Queue.take(observations);
+        assert.strictEqual(confirmed.status, "fresh");
+        assert.strictEqual(confirmed.observedAt, 2_000);
+        assert.strictEqual(confirmed.lastGoodObservedAt, 2_000);
+        assert.notStrictEqual(confirmed.observationGeneration, first.observationGeneration);
+        assert.strictEqual(confirmed.directoryDigest, first.directoryDigest);
+        assert.deepEqual(confirmed.directory, first.directory);
+
+        yield* f.writeUsers({
+          ...USERS_FILE,
+          machineOwners: { ...USERS_FILE.machineOwners, [GAVIN_MACHINE]: "dan" },
+        });
+        yield* TestClock.setTime(2_500);
+        yield* refresh();
+        const otherDefaultChanged = yield* Queue.take(observations);
+        assert.deepEqual(otherDefaultChanged.directory, confirmed.directory);
+        assert.notStrictEqual(otherDefaultChanged.directoryDigest, confirmed.directoryDigest);
+
+        yield* TestClock.setTime(3_000);
+        yield* refresh(f.unreachableRosterPath);
+        const unavailable = yield* Queue.take(observations);
+        assert.strictEqual(unavailable.status, "unavailable");
+        assert.strictEqual(unavailable.observedAt, 3_000);
+        assert.strictEqual(unavailable.lastGoodObservedAt, 2_500);
+        assert.strictEqual(unavailable.directoryDigest, otherDefaultChanged.directoryDigest);
+        assert.deepEqual(unavailable.directory, danDirectory);
+
+        yield* TestClock.setTime(4_000);
+        yield* f.fs.writeFileString(f.usersFile, "{invalid");
+        yield* refresh();
+        const invalid = yield* Queue.take(observations);
+        assert.strictEqual(invalid.status, "invalid");
+        assert.strictEqual(invalid.lastGoodObservedAt, 2_500);
+        assert.strictEqual(invalid.directoryDigest, unavailable.directoryDigest);
+        assert.deepEqual(invalid.directory, danDirectory);
+
+        yield* TestClock.setTime(5_000);
+        yield* f.fs.remove(f.usersFile);
+        yield* refresh();
+        const absent = yield* Queue.take(observations);
+        assert.strictEqual(absent.status, "absent");
+        assert.strictEqual(absent.lastGoodObservedAt, 5_000);
+        assert.notStrictEqual(absent.directoryDigest, invalid.directoryDigest);
+        assert.deepEqual(absent.directory.users, []);
+        yield* TestClock.setTime(6_000);
+        yield* refresh(f.unreachableRosterPath);
+        const absentThenAway = yield* Queue.take(observations);
+        assert.strictEqual(absentThenAway.status, "unavailable");
+        assert.strictEqual(absentThenAway.lastGoodObservedAt, 5_000);
+        assert.strictEqual(absentThenAway.directoryDigest, absent.directoryDigest);
+
+        const restarted = yield* f.machine(stateDir);
+        const restored = yield* restarted.users.observation;
+        assert.strictEqual(restored.status, "never_read");
+        assert.isNull(restored.observedAt);
+        assert.isNull(restored.lastGoodObservedAt);
+        assert.deepEqual(restored.directory, yield* restarted.users.current);
+        assert.deepEqual(first.directory, danDirectory);
+      }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("keeps the source observation stable until its snapshot transaction finishes", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.writeUsers(USERS_FILE);
+      const { users } = yield* f.machine();
+      yield* users.refresh({ rosterPath: f.rosterPath, machineId: DAN_MACHINE });
+      const before = yield* users.observation;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const requested = yield* Deferred.make<void>();
+      const captured = yield* users
+        .withObservationSnapshot((observation) =>
+          Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.as(observation),
+          ),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      yield* Effect.gen(function* () {
+        yield* f.writeUsers({
+          ...USERS_FILE,
+          users: [{ id: "dan", name: "Daniel" }, USERS_FILE.users[1]],
+        });
+        const refreshing = yield* Deferred.succeed(requested, undefined).pipe(
+          Effect.andThen(users.refresh({ rosterPath: f.rosterPath, machineId: DAN_MACHINE })),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(requested);
+        assert.deepEqual(yield* users.observation, before);
+        yield* Deferred.succeed(release, undefined);
+        assert.deepEqual(yield* Fiber.join(captured), before);
+        yield* Fiber.join(refreshing);
+        const after = yield* users.observation;
+        assert.notStrictEqual(after.observationGeneration, before.observationGeneration);
+        assert.notStrictEqual(after.directoryDigest, before.directoryDigest);
+        assert.strictEqual(after.directory.users[0]!.name, "Daniel");
+        assert.strictEqual(before.directory.users[0]!.name, "Dan");
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect(
+    "classifies a filesystem read failure as unavailable and retains its last good observation",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* f.writeUsers(USERS_FILE);
+        let denied = false;
+        const flaky = FileSystem.FileSystem.of({
+          ...f.fs,
+          readFileString: (requested, encoding) =>
+            denied && requested === f.usersFile
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: "PermissionDenied",
+                    module: "FileSystem",
+                    method: "readFileString",
+                    pathOrDescriptor: requested,
+                  }),
+                )
+              : f.fs.readFileString(requested, encoding),
+        });
+        const { users } = yield* f.machine(undefined, flaky);
+        yield* TestClock.setTime(10);
+        yield* users.refresh({ rosterPath: f.rosterPath, machineId: DAN_MACHINE });
+        const good = yield* users.observation;
+        denied = true;
+        yield* TestClock.setTime(20);
+        yield* users.refresh({ rosterPath: f.rosterPath, machineId: DAN_MACHINE });
+        const failed = yield* users.observation;
+        assert.strictEqual(failed.status, "unavailable");
+        assert.strictEqual(failed.observedAt, 20);
+        assert.strictEqual(failed.lastGoodObservedAt, 10);
+        assert.strictEqual(failed.directoryDigest, good.directoryDigest);
+        assert.deepEqual(failed.directory, good.directory);
+      }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("reads the users and this machine's default owner, and caches them in userdata", () =>
     Effect.gen(function* () {
       const f = yield* fixture();

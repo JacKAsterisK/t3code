@@ -3,6 +3,7 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import * as SessionStore from "./SessionStore.ts";
 
@@ -36,6 +37,15 @@ export const mcpClientSubject = (approvalSubject: string): string =>
 export const isMcpClientSubject = (subject: string) =>
   subject === MCP_CLIENT_SUBJECT || subject.startsWith(MCP_PREFIX);
 
+export class CredentialAccessUnavailable extends Schema.TaggedError<CredentialAccessUnavailable>()(
+  "CredentialAccessUnavailable",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Current credential access could not be checked.";
+  }
+}
+
 /**
  * Optional: limits a credential, each time it is used, to what the fleet machine it is attributed
  * to may do now. Without it every credential keeps the scopes it was issued with.
@@ -46,10 +56,16 @@ export class CredentialAccessCap extends Context.Service<
     /** The scopes usable right now; undefined when the credential may not be used at all. */
     readonly scopes: (credential: {
       readonly subject: string;
+      /** Authenticated store/token context, never a client assertion. */
+      readonly sessionId?: string;
+      readonly peerLink?: boolean;
       readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
       /** An MCP task grant, which a plain `mcp-client` subject cannot attribute. */
       readonly taskGrant?: boolean;
-    }) => Effect.Effect<ReadonlyArray<AuthEnvironmentScope> | undefined>;
+    }) => Effect.Effect<
+      ReadonlyArray<AuthEnvironmentScope> | undefined,
+      CredentialAccessUnavailable
+    >;
     /**
      * Whether the credential may administer the fleet from here now, or hand access outside it
      * (guest shares, webhook URLs, T3 Connect linking), which outlives an exception: a fleet
@@ -86,6 +102,13 @@ export const cappedSessionStore = (
   if (Option.isNone(cap)) return sessions;
   const limit = <S extends SessionStore.VerifiedSession>(session: S) =>
     cap.value.scopes(session).pipe(
+      Effect.mapError(
+        (cause) =>
+          new SessionStore.SessionCredentialVerificationError({
+            sessionId: session.sessionId,
+            cause,
+          }),
+      ),
       Effect.flatMap((scopes) =>
         scopes === undefined
           ? DateTime.now.pipe(

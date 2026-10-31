@@ -1,3 +1,4 @@
+import * as ApprovalDelivery from "../approvals/ApprovalDelivery.ts";
 import * as GuestShareService from "../guest/GuestShareService.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
@@ -179,9 +180,6 @@ const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pip
 const layerProviderTurnControlServiceProvided = ProviderTurnControlService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );
-const layerRuntimeRequestServiceProvided = RuntimeRequestService.layer.pipe(
-  Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
-);
 const layerCheckpointRollbackServiceProvided = CheckpointRollbackService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -230,6 +228,29 @@ const layerOrchestratorProvided = Orchestrator.layer.pipe(
       layerProviderSwitchServiceProvided,
       layerRunExecutionServiceProvided,
       ThreadForkService.layer,
+    ),
+  ),
+);
+
+const layerRuntimeRequestServiceProvided = RuntimeRequestService.layer.pipe(
+  Layer.provide(
+    ApprovalDelivery.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          ProjectionStore.layer,
+          layerProviderSessionManagerProvided,
+          ThreadCommandExecutor.layer,
+          layerOrchestratorProvided,
+        ),
+      ),
+    ),
+  ),
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectionStore.layer,
+      layerProviderSessionManagerProvided,
+      ThreadCommandExecutor.layer,
+      layerOrchestratorProvided,
     ),
   ),
 );

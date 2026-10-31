@@ -1,3 +1,6 @@
+import { ApprovalManagementSettings } from "./ApprovalManagementSettings";
+import { usePrimaryEnvironmentId } from "~/state/environments";
+import { Checkbox } from "../ui/checkbox";
 import { useAtomValue } from "@effect/atom-react";
 import { linkRequestFailureMessage } from "@t3tools/client-runtime/link-request";
 import {
@@ -58,34 +61,40 @@ export function LinkedEnvironmentsSettings({
   readonly environmentLabel: string | null;
   readonly isSearchTarget: boolean;
 }) {
+  const primaryId = usePrimaryEnvironmentId();
   const links = useEnvironmentQuery(peerLinkEnvironment.list({ environmentId, input: {} }));
   const canLink = useAtomValue(peerLinkEnvironment.link.permissionAtom(environmentId));
   const search = searchableSetting("linked-environments");
   return (
-    <SettingsSection
-      {...(isSearchTarget ? { id: search.id } : {})}
-      title={environmentLabel === null ? search.title : `${search.title} · ${environmentLabel}`}
-      headerAction={canLink ? <LinkEnvironmentAction environmentId={environmentId} /> : null}
-    >
-      {links.error ? (
-        <SettingsRow title="Could not load linked environments" description={links.error} />
-      ) : !links.data ? (
-        <SettingsRow title="Loading linked environments…" role="status" />
-      ) : links.data.links.length === 0 ? (
-        <SettingsRow
-          title="No linked environments"
-          description="Link another machine running T3 Code, such as a VPS, so agents here can launch and drive threads there."
-        />
-      ) : (
-        links.data.links.map((link) => (
-          <LinkedEnvironmentRow
-            key={link.environmentId}
-            environmentId={environmentId}
-            link={link}
+    <>
+      <SettingsSection
+        {...(isSearchTarget ? { id: search.id } : {})}
+        title={environmentLabel === null ? search.title : `${search.title} · ${environmentLabel}`}
+        headerAction={canLink ? <LinkEnvironmentAction environmentId={environmentId} /> : null}
+      >
+        {links.error ? (
+          <SettingsRow title="Could not load linked environments" description={links.error} />
+        ) : !links.data ? (
+          <SettingsRow title="Loading linked environments…" role="status" />
+        ) : links.data.links.length === 0 ? (
+          <SettingsRow
+            title="No linked environments"
+            description="Link another machine running T3 Code, such as a VPS, so agents here can launch and drive threads there."
           />
-        ))
-      )}
-    </SettingsSection>
+        ) : (
+          links.data.links.map((link) => (
+            <LinkedEnvironmentRow
+              key={link.environmentId}
+              environmentId={environmentId}
+              link={link}
+            />
+          ))
+        )}
+      </SettingsSection>
+      {environmentId !== primaryId ? (
+        <ApprovalManagementSettings environmentId={environmentId} />
+      ) : null}
+    </>
   );
 }
 
@@ -173,6 +182,7 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
   const [choice, setChoice] = useState<string | null>(null);
   const [address, setAddress] = useState("");
   const [pairingCode, setPairingCode] = useState("");
+  const [approvals, setApprovals] = useState(false);
   const [access, setAccess] = useState<AuthMcpClientAccess>("approval-required");
   const [busy, setBusy] = useState(false);
   // Machines whose minting already failed, so the dialog asks for a code instead.
@@ -189,7 +199,11 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
   const connected = usePreparedConnection(targetId);
   const mayMint = useEnvironmentScope(targetId, AuthAccessWriteScope);
   const canMint =
-    targetId !== null && Option.isSome(connected) && mayMint && !mintFailed.has(targetId);
+    targetId !== null &&
+    Option.isSome(connected) &&
+    mayMint &&
+    !mintFailed.has(targetId) &&
+    !approvals;
   const needsAddress = selected === ANOTHER_ADDRESS || machine?.urls.length === 0;
   const ready =
     selected !== null &&
@@ -202,6 +216,7 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
       setAddress("");
       setPairingCode("");
       setAccess("approval-required");
+      setApprovals(false);
       setMintFailed(new Set());
     }
   };
@@ -234,6 +249,7 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
                 : { expectedEnvironmentId: machine.environmentId, expectedLabel: machine.label }),
               pairingCode: code,
               access,
+              ...(approvals && access !== "read-only" ? { approvals: true } : {}),
             },
           });
     inFlight.current = false;
@@ -342,6 +358,17 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
               </label>
             )}
             <LinkAccessPicker value={access} onChange={setAccess} disabled={busy} />
+            <label className="flex items-start gap-2 text-xs">
+              <Checkbox
+                checked={approvals && access !== "read-only"}
+                disabled={busy || access === "read-only"}
+                onCheckedChange={(checked) => setApprovals(checked === true)}
+              />
+              <span>
+                Request approval permission using a deliberately approval-capable pairing code. The
+                destination owner must separately bind this new sign-in and enable its policy.
+              </span>
+            </label>
           </form>
         </DialogPanel>
         <DialogFooter variant="bare">

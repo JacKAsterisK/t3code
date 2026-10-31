@@ -134,6 +134,11 @@ function mapSessionRpcError(
 ): ConnectionAttemptError {
   switch (error._tag) {
     case "EnvironmentAuthorizationError":
+      if (error.retryable === true)
+        return new ConnectionTransientErrorClass({
+          reason: "remote-unavailable",
+          detail: error.message,
+        });
       return new ConnectionBlockedError({
         reason: "permission",
         detail: error.message,

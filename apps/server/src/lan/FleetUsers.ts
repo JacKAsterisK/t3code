@@ -1,20 +1,24 @@
-// @effect-diagnostics preferSchemaOverJson:off -- Compares two schema-validated values for change, never parses.
+// @effect-diagnostics preferSchemaOverJson:off nodeBuiltinImport:off -- Compares validated values; hashes directory snapshots and creates observation identities.
 /**
  * T3 Code LAN: the fleet's users, from fleet-users.json beside the roster. Each machine reads it
  * with its fleet sync and keeps the last good copy in userdata, so owner badges and this machine's
  * default owner survive the share being away. Owners are labels: nothing here grants access.
  */
+import * as NodeCrypto from "node:crypto";
 import {
   type FleetUserId,
   type FleetUsersDirectory,
   FleetMachineId,
   FleetUsersFile,
 } from "@t3tools/contracts";
+import { stableStringify } from "@t3tools/shared/relaySigning";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import type * as Stream from "effect/Stream";
@@ -38,10 +42,44 @@ export interface FleetUsersRefreshInput {
   readonly machineId: string;
 }
 
+export interface FleetUsersObservation {
+  readonly status: "fresh" | "unavailable" | "invalid" | "absent" | "never_read";
+  readonly observedAt: number | null;
+  readonly observationGeneration: string;
+  readonly directoryDigest: string | null;
+  readonly lastGoodObservedAt: number | null;
+  readonly directory: FleetUsersDirectory;
+}
+
+const observationOf = (
+  directory: FleetUsersDirectory,
+  file: FleetUsersFile | null,
+  status: FleetUsersObservation["status"],
+  observedAt: number | null,
+  lastGoodObservedAt: number | null,
+): FleetUsersObservation => ({
+  status,
+  observedAt,
+  observationGeneration: NodeCrypto.randomUUID(),
+  directoryDigest:
+    file === null && lastGoodObservedAt === null
+      ? null
+      : NodeCrypto.createHash("sha256").update(stableStringify({ file, directory })).digest("hex"),
+  lastGoodObservedAt,
+  directory,
+});
+
 export class FleetUsers extends Context.Service<
   FleetUsers,
   {
     readonly current: Effect.Effect<FleetUsersDirectory>;
+    readonly observation: Effect.Effect<FleetUsersObservation>;
+    /** Includes unchanged successful reads and failed reads retaining last-good values. */
+    readonly observations: Stream.Stream<FleetUsersObservation>;
+    /** Keeps the source observation stable while a journal/source-event transaction binds it. */
+    readonly withObservationSnapshot: <A, E, R>(
+      use: (observation: FleetUsersObservation) => Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E, R>;
     /** Emits whenever a read changes the users or this machine's default owner. */
     readonly changes: Stream.Stream<FleetUsersDirectory>;
     /** Reads the share's file. An unreachable share or an invalid file keeps the last good copy. */
@@ -86,6 +124,16 @@ const make = Effect.gen(function* () {
   // What the cache file holds. It can trail `cache` after a failed save, which the next refresh retries.
   let persisted = cache;
   const state = yield* SubscriptionRef.make(directoryOf(cache));
+  let lastGoodObservedAt: number | null = null;
+  const observations = yield* SubscriptionRef.make(
+    observationOf(directoryOf(cache), cache?.file ?? null, "never_read", null, null),
+  );
+  const withObservationSnapshot = Effect.fn("FleetUsers.withObservationSnapshot")(
+    function* <A, E, R>(use: (observation: FleetUsersObservation) => Effect.Effect<A, E, R>) {
+      return yield* use(yield* SubscriptionRef.get(observations));
+    },
+    (effect) => mutex.withPermits(1)(effect),
+  );
 
   const readShare = Effect.fn("FleetUsers.readShare")(function* (rosterPath: string) {
     const root = path.dirname(rosterPath);
@@ -102,13 +150,22 @@ const make = Effect.gen(function* () {
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.flatMap((value) => Effect.try(() => validateFleetUsers(value))),
       Effect.map((value) => ({ _tag: "valid", value }) as const),
-      Effect.catch((cause) => Effect.succeed({ _tag: "invalid", cause } as const)),
+      Effect.catch((cause) =>
+        Effect.succeed(
+          PlatformError.isPlatformError(cause)
+            ? ({ _tag: "unavailable" } as const)
+            : ({ _tag: "invalid", cause } as const),
+        ),
+      ),
     );
   });
 
   const refresh = Effect.fn("FleetUsers.refresh")(
     function* (input: FleetUsersRefreshInput) {
       const read = yield* readShare(input.rosterPath);
+      const observedAt = yield* Clock.currentTimeMillis;
+      if (cache?.machineId !== input.machineId) lastGoodObservedAt = null;
+      if (read._tag === "valid" || read._tag === "absent") lastGoodObservedAt = observedAt;
       const kept = cache?.machineId === input.machineId ? cache.file : null;
       if (read._tag === "invalid")
         yield* Effect.logWarning(
@@ -143,6 +200,16 @@ const make = Effect.gen(function* () {
       const updated = directoryOf(cache);
       if (JSON.stringify(updated) !== JSON.stringify(yield* SubscriptionRef.get(state)))
         yield* SubscriptionRef.set(state, updated);
+      yield* SubscriptionRef.set(
+        observations,
+        observationOf(
+          updated,
+          cache.file,
+          read._tag === "valid" ? "fresh" : read._tag,
+          observedAt,
+          lastGoodObservedAt,
+        ),
+      );
       return updated;
     },
     (effect) => mutex.withPermits(1)(effect),
@@ -150,6 +217,9 @@ const make = Effect.gen(function* () {
 
   return FleetUsers.of({
     current: SubscriptionRef.get(state),
+    observation: SubscriptionRef.get(observations),
+    observations: SubscriptionRef.changes(observations),
+    withObservationSnapshot,
     changes: SubscriptionRef.changes(state),
     refresh,
   });
@@ -163,8 +233,18 @@ export const layerStatic = (directory: FleetUsersDirectory) =>
     FleetUsers,
     Effect.gen(function* () {
       const state = yield* SubscriptionRef.make(directory);
+      const observation = observationOf(directory, null, "never_read", null, null);
       return FleetUsers.of({
         current: SubscriptionRef.get(state),
+        observation: Effect.succeed(observation),
+        observations: SubscriptionRef.changes(yield* SubscriptionRef.make(observation)),
+        withObservationSnapshot: Effect.fn("FleetUsers.withStaticObservationSnapshot")(function* <
+          A,
+          E,
+          R,
+        >(use: (observation: FleetUsersObservation) => Effect.Effect<A, E, R>) {
+          return yield* use(observation);
+        }),
         changes: SubscriptionRef.changes(state),
         refresh: Effect.fn("FleetUsers.refreshStatic")(function* () {
           return yield* SubscriptionRef.get(state);

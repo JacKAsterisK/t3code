@@ -1,3 +1,10 @@
+import Migration0089 from "./Migrations/089_AgentApprovalFleetPolicyPublications.ts";
+import Migration0088 from "./Migrations/088_PeerLinkProvenance.ts";
+import Migration0087 from "./Migrations/087_AgentEventRelayAuthorityEvidence.ts";
+import Migration0086 from "./Migrations/086_AgentGatewayCompatibility.ts";
+import Migration0085 from "./Migrations/085_AgentEventRelayAndApprovalForwarding.ts";
+import Migration0084 from "./Migrations/084_AgentApprovalDelegations.ts";
+import Migration0083 from "./Migrations/083_AgentEventFacts.ts";
 import * as Migrator from "effect/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -83,6 +90,7 @@ import Migration0077 from "./Migrations/077_ActiveTurnItemIndexes.ts";
 import Migration0078 from "./Migrations/078_ExcludeAttachmentPlaceholdersFromSearch.ts";
 import Migration0079 from "./Migrations/079_SubagentDeliveryState.ts";
 import Migration0080 from "./Migrations/080_ScheduledTaskOwner.ts";
+import Migration0082 from "./Migrations/082_AgentApprovalAuthorityAndReceipts.ts";
 import Migration0081 from "./Migrations/081_AgentEventSubscriptions.ts";
 
 const migrationEntries = [
@@ -168,6 +176,14 @@ const migrationEntries = [
   [79, "SubagentDeliveryState", Migration0079],
   [80, "ScheduledTaskOwner", Migration0080],
   [81, "AgentEventSubscriptions", Migration0081],
+  [82, "AgentApprovalAuthorityAndReceipts", Migration0082],
+  [83, "AgentEventFacts", Migration0083],
+  [84, "AgentApprovalDelegations", Migration0084],
+  [85, "AgentEventRelayAndApprovalForwarding", Migration0085],
+  [86, "AgentGatewayCompatibility", Migration0086],
+  [87, "AgentEventRelayAuthorityEvidence", Migration0087],
+  [88, "PeerLinkProvenance", Migration0088],
+  [89, "AgentApprovalFleetPolicyPublications", Migration0089],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

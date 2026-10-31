@@ -1,3 +1,6 @@
+import * as ApprovalAuthority from "./ApprovalAuthority.ts";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no generateKeyPairSync or sign.
 import * as NodeCrypto from "node:crypto";
 
@@ -778,3 +781,62 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
     ),
   );
 });
+
+it.effect(
+  "removal invalidates retained approval bearers and calls paused before the authority gate",
+  () =>
+    Effect.gen(function* () {
+      const auth = yield* EnvironmentAuth.EnvironmentAuth;
+      const authority = yield* ApprovalAuthority.ApprovalAuthority;
+      const sessions = yield* SessionStore.SessionStore;
+      const issued = yield* auth.issueMcpClientSession({
+        label: "Outside agent",
+        access: "full-access",
+        peerLink: false,
+        applicationId: "registered-app",
+        approvals: true,
+        approvalSubject: "owner",
+        client: { deviceType: "bot" },
+      });
+      const before = yield* authority.check(issued.sessionId);
+      const paused = yield* Deferred.make<void>();
+      const pending = yield* Deferred.await(paused).pipe(
+        Effect.andThen(authority.withGate(authority.check(issued.sessionId, before.revision))),
+        Effect.result,
+        Effect.forkScoped,
+      );
+      yield* authority.remove(issued.sessionId, false);
+      yield* Deferred.succeed(paused, undefined);
+      expect((yield* Fiber.join(pending))._tag).toBe("Failure");
+      const old = yield* sessions.verify(issued.token);
+      expect(old.scopes).not.toContain("orchestration:approve");
+      expect(old.scopes).toContain("orchestration:operate");
+      const unrelated = yield* auth.issueMcpClientSession({
+        label: "Same label",
+        access: "full-access",
+        peerLink: false,
+        applicationId: "other-app",
+        approvals: true,
+        approvalSubject: "owner",
+        client: { deviceType: "bot" },
+      });
+      expect((yield* authority.check(unrelated.sessionId)).session_id).not.toBe(issued.sessionId);
+      yield* auth.issueMcpClientSession({
+        label: "Other sign-in",
+        access: "full-access",
+        peerLink: false,
+        applicationId: "registered-app",
+        approvals: false,
+        approvalSubject: "owner",
+        client: { deviceType: "bot" },
+      });
+      expect((yield* authority.check(unrelated.sessionId)).enabled).toBe(1);
+      expect(
+        (yield* authority
+          .withoutFamilyApproval("other-app", "owner", Effect.fail("rollback consent"))
+          .pipe(Effect.result))._tag,
+      ).toBe("Failure");
+      expect((yield* authority.check(unrelated.sessionId)).enabled).toBe(1);
+      expect((yield* sessions.verify(unrelated.token)).scopes).toContain("orchestration:approve");
+    }).pipe(Effect.provide(layerEnvironmentAuth().pipe(Layer.provideMerge(NodeServices.layer)))),
+);

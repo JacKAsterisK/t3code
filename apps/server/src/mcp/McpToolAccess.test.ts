@@ -16,6 +16,7 @@ import * as Schema from "effect/Schema";
 import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 
 import { OrchestratorProjectionError } from "../orchestration-v2/Orchestrator.ts";
+import * as ApprovalAuthority from "../auth/ApprovalAuthority.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
@@ -485,4 +486,41 @@ it.effect("refuses a linked environment to a tool that acts as its calling threa
     ).pipe(Effect.scoped, Effect.exit);
     expect(Exit.isFailure(built) && Cause.hasDies(built.cause)).toBe(true);
   }),
+);
+
+it.effect.each([
+  ["authority_revoked", "approvals_not_granted"],
+  ["storage_unavailable", "orchestration_error"],
+] as const)(
+  "keeps approval admission %s distinct at the public MCP boundary",
+  ([reason, expected]) => {
+    const toolkit = Toolkit.make(
+      Tool.make("approves", {
+        ...probe,
+        parameters: Schema.Struct({ environmentId: Schema.optionalKey(EnvironmentId) }),
+        dependencies: [...probe.dependencies, ApprovalAuthority.ApprovalAuthority],
+      }),
+    );
+    const handlers = McpToolAccess.toLayer(toolkit, {
+      approves: McpToolAccess.approves(
+        () => [],
+        () => ran,
+      ),
+    });
+    return Effect.gen(function* () {
+      expect(yield* call("approves", fullAccessClient)).toBe(expected);
+    }).pipe(
+      Effect.provide(
+        McpHttpServer.toolkitRegistration(toolkit, handlers).pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provide(
+            Layer.mock(ApprovalAuthority.ApprovalAuthority)({
+              check: () => Effect.fail(new ApprovalAuthority.ApprovalAuthorityError({ reason })),
+            }),
+          ),
+          Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
+        ),
+      ),
+    );
+  },
 );

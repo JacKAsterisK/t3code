@@ -8,6 +8,7 @@ import {
   AuthProvidersManageScope,
   AuthSessionId,
   type AuthEnvironmentScope,
+  EnvironmentAuthorizationError,
   type ScheduledTaskListResult,
   WsScheduledTasksSubscribeRpc,
   EnvironmentId,
@@ -984,6 +985,7 @@ it.effect("stops showing webhook URLs once a connection's access narrows after i
       AuthOrchestrationReadScope,
       AuthOrchestrationOperateScope,
     ];
+    let unavailable = false;
     const server = yield* RpcServer.makeNoSerialization(
       RpcGroup.make(WsScheduledTasksSubscribeRpc),
       {
@@ -1007,7 +1009,17 @@ it.effect("stops showing webhook URLs once a connection's access narrows after i
           {},
           yield* ServerBrowser.ServerBrowser,
           () => Effect.void,
-          Effect.sync(() => current),
+          Effect.suspend(() =>
+            unavailable
+              ? Effect.fail(
+                  new EnvironmentAuthorizationError({
+                    message: "Current permissions are temporarily unavailable.",
+                    requiredScope: AuthOrchestrationReadScope,
+                    retryable: true,
+                  }),
+                )
+              : Effect.succeed(current),
+          ),
         ).pipe(
           Layer.provide(
             Layer.mergeAll(
@@ -1040,6 +1052,14 @@ it.effect("stops showing webhook URLs once a connection's access narrows after i
       payload: {},
       headers: Headers.empty,
     });
+    yield* Queue.offer(lists, list);
+    assert.isDefined((yield* Queue.take(responses)).tasks[0]?.webhook);
+    yield* server.write(0, { _tag: "Ack", requestId });
+    unavailable = true;
+    yield* Queue.offer(lists, list);
+    assert.isUndefined((yield* Queue.take(responses)).tasks[0]?.webhook);
+    yield* server.write(0, { _tag: "Ack", requestId });
+    unavailable = false;
     yield* Queue.offer(lists, list);
     assert.isDefined((yield* Queue.take(responses)).tasks[0]?.webhook);
     yield* server.write(0, { _tag: "Ack", requestId });

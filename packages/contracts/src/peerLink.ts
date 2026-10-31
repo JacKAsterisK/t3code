@@ -40,6 +40,7 @@ export const PeerLinkCreateInput = Schema.Struct({
   /** A pairing code from the peer (`t3 pair` there, or its Connections settings). */
   pairingCode: TrimmedNonEmptyString,
   access: AuthMcpClientAccess,
+  approvals: Schema.optionalKey(Schema.Boolean),
   /**
    * The environment the user means. Addresses that answer as another one are
    * skipped, and only those that answer as this one are kept.
@@ -91,6 +92,7 @@ export const PeerLinkRequestAnswerInput = Schema.Struct({
       /** The addresses the client knows for that machine, most preferred first. */
       urls: Schema.NonEmptyArray(TrimmedNonEmptyString),
       access: AuthMcpClientAccess,
+      approvals: Schema.optionalKey(Schema.Boolean),
       pairingCode: TrimmedNonEmptyString,
     }),
     /** Answers with a machine this environment is already linked to, as it is. */

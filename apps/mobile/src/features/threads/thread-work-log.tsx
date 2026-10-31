@@ -1,3 +1,4 @@
+import { approvalDeliveryText } from "@t3tools/shared/approvalPresentation";
 import { Button } from "../../components/ui/Button";
 import { ThreadSubagentGroup } from "./thread-subagent-group";
 import { ProposedPlanCard } from "./ProposedPlanCard";
@@ -954,6 +955,32 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
       </WorkLogPressable>
     );
   }
+  if (failureItem?.type === "approval_request" && failureItem.approvalDelivery !== undefined)
+    return (
+      <View className="gap-1 rounded-xl border border-border p-3">
+        <Text className="font-sans text-sm text-foreground">
+          {approvalDeliveryText(failureItem.approvalDelivery)}
+        </Text>
+        {failureItem.approval ? (
+          <Text selectable className="font-mono text-xs text-foreground-secondary">
+            Permission lasts for this provider turn. {failureItem.approval.grant.expiresWhen}.{" "}
+            {JSON.stringify(failureItem.approval.grant.permission, null, 2)}
+          </Text>
+        ) : null}
+        {failureItem.resolvedBy ? (
+          <Text className="font-sans text-xs text-foreground-secondary">
+            Submitted by {failureItem.resolvedBy.label}, an authenticated{" "}
+            {failureItem.resolvedBy.kind === "mcp_client" ? "agent" : "user"} session.
+          </Text>
+        ) : null}
+        {failureItem.resolvedBy?.assertion ? (
+          <Text className="font-sans text-xs text-foreground-secondary">
+            Agent assertion: for {failureItem.resolvedBy.assertion.onBehalfOf}.{" "}
+            {failureItem.resolvedBy.assertion.authorization}
+          </Text>
+        ) : null}
+      </View>
+    );
   const notifiedSubagentThreadId =
     row.projectedItem.item.type === "notification"
       ? notificationChildThreadId(row.projectedItem.item.source)

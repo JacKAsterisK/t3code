@@ -16,6 +16,8 @@ import * as HttpClientRequest from "effect/http/HttpClientRequest";
 
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PeerLinks from "./PeerLinks.ts";
+import * as Network from "./PeerNetworkDispatch.ts";
+import { INITIATING_CLIENT_HEADER } from "../approvals/ApprovalLaunchProvenance.ts";
 
 /** The only MCP protocol version a T3 Code `/mcp` registers. */
 const PROTOCOL_VERSION = "2025-06-18";
@@ -45,6 +47,11 @@ export class PeerMcpClient extends Context.Service<
        * (`McpToolAccess.writesOf`): the rule the peer applies to a read-only link.
        */
       readonly writes: boolean;
+      readonly initiatingClientId?: string;
+      /** Internal live admission, after DNS and before every guarded send. */
+      readonly beforeSend?: Effect.Effect<void, OrchestratorMcpFailure>;
+      /** Guarded tools/call deadline, after link probing; setup sends retain their own bounds. */
+      readonly requestTimeoutMs?: number;
       readonly success: S;
     }) => Effect.Effect<S["Type"], OrchestratorMcpFailure>;
   }
@@ -71,6 +78,11 @@ const writeRefused = new OrchestratorMcpFailure({
   message:
     "This tool changes the linked environment, and this machine's Machine access list makes it read-only there. Reading there still works.",
 });
+
+class BeforeSendRefused extends Schema.TaggedError<BeforeSendRefused>()(
+  "PeerMcpBeforeSendRefused",
+  { failure: OrchestratorMcpFailure },
+) {}
 
 const ToolCallResponse = Schema.Struct({
   result: Schema.optional(
@@ -124,6 +136,7 @@ const make = Effect.gen(function* () {
   const links = yield* PeerLinks.PeerLinks;
   const ceiling = yield* PeerWriteCeiling;
   const httpClient = yield* HttpClient.HttpClient;
+  const dispatch = yield* Network.capture;
   // One MCP session per peer and address, reused across calls. The peer keeps
   // sessions in memory, so a restart there answers 404 and we start a new one.
   const sessions = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
@@ -138,22 +151,37 @@ const make = Effect.gen(function* () {
           .pipe(Effect.flatMap((writable) => (writable ? Effect.void : Effect.fail(writeRefused))))
       : Effect.void;
 
-  const post = (url: string, token: string, body: unknown, headers: Record<string, string>) =>
-    httpClient.execute(
-      HttpClientRequest.post(`${url}/mcp`).pipe(
-        HttpClientRequest.setHeaders({
-          accept: "application/json, text/event-stream",
-          authorization: `Bearer ${token}`,
-          ...headers,
-        }),
-        HttpClientRequest.setBody(HttpBody.text(JSON.stringify(body), "application/json")),
-      ),
+  const post = (
+    url: string,
+    token: string,
+    body: unknown,
+    headers: Record<string, string>,
+    beforeSend?: Effect.Effect<void, OrchestratorMcpFailure>,
+    timeoutMs = 15_000,
+  ) => {
+    const request = HttpClientRequest.post(`${url}/mcp`).pipe(
+      HttpClientRequest.setHeaders({
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token}`,
+        ...headers,
+      }),
+      HttpClientRequest.setBody(HttpBody.text(JSON.stringify(body), "application/json")),
     );
+    return beforeSend === undefined
+      ? httpClient.execute(request)
+      : dispatch
+          .execute(
+            request,
+            beforeSend.pipe(Effect.mapError((failure) => new BeforeSendRefused({ failure }))),
+          )
+          .pipe(Effect.timeout(timeoutMs));
+  };
 
   const openSession = Effect.fn("PeerMcpClient.openSession")(function* (
     url: string,
     token: string,
     limitHeader: Record<string, string>,
+    beforeSend?: Effect.Effect<void, OrchestratorMcpFailure>,
   ) {
     const initialized = yield* post(
       url,
@@ -169,6 +197,7 @@ const make = Effect.gen(function* () {
         },
       },
       limitHeader,
+      beforeSend,
     );
     const sessionId = initialized.headers["mcp-session-id"];
     if (initialized.status === 403) return yield* linkedEnvironmentsOffThere;
@@ -186,6 +215,7 @@ const make = Effect.gen(function* () {
       token,
       { jsonrpc: "2.0", method: "notifications/initialized" },
       { ...limitHeader, "mcp-session-id": sessionId, "mcp-protocol-version": PROTOCOL_VERSION },
+      beforeSend,
     );
     return sessionId;
   });
@@ -196,6 +226,9 @@ const make = Effect.gen(function* () {
         .resolve(input.environmentId)
         .pipe(Effect.mapError(fromLinkError));
       const limitHeader = {
+        ...(input.initiatingClientId === undefined
+          ? {}
+          : { [INITIATING_CLIENT_HEADER]: input.initiatingClientId }),
         [McpInvocationContext.MODE_LIMIT_HEADER]: `${input.limits.runtimeMode}/${input.limits.interactionMode}`,
       };
       const sessionKey = `${input.environmentId} ${resolved.url}`;
@@ -218,14 +251,23 @@ const make = Effect.gen(function* () {
                 "mcp-session-id": sessionId,
                 "mcp-protocol-version": PROTOCOL_VERSION,
               },
+              input.beforeSend,
+              input.requestTimeoutMs,
             ),
           ),
         );
       const existing = (yield* Ref.get(sessions)).get(sessionKey);
-      const sessionId = existing ?? (yield* openSession(resolved.url, resolved.token, limitHeader));
+      const sessionId =
+        existing ??
+        (yield* openSession(resolved.url, resolved.token, limitHeader, input.beforeSend));
       let response = yield* callOnce(sessionId);
       if (response.status === 404) {
-        const renewed = yield* openSession(resolved.url, resolved.token, limitHeader);
+        const renewed = yield* openSession(
+          resolved.url,
+          resolved.token,
+          limitHeader,
+          input.beforeSend,
+        );
         yield* Ref.update(sessions, (current) => new Map(current).set(sessionKey, renewed));
         response = yield* callOnce(renewed);
       } else if (existing === undefined) {
@@ -291,13 +333,21 @@ const make = Effect.gen(function* () {
         Effect.andThen(
           effect.pipe(
             Effect.tapError((error) =>
-              error === writeRefused
+              error === writeRefused || error._tag === "PeerMcpBeforeSendRefused"
                 ? Effect.void
                 : links.recordOutcome(input.environmentId, { error: error.message }),
             ),
             Effect.tap(() => links.recordOutcome(input.environmentId, { error: null })),
             // Recorded above with the transport's own message; the agent hears it plainly.
             Effect.catchTags({
+              PeerMcpBeforeSendRefused: (error) => Effect.fail(error.failure),
+              TimeoutError: () =>
+                Effect.fail(
+                  new OrchestratorMcpFailure({
+                    code: "orchestration_error",
+                    message: "The linked environment stopped answering.",
+                  }),
+                ),
               HttpClientError: () =>
                 Effect.fail(
                   new OrchestratorMcpFailure({

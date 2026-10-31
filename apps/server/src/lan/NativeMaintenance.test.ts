@@ -1785,3 +1785,68 @@ effectIt.effect("v2 inspection still refuses a concurrent durable write", () =>
     assert.isTrue(changed);
   }).pipe(Effect.provide(Layer.mergeAll(testLayer, NodeServices.layer)), Effect.scoped),
 );
+
+effectIt.effect(
+  "approval audit rows and secret references survive maintenance without changing work generation",
+  () =>
+    Effect.gen(function* () {
+      const { dbPath, insert } = yield* fixtureAtMigration();
+      const before = NativeMaintenance.inspectStoppedRepairWork(dbPath).workGeneration;
+      yield* insert("agent_approval_authorizations", "fixture", {
+        session_id: "approval-session",
+        application_id: "app",
+        consent_family_id: "owner",
+        initiating_client_id: "client",
+      });
+      for (const state of ["prepared", "delivery_unknown"])
+        yield* insert("agent_approval_receipts", "fixture", {
+          receipt_id: state,
+          role: "local",
+          principal_id: "session:approval-session",
+          client_request_id: state,
+          command_id: `approval:${state}`,
+          state,
+          operation_json: '{"consent":"retained"}',
+          actor_json: '{"kind":"mcp_client"}',
+        });
+      yield* insert("agent_event_subscriptions", "fixture", {
+        subscription_id: "sub-approval-preserved",
+        secret_ref: "agent-events-preserved",
+        state: "active",
+      });
+      assert.equal(NativeMaintenance.inspectStoppedRepairWork(dbPath).workGeneration, before);
+      const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+      try {
+        assert.deepEqual(
+          db
+            .prepare(
+              "SELECT state, operation_json, actor_json FROM agent_approval_receipts ORDER BY state",
+            )
+            .all()
+            .map((row) => ({ ...row })),
+          [
+            {
+              state: "delivery_unknown",
+              operation_json: '{"consent":"retained"}',
+              actor_json: '{"kind":"mcp_client"}',
+            },
+            {
+              state: "prepared",
+              operation_json: '{"consent":"retained"}',
+              actor_json: '{"kind":"mcp_client"}',
+            },
+          ],
+        );
+        assert.equal(
+          db
+            .prepare(
+              "SELECT secret_ref FROM agent_event_subscriptions WHERE subscription_id = 'sub-approval-preserved'",
+            )
+            .get()!.secret_ref,
+          "agent-events-preserved",
+        );
+      } finally {
+        db.close();
+      }
+    }).pipe(Effect.provide(Layer.mergeAll(testLayer, NodeServices.layer)), Effect.scoped),
+);

@@ -1,5 +1,6 @@
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
@@ -244,4 +245,74 @@ it.live("reports the stderr error when the process exits before initialize", () 
       "Codex App Server process exited with code 1: Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: npm install -g @openai/codex@latest",
     );
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "captures unknown raw permission authority before native dispatch decoding strips it",
+  () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(stdio);
+      const initialized = yield* client
+        .request("initialize", { clientInfo: { name: "test", version: "1" } })
+        .pipe(Effect.forkScoped);
+      const initialize = JSON.parse(yield* Queue.take(output)) as { id: number };
+      yield* Queue.offer(
+        input,
+        new TextEncoder().encode(
+          JSON.stringify({
+            id: initialize.id,
+            result: {
+              userAgent: "Codex/0.159.0",
+              codexHome: "/tmp",
+              platformFamily: "unix",
+              platformOs: "linux",
+            },
+          }) + "\n",
+        ),
+      );
+      yield* Fiber.join(initialized);
+      const observed = yield* Queue.unbounded<{
+        payload: unknown;
+        context: CodexClient.ServerRequestContext;
+      }>();
+      yield* client.handleServerRequest("item/permissions/requestApproval", (payload, context) =>
+        Queue.offer(observed, { payload, context }).pipe(
+          Effect.as({ permissions: {}, scope: "turn" as const }),
+        ),
+      );
+      const permissions = { network: { enabled: true, unknownAuthority: true } };
+      yield* Queue.offer(
+        input,
+        new TextEncoder().encode(
+          JSON.stringify({
+            id: 42,
+            method: "item/permissions/requestApproval",
+            params: {
+              cwd: "/repo",
+              itemId: "item",
+              threadId: "thread",
+              turnId: "turn",
+              startedAtMs: 1,
+              permissions,
+            },
+          }) + "\n",
+        ),
+      );
+      const event = yield* Queue.take(observed);
+      assert.equal(event.context.permissionEvidence?.supported, false);
+      assert.equal(event.context.nativeRequestId, 42);
+      assert.deepEqual(event.payload, {
+        cwd: "/repo",
+        itemId: "item",
+        threadId: "thread",
+        turnId: "turn",
+        startedAtMs: 1,
+        permissions: { network: { enabled: true } },
+      });
+      assert.deepEqual(JSON.parse(yield* Queue.take(output)), {
+        id: 42,
+        result: { permissions: {}, scope: "turn" },
+      });
+    }).pipe(Effect.scoped),
 );

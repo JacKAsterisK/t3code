@@ -342,8 +342,13 @@ export const layer: Layer.Layer<
         // Never hold a transaction or the reader lock across a yield or a rest.
         yield* Effect.yieldNow;
         if (obsolete.length > 0) {
-          yield* sql`DELETE FROM orchestration_events WHERE sequence IN ${sql.in(obsolete)}`;
-          deletedEventCount += obsolete.length;
+          const deleted = yield* sql<{ readonly sequence: number }>`DELETE FROM orchestration_events
+            WHERE sequence IN ${sql.in(obsolete)} AND NOT EXISTS (
+              SELECT 1 FROM agent_event_source_state AS source WHERE source.id = 1
+                AND source.activated_at IS NOT NULL AND source.bootstrap_sequence IS NOT NULL
+                AND orchestration_events.sequence >= COALESCE(source.rebuild_sequence, source.bootstrap_sequence)
+            ) RETURNING sequence`;
+          deletedEventCount += deleted.length;
           yield* Effect.yieldNow;
         }
         throughSequence =

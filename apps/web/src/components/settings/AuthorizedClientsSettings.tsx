@@ -1,3 +1,6 @@
+import { ApprovalManagementSettings } from "./ApprovalManagementSettings";
+import { ApprovalPermissionRemoval } from "./ApprovalPermissionRemoval";
+import { AuthOrchestrationApproveScope } from "@t3tools/contracts";
 import { AUTH_SCOPE_OPTIONS as PAIRING_SCOPE_OPTIONS } from "@t3tools/shared/authScopeOptions";
 import { PlusIcon, QrCodeIcon } from "lucide-react";
 import { type ReactNode, memo, useId, useState } from "react";
@@ -494,6 +497,7 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
   onRevokeSession,
   canRevoke,
 }: ConnectedClientListRowProps) {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const nowMs = useNowSecond();
   const isLive = clientSession.current || clientSession.connected;
   const lastConnectedAt = clientSession.lastConnectedAt;
@@ -545,6 +549,13 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
           </p>
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+          {primaryEnvironmentId !== null &&
+          clientSession.scopes.includes(AuthOrchestrationApproveScope) ? (
+            <ApprovalPermissionRemoval
+              environmentId={primaryEnvironmentId}
+              sessionId={clientSession.sessionId}
+            />
+          ) : null}
           {!clientSession.current ? (
             <Button
               size="xs"
@@ -578,6 +589,7 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
 }: AuthorizedClientsHeaderActionProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [approvalGrant, setApprovalGrant] = useState(false);
   const [pairingLabel, setPairingLabel] = useState("");
   const [pairingScopes, setPairingScopes] = useState<ReadonlyArray<AuthGrantScope>>([
     ...AuthStandardClientScopes,
@@ -598,9 +610,11 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
       const created = await createServerPairingCredential({
         label: pairingLabel,
         scopes: selectedScopes,
+        approvalGrant,
       });
       onPairingLinkCreated(created);
       setPairingLabel("");
+      setApprovalGrant(false);
       setPairingScopes(
         AuthStandardClientScopes.filter((scope) => delegatableScopes.includes(scope)),
       );
@@ -740,6 +754,17 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
                   ),
                 )}
               </div>
+              <label className="flex items-start gap-3 text-xs">
+                <Checkbox
+                  checked={approvalGrant}
+                  disabled={isCreatingPairingLink}
+                  onCheckedChange={(checked) => setApprovalGrant(checked === true)}
+                />
+                <span>
+                  Create an approval-capable agent code. The agent sign-in must separately opt in,
+                  and each request still needs consent for its exact permission and duration.
+                </span>
+              </label>
               {selectedScopes.length === 0 ? (
                 <p className="text-xs text-destructive">Select at least one permission.</p>
               ) : selectedScopes.includes(AuthAccessWriteScope) ? (
@@ -799,8 +824,10 @@ export const PairingClientsList = memo(function PairingClientsList({
   onRevokeClientSession,
   canRevoke,
 }: PairingClientsListProps) {
+  const environmentId = usePrimaryEnvironmentId();
   return (
     <>
+      {environmentId ? <ApprovalManagementSettings environmentId={environmentId} /> : null}
       {pairingLinks.map((pairingLink) => (
         <PairingLinkListRow
           key={pairingLink.id}

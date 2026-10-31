@@ -1,3 +1,4 @@
+import * as ApprovalAuthority from "../auth/ApprovalAuthority.ts";
 import {
   type EnvironmentId,
   type OrchestrationV2LinkOrigin,
@@ -197,6 +198,68 @@ export const writesWithCapability = <P, A, E, R>(handle: (params: P) => Effect.E
     () => writingCaller,
     always,
   );
+
+export const approves = <P extends { readonly environmentId?: EnvironmentId }, A, E, R>(
+  threads: (params: P) => ReadonlyArray<ThreadId | undefined>,
+  handle: (params: P) => Effect.Effect<A, E, R>,
+) => {
+  const writing = writesThreads(threads, handle);
+  return declare(
+    (params: P) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        if (scope.thread !== undefined)
+          return yield* new OrchestratorMcpFailure({
+            code: "thread_caller_refused",
+            message: "Permission responses require an outside client.",
+          });
+        if (scope.client?.taskOnly === true)
+          return yield* new OrchestratorMcpFailure({
+            code: "task_only_refused",
+            message: "Task-only access cannot answer permissions.",
+          });
+        if (scope.client === undefined || scope.client.linked === true)
+          return yield* new OrchestratorMcpFailure({
+            code:
+              scope.client?.linked === true &&
+              params.environmentId !== undefined &&
+              params.environmentId !== scope.environmentId
+                ? "forwarding_chain_refused"
+                : "approvals_not_granted",
+            message:
+              "Approval responses require a local initiating client and one authenticated hop.",
+          });
+        const authority = yield* ApprovalAuthority.ApprovalAuthority;
+        yield* authority.check(scope.client.sessionId).pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorMcpFailure({
+                code:
+                  cause.reason === "storage_unavailable"
+                    ? "orchestration_error"
+                    : "approvals_not_granted",
+                message:
+                  cause.reason === "storage_unavailable"
+                    ? "Approval authority could not be checked. Retry the same request."
+                    : "Approval permission was not granted or has been removed.",
+              }),
+          ),
+        );
+        return yield* params.environmentId !== undefined &&
+        params.environmentId !== scope.environmentId
+          ? handle(params)
+          : checkedHandler(writing)(params);
+      }),
+    () =>
+      Effect.fail(
+        new OrchestratorMcpFailure({
+          code: "forwarding_unavailable",
+          message: "Linked approval responses require the dedicated one-hop transport.",
+        }),
+      ),
+    always,
+  );
+};
 
 export const writesThreads = <P, A, E, R>(
   threads: (params: P) => ReadonlyArray<ThreadId | undefined>,
@@ -411,7 +474,8 @@ const gateTaskOnly = <Handlers>(handlers: Handlers): Handlers =>
               scope.client?.taskOnly === true && !taskOnlyTools.has(name)
                 ? Effect.fail(
                     new OrchestratorMcpFailure({
-                      code: "capability_denied",
+                      code:
+                        name === "t3_approval_request" ? "task_only_refused" : "capability_denied",
                       message:
                         "This task-only credential may only use the approved LAN task tools.",
                     }),

@@ -264,7 +264,7 @@ export const layerAuthority = (verdicts: Verdicts) =>
 export const allowed = (sessionExpiresAt = 8.64e15, subject = "mcp-client:local") =>
   ({ _tag: "Allowed", sessionExpiresAt, subject }) as const;
 
-/** A fresh in-memory database with every migration, 081 included. */
+/** A fresh in-memory database with every canonical migration. */
 export const layerDatabase = Layer.fresh(SqlitePersistence.layerMemory);
 
 /** A file database, so two server generations can share it across a restart. */

@@ -12,6 +12,9 @@ import packageJson from "../../../package.json" with { type: "json" };
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as AgentEventAuthority from "../../agentEvents/AgentEventAuthority.ts";
 import * as AgentEventDelivery from "../../agentEvents/AgentEventDelivery.ts";
+import * as AgentFactAuthority from "../../agentEvents/AgentFactAuthority.ts";
+import * as AgentFactRuntime from "../../agentEvents/AgentFactRuntime.ts";
+import * as ProjectionStore from "../../orchestration-v2/ProjectionStore.ts";
 import * as Subscriptions from "../../agentEvents/AgentEventSubscriptions.ts";
 import { layerTransport, WebhookTransport } from "../../agentEvents/WebhookSender.ts";
 import * as ServerSettings from "../../serverSettings.ts";
@@ -254,7 +257,10 @@ export const layer = Layer.effect(McpEventsEndpoint, make);
 
 /** The endpoint with its delivery worker, authority checks and webhook transport. */
 export const layerLive = layer.pipe(
+  Layer.provideMerge(AgentFactRuntime.layer),
   Layer.provideMerge(AgentEventDelivery.layer),
+  Layer.provideMerge(AgentFactAuthority.layer),
+  Layer.provideMerge(ProjectionStore.layer),
   Layer.provideMerge(AgentEventAuthority.layer),
   Layer.provideMerge(layerTransport),
 );

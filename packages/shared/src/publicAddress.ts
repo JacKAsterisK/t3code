@@ -27,12 +27,16 @@ for (const [network, prefix] of [
 ] as const) {
   NON_PUBLIC.addSubnet(network, prefix, "ipv4");
 }
-// Block IPv4-carrying IPv6 ranges that translators may route without checking.
+// Non-global IPv6 ranges, including IPv4 forms that translators may route without checking.
 for (const [network, prefix] of [
   ["::", 96],
   ["::ffff:0:0:0", 96],
   ["64:ff9b:1::", 48],
   ["100::", 64],
+  ["100:0:0:1::", 64],
+  ["2001:2::", 48],
+  ["3fff::", 20],
+  ["5f00::", 16],
   ["2001::", 32],
   ["2001:db8::", 32],
   ["fc00::", 7],

@@ -58,6 +58,8 @@ export class WebhookTransport extends Context.Service<
       readonly url: URL;
       readonly headers: Readonly<Record<string, string>>;
       readonly body: string;
+      readonly expiresAt?: number;
+      readonly canDispatch?: Effect.Effect<boolean>;
     }) => Effect.Effect<PostOutcome>;
   }
 >()("t3/agentEvents/WebhookSender/WebhookTransport") {}
@@ -108,22 +110,41 @@ const classify = (error: unknown): PostFailureReason => {
  * checks the certificate against the original hostname.
  */
 export const makeTransport = (options: WebhookTransportOptions): WebhookTransport["Service"] => ({
-  post: ({ url, headers, body }) => {
+  post: Effect.fn("WebhookTransport.post")(function* ({
+    url,
+    headers,
+    body,
+    expiresAt,
+    canDispatch,
+  }) {
+    const clock = yield* Clock.Clock;
+    const timeoutMs = Math.min(
+      options.timeoutMs ?? CALLBACK_TIMEOUT_MS,
+      expiresAt === undefined ? Infinity : expiresAt - clock.currentTimeMillisUnsafe(),
+    );
+    if (timeoutMs <= 0) return { _tag: "Failed", reason: "timeout" } as const;
     const host = url.hostname.startsWith("[") ? url.hostname.slice(1, -1) : url.hostname;
-    const attempt = Effect.callback<PostOutcome>((resume) => {
-      let request: ReturnType<typeof NodeHttps.request> | undefined;
-      let settled = false;
-      const finish = (outcome: PostOutcome) => {
-        if (settled) return;
-        settled = true;
-        resume(Effect.succeed(outcome));
-      };
-      void resolveAllowedAddresses(host, {
-        refuses: options.refuses,
-        ...(options.resolve === undefined ? {} : { resolve: options.resolve }),
-      }).then((addresses) => {
-        if (settled) return;
-        if (addresses === undefined) return finish({ _tag: "Failed", reason: "address_refused" });
+    const attempt = Effect.gen(function* () {
+      const addresses = yield* Effect.promise(() =>
+        resolveAllowedAddresses(host, {
+          refuses: options.refuses,
+          ...(options.resolve === undefined ? {} : { resolve: options.resolve }),
+        }),
+      );
+      if (addresses === undefined) return { _tag: "Failed", reason: "address_refused" } as const;
+      if (canDispatch !== undefined && !(yield* canDispatch)) return yield* Effect.interrupt;
+      return yield* Effect.callback<PostOutcome>((resume) => {
+        if (expiresAt !== undefined && clock.currentTimeMillisUnsafe() >= expiresAt) {
+          resume(Effect.succeed({ _tag: "Failed", reason: "timeout" }));
+          return;
+        }
+        let request: ReturnType<typeof NodeHttps.request> | undefined;
+        let settled = false;
+        const finish = (outcome: PostOutcome) => {
+          if (settled) return;
+          settled = true;
+          resume(Effect.succeed(outcome));
+        };
         try {
           request = NodeHttps.request({
             protocol: "https:",
@@ -171,17 +192,17 @@ export const makeTransport = (options: WebhookTransportOptions): WebhookTranspor
         });
         request.on("error", (error) => finish({ _tag: "Failed", reason: classify(error) }));
         request.end(body);
-      });
-      return Effect.sync(() => {
-        settled = true;
-        request?.destroy();
+        return Effect.sync(() => {
+          settled = true;
+          request?.destroy();
+        });
       });
     });
-    return attempt.pipe(
-      Effect.timeoutOption(Duration.millis(options.timeoutMs ?? CALLBACK_TIMEOUT_MS)),
+    return yield* attempt.pipe(
+      Effect.timeoutOption(Duration.millis(timeoutMs)),
       Effect.map(Option.getOrElse((): PostOutcome => ({ _tag: "Failed", reason: "timeout" }))),
     );
-  },
+  }),
 });
 
 /**
@@ -252,6 +273,8 @@ export const postSigned = Effect.fn("AgentEvents.postSigned")(function* (input: 
   readonly webhookId: string;
   readonly keys: ReadonlyArray<Uint8Array>;
   readonly body: string;
+  readonly expiresAt?: number;
+  readonly canDispatch?: Effect.Effect<boolean>;
 }) {
   const transport = yield* WebhookTransport;
   const timestampSeconds = Math.floor((yield* Clock.currentTimeMillis) / 1000);
@@ -259,6 +282,8 @@ export const postSigned = Effect.fn("AgentEvents.postSigned")(function* (input: 
     url: input.url,
     body: input.body,
     headers: signedHeaders({ ...input, timestampSeconds }),
+    ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+    ...(input.canDispatch === undefined ? {} : { canDispatch: input.canDispatch }),
   });
 });
 

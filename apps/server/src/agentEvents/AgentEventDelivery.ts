@@ -4,7 +4,9 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as FiberSet from "effect/FiberSet";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -99,6 +101,11 @@ export const attempt = Effect.fn("AgentEventDelivery.attempt")(function* (claim:
 }) {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const authority = yield* AgentEventAuthority.AgentEventAuthority;
+  const settings = yield* ServerSettings.ServerSettingsService;
+  const enabled = settings.getSettings.pipe(
+    Effect.map((current) => current.agentEventsEnabled),
+    Effect.orElseSucceed(() => false),
+  );
   const now = yield* Clock.currentTimeMillis;
   const subscription = yield* Store.findSubscription(claim.subscriptionId);
   const delivery = yield* Store.findDelivery(claim.subscriptionId, claim.eventId);
@@ -168,7 +175,7 @@ export const attempt = Effect.fn("AgentEventDelivery.attempt")(function* (claim:
     return "rejected" as const;
   }
   const sendAt = yield* Clock.currentTimeMillis;
-  if (sendAt >= subscription.expiresAt) {
+  if (sendAt >= subscription.expiresAt || !(yield* enabled)) {
     yield* release("pending", null);
     return "skipped" as const;
   }
@@ -178,8 +185,14 @@ export const attempt = Effect.fn("AgentEventDelivery.attempt")(function* (claim:
     webhookId: event.eventId,
     keys: keys.flatMap((key) => (Option.isSome(key) ? [key.value] : [])),
     body,
+    expiresAt: subscription.expiresAt,
+    canDispatch: enabled,
   });
   const finishedAt = yield* Clock.currentTimeMillis;
+  if (finishedAt >= subscription.expiresAt || !(yield* enabled)) {
+    yield* release("pending", null, finishedAt);
+    return "skipped" as const;
+  }
   const status = outcome._tag === "Response" ? outcome.status : null;
   const record = (
     state: "pending" | "delivered" | "rejected" | "abandoned",
@@ -332,22 +345,23 @@ export const layer = Layer.effect(
       | ServerConfig.ServerConfig
       | FileSystem.FileSystem
       | WebhookTransport
+      | ServerSettings.ServerSettingsService
     >();
     const fleetAccess = yield* Effect.serviceOption(FleetAccessPolicy.FleetAccess);
     const enabled = settings.getSettings.pipe(
       Effect.map((current) => current.agentEventsEnabled),
       Effect.orElseSucceed(() => false),
     );
+    const settingsChanges = yield* settings.subscribeChanges;
     // Turning events on takes a restart (the /mcp protocol list is fixed then); off stops at once.
     if (!(yield* enabled)) return AgentEventDelivery.of({ wake: Effect.void });
-    // Sends belong to the worker: shutting it down interrupts them, and the next start resends.
-    const workerScope = yield* Effect.scope;
+
     const inFlight = yield* Ref.make(0);
     const wakeups = yield* Queue.sliding<void>(1);
     const sweeps = yield* Queue.sliding<void>(1);
     const quietly =
       (label: string) =>
-      <A, E>(effect: Effect.Effect<A, E>) =>
+      <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         effect.pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning(`Agent events ${label} failed.`, { cause }),
@@ -361,22 +375,76 @@ export const layer = Layer.effect(
     );
     yield* removeOrphanSecrets().pipe(Effect.provide(context), quietly("secret cleanup"));
 
-    const send = (claim: { readonly subscriptionId: string; readonly eventId: string }) =>
+    type Claim = { readonly subscriptionId: string; readonly eventId: string };
+    type Cleanup = Claim & { readonly nextAttemptAt: number };
+    const cleanup = yield* Ref.make(new Map<string, Cleanup>());
+    const releaseClaim = Effect.fn("AgentEventDelivery.releaseClaim")(function* (claim: Cleanup) {
+      const now = yield* Clock.currentTimeMillis;
+      yield* Store.finishAttempt({
+        ...claim,
+        state: "pending",
+        attempted: false,
+        nextAttemptAt: claim.nextAttemptAt,
+        lastStatus: null,
+        lastError: "delivery_interrupted",
+        now,
+      });
+      yield* Ref.update(cleanup, (pending) => {
+        const next = new Map(pending);
+        next.delete(claim.subscriptionId);
+        return next;
+      });
+    });
+    const retryCleanup = Effect.gen(function* () {
+      for (const claim of (yield* Ref.get(cleanup)).values())
+        yield* releaseClaim(claim).pipe(quietly("claim cleanup"));
+    }).pipe(Effect.provide(context));
+    yield* Effect.addFinalizer(() => retryCleanup);
+    const sends = yield* FiberSet.make<void>();
+    const send = (claim: Claim) =>
       attempt(claim).pipe(
+        Effect.onExit((exit) =>
+          Exit.isSuccess(exit)
+            ? Effect.void
+            : Effect.gen(function* () {
+                const now = yield* Clock.currentTimeMillis;
+                const pending = {
+                  ...claim,
+                  nextAttemptAt: now + (Exit.hasInterrupts(exit) ? 0 : UNAVAILABLE_RETRY_MS),
+                };
+                yield* Ref.update(cleanup, (waiting) =>
+                  new Map(waiting).set(claim.subscriptionId, pending),
+                );
+                yield* releaseClaim(pending).pipe(quietly("claim cleanup"));
+              }),
+        ),
+        Effect.ensuring(
+          Ref.update(inFlight, (count) => count - 1).pipe(
+            Effect.andThen(Queue.offer(wakeups, undefined)),
+          ),
+        ),
         Effect.provide(context),
         quietly("delivery"),
-        Effect.ensuring(Ref.update(inFlight, (count) => count - 1)),
-        Effect.andThen(Queue.offer(wakeups, undefined)),
       );
-    const tick = Effect.gen(function* () {
-      if (!(yield* enabled)) return;
-      const now = yield* Clock.currentTimeMillis;
-      yield* Store.expireDue(now);
-      const free = MAX_IN_FLIGHT - (yield* Ref.get(inFlight));
-      const claims = yield* Store.claimDue(now, free);
-      yield* Ref.update(inFlight, (count) => count + claims.length);
-      for (const claim of claims) yield* Effect.forkIn(send(claim), workerScope);
-    }).pipe(Effect.provide(context), quietly("worker"));
+    const tick = Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        yield* retryCleanup;
+        if (!(yield* enabled)) return;
+        const now = yield* Clock.currentTimeMillis;
+        yield* Store.expireDue(now);
+        const free = MAX_IN_FLIGHT - (yield* Ref.get(inFlight));
+        const claims = yield* Store.claimDue(now, free);
+        yield* Ref.update(inFlight, (count) => count + claims.length);
+        for (const claim of claims) yield* FiberSet.run(sends, restore(send(claim)));
+      }),
+    ).pipe(Effect.provide(context), quietly("worker"));
+    yield* Effect.forkScoped(
+      Stream.runForEach(settingsChanges, (current) =>
+        (current.agentEventsEnabled ? Effect.void : FiberSet.clear(sends)).pipe(
+          Effect.andThen(Queue.offer(wakeups, undefined)),
+        ),
+      ),
+    );
 
     yield* Effect.forkScoped(
       Effect.forever(

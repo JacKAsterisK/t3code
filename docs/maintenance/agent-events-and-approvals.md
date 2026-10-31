@@ -106,8 +106,11 @@ at once.
   second and wakes early after a subscribe.
   - At most one request is in flight per subscription and four overall, each
     taking the subscription's lowest due sequence.
-  - The worker owns its sends: a shutdown interrupts them, and a send left
-    `sending` goes again on the next start with the same event id.
+  - Disabling events or shutting down interrupts worker-owned sends and
+    releases their claims to `pending`. A hard crash can leave `sending` rows;
+    the next start retries them with the same event id.
+  - An internal failure releases its claim with a 30-second backoff. Failed
+    cleanup writes are retried on later ticks, even while events are disabled.
   - It sweeps every 60 seconds, and at once when a session is removed or fleet
     access changes. It prunes hourly and removes orphaned secret files at
     startup.
@@ -168,8 +171,11 @@ at once.
 - **TTL.** The default is 24 hours, bounded to 1 hour–7 days and never past the
   session's expiry. `ttlMs: null` still gets a finite grant.
 - **Expiry.** Delivery stops exactly at `refreshBefore`, with no grace period.
-  The claim query requires `expires_at > now`, and the time is checked again
-  just before sending.
+  The claim query requires `expires_at > now`, and the sender rechecks expiry
+  after DNS and immediately before connecting. The earlier of subscription
+  expiry and the normal 10-second timeout bounds DNS and socket work. Cancellation
+  discards late DNS results and destroys sockets; it cannot retract bytes already
+  sent.
   - The sweep marks the subscription `expired` and keeps its queue, so a later
     subscribe resumes it.
   - An expired, gone or unsubscribed subscription becomes `active` again when

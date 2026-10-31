@@ -193,7 +193,7 @@ describe("agent events harness", () => {
         const eventId = yield* queue("wake-1");
         assert.strictEqual((yield* nextEvent).headers["webhook-id"], eventId);
         yield* Scope.close(first, Exit.void);
-        assert.deepStrictEqual(yield* deliveryState(eventId), ["sending", 0]);
+        assert.deepStrictEqual(yield* deliveryState(eventId), ["pending", 0]);
 
         // Second generation on the same database resends the same event.
         const second = yield* startServer;

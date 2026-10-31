@@ -1,6 +1,12 @@
 import { assert, describe, it } from "@effect/vitest";
 import { isNonPublicAddress } from "@t3tools/shared/publicAddress";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Queue from "effect/Queue";
+import * as TestClock from "effect/testing/TestClock";
+import * as Exit from "effect/Exit";
 
 import {
   receiverTransport,
@@ -27,6 +33,130 @@ const urlFor = (port: number, path = "/hooks/t3?token=abc") =>
   new URL(`https://callback.test:${port}${path}`);
 
 describe("WebhookSender", () => {
+  it.effect("verification still has its normal ten-second bound during DNS", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const resolving = yield* Deferred.make<void>();
+        const transport = makeTransport({
+          refuses: isNonPublicAddress,
+          resolve: () => {
+            Deferred.doneUnsafe(resolving, Effect.void);
+            return new Promise(() => {});
+          },
+        });
+        const fiber = yield* verifyCallback({
+          url: urlFor(443),
+          subscriptionId: "sub_1",
+          keys: [key],
+        }).pipe(Effect.provideService(WebhookTransport, transport), Effect.flip, Effect.forkScoped);
+        yield* Deferred.await(resolving);
+        yield* TestClock.adjust("9999 millis");
+        assert.isUndefined(fiber.pollUnsafe());
+        yield* TestClock.adjust("1 millis");
+        assert.isDefined(fiber.pollUnsafe());
+        assert.strictEqual((yield* Fiber.join(fiber)).reason, "timeout");
+      }),
+    ),
+  );
+
+  it.live("expiry cancels a pending DNS wait and discards its late result", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const receiver = yield* startReceiver();
+        let connections = 0;
+        receiver.server.on("connection", () => {
+          connections += 1;
+        });
+        const resolving = yield* Deferred.make<void>();
+        const answer = Promise.withResolvers<ReadonlyArray<{ address: string; family: number }>>();
+        const transport = receiverTransport(receiver.ca, {
+          resolve: () => {
+            Deferred.doneUnsafe(resolving, Effect.void);
+            return answer.promise;
+          },
+        });
+        yield* Effect.gen(function* () {
+          yield* TestClock.setTime(1_000);
+          const fiber = yield* transport
+            .post({ url: urlFor(receiver.port), headers: {}, body: "{}", expiresAt: 2_000 })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(resolving);
+          yield* TestClock.adjust("999 millis");
+          assert.isUndefined(fiber.pollUnsafe());
+          yield* TestClock.adjust("1 millis");
+          assert.isDefined(fiber.pollUnsafe());
+          assert.deepStrictEqual(yield* Fiber.join(fiber), { _tag: "Failed", reason: "timeout" });
+          answer.resolve([{ address: "127.0.0.1", family: 4 }]);
+          yield* Effect.promise(() => answer.promise);
+          yield* TestClock.adjust("10 seconds");
+          assert.strictEqual(connections, 0);
+          assert.strictEqual(receiver.received.length, 0);
+        }).pipe(Effect.provide(TestClock.layer()));
+      }),
+    ),
+  );
+
+  it.live("does not connect when events are disabled during DNS", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const receiver = yield* startReceiver();
+        let enabled = true;
+        const transport = receiverTransport(receiver.ca, {
+          resolve: async () => {
+            enabled = false;
+            return [{ address: "127.0.0.1", family: 4 }];
+          },
+        });
+        const input = {
+          url: urlFor(receiver.port),
+          headers: {},
+          body: "{}",
+          canDispatch: Effect.sync(() => enabled),
+        };
+        const exit = yield* Effect.exit(transport.post(input));
+        assert.isTrue(Exit.hasInterrupts(exit));
+        assert.strictEqual(receiver.received.length, 0);
+      }),
+    ),
+  );
+
+  it.live("does not start a connection when DNS completes at the subscription deadline", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const receiver = yield* startReceiver();
+        const clock = yield* Clock.Clock;
+        let now = 1_000;
+        let connections = 0;
+        receiver.server.on("connection", () => {
+          connections += 1;
+        });
+        const transport = receiverTransport(receiver.ca, {
+          resolve: async () => {
+            now = 2_000;
+            return [{ address: "127.0.0.1", family: 4 }];
+          },
+        });
+        const input = { url: urlFor(receiver.port), headers: {}, body: "{}", expiresAt: 2_000 };
+        const outcome = yield* transport.post(input).pipe(
+          Effect.provideService(
+            Clock.Clock,
+            new Proxy(clock, {
+              get: (target, property, receiver) =>
+                property === "currentTimeMillisUnsafe"
+                  ? () => now
+                  : property === "currentTimeMillis"
+                    ? Effect.sync(() => now)
+                    : Reflect.get(target, property, receiver),
+            }),
+          ),
+        );
+        assert.deepStrictEqual(outcome, { _tag: "Failed", reason: "timeout" });
+        assert.strictEqual(connections, 0);
+        assert.strictEqual(receiver.received.length, 0);
+      }),
+    ),
+  );
+
   it.live("signs the exact bytes it sends, verified by the standardwebhooks library", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -272,24 +402,39 @@ describe("WebhookSender", () => {
     }),
   );
 
-  it.live("times out a callback that never answers", () =>
+  it.live("bounds a hanging socket by expiry or the normal callback timeout", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const receiver = yield* startReceiver();
         receiver.respond.current = () => "hang";
-        const outcome = yield* postSigned({
-          url: urlFor(receiver.port),
-          subscriptionId: "sub_1",
-          webhookId: "t3e1_t",
-          keys: [key],
-          body: "{}",
-        }).pipe(
-          Effect.provideService(
-            WebhookTransport,
-            receiverTransport(receiver.ca, { timeoutMs: 300 }),
-          ),
-        );
-        assert.deepStrictEqual(outcome, { _tag: "Failed", reason: "timeout" });
+        for (const expiresAt of [2_000, undefined]) {
+          const closed = yield* Deferred.make<void>();
+          receiver.server.once("secureConnection", (socket) => {
+            socket.once("close", () => Deferred.doneUnsafe(closed, Effect.void));
+          });
+          yield* Effect.gen(function* () {
+            yield* TestClock.setTime(1_000);
+            const fiber = yield* postSigned({
+              url: urlFor(receiver.port),
+              subscriptionId: "sub_1",
+              webhookId: "t3e1_t",
+              keys: [key],
+              body: "{}",
+              ...(expiresAt === undefined ? {} : { expiresAt }),
+            }).pipe(
+              Effect.provideService(WebhookTransport, receiverTransport(receiver.ca)),
+              Effect.forkScoped,
+            );
+            yield* Queue.take(receiver.requests);
+            const duration = expiresAt === undefined ? 10_000 : expiresAt - 1_000;
+            yield* TestClock.adjust(duration - 1);
+            assert.isUndefined(fiber.pollUnsafe());
+            yield* TestClock.adjust(1);
+            assert.isDefined(fiber.pollUnsafe());
+            assert.deepStrictEqual(yield* Fiber.join(fiber), { _tag: "Failed", reason: "timeout" });
+            yield* Deferred.await(closed);
+          }).pipe(Effect.provide(TestClock.layer()));
+        }
       }),
     ),
   );

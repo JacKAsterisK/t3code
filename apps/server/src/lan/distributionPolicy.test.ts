@@ -28,6 +28,7 @@ import * as PublicConfig from "../cloud/publicConfig.ts";
 import * as Awareness from "../relay/AgentAwarenessRelay.ts";
 import * as HeldHooks from "../relay/HeldHooksWaker.ts";
 import * as SelfUpdate from "../cloud/selfUpdate.ts";
+import * as NpmRelease from "../cloud/npmRelease.ts";
 import * as DesktopUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
 import * as LauncherClient from "../cloud/serviceLauncherClient.ts";
 import * as BootService from "../cloud/bootService.ts";
@@ -130,6 +131,7 @@ it.effect("disabled telemetry ignores malformed ambient exporter settings", () =
     const config = yield* resolveServerConfig(
       {
         mode: Option.some("web"),
+        lan: Option.none(),
         port: Option.some(3773),
         host: Option.none(),
         baseDir: Option.some(baseDir),
@@ -183,6 +185,8 @@ it.effect("disabled native updates cannot commit or acquire update dependencies"
         launcherManaged: true,
       }),
     );
+    const npmRelease = yield* NpmRelease.make();
+    assert.isNull(yield* npmRelease.get({ spec: "latest" }));
     const desktop = yield* DesktopUpdate.make();
     assert.isFalse(desktop.available);
     assert.equal((yield* Effect.flip(desktop.commit("fixture")))._tag, "ServerSelfUpdateError");

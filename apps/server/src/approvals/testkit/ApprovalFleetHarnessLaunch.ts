@@ -54,7 +54,7 @@ export const layer = (env: FleetEnvironment) =>
         Layer.mock(Terminal.TerminalManager)({ close: () => Effect.void }),
         Layer.mock(Git.GitWorkflowService)({}),
         Layer.mock(GitDriver.GitVcsDriver)({}),
-        Layer.mock(Providers.ProviderRegistry)({}),
+        Layer.mock(Providers.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
         Layer.mock(Repositories.SourceControlRepositoryService)({}),
         Layer.mock(Text.TextGeneration)({}),
         Document.layer,

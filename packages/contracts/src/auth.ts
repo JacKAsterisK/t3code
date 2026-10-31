@@ -244,7 +244,7 @@ export const AuthAccessTokenResult = Schema.Struct({
 export type AuthAccessTokenResult = typeof AuthAccessTokenResult.Type;
 
 export const AuthWebSocketTicketResult = Schema.Struct({
-  ticket: TrimmedNonEmptyString,
+  ticket: Schema.RedactedFromValue(TrimmedNonEmptyString),
   expiresAt: Schema.DateTimeUtc,
 });
 export type AuthWebSocketTicketResult = typeof AuthWebSocketTicketResult.Type;
@@ -508,7 +508,7 @@ export const AuthMcpAuthorizationRequest = Schema.Struct({
   redirect_uri: Schema.optionalKey(Schema.String),
   code_challenge: Schema.optionalKey(Schema.String),
   code_challenge_method: Schema.optionalKey(Schema.String),
-  state: Schema.optionalKey(Schema.String),
+  state: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
   resource: Schema.optionalKey(Schema.String),
   task_only: Schema.optionalKey(Schema.String),
   offline_access: Schema.optionalKey(Schema.String),
@@ -564,10 +564,10 @@ export class AuthMcpApprovalError extends Schema.TaggedError<AuthMcpApprovalErro
 
 export const AuthMcpTokenRequest = Schema.Struct({
   grant_type: Schema.optionalKey(Schema.String),
-  code: Schema.optionalKey(Schema.String),
+  code: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
   redirect_uri: Schema.optionalKey(Schema.String),
   client_id: Schema.optionalKey(Schema.String),
-  code_verifier: Schema.optionalKey(Schema.String),
+  code_verifier: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
   resource: Schema.optionalKey(Schema.String),
   refresh_token: Schema.optionalKey(Schema.String),
   /** T3 Code LAN: a fleet machine's signed claim to hold the grant it refreshes. */

@@ -22,6 +22,7 @@ import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 import type * as Scope from "effect/Scope";
 import * as Result from "effect/Result";
@@ -277,7 +278,7 @@ const make = Effect.gen(function* () {
               redirect_uri: LINK_REDIRECT_URI,
               code_challenge: challenge,
               code_challenge_method: "S256",
-              state,
+              state: Redacted.make(state),
               resource,
             },
             decision: {
@@ -316,10 +317,10 @@ const make = Effect.gen(function* () {
         .token({
           payload: {
             grant_type: "authorization_code",
-            code,
+            code: Redacted.make(code),
             redirect_uri: LINK_REDIRECT_URI,
             client_id: registered.client_id,
-            code_verifier: verifier,
+            code_verifier: Redacted.make(verifier),
             resource,
           },
         })

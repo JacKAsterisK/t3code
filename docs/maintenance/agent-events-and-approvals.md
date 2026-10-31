@@ -11,49 +11,60 @@ tunnel):
    "Allow Codex to use Google Chrome?" verbally, but no MCP tool can answer a
    provider permission request.
 
-[Native feature sync](native-feature-sync.md) rows 4 and 5 point here. Status:
-**phase 0 built on `lan/agent-events-phase0`, awaiting review and the live wake
-test; phases 1–4 are design only.** [Phase 0 as built](#phase-0-as-built) is
-authoritative where it differs from the design below. Evidence comes from fork
-`main` at `7547aa4a5` (upstream `1854e14d0`), effect `4.0.5`, the task-owner
-work in progress on `lan/task-owners` (read from its worktree, uncommitted on
-2026-10-30), and OpenAI's
-[MCP Events](https://developers.openai.com/plugins/build/mcp-events) page as
-read on 2026-10-30.
+[Native feature sync](native-feature-sync.md) rows 4 and 5 point here.
+Phase 0 is merged at `8b12091c35`, disabled by default and not released.
+Phases 1-4 remain implementation plans; the reviewed initial Phase 1 scope
+is verified local Codex permission requests only. This design uses fork main
+`45194c8c34` (task owners merged), the original Astra review of `5cf43fb64d`,
+and the focused Sol follow-up reviews. Source locations below refer to
+`45194c8c34` unless marked otherwise.
+
+**Integration boundary.** The [Phase 0 as-built contract](#phase-0-as-built)
+below and actual migration 081 are authoritative over the historical Phase 0
+sketches elsewhere in this document. Reuse its session principals, epoch/head
+sequence, flat secret names, immutable occurrence times, exact expiry and
+durable probes. Keep the verified delivery cancellation and claim-recovery
+behavior. Phase 1 reserves additive migration 082 and does not recreate those
+services. The acknowledged native-write primitive and all approval guards
+must pass before MCP acceptance is enabled. No release or live test is
+authorized by this document.
 
 ## Summary
 
-**Events.** BuildMachine's `/mcp` becomes an MCP 2.0 (`2026-07-28`) server that
-advertises `capabilities.events` and implements `events/list`,
-`events/subscribe` and `events/unsubscribe`, with Standard Webhooks delivery
-as OpenAI specifies. Every machine derives a small, durable **fact log** from
-its committed orchestration events: approvals, questions, blockers, finished
-runs and owner changes. Fact IDs are deterministic, so re-deriving a fact after
-a restart never produces a second event. BuildMachine pulls each linked peer's
-fact log over the existing peer link with a link-only read tool and folds those
-facts into its own log. A per-subscription outbox delivers each matching fact
-once per subscription, with retries, replay cursors, `truncated`, and access
-rechecks. Owner identity is part of every payload and is never used to filter.
-The fact log replaces the fork's `RoutingStore` observation inbox, so there is
-still one ledger.
+**Approvals (Phase 1).** Add a separate `t3_approval_request` tool for local
+Codex `item/permissions/requestApproval` requests only. All other profiles
+stay app-only initially. Full access never implies approval permission. A separate,
+unchecked sign-in box grants `orchestration:approve`; every accepted response
+also names the exact request incarnation, displayed grant and effective scope.
+Some providers' narrowest accept grants an entire turn. Those require explicit
+consent to that scope on that request. Unknown scope, persistent grants and
+ask-rule approvals stay app-only. The native serialized command validates the
+same presentation again when committing the response. Recoverable receipts
+distinguish preparation, native commitment, provider delivery and uncertainty.
 
-**Approvals.** A new fork tool, `t3_approval_request` (`list`, `read`,
-`respond`), answers exactly one pending provider approval with `accept` (the
-provider's narrowest "once") or `decline`. The call must carry the request's
-`presentationDigest`, a hash of exactly what was shown, plus the person the
-approval is for and their words. Only outside clients whose grant carries a new
-opt-in scope, `orchestration:approve`, may call it. The scope is off by default
-and offered on the sign-in page for Supervised and above. The tool goes through
-the same `runtime-request.respond` command the UI uses, so every native check
-still runs. Single use is enforced twice: by the orchestrator's pending → resolved
-transition, and by a receipts table. The resolved request records who approved,
-for whom and via which machine, and the thread shows it. Through a native link,
-BuildMachine checks the dot's grant before forwarding, and the receiving
-machine separately requires its link to carry `orchestration:approve`.
+**Events (Phase 2).** Derive facts in source-event order with a persisted
+reducer, never by replaying against today's projection. Request occurrences
+and transitions have durable identities independent of their content hashes.
+All readable Dan, Gavin, unassigned, scheduled and child-task attention events
+are eligible. Owner assignment and directory-version metadata describe each
+historical event and never confer authority. Child run-finished events are
+off by default; child approvals, questions and blockers remain eligible.
 
-Approvals can ship before events. A short transport and wake probe goes first,
-because whether the dot actually wakes on MCP Events is the largest unknown and
-the cheapest to test.
+**Fleet (Phase 3).** BuildMachine pulls origin facts through native links and
+relays approved responses once. Destination authority defaults to threads
+started through BuildMachine by the same initiating client. Other threads
+need explicit destination-side delegation. Both machines recheck current
+permission; no linked caller may forward again, even with Full access.
+
+**Consolidation (Phase 4).** Keep `t3_lan_*` observe/ACK working through
+Phases 1–3. Consolidate only after a contract-preserving adapter proves ACK,
+generation, reset and snapshot parity, or Dan explicitly retires that
+contract. No table drop is authorized by this plan.
+
+Phase 1 works by polling without events. Phase 0's wake probe is a separate
+proof; a webhook 2xx does not prove the dot woke. Posting an upstream
+discussion and any live tests or release remain separate actions. This task
+drafts the discussion only.
 
 ## Phase 0 as built
 
@@ -450,10 +461,12 @@ would interpret differently. A separate fork tool avoids both problems (see
   the caller's modes (`assertTargetWithinLimits`) and in the same link
   (`assertSameLink`), then passes `DispatchModeLimit` so the orchestrator
   rechecks under lock.
-- **Requester side of a link.** `PeerForwarding.callerLimits` refuses linked
-  callers (no chaining) and sends the caller's modes as `T3-Mode-Limit`.
-  `PeerMcpClient` refuses writes while this machine's Machine access list makes
-  the destination read-only (`PeerWriteCeiling`).
+- **Requester side of a link.** `PeerForwarding.callerLimits` uses
+  `assertNotLinked`, but that helper refuses only fenced links:
+  `apps/server/src/mcp/linkOrigin.ts:55`. Full-access links can pass.
+  Phase 3 adds an approval-specific refusal for **every** linked caller
+  naming a remote environment. `PeerMcpClient` also retains
+  `PeerWriteCeiling` and the forwarded `T3-Mode-Limit`.
 - **What the receiver sees.** Only the link's own credential: "the peer sees
   only the link's credential".
 - **Fleet links.** Fleet standard maps to `full-access` links, which the
@@ -510,67 +523,79 @@ Upstream has nothing that wakes an outside assistant or approves through MCP.
 Neither of the closed PRs could be reused as is: both were in-app and
 per-thread, and neither had durable replay.
 
-### F8. The owner feature (`lan/task-owners`, in progress)
+### F8. Task owners are merged
 
-- `OrchestrationV2ThreadShell.ownerId` (lenient `NullOr(TrimmedNonEmptyString)`)
-  and the domain event `thread.owner-set` from the command `thread.owner.set`.
-  It is the one write a read-only session may make.
-- `ownerId` on `thread.create` and `ThreadLaunchInput`. When absent, the
-  machine's default owner from `fleet-users.json` (`FleetUsersFile.machineOwners`)
-  is used.
-- `FleetUser { id, name, color? }`; `FleetUsersDirectory` for clients.
-- Migration **080** `ScheduledTaskOwner`. `NativeMaintenance` gains
-  `addedNullColumns = ["owner_id"]`. `home-repair.ts` `supportedMigrationIds`
-  goes to 80.
-- An owner "is a label only: it never grants or limits access". This design
-  keeps it that way.
+[Task owners](../operations/task-owners.md) landed in main `45194c8c34`,
+including migration **080**. `ownerId` and `thread.owner-set` are available;
+the sequence and directory-generation metadata needed here are new Phase 2
+work, not already-present owner fields.
+
+`apps/server/src/lan/FleetUsers.ts:46` exposes `current` and `changes`;
+`directoryOf` resolves users and the machine default from the last good file.
+The file's `version: 1` is a schema version, not a content revision. Refresh
+retains last-good data on invalid/unreachable input and clears it on confirmed
+absence (`FleetUsers.ts:95`). Names are resolved by `ownerName`
+(`FleetUsers.ts:177`).
+
+Owners are labels only. Read-only callers can change them on readable threads.
+Never use owner, machine default, name, colour or directory membership to
+authorize an approval or suppress events. The dot receives all authorized
+events and chooses which person to notify.
 
 ## Design
 
 ### Components and files
 
-| Component            | File (new unless noted)                                                                                                       | Role                                                                                                          |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| MCP 2.0 enablement   | `mcp/McpHttpServer.ts` (edit)                                                                                                 | Adds `McpProtocol.v2026_07_28` beside `v2025_06_18`, behind `agentEvents.enabled`                             |
-| Events interceptor   | `mcp/events/McpEventsEndpoint.ts`                                                                                             | In the `/mcp` middleware after auth: answers `events/*`, patches `capabilities.events` into `server/discover` |
-| Catalog and schemas  | `packages/contracts/src/agentEvents.ts`                                                                                       | Event names, input schemas, payload schemas, cursor codec                                                     |
-| Fact deriver         | `agentEvents/AgentFactDeriver.ts`                                                                                             | Follows `EventSink.stream` from a stored watermark and writes facts                                           |
-| Fact store           | `agentEvents/AgentFactStore.ts`                                                                                               | The one ledger: append (idempotent), page by `fact_seq`, retention                                            |
-| Fleet relay          | `agentEvents/AgentFactRelay.ts`                                                                                               | Per linked peer, long-polls `t3_link_agent_facts` and folds facts in                                          |
-| Link fact tool       | `mcp/toolkits/agentEvents/{tools,handlers}.ts`                                                                                | `t3_link_agent_facts` (link-only read) and `t3_agent_events` (status read)                                    |
-| Subscriptions        | `agentEvents/AgentEventSubscriptions.ts`                                                                                      | Deterministic IDs, TTL, refresh, unsubscribe, access rechecks                                                 |
-| Webhook sender       | `agentEvents/WebhookSender.ts`                                                                                                | Standard Webhooks signing, verification challenge, public-address guard, no redirects                         |
-| Delivery worker      | `agentEvents/AgentEventDelivery.ts`                                                                                           | Outbox claims, backoff, 410/413 handling, restart reset                                                       |
-| Public-address guard | `packages/shared/src/publicAddress.ts`                                                                                        | Extracted from `htmlRender/publicProxy.ts` `isLocal` and `shared/hostClassification.ts`                       |
-| Approval tool        | `mcp/toolkits/approvals/{tools,handlers}.ts`                                                                                  | `t3_approval_request` (`list`, `read`, `respond`)                                                             |
-| Approval receipts    | `agentEvents/ApprovalReceipts.ts`                                                                                             | Single use, idempotent retry, audit                                                                           |
-| Presentation digest  | `packages/shared/src/approvalPresentation.ts`                                                                                 | One canonical function used by the event, `read` and `respond`                                                |
-| Approve scope        | `contracts/src/auth.ts`, `auth/McpOAuth.ts`, `auth/EnvironmentAuth.ts`, sign-in page (edits)                                  | `orchestration:approve`, an opt-in checkbox, and `client.approvals` on the invocation scope                   |
-| `resolvedBy`         | `contracts/src/orchestrationV2.ts`, `Orchestrator.ts`, web `TimelinePendingApprovalRow`, mobile `PendingApprovalCard` (edits) | Optional actor on `runtime-request.respond` and on the resolved request, rendered on the thread               |
-| Fleet link approvals | `lan/FleetAccessPolicy.ts`, `lan/FleetPeerLinks.ts` (edits)                                                                   | Per-machine `approvals` flag, default off, minted into the link code's scopes                                 |
+| Component                 | File (new unless noted)                                                                                                   | Role                                                                                                          |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| MCP 2.0 enablement        | `mcp/McpHttpServer.ts` (edit)                                                                                             | Adds `McpProtocol.v2026_07_28` beside `v2025_06_18`, behind `agentEvents.enabled`                             |
+| Events interceptor        | `mcp/events/McpEventsEndpoint.ts`                                                                                         | In the `/mcp` middleware after auth: answers `events/*`, patches `capabilities.events` into `server/discover` |
+| Catalog and schemas       | `packages/contracts/src/agentEvents.ts`                                                                                   | Event names, input schemas, payload schemas, cursor codec                                                     |
+| Fact deriver              | `agentEvents/AgentFactDeriver.ts`                                                                                         | Follows `EventSink.stream` from a stored watermark and writes facts                                           |
+| Fact store                | `agentEvents/AgentFactStore.ts`                                                                                           | The one ledger: append (idempotent), page by `fact_seq`, retention                                            |
+| Fleet relay               | `agentEvents/AgentFactRelay.ts`                                                                                           | Per linked peer, long-polls `t3_link_agent_facts` and folds facts in                                          |
+| Link fact tool            | `mcp/toolkits/agentEvents/{tools,handlers}.ts`                                                                            | `t3_link_agent_facts` (link-only read) and `t3_agent_events` (status read)                                    |
+| Subscriptions             | `agentEvents/AgentEventSubscriptions.ts`                                                                                  | Deterministic IDs, TTL, refresh, unsubscribe, access rechecks                                                 |
+| Webhook sender            | `agentEvents/WebhookSender.ts`                                                                                            | Standard Webhooks signing, verification challenge, public-address guard, no redirects                         |
+| Delivery worker           | `agentEvents/AgentEventDelivery.ts`                                                                                       | Outbox claims, backoff, 410/413 handling, restart reset                                                       |
+| Public-address guard      | `packages/shared/src/publicAddress.ts`                                                                                    | Extracted from `htmlRender/publicProxy.ts` `isLocal` and `shared/hostClassification.ts`                       |
+| Approval tool             | `mcp/toolkits/approvals/{tools,handlers}.ts`                                                                              | Local list/read/respond; explicit forwarding refusal until Phase 3                                            |
+| Approval service          | `approvals/ApprovalService.ts`, `approvals/ApprovalReceipts.ts`, `auth/ApprovalAuthority.ts`                              | Native command submission, reconciliation and live authority admission                                        |
+| Grant and digest          | `packages/contracts/src/approvals.ts`, `packages/shared/src/approvalPresentation.ts`                                      | Provider effect/scope and immutable request binding shared by read, native validation and events              |
+| Approve scope             | `packages/contracts/src/auth.ts`, `auth/{McpOAuth,EnvironmentAuth,SessionStore}.ts`, consent surfaces                     | Independent opt-in, scope removal and replacement                                                             |
+| Trusted audit             | `packages/contracts/src/orchestrationV2.ts`, `Orchestrator.ts`, `EventSink.ts`, `ProjectionStore.ts`, approval cards      | Server-only admission metadata and projected attribution                                                      |
+| Fleet authority (Phase 3) | `approvals/ApprovalForwarding.ts`, `lan/FleetApprovalPolicy.ts`, `lan/FleetCredentialAccess.ts`, `peer/PeerForwarding.ts` | Destination-specific scope, provenance, explicit delegation and per-call cap                                  |
 
-All server paths are under `apps/server/src/`. Nothing in `apps/server/src/peer`
-changes: the approval tool calls `PeerForwarding.call` with parameters the
-server builds itself (see [Forwarded approvals](#forwarded-approvals)).
+Server-relative paths are under `apps/server/src/`. Phase 1's exact file
+list is in [Phase 1 build plan](#phase-1-build-plan). Phase 3 may extend peer
+forwarding for namespacing and stable provenance; the earlier claim that no
+peer code changes was incorrect. Shared auth and registration edits must be
+integrated serially with Phase 0.
 
 ### Data model and migrations
 
-The owner feature takes **080**. Each phase below adds one forward migration
-with the next free fork ID at merge time. The numbers here assume no other
-migration lands first. Every new migration must also:
+Task owners use **080**; Phase 0 uses **081**. Reserve **082**
+`AgentApprovalAuthorityAndReceipts` for Phase 1, **083**
+`AgentEventFacts` for Phase 2 and **084** `AgentApprovalDelegations` for
+Phase 3. Recheck the migration registry before implementation and use the next
+free ID >= 082 if another lands. Phase 4 has no destructive migration number
+reserved.
 
-- extend `scripts/lan/home-repair.ts` `supportedMigrationIds` and the release
-  audits' current schema (as `b428bda9d` did);
-- stay outside `NativeMaintenance` `workGeneration`. These tables are delivery
-  state, not work: add a test that a home with rows in them verifies unchanged
-  across candidate migrations, and list them as non-work in
-  [native feature sync](native-feature-sync.md#data-constraints);
-- leave fleet, peer-link, session and machine-grouping data alone. All changes
-  are additive.
+For each new ID, register it in `apps/server/src/persistence/Migrations.ts`,
+extend `scripts/lan/home-repair.ts` `supportedMigrationIds`, and update the
+schema expectations of release/home audits. Treat event delivery and approval
+audit state as non-work in `NativeMaintenance`; test actual row, payload and
+secret-reference preservation separately from `workGeneration`. Do not
+modify unrelated work, grouping, fleet membership or existing peer sessions.
+
+The 081 SQL below is the untouched historical sketch. Implement against
+[the actual 081](https://github.com/JacKAsterisK/t3code/blob/a0c1fd7a74/apps/server/src/persistence/Migrations/081_AgentEventSubscriptions.ts):
+it already creates `agent_event_log_state(epoch, head_seq, floor_seq)`,
+replayable probes and deliveries with `log_seq`. Phase 2 extends that
+sequence space rather than creating another log or epoch.
 
 Webhook secrets never enter `statev2.sqlite`. They live in `ServerSecretStore`
-under flat `agent-events-<hash>-<random>` names (phase 0 as built; the store
-creates only its root directory), in the `userdata/secrets`
+under `agent-events/<subscriptionId>[/previous]`, in the `userdata/secrets`
 tree that home repair already preserves.
 
 ```sql
@@ -603,97 +628,144 @@ CREATE TABLE agent_event_callback_verifications (
   PRIMARY KEY (principal_id, callback_url)
 );
 
--- 082_AgentApprovalReceipts (phase 1)
+-- 082_AgentApprovalAuthorityAndReceipts (phase 1; additive)
+CREATE TABLE agent_approval_authorizations (
+  session_id TEXT PRIMARY KEY,
+  application_id TEXT NOT NULL, consent_family_id TEXT NOT NULL,
+  initiating_client_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1,
+  replaced_by_session_id TEXT, updated_at INTEGER NOT NULL
+);
+CREATE INDEX idx_agent_approval_family
+  ON agent_approval_authorizations(application_id, consent_family_id);
 CREATE TABLE agent_approval_receipts (
-  receipt_id TEXT PRIMARY KEY,
+  receipt_id TEXT PRIMARY KEY, role TEXT NOT NULL, -- local|forwarder|receiver
+  principal_id TEXT NOT NULL, client_request_id TEXT NOT NULL,
+  operation_digest TEXT NOT NULL, operation_json TEXT NOT NULL,
   environment_id TEXT NOT NULL, thread_id TEXT NOT NULL, request_id TEXT NOT NULL,
-  role TEXT NOT NULL,                          -- local|forwarder|receiver
-  client_request_key TEXT NOT NULL,            -- sha256(principal, clientRequestId)
-  decision TEXT NOT NULL, presentation_digest TEXT NOT NULL,
-  principal_id TEXT NOT NULL, client_label TEXT NOT NULL,
-  on_behalf_of TEXT NOT NULL, authorization_text TEXT NOT NULL,
+  request_incarnation TEXT NOT NULL, provider_session_id TEXT NOT NULL,
+  provider_generation TEXT NOT NULL, presentation_digest TEXT NOT NULL,
+  decision TEXT NOT NULL, effective_scope TEXT NOT NULL, grant_digest TEXT NOT NULL,
+  command_id TEXT NOT NULL, state TEXT NOT NULL,
+  -- prepared|committed|delivery_admitted|response_written|provider_acknowledged
+  -- refused|delivery_withheld|delivery_failed|delivery_unknown
+  delivery_evidence_json TEXT, delivery_admitted_revision INTEGER,
+  authority_revision INTEGER NOT NULL, actor_json TEXT NOT NULL,
   via_environment_id TEXT, upstream_receipt_id TEXT,
-  outcome TEXT NOT NULL,                       -- submitted|refused:<code>|delivery_failed
-  command_id TEXT, created_at INTEGER NOT NULL
+  result_sequence INTEGER, failure_code TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
-CREATE UNIQUE INDEX idx_agent_approval_once
-  ON agent_approval_receipts(environment_id, thread_id, request_id, role)
-  WHERE outcome = 'submitted';
-CREATE UNIQUE INDEX idx_agent_approval_retry ON agent_approval_receipts(client_request_key, role);
+CREATE UNIQUE INDEX idx_agent_approval_retry
+  ON agent_approval_receipts(principal_id, client_request_id, role);
+CREATE UNIQUE INDEX idx_agent_approval_command
+  ON agent_approval_receipts(command_id, role);
+-- Native command commitment is the winner guard, not a pre-dispatch submitted row.
 
--- 083_AgentEventFacts (phase 2)
+-- 083_AgentEventFacts (phase 2; log state/counter already exists in 081)
+ALTER TABLE agent_event_log_state ADD COLUMN derived_through_sequence INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE agent_event_facts (
-  fact_seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_id TEXT NOT NULL UNIQUE,               -- deterministic, see "Identity"
+  log_seq INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE,
   fact_key TEXT NOT NULL, kind TEXT NOT NULL,
-  origin_environment_id TEXT NOT NULL, thread_id TEXT NOT NULL,
-  occurred_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL,
-  relayed_from TEXT,                           -- null for facts derived here
-  data_json TEXT NOT NULL                      -- payload "data", <= 16 KiB
+  origin_environment_id TEXT NOT NULL, origin_generation TEXT NOT NULL,
+  source_sequence INTEGER NOT NULL, transition_ordinal INTEGER NOT NULL,
+  thread_id TEXT, occurred_at INTEGER NOT NULL, recorded_at INTEGER NOT NULL,
+  relayed_from TEXT, data_json TEXT NOT NULL
 );
-CREATE INDEX idx_agent_event_facts_thread ON agent_event_facts(origin_environment_id, thread_id, fact_seq);
-CREATE TABLE agent_event_log_state (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  epoch TEXT NOT NULL,                         -- random per fact log; changes if the log is rebuilt
-  floor_seq INTEGER NOT NULL,                  -- lowest fact_seq still retained
-  derived_through_sequence INTEGER NOT NULL    -- EventSink global sequence watermark
+CREATE TABLE agent_event_derivation_state (
+  state_key TEXT PRIMARY KEY, source_sequence INTEGER NOT NULL, state_json TEXT NOT NULL
+);
+CREATE TABLE agent_event_directories (
+  generation TEXT PRIMARY KEY, content_digest TEXT NOT NULL,
+  observed_at INTEGER NOT NULL, directory_json TEXT NOT NULL
+);
+CREATE TABLE agent_event_source_directories (
+  source_generation TEXT NOT NULL, source_sequence INTEGER NOT NULL,
+  directory_generation TEXT NOT NULL REFERENCES agent_event_directories(generation),
+  PRIMARY KEY (source_generation, source_sequence)
 );
 CREATE TABLE agent_event_peer_cursors (
   environment_id TEXT PRIMARY KEY, peer_epoch TEXT NOT NULL, peer_seq INTEGER NOT NULL,
-  status TEXT NOT NULL,                        -- following|unsupported|unreachable|gap
-  updated_at INTEGER NOT NULL, detail TEXT
+  status TEXT NOT NULL, status_transition INTEGER NOT NULL,
+  authorization_generation TEXT, updated_at INTEGER NOT NULL, detail TEXT
 );
+-- Facts, reducer state, matching outbox inserts and watermark advance commit atomically.
 
--- 084_RetireLanObservationLedger (phase 4, needs Dan's approval)
-DROP TABLE lan_observation_inbox; DROP TABLE lan_observation_cursors;
--- lan_owned_threads stays: task mutations use it.
+-- 084_AgentApprovalDelegations (phase 3)
+-- Add durable thread creation provenance and destination-side grants as described below.
+-- No DROP TABLE in Phases 1–4.
+
 ```
 
-**Retention.** Facts are kept for 14 days or 50,000 rows, whichever is
-smaller. Delivered and rejected delivery rows are kept for 7 days. Ended
-subscriptions are kept for 7 days so a re-subscribe can replay. Pruning raises
-`floor_seq`.
+**Retention (Phases 1–4).** Keep ordinary facts for 14 days or 50,000
+sequences, whichever prunes first; share Phase 0's sequence counter with probes.
+Never prune past an unfinished delivery: pin its payload and the contiguous
+suffix after the oldest pinned sequence, so the floor represents a real
+contiguous retained range. This makes 50,000 a soft cap while deliveries are
+unfinished. Retry abandonment is 48 hours after queueing, including expiry
+time; never send while expired. After abandonment, pruning can resume and the
+diagnostic cursor reports the gap. The soft-cap overrun is limited by the 48-hour unfinished-delivery horizon;
+report pinned rows and bytes in status. Never silently advance a cursor
+across missing payloads.
+
+Keep finished delivery rows and ended subscriptions 7 days, callback
+verification 24 hours, and renew subscriptions by the granted expiry (default
+24 hours, maximum 7 days, bounded by session expiry). Phase 0 owns transport
+expiry/replay implementation. Phase 2 extends its recomputed watermark and
+ahead-of-head rejection to facts; occurrence timestamps remain fixed.
+
+Approval audit is independent: retain full terminal receipts 90 days.
+Never prune a prepared, committed-with-pending-delivery, delivery-admitted
+or uncertain receipt.
+Retain compact retry-key/operation/command/incarnation tombstones until the
+issuing authorization and every expressly linked replacement are revoked or
+expired and native delivery has settled. A retired tombstone can never name
+an approvable incarnation again; a reused old key then fails `not_live`,
+never targets a newer request. No approval receipt is pruned by event limits.
+Owner directory snapshots and reducer checkpoints survive as long as any
+retained fact or replay source needs them.
 
 ### Identity
 
-- **Fact key** (readable, in the payload):
-  - `approval:<env>:<thread>:<requestId>`
-  - `question:<env>:<thread>:<requestId>`
-  - `secret:<env>:<thread>:<requestId>`
-  - `blocked:<env>:<thread>:<runId>:<reason>`
-  - `run:<env>:<thread>:<runId>`
-  - `owner:<env>:<thread>`
-
-  `<env>` is always the **origin** environment, so BuildMachine and CryoFrog
-  produce the same key for the same fact.
-
-- **Event ID** (`eventId`, `webhook-id`): `t3e1_` + the first 32 characters of
-  `base64url(sha256(<transition>|<factKey>|<revision>))`. Each fact kind
-  defines its revision:
-  - approval and question opened: the `presentationDigest`;
-  - closed: the terminal status;
-  - run ended: `attemptId|status`;
-  - owner changed: the owner revision.
-
-  Hashing keeps the ID short whatever the thread IDs are (for example
-  `mcp:launch:…`). The same underlying fact always produces the same ID: after
-  a restart, after a relay, or on a second machine. `INSERT OR IGNORE` on
-  `event_id` is the dedupe.
-
-- **Subscription ID**: `sub_` + the first 32 characters of
-  `base64url(sha256(canonicalJson([principalId, url, name, canonicalJson(arguments)])))`.
-  Arguments compare as canonical JSON, so key order never creates a duplicate.
-  The ID is output only.
-- **Principal**: `CredentialAttribution.mcpClientSubject(approvalSubject)`
-  plus the OAuth `client_id` the session was issued to. It must survive the
-  30-day re-sign-in: a new session for the same subject and client produces
-  the same subscription. If the session does not record `client_id` today,
-  phase 0 adds it to `client` metadata at issue time; old sessions fall back
-  to the session ID.
+- **Request incarnation.** Allocate a fresh durable identifier at native
+  request admission, even if the native request ID is reused. Carry
+  `{ requestIncarnation, providerSessionId, providerGeneration }` through
+  the request, turn item, command and response effect. Late presentation
+  updates increment `presentationRevision`; they do not change incarnation.
+  A genuinely new request gets a new incarnation.
+- **Fact key.** An attention occurrence is keyed by origin environment,
+  source generation, thread, request incarnation (approval/question/secret),
+  blocker entry occurrence, run attempt, or owner assignment sequence.
+  Two approvals on one thread never share an occurrence. A blocker that
+  clears and recurs gets a new entry occurrence.
+- **Event ID.** `t3e1_` plus a hash of canonical
+  `[originEnvironmentId, sourceGeneration, sourceSequence,
+  transitionOrdinal, kind, occurrenceId]`. The ordinal is a stable reducer
+  output order within that source event. A → B → A changes produce three
+  transitions despite equal content hashes. Close, secret, blocker and
+  source-status transitions each have an occurrence/revision; hashes guard
+  content, never deduplicate distinct transitions.
+- **Sequence.** `log_seq` comes from 081's shared head counter in the same
+  transaction as the fact insert. A fact-log rebuild changes its cursor
+  epoch but preserves source generation and event IDs. An actual source
+  reset changes source generation and reports a gap. Imported facts retain
+  their original IDs and source coordinates.
+- **Principal.** Reuse Phase 0's `session:<sessionId>` (or an explicitly
+  supported non-task `grant:<grantId>`). Never combine OAuth application ID
+  with `mcp-client:local` to identify a principal. Separate sign-ins have
+  separate receipt keys and subscription ownership. Consent family and
+  initiating-client provenance below are separate concepts, not principals.
+  Credential renewal preserves provenance only by authenticated, explicit
+  replacement; it never merges unrelated sign-ins.
+- **Subscription identity.** Reuse the Phase 0 helper and canonical
+  arguments. No owner ID enters identity, filtering or read authorization.
 
 ### Event catalog
 
-`events/list` returns six definitions, each with `delivery: ["webhook"]`.
+Phase 2 extends the Phase 0 probe-only catalog to these six definitions,
+each with `delivery: ["webhook"]`. The event's `answerable` field describes
+provider support, not subscriber authority; `read` supplies current caller
+rights before a response. Never bake a subscriber-specific grant into an
+immutable shared fact.
 
 | Name                 | Fires on                                                                                                | Default use  |
 | -------------------- | ------------------------------------------------------------------------------------------------------- | ------------ |
@@ -761,29 +833,38 @@ per-kind `detail`:
     projectId: string, projectName: string | null,
     parentThreadId: string | null, delegated: boolean,
     runtimeMode: RuntimeMode, interactionMode: ProviderInteractionMode
-  },
+  } | null,                              // null only for source_status/probe
   run: { id: string, attemptId: string | null } | null,
   owner: {
     state: "assigned" | "unassigned" | "unknown_user",
     id: string | null,                   // fleet-users.json id; null when unassigned
     label: string | null,                // that user's name as the origin resolved it
-    revision: number,                    // origin thread sequence of the last owner change; 0 = set at creation
-    asOf: string,                        // ISO time the owner was read
+    assignmentRevision: number,          // source sequence of create/last owner-set
+    sourceGeneration: string,            // distinguishes source reset/rebuild
+    directoryGeneration: string | null,   // origin-local observation generation
+    directoryDigest: string | null,       // hash of canonical validated users file, not schema version 1
+    directoryObservedAt: string | null,
+    asOfSourceSequence: number,
     machineDefault: { id: string, label: string | null } | null  // only when unassigned: informational
-  },
-  origin: { environmentId: string, threadSequence: number, occurredAt: string },
+  } | null,                              // null for facts without a thread
+  origin: { environmentId: string, sourceGeneration: string,
+            sourceKind: "orchestration" | "peer_status" | "bootstrap",
+            sourceSequence: number, transitionOrdinal: number, occurredAt: string },
   relay: { viaEnvironmentId: string, relayedAt: string } | null,
   detail: ApprovalDetail | QuestionDetail | SecretDetail | BlockedDetail
         | RunFinishedDetail | OwnerChangedDetail | RequestClosedDetail | SourceStatusDetail
 }
 
 ApprovalDetail = {
-  requestId, requestKind, appName?, prompt?, reason?, fullAccessOverride?,
-  options: [{ decision, label, warning? }],        // exactly as the UI shows them
-  presentationDigest: string,                      // sha256 hex, see "Presentation digest"
-  answerable: { via: "t3_approval_request", decisions: ("accept" | "decline")[] }
-            | { via: "ui_only", reason: string },  // e.g. URL elicitation, not live, scope not granted
-  createdAt, revision: number, supersedesEventId: string | null
+  requestId, requestIncarnation, providerSessionId, providerGeneration,
+  requestKind, appName?, prompt?, reason?, fullAccessOverride?,
+  options: [{ decision, label, warning? }],
+  grant: ApprovalGrant,                            // actual resources, native reply and effective scope
+  presentationDigest: string,                      // includes the underlying grant and binding
+  answerable: { via: "t3_approval_request", decisions: ("accept" | "decline")[],
+                requiredConsentScope: "once" | "turn" | null }
+            | { via: "ui_only", reason: string },
+  createdAt, presentationRevision: number, supersedesEventId: string | null
 }
 QuestionDetail = { requestId, questions: [{ id, header, question, options: string[], required }],
                    answerable: { via: "t3_pending_request" } | { via: "ui_only", reason } }
@@ -804,69 +885,139 @@ for large records. A body over 256 KiB is therefore impossible by
 construction. The sender still checks the limit and records `rejected` rather
 than sending.
 
-**Owner semantics.**
+**Owner semantics.** Every fact describes the assignment at its source
+transition, with separate `assignmentRevision`, `sourceGeneration`,
+`directoryGeneration` and `directoryDigest`. The directory digest covers
+the validated users file and machine defaults, not its constant schema
+`version: 1`. The generation identifies an origin observation; a rename
+therefore cannot masquerade as the same label revision. Last-good data is
+marked with its original observation time. Confirmed absence, never-read and
+unknown-user states are explicit. A machine default is informational and
+never overwrites a historical unassigned owner.
 
-- `owner` is read from the origin thread when the fact is derived:
-  `ownerId`, plus the origin's `fleet-users.json` name for `label`.
-- `unassigned` means the thread has no `ownerId` (threads from before the
-  feature, or a machine without a default). `machineDefault` reports what that
-  machine would default to, without asserting it.
-- `unknown_user` means an ID the origin's directory cannot name. The ID is
-  kept and `label` is null.
-- `revision` lets the dot discard a stale label. An `owner_changed` with a
-  higher revision supersedes the labels on every earlier event for that
-  thread. Before relaying anything owner-dependent, the dot can re-read the
-  thread. `t3_thread_read` must return the current owner and revision; that
-  is a requirement on the owner feature, and its shell does not carry the
-  revision yet.
-- The owner feature must expose the sequence of the last `thread.owner-set`
-  on the shell (for example `ownerSetSequence`). Until it does, the deriver
-  reads it from `EventStore.read({ threadId, eventType: "thread.owner-set" })`.
+Phase 2 first extends `lan/FleetUsers.ts` with a separate observation feed:
+`{ status: fresh|unavailable|invalid|absent|never_read, observedAt,
+observationGeneration, directoryDigest?, lastGoodObservedAt? }`. Emit every
+refresh outcome, including unchanged successful reads and failed reads that
+retain last-good values. Existing `current/changes` expose values only and
+cannot establish freshness (`FleetUsers.ts:44`, `:109-145`). Persist the
+observation feed before binding its generation to source commitment; reading
+the share or waiting for it never happens inside an EventSink transaction.
+
+Phase 2 adds `agentEvents/AgentEventOwnerJournal.ts`: snapshot each accepted
+`FleetUsers` directory observation with a persisted generation/digest and
+bind that generation to source events **at source commitment**, inside the
+EventSink transaction. Extend stored-event metadata (and its SQL storage)
+with this immutable reference. Directory changes and event capture serialize
+at that boundary; the deriver never asks today's `FleetUsers.current` for
+an old event. Retain the referenced snapshots when rebuilding facts.
+
+The ordered reducer gets assignment changes from `thread.create` and
+`thread.owner-set`; no new owner-shell field is assumed. Phase 2 extends
+`t3_thread_read`/approval `read` with current assignment/source/directory
+coordinates and freshness status. Before person-specific notification, the
+dot **must** resolve the current owner at the origin. If the origin or
+directory freshness cannot be established, report the historical assignment
+and the uncertainty; do not guess who should be notified. A delayed fact keeps
+its original owner even after reassignment. This routing rule never removes
+Dan's, Gavin's or unassigned facts from delivery.
 
 ### Presentation digest
 
-`approvalPresentationDigest(request, item, environmentId)` = SHA-256 of the
-canonical JSON of:
+`ApprovalGrant` is a new adapter-produced contract in
+`packages/contracts/src/approvals.ts`:
 
-- `environmentId`, `threadId`, `runId`, `requestId`, `requestKind`;
-- `nativeRequestRef.nativeId`;
-- `appName`, `prompt`, `reason`, `fullAccessOverride`;
-- `options` (ordered `decision`, `label`, `warning`);
-- `createdAt`.
+```ts
+{
+  version: 1,
+  provider: string, providerVersion: string | null, nativeMethod: string,
+  nativeDecision: unknown,              // validated, exact outbound permission decision
+  permission: unknown,                  // validated authorization-relevant native payload
+  resources: { commands?: string[], cwd?: string, paths?: unknown[],
+               network?: unknown, tool?: string, input?: unknown },
+  effectiveScope: "once" | "turn" | "session" | "persistent" | "unknown",
+  appliesTo: string,                     // human-readable exact authority, no reason-only summary
+  expiresWhen: string,
+  persistence: "none" | "provider_session" | "disk" | "unknown",
+  supported: boolean, unsupportedReason?: string
+}
+```
 
-These are exactly the fields the approval row renders. The event, `read`,
-`respond` and the UI test all use this one function from
-`packages/shared/src/approvalPresentation.ts`. If a provider fills in details
-late (upstream #26344 saw this), the digest changes. That produces a new
-`approval` event (`revision + 1`, `supersedesEventId`), and a respond carrying
-the old digest is refused.
+`unknown` above means a provider-specific decoded JSON union in the real
+schema, not arbitrary unvalidated input. Never infer scope from button text,
+`requestKind` or the provider's reason. Retain the complete permission
+payload in the authoritative request/event; sanitize secrets, not
+authorization-relevant fields. If safe presentation cannot describe the
+whole grant, refuse MCP accept. Capture and validate the original native
+request **before lossy schema decoding**. For the initial Codex profile,
+`effect-codex-app-server/src/client.ts` validates a recursively closed,
+versioned raw profile at `dispatchRequest`, before `decodeOptionalPayload`
+in `_internal/shared.ts` can discard excess properties. Preserve the raw
+request plus supported/unsupported validation evidence with its binding;
+unknown keys at any permission/network/filesystem nesting make it app-only.
+Do not change unrelated native decoding globally or hash a stripped object
+as proof that the original authority was fully presented. Unsupported raw
+shapes retain a safe bounded app presentation without authorizing MCP replies.
+Event previews may truncate text but
+`read` must return the full safe grant (or `ui_only: incomplete_grant`).
+
+`approvalPresentationDigest` hashes canonical, versioned JSON containing
+environment/thread/run/request/incarnation, provider session/generation,
+native request/method, presentation revision, created time, ordered offered
+options, prompt/reason/app/override, and the full `ApprovalGrant`.
+`grantDigest` separately hashes its grant portion. The UI, read tool,
+events, native command validator and adapter delivery guard use the same
+helpers. Missing metadata on an old pending request is `ui_only`; never
+backfill by guessing.
+
+A provider update increments presentation revision even for A → B → A.
+The native response command receives the expected binding and digest and
+validates them again under the target thread lock, immediately before
+resolution/commit. A handler-side read is for presentation only.
 
 ### Fact derivation
 
-`AgentFactDeriver` runs on every machine with `agentEvents.enabled`. It
-follows `EventSink.stream({ afterSequence: derived_through_sequence })`. For
-each committed event it inserts facts and advances the watermark in one SQL
-transaction:
+`AgentFactDeriver` consumes committed `EventSink.stream` source events in
+global sequence order and feeds a persisted reducer. It applies each event
+to its own thread/run/item/request/owner state, then derives transitions
+from before/after state **at that sequence**. Do not call
+`getRuntimeResponseContext`, today's shell or the latest assistant message
+when replaying history.
 
-| Domain event                                                                                                                    | Fact                                                                                                                                                         |
-| ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `runtime-request.updated` → `pending`, approval kinds; or `turn-item.updated` on an `approval_request` whose request is pending | `approval` once the request and its item both exist, through `getRuntimeResponseContext`. A changed digest gives a new revision.                             |
-| Same for `user_input` with a `user_input_request` item                                                                          | `question`                                                                                                                                                   |
-| `secret_request` turn item pending                                                                                              | `secret` (name only, never a value)                                                                                                                          |
-| `runtime-request.updated` → `resolved`, `expired` or `cancelled`                                                                | `request_closed`, carrying `resolvedBy` when present. A pending live approval that becomes `expired` or `not_resumable` also raises `blocked: request_lost`. |
-| `runtime-request.delivery.fail`                                                                                                 | `blocked: answer_not_delivered`                                                                                                                              |
-| Thread `limitRecovery` becomes waiting                                                                                          | `blocked: usage_limit`                                                                                                                                       |
-| `run.updated` to a terminal status (`ThreadManagement.isTerminalRunStatus`)                                                     | `run_finished`, with the last assistant message as `resultPreview`                                                                                           |
-| `thread.owner-set`                                                                                                              | `owner_changed`                                                                                                                                              |
+| Source transition                                                         | Fact                                                                                       |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Pending approval and its item become present, or its version changes      | `approval`, keyed by incarnation and transition; include the full grant binding            |
+| Pending user input or secret request appears/changes                      | `question` or `secret`; secrets contain only the requested name                            |
+| Runtime request resolves/expires/cancels                                  | `request_closed`; native commitment is separate from provider delivery                     |
+| Live request becomes unrecoverable, or answer delivery definitively fails | `blocked: request_lost` or `answer_not_delivered`                                          |
+| Limit recovery enters waiting, clears, then enters again                  | One blocker entry per occurrence, with explicit revisions                                  |
+| Run attempt enters a terminal state                                       | `run_finished`; result preview reduced from messages committed by that sequence            |
+| Thread create/owner-set changes assignment                                | `owner_changed`, with immutable source-time owner snapshots                                |
+| Relay connection/status changes                                           | A durable status-transition occurrence; repeated unreachable/following cycles are distinct |
 
-**Restart.** A crash between commit and derivation replays from the
-watermark, and the deterministic IDs make re-insertion a no-op. Facts are
-derived for **every** thread, whatever its owner or origin, including
-scheduled-task and delegated threads.
+Commit reducer/checkpoint updates, every emitted fact, log-head allocation,
+all matching durable outbox rows (or an explicit replayable matcher
+watermark), and source watermark in one SQL transaction. A crash cannot
+advance derivation past undelivered matching work. Duplicate replay of one
+source event is a no-op; equal content on a new transition is not.
 
-**First start.** The watermark starts at `latestApplicationSequence`, so a
-newly enabled machine does not flood the dot with history. Requests already
-pending at that moment are backfilled once from the projection.
+**Activation/bootstrap.** Take one consistent read transaction at source
+sequence S, snapshot required reducer state and the directory observation,
+and atomically store activation generation, snapshot, watermark S and
+pending-attention bootstrap facts. Those facts say `bootstrap_snapshot`
+and observed-at S; they do not claim the request originally opened then.
+Resume events after S. Do not emit old terminal runs. For historical events
+predating the owner journal, keep label revision unknown, or use the S
+snapshot only for the explicitly marked bootstrap; never rewrite their past
+labels with current names. A supported rebuild uses the retained checkpoint,
+immutable source events and directory references. Missing source history
+produces an explicit gap, not invented transitions.
+
+Derive every readable thread irrespective of owner, launch source or
+delegation. Suppress child `run_finished` only during subscription matching
+unless `includeDelegatedResults`; always match child attention kinds.
+Parent completion/failure remains based on native child accounting, not
+synthetic completion from suppressed child facts.
 
 ### Fleet relay
 
@@ -913,13 +1064,34 @@ is a read tool:
   and is retried with backoff. Each state change produces a single
   `source_status` fact.
 - **Reads only.** A read-only link is enough to follow facts.
+- **Status identity.** Persist each peer status transition counter with the
+  cursor update and its fact. Use source kind `peer_status`, the peer ID
+  and that counter as its occurrence; do not pretend it is an orchestration
+  event. A repeated unreachable/following cycle gets new events.
 
-**Visibility.** When a fact is matched to a subscription, it is delivered only
-if that subscriber could read the thread now. A local fact needs
-`orchestration:read`. A relayed fact also needs this machine's link to the
-origin, and the subscriber must not be a linked caller. That is the same rule
-as `t3_thread_read` with `environmentId`. This is access control, not owner
-filtering.
+**Visibility (Phase 3 integration).** Reuse Phase 0's outside-sharing
+authority predicate at subscribe, refresh, pull and each send. Extend it with
+one `canReadFactNow` predicate shared by relay export, cached reads, replay,
+matching and delivery. Check current thread existence/visibility, enabled
+Linked environments on both ends, the authenticated link's current
+credential/read cap, source authorization generation and requester limits.
+Owner is never consulted. Threadless source-status facts contain only
+current local connection diagnostics, not cached thread content; they use
+current local link/read authority rather than requiring a successful poll
+of the unavailable source. When remote authority cannot be established for
+thread facts, hold
+cached facts without sending; an old successful poll is not permission to
+send after an outage or revocation. Permanent deletion/revocation records a
+reasoned skip; uncertainty does not advance delivery progress.
+
+The Phase 3 link read contract additionally returns an authorization
+generation and supports validating a bounded set of cached thread/fact
+references immediately before external delivery. A restarted, expired,
+disabled or narrowed link invalidates cached authority. Remote access
+changes after the final check and an already-in-flight network request are
+an unavoidable boundary; record check time/generation and never claim bytes
+already sent can be recalled. Relayed payloads/IDs remain immutable, and
+received facts are never re-exported as local origin facts.
 
 ### MCP 2.0 transport and the events endpoint
 
@@ -1066,220 +1238,545 @@ that environment's facts for the subscription, and records `source_status`.
 
 ### Approval tool
 
-`t3_approval_request` lives in the fork toolkit `mcp/toolkits/approvals`,
-registered beside `LanToolkit`. Its parameters:
+Phase 1 registers a fork toolkit `mcp/toolkits/approvals`. It is available
+over both existing tool-call protocols and independent of events. The handler
+calls `approvals/ApprovalService.ts`; it does not implement native policy.
+`t3_pending_request` remains user-input-only.
 
 ```ts
-{
-  action: "list" | "read" | "respond",
-  environmentId?: EnvironmentId,   // plain EnvironmentId, not OrchestratorMcpEnvironmentTarget:
-                                   // the handler forwards it itself (see below)
-  threadId: ThreadId,              // required; outside callers have no "this thread"
-  requestId?: RuntimeRequestId,
-  respond?: {
-    decision: "accept" | "decline",
-    presentationDigest: string,
-    clientRequestId: string,       // 8–128 chars; a retry with the same id returns the first receipt
-    onBehalfOf: string,            // 1–64: the person whose explicit approval this carries, e.g. "Dan"
-    authorization: string,         // 1–500: their words, e.g. "Dan: approve the Chrome request on the probe task"
-  },
-  attestation?: ForwardAttestation // accepted only from a linked caller; set by the forwarding server
-}
+type ApprovalToolInput =
+  | { action: "list"; threadId: ThreadId; environmentId?: EnvironmentId }
+  | {
+      action: "read";
+      threadId: ThreadId;
+      requestId: RuntimeRequestId;
+      environmentId?: EnvironmentId;
+    }
+  | {
+      action: "respond";
+      threadId: ThreadId;
+      requestId: RuntimeRequestId;
+      environmentId?: EnvironmentId;
+      clientRequestId: string; // top-level; 8–128 chars
+      expected: {
+        requestIncarnation: string;
+        providerSessionId: string;
+        providerGeneration: string;
+        presentationRevision: number;
+        presentationDigest: string;
+      };
+      decision: "accept" | "decline";
+      consent: {
+        effectiveScope: "once" | "turn";
+        grantDigest: string;
+        onBehalfOf: string;
+        authorization: string;
+      };
+    };
 ```
 
-What each action returns:
+List/read require ordinary current read authority and return
+`ApprovalDetail`, current owner coordinates and `answerable` for this
+caller. Respond requires the separate approval permission, including for a
+decline. Thread and task-only callers are refused; unknown extra fields
+(including a public `attestation` or `resolvedBy`) are rejected. Phase 1
+returns `forwarding_unavailable` for any remote `environmentId`; it does
+not accidentally route through the generic thread toolkit.
 
-- **`list`:** the pending approvals in the thread. Each has `requestId`,
-  `requestKind`, `appName`, `createdAt`, `presentationDigest` and `answerable`.
-- **`read`:** `ApprovalDetail` (above) and the thread's current owner.
-- **`respond`:**
-  `{ receiptId, status: "submitted" | "already_submitted", decision, sequence }`.
+A receipt result is
+`{ receiptId, commandId, state, replayed, decision, effectiveScope,
+sequence?, failureCode?, deliveryEvidence? }`. `committed` means the native
+resolution and response effect are durable, with no claim of transmission.
+`delivery_admitted` names the irreversible handoff authorization boundary.
+`response_written` means a command-bound native response write completed;
+`provider_acknowledged` is available only for an explicit correlated peer
+acknowledgment. Neither means the tool executed. Codex has no such peer
+acknowledgment for JSON-RPC responses, so Phase 1 reports `response_written`.
+Resolving an in-memory deferred or inserting into an outgoing queue never
+counts as a completed write. `prepared`, `committed` and `delivery_admitted`
+remain visibly pending; `delivery_unknown` is uncertain. Exact retry returns
+the same operation/receipt and its latest state.
 
-**Decision mapping.** `accept` sends the native `accept`:
+Refusal codes extend `OrchestratorMcpFailure` in
+`packages/contracts/src/orchestratorMcp.ts`: `approvals_not_granted`,
+`thread_caller_refused`, `task_only_refused`, `request_not_found`,
+`not_an_approval`, `not_live`, `request_changed`,
+`presentation_changed`, `decision_not_offered`, `scope_consent_required`,
+`scope_unsupported`, `ui_only`, `idempotency_conflict`,
+`already_answered`, `authority_revoked`, `forwarding_unavailable`;
+Phase 3 adds `link_not_approved`, `thread_not_delegated`,
+`forwarding_chain_refused`. Preserve native capability/mode refusal codes.
+`already_answered` returns safe resolution status/actor/sequence when
+readable, including when the T3 app won. It never says this MCP call succeeded.
 
-- Codex permissions: `scope: "turn"`.
-- Command and file-change approvals: that one call.
-- Elicitations: accept with no persistence.
-- Claude and ACP providers: their own single-use allow.
+### Provider approval matrix
 
-`decline` sends `decline`. `acceptForSession`, `acceptAlways`, `cancel` and
-feedback cannot be expressed. If the item's options exist and do not include
-the requested decision, the call is refused. A URL-mode elicitation, where
-`accept` maps to `decline`, is `ui_only`.
+These are **effective** grants at main `45194c8c34`, not promises derived
+from a label. Phase 1 adds adapter-produced grant descriptors and focused
+protocol tests for supported rows. Missing/unknown payload or scope remains
+`ui_only`. For every accept, bind the selected native reply and full
+authorization-bearing input to the digest.
 
-**Refusals.** All are `OrchestratorMcpFailure`, with these codes:
+**Initial Phase 1 support is local Codex `item/permissions/requestApproval`
+only**, for a verified raw native version/profile, with exact turn consent
+and both accept/decline through the guarded service. All other profiles are
+app-only initially. The matrix records conditions for later support, not
+permission to enable them in this implementation. A nonpersistent Chrome
+elicitation profile needs its own verified reply/lifetime tests before a
+later enablement; it is not inferred from form labels or defaults.
 
-- `approvals_not_granted`, `thread_caller_refused`, `task_only_refused`,
-  `capability_denied` (read-only);
-- `request_not_found`, `not_an_approval` (questions go to
-  `t3_pending_request`);
-- `not_pending`, `not_live` (not resumable, or the session is gone);
-- `presentation_changed` (returns the current digest; nothing is done);
-- `decision_not_offered`;
-- `runtime_mode_escalation_denied` / `interaction_mode_escalation_denied`;
-- `already_resolved` (a different `clientRequestId` already answered it);
-- `link_not_approved` (receiver);
-- `invalid_request` (attestation from a non-linked caller).
+| Provider/request                                                            | Actual accept and lifetime                                                                                                                                                                         | Profile requirements (permissions row only in initial Phase 1)                                                                                                                                                                                                                                                       |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Codex `item/commandExecution/requestApproval`, legacy `execCommandApproval` | Native `accept` / legacy `approved`; does not enter T3's session allowance. `acceptForSession` and `acceptAlways` do.                                                                              | App-only initially. Later profile requirements: Support request-once only when the native contract is known. Show full command/argv, cwd, requested execution/network/filesystem authority and policy-amendment proposal; do not use `reason ?? command` as the permission. No amendment/session choice.             |
+| Codex `item/fileChange/requestApproval`, legacy `applyPatchApproval`        | Nonempty `grantRoot` requests session-wide root writes with uncertain native semantics (`schema.gen.ts:49278`, `:47113`); native accept does not narrow it.                                        | App-only initially and always app-only for nonempty `grantRoot`, for both methods. Rootless support additionally requires verified complete proposed changes and native lifetime; never classify a root grant as once.                                                                                               |
+| Codex `item/permissions/requestApproval`                                    | Returns the **whole** requested permissions with `scope: "turn"`; decline returns empty permissions.                                                                                               | Support `effectiveScope: "turn"` only with explicit per-request turn consent and full filesystem read/write paths, network fields from the verified raw profile; unknown raw fields make it app-only. Plain “approve once” is refused. Never infer from mapped command/file-read/file-change kind.                   |
+| Codex `mcpServer/elicitation/request`                                       | Form accept uses `toMcpElicitationResponse`; no requested persistence. URL accept maps to decline (normally rejected before a card).                                                               | App-only initially. Later profile requirements: Support only representable nonpersistent form acceptance. Show app/server, request/schema and exact generated content, including defaults. If no true nonpersistent option exists, or persistence is ambiguous, app-only. URL/forms needing user data stay app-only. |
+| Claude `canUseTool`                                                         | `behavior: "allow"` with exact `updatedInput`, `user_temporary`; once adds no `updatedPermissions`. Session choice adds permission updates.                                                        | App-only initially. Later profile requirements: Support once; show actual tool name and effective input, not its title. Session/disk rules are excluded. `fullAccessOverride: "ask_rule"` stays app-only, including decline.                                                                                         |
+| Claude MCP elicitation                                                      | Supported form path reuses the Codex elicitation acceptance helper; unsupported/URL forms are declined.                                                                                            | App-only initially. Later profile requirements: Same representability/nonpersistence requirement; exact generated form content is part of the grant.                                                                                                                                                                 |
+| ACP command permission                                                      | `allow_once` is selected, **and** `makeAcpClientPolicyGrants.recordApproval` enables command execution for the remainder of that provider turn. ACP cannot bind the grant to one terminal command. | App-only initially. Later profile requirements: Support explicit turn consent only. Show the requested tool call and the broader permission to execute additional commands in that turn; expiry names the provider turn.                                                                                             |
+| ACP file read/change and other known permission kinds                       | Selects offered `allow_once`; T3's extra client-policy execution grant applies only to command kind. `allow_always` may persist beyond a session.                                                  | App-only initially. Later profile requirements: Support once only for a verified flavor/request profile with complete tool call, locations, inputs and native options. Unknown kinds, missing `allow_once` or unverifiable provider semantics stay app-only. Never fall back to `allow_always`.                      |
+| Antigravity, Grok, Fx, ACP registry agents                                  | Use the shared ACP adapter, with flavor-specific classification and question extraction.                                                                                                           | App-only initially. Later profile requirements: Inherit the ACP command turn grant and verified file profiles. Questions extracted from permission requests remain questions. New registry providers default unsupported until profiled; no inference from a familiar name.                                          |
+| Pi extension `confirm`                                                      | Sends `confirmed: true` once; `acceptForSession` adds a title/message-based T3 session grant. The arbitrary extension decides what true means.                                                     | Default app-only: a prompt is not proof of permission scope. Only a verified extension profile describing the action, input and lifetime can expose once. Other extension UI methods are questions.                                                                                                                  |
+| OpenCode v1                                                                 | `accept` maps to `permission.reply(..., reply: "once")`; both session/always map to native `always`.                                                                                               | App-only initially. Later profile requirements: Support only a verified version/profile whose native once semantics are known, with permission, patterns/resources, metadata and request/session identity shown. Unknown coalescing or persistence => app-only. Never send `always`.                                 |
+| OpenCode v2                                                                 | Native reply `decision: "once"`; session/always additionally persist T3 rules for the asking subagent's project.                                                                                   | App-only initially. Later profile requirements: Same verified-once gate; show action/resources/save proposals and asking session/project. Accept writes no standing rules. Decline may send a steer and reject; disclose that effect.                                                                                |
+| Muse                                                                        | Sends the selected native `choiceId` and `currentRequirementId`. Decision names alone do not establish scope: an `approved` choice can have a different scope. Decline may map to abort.           | App-only initially. Later profile requirements: Support only an offered choice with explicit `scope: "once"`, complete subject/raw args/requirement revision and no amendment. Show abort semantics when that is the offered decline. Session/localPersistent and unknown scopes stay app-only.                      |
+| Cursor SDK                                                                  | No interactive approval callback; `respondToRuntimeRequest` returns unsupported.                                                                                                                   | App-only/unsupported, never synthesize a native permission request.                                                                                                                                                                                                                                                  |
+| Future/other adapters                                                       | Unspecified.                                                                                                                                                                                       | Deny MCP accept until an explicit provider profile and protocol-effect tests exist.                                                                                                                                                                                                                                  |
+
+Evidence: Codex mappings at
+`apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts:563`,
+`:591`, `:5216`, `:5287`, `:5359`, `:5421`, `:5500`;
+elicitation at `apps/server/src/provider/CodexMcpElicitation.ts:184`.
+Claude at `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts:3414`, `:9757`, `:9841`.
+ACP at `packages/provider-acp/src/server/adapter.ts:1025`, `:6050`,
+`:6167`, `clientPolicy.ts:235`; flavor entrypoints at
+`apps/server/src/orchestration-v2/Adapters/AntigravityAdapterV2.ts:256`,
+`packages/provider-{grok,fx,acp-registry}/src/server/adapter.ts`.
+Pi at `packages/provider-pi/src/server/adapter.ts:1305`, `:2787`,
+`:3374`. OpenCode at
+`packages/provider-opencode/src/server/OpenCodeRuntime.ts:370`,
+`server/adapter.ts:3533`, `server/v2/adapter.ts:3830`. Muse at
+`packages/provider-muse/src/server/protocol.ts:203`, `:228`,
+`server/adapter.ts:1062`. Cursor at
+`packages/provider-cursor/src/server/adapter.ts:2709`.
+
+Session/persistent approvals are not supported over MCP in Phase 1.
+The opt-in permission is never blanket consent to turn scope. Every accept
+carries `consent.effectiveScope` and the exact `grantDigest`; a turn grant
+requires the owner's words to explicitly acknowledge that turn-wide authority.
+T3 validates that the structured consent matches, and records the words as an
+agent assertion; it cannot prove what Dan actually said. Decline can refuse
+a supported request without consenting to grant its permission. Unsupported
+types and ask-rule requests remain app-only for both decisions.
 
 ### Enforcement points
 
-**Local** (the thread is on the machine the client signed in to). In order:
+**Authoritative local path.** Preserve native pending/resumable/live-session,
+provider-enabled and runtime/interaction-mode checks. The important source
+boundaries are `Orchestrator.ts:8732` (response plan), `:13385` (thread
+lock), `EventSink.ts:635` (atomic events/projections/command receipt/outbox)
+and `EffectWorker.ts:389` (provider response).
 
-1. `/mcp` auth builds the scope. `client.approvals` is set when the session's
-   scopes, after `CredentialAccessCap`, include `orchestration:approve`.
-2. Tool visibility: `EnabledWhen` hides the tool from thread callers and from
-   clients without `client.approvals`. The handler checks both again.
-3. The new declaration `McpToolAccess.approves(…)`:
-   - refuses thread callers, `taskOnly` grants, read-only clients, and clients
-     without the approve scope;
-   - runs `writingCaller` (live, non-read-only) and `writesThreads`'
-     per-thread checks (`assertTargetWithinLimits`, `assertSameLink`);
-   - provides `DispatchModeLimit`, so the orchestrator rechecks modes under
-     its lock.
+1. Authenticate an outside client and re-read current session authority,
+   approval opt-in and credential caps. List/read may run without approval
+   scope; respond may not. Tool visibility is convenience, never enforcement.
+   `McpToolAccess.approves` refuses thread/task-only/read-only callers and
+   provides `DispatchModeLimit`.
+2. Compute the complete immutable operation digest, including principal,
+   target, expected binding, decision, grant/scope and consent/claimed actor
+   text. Look up `(principal, clientRequestId, role)` **before** testing
+   pending status. A matching operation reconciles/returns its receipt;
+   different arguments give `idempotency_conflict`. Unauthorized old tokens
+   cannot use retry to regain approval rights.
+3. Insert `prepared` with stable `commandId = approval:<receiptId>` and
+   immutable operation JSON. Preparation does not reserve or resolve the
+   request. A crash here leaves a recoverable intent, not success.
+4. Dispatch a server-only guarded `runtime-request.respond`. Under the
+   target thread lock and native-update admission, re-read request/item and
+   recompute binding/digest, offered decision, provider profile, scope and
+   live session/generation. Check ask-rule exclusion and current modes.
+   A changed incarnation/session is `request_changed`; a changed
+   presentation/grant is `presentation_changed`. The decision must be
+   offered by the current native profile/options. Never infer an offer from
+   absence of the options array.
+5. At that same commit boundary, recheck approval authority/revision through
+   `ApprovalAuthority`'s admission gate. Revocation/downgrade and approval
+   commitment serialize on that gate; a call authorized before revocation
+   cannot commit after it. Lock order is thread lock, then authority gate;
+   revocation takes no thread locks. No network I/O inside this gate.
+6. Native request resolution, trusted actor, approval receipt `committed`,
+   command receipt and guarded response outbox effect commit in **one**
+   EventSink SQL transaction. The app and MCP race has exactly one native
+   winner. If the app or another operation won, this receipt is
+   `refused: already_answered`; do not report submission.
+7. The guarded effect also carries the authenticated approval principal,
+   authorization identity/revision and original credential/mode ceiling,
+   alongside incarnation/session/generation/grant binding. Immediately
+   before irreversible adapter handoff, **delivery admission** rechecks
+   current approval authority, credential caps, effective modes and current
+   immutable native binding. Admission and removal serialize on the same
+   authority gate. Keep the adapter response gate held through this check
+   and handoff; follow a fixed thread/native-admission -> adapter-response
+   -> authority-gate lock order, and never acquire those locks in reverse.
+   Local receipt SQL may run under that gate; provider/network waits may not.
+8. Admission durably records `delivery_admitted` with the checked revision
+   and passes a command-bound admission token into the provider response
+   path. Before admission, removal wins and withholds delivery. After this
+   boundary the native handoff may be irreversible and cannot be recalled;
+   describe that boundary honestly, including a crash before write evidence.
+   Revalidation is not an earlier check outside the removal gate.
+9. Carry a typed result through deferred handoff, queue admission and the
+   actual writer. Codex's current `respondToRuntimeRequest` only resolves a
+   deferred (`CodexAdapterV2.ts:7716`); `protocol.ts:248,339,482` subsequently
+   encodes, queues and writes. Add stable command/native-response IDs and
+   completion/failure hooks to the owned client/protocol writer. Queueing
+   produces pending evidence, completed transport write produces
+   `response_written`, and only an actual correlated peer acknowledgment
+   can produce `provider_acknowledged`. Preserve actual provider differences;
+   do not wrap the existing adapter return as a delivery acknowledgment.
+   This requires extending/replacing the owned `_internal/stdio.ts`
+   transport-creation bridge as well as the client/protocol hooks. Its
+   current opaque `handle.stdin` sink can finish after `writable.write`
+   accepts bytes into Node's buffer, before a write-completion callback.
+   Add a command-bound acknowledged-write primitive at the actual child
+   stdin writer, with completion/failure/interruption evidence. If the
+   existing child handle hides that callback, extend the owned creation
+   bridge or local spawn wiring rather than inferring completion from the
+   sink, queue, return value or `drain`. Serialize message writes, honor
+   backpressure and preserve the same stdin across messages; close it only
+   at the owning process/scope boundary. No vendored Effect source edits.
+   MCP acceptance remains disabled until this primitive and its delayed-
+   callback, failure and interruption tests pass.
+10. A trusted delivery-result command persists receipt/outbox evidence.
+    Definite failure before handoff is `delivery_failed` (or the policy
+    refusal below); ambiguous or interrupted admitted writes are
+    `delivery_unknown`. These are typed terminal outcomes of the response
+    effect, not ordinary execution errors routed into EffectWorker's
+    generic retry policy (`EffectWorker.ts:819`). Suppress blind resend.
 
-   It is a new kind of declaration, so it must be added to
-   `taskOnlyTools`/`gateTaskOnly` review (it is **not** a task-only tool).
+**Withheld-response recovery.** A committed response denied at delivery
+admission becomes terminal `delivery_withheld`, with `authority_revoked`,
+`mode_changed` or `request_changed` as appropriate, and an app-visible
+attention state. If the exact native deferred is still live and proof says
+no handoff occurred, a guarded internal recovery command re-exposes it in
+the app with a new T3 request incarnation/revision. The old receipt and
+consent remain terminal and cannot resolve that incarnation. Otherwise
+show `request_lost` and the existing app restart/retry path. Uncertain or
+already admitted sends are never reopened as provably unanswered requests.
 
-4. Request binding: `getRuntimeResponseContext`. The request must be an
-   approval kind, `pending`, with `responseCapability.type === "live"`, a
-   session present, and an item present. The digest must match. The decision
-   must be offered.
-5. Single use: insert the `agent_approval_receipts` row (role `local`,
-   outcome `submitted`) **before** dispatch. The partial unique index refuses a
-   second answer to the request. The retry index returns the first receipt for
-   the same `clientRequestId`.
-6. Dispatch `runtime-request.respond` with
-   `resolvedBy = { kind: "mcp_client", label, principalId, onBehalfOf, authorization, viaEnvironmentId: null, receiptId }`.
-   This runs the native checks unchanged; the pending → resolved transition is
-   the second single-use guard. A dispatch error updates the receipt outcome
-   and frees the request for a corrected retry.
-7. The provider gets exactly the mapped decision through the existing effect.
-   A delivery failure produces `runtime-request.delivery.fail`, which becomes a
-   `blocked: answer_not_delivered` event.
+The guarded expected fields and actor live on an internal
+`OrchestrationV2ServerCommand` variant/context, not an optional
+client-authored `resolvedBy` field. Public UI RPC rejects those fields.
+Ordinary UI responses still use native dispatch and receive trusted
+user/session attribution. UI does not acquire MCP approval scope merely
+because the request is shared. Add offered-decision validation to the shared
+native path so the UI cannot submit an unoffered answer either.
+
+**Recovery.** Startup and matching retries reconcile by stable command ID
+against `CommandReceiptStore` and the effect outbox **before** resubmission.
+A prepared receipt with no command receipt may dispatch only while its
+original authority and exact request remain valid. A committed receipt
+with no completed-write evidence is pending delivery, not completion. Recover
+from native receipt acceptance even if the caller lost the HTTP response.
+If the provider session died, report `request_lost`/delivery failure;
+never claim the command ran.
+
+Adapter idempotency uses the same response command ID plus request binding.
+A duplicate send to a known completed deferred returns its recorded response
+outcome. For a native transport with no dedupe/query facility, an ambiguous
+write is not blindly replayed: retain `delivery_unknown` and require
+reconciliation or app inspection. A new approval requires a new incarnation
+and fresh consent. An uncertain receipt never prevents inspection or falsely
+marks an unanswered request as done.
 
 #### Forwarded approvals
 
-The thread is on CryoFrog and the dot is signed in to BuildMachine.
+Phase 3 adds `approvals/ApprovalForwarding.ts`; Phase 1 refuses all remote
+targets. Use A = BuildMachine, B = CryoFrog, and A's authenticated native
+link **to B**. A is the requester/forwarder; B owns the request and commits
+the native response.
 
-**On BuildMachine:**
+**Authority is the intersection of these checks:**
 
-- Steps 1–3 run against the dot's grant.
-- `PeerForwarding.callerLimits` refuses linked callers and computes the dot's
-  modes.
-- A `forwarder` receipt is written (single use on this side too).
-- The handler then calls `PeerForwarding.call(scope, ApprovalTool, cryoFrogEnv, params, writes = true)`
-  with `params` it builds itself: the dot's `respond` fields, plus
-  `attestation = { clientLabel, principalHash, viaEnvironmentId: BuildMachine, forwarderReceiptId, onBehalfOf, authorization }`.
-  The agent cannot supply `attestation`: the handler refuses it from
-  non-linked callers.
-- `PeerMcpClient` still applies `PeerWriteCeiling` (BuildMachine's Machine
-  access list) and sends `T3-Mode-Limit` = the dot's modes.
+- The dot's current session on A explicitly holds `orchestration:approve`,
+  remains non-read-only and is within its modes.
+- A's current outbound Machine access list permits writes to B.
+- B's authenticated link from A currently holds the approval scope after
+  destination credential caps. B's destination-specific approval policy
+  enables that link; mode ceilings still apply.
+- The target's immutable creation provenance names that authenticated A link
+  **and** the same initiating-client identity, or B has an explicit,
+  unrevoked delegation for that link/client/thread. This additional approval
+  restriction applies even to Full access links.
+- All native request/incarnation/presentation/scope/consent checks pass at B.
 
-**On CryoFrog:**
+Neither owner labels nor `onBehalfOf: "Dan"` establish any of those rights.
+Dan's events and Gavin's events are delivered on the same read basis, but
+event delivery does not grant permission to answer them.
 
-- The caller is BuildMachine's link session.
-- `approves(…)` requires the **link's** scopes to include
-  `orchestration:approve` (after `FleetCredentialAccess`); otherwise
-  `link_not_approved`.
-- Then steps 3–7 run, with `T3-Mode-Limit` capping modes at the dot's and the
-  `linkOrigin` fence applying if the link is below full access.
-- The receipt (role `receiver`) records the attestation as **asserted by the
-  link**.
-- `resolvedBy` becomes
-  `{ kind: "mcp_client", label: "<link label>", actingFor: attestation.clientLabel, onBehalfOf, authorization, viaEnvironmentId: BuildMachine, receiptId }`.
+**Stable provenance.** In migration 084 persist
+`agent_thread_approval_origins(thread_id PRIMARY KEY,
+source_environment_id, link_identity_id, initiating_client_id,
+creation_command_id, created_sequence)`, plus
+`agent_approval_delegations(delegation_id PRIMARY KEY, thread_id,
+link_identity_id, initiating_client_id, policy_revision, created_by,
+created_at, revoked_at)`. Foreign keys/uniqueness bind a delegation to that
+destination. Link identity is server-assigned and survives authenticated link
+credential renewal; environment label, subject text or owner is not identity.
+A assigns an opaque initiating-client ID at consent and passes it only in
+server-built launch/forwarding metadata. B stores it with authenticated
+immediate-link provenance at creation. Explicit owner-approved replacement
+may carry that client ID forward; a fresh sign-in otherwise gets a new ID.
+Existing threads/provenance without both values need explicit delegation.
+For this approval path only, target authorization accepts the ordinary
+same-link fence **or** a current destination delegation for this exact
+link/client/thread. Do not change the thread's creation provenance or loosen
+other native write tools. Mode ceilings and native request checks still hold.
+Add provenance to the actual shared launch service and all MCP launch routes,
+not only to `t3_thread_launch`.
 
-So an approval through a link needs both keys:
+**No chaining.** On **every** approval forwarding entry, reject
+`scope.client.linked === true` whenever it names a remote environment,
+regardless of access level. A linked receiver accepts only a local target.
+Do not rely on `assertNotLinked`'s fenced-link behavior. Export only origin
+facts; that separate event rule is not an approval-chain guard.
 
-- the dot's grant on BuildMachine carries the approve scope;
-- BuildMachine's link on CryoFrog carries it, which follows from fleet policy
-  or a manual link's checkbox.
+**Wire contract.** The public approval schema has no attestation field.
+Use a separate hidden, link-only `t3_link_approval_request` schema in the
+same toolkit, with operation `prepare | commit | status`, a receiver-local
+target and server-built asserted initiating client/consent/forwarder receipt.
+B derives immediate sender and link identity from authenticated invocation
+metadata. It records the initiating client and human words as **asserted by
+A**, never independently authenticated facts.
 
-Neither alone is enough.
+A's retry key is explicitly namespaced by
+`hash(["approval-v1", A, initiatingPrincipal, clientRequestId])` before
+forwarding. B keys retries by stable authenticated link identity plus that
+key and verifies the complete operation digest. Keep the key top-level;
+`PeerForwarding.ts:153` only namespaces a top-level `clientRequestId`.
+Credential rotation must not create a second remote operation.
+
+A persists a prepared forwarder receipt, B persists an immutable prepared
+receiver operation, then B commits through the same guarded local service.
+A stores B's receipt/command ID. Lost replies are reconciled through the
+link-only `status` operation; A never retries with a new key or reports
+success from its own preparation. Status access is limited to the originating
+link and operation. Neither side's `prepared` state reserves native success.
+B must recheck current link policy/delegation at commit, not only at prepare.
+
+**Compatible destination policy.** Do not add `approvals` to the strict
+signed `FleetAccessEntry` machine shape (`FleetAccessPolicy.ts:32`).
+Use a separate versioned file
+`fleet-approval-policy/<destinationMachineId>.json`, signed by that
+destination's existing fleet identity. It is a complete snapshot with
+`version: 1, fleetId, destinationMachineId, revision, previousDigest,
+createdAt, grants: [{ callerMachineId, enabled }], signature`.
+Validate signer/destination against the current trusted roster. Only that
+destination's authorized owner/admin may write it. Existing readers ignore
+the new directory and continue reading unchanged fleet-access files.
+A local destination revision is authoritative immediately; distribution
+copies, old links and relink offers cannot override a newer local revocation.
+Invalid/unknown/conflicting or rollback revisions grant no approvals.
+Use the same strict canonical signing/atomic-write patterns as FleetFiles.
+A manual link uses the same destination-local record keyed by stable link
+identity; no unsigned client label grants permission.
+
+`FleetCredentialAccess` strips `orchestration:approve` on **every**
+linked call unless the current destination policy permits it. Removal works
+with the retained old link token and with an already-prepared receiver
+operation; reissuing credentials alone is insufficient. Restoring policy
+never silently restores a revoked client session. UI exposes the destination
+scope separately from read/full-access and thread delegation.
+
+**Revocation boundary.** A rechecks the dot's live authority at forwarding
+admission and before each commit send; B rechecks its own current link and
+delegation under native commit admission. Source revocation cancels queued
+forwards and notifies B to refuse uncommitted prepared operations. If a
+commit was already sent and its outcome is unknown, retain an uncertain
+receipt and reconcile; do not claim that remote work stopped. A network
+partition cannot recall an already-admitted remote request. Phase 3's review
+must verify these linearization points and fail-closed behavior; no cached
+attestation becomes ongoing approval authority.
 
 ### Granting approval permission
 
-- **Sign-in page.** For Supervised and above, a checkbox that is **off by
-  default**: "Also let this agent answer permission requests: approve once or
-  decline, one request at a time." It adds `orchestration:approve` to the
-  session's scopes. `mcpClientScopes(access, { approvals })` is the single
-  source of truth. Read-only never offers it.
-- **Who can grant it.** The approving browser session or pairing code must
-  hold the scope (`McpOAuth.approve` already refuses scopes the approver
-  lacks). Owner sessions and standard pairing codes gain it; the scope is
-  added to `AuthStandardClientScopes`.
-- **Seeing and revoking it.** Settings → Sharing & access shows "can answer
-  approvals" on the client. Revoking the session removes it. To keep the
-  client but drop approvals, sign in again without the box.
-- **Peer links.**
-  - Fleet: `FleetAccessPolicy` gains a per-machine `approvals: boolean`,
-    default `false`. D mints L's link code with the scope only when it is
-    true, and a change re-offers a code, as access changes do today.
-  - Manual links: the link-request card offers the same unchecked box.
-  - A link without the scope still follows facts (read).
+The accepted sign-in checkbox is separate from access level, unchecked,
+and unavailable for read-only/task-only grants:
+
+> Also let this agent answer permission requests. Each approval must name
+> the permission and its duration. Broader permissions require my explicit
+> consent for that request.
+
+`mcpClientScopes(access, { approvals: false })` stays the default,
+including Full access. Check opt-in during both browser and pairing-code
+flows and token exchange; persist it in pending OAuth code state. The OAuth
+scope response must describe actual granted scopes. No legacy
+`orchestration:operate` parent/alias may imply approval rights. Existing
+MCP sessions and peer credentials start without the new scope. Do not
+retroactively grant it by widening a common scope array.
+
+The approving owner session must have explicit grantor authority. Pairing
+codes can grant approvals only when deliberately created with an approval
+grant option; ordinary agent codes cannot mint that authority. New scope
+schema, token decoding, protected-resource metadata and scope compatibility
+tests must cover this, not just the checkbox. Permission controls work for
+web, desktop's web surface and the mobile outside-agent connection flow.
+
+**Identity and downgrade.** Keep Phase 0's session principal. Migration 082
+stores a distinct approval authorization row for each session and an opaque
+initiating-client ID. `application_id` is registered OAuth application
+identity, not client name. `consent_family_id` is the server's local
+consenting authority/fleet-attribution lineage; it groups revocation only.
+Its family key comes from the authenticated grantor's normalized attribution
+root (a server-owned local-owner family when no fleet root exists), never
+client-supplied metadata. It must not be `mcp-client:local` used as a receipt
+principal.
+
+A completed sign-in **without** approvals atomically disables approvals on
+all prior sessions in that same registered application/consenting-authority
+family, and issues the new session without them. The consent page makes
+that replacement effect explicit. This scope removal does not merge session
+identities or subscriptions, and does not revoke other scopes. An explicit
+owner-selected replacement may preserve initiating-client provenance.
+Never infer provenance continuity solely from equal application metadata.
+
+Settings → Sharing & access also has an explicit **Remove approval
+permission** operation for one session/family; full session revocation
+continues to stop event delivery. All permission changes bump the live
+authority revision and publish a notice. `ApprovalAuthority` and
+`EnvironmentAuth` consult the row/cap on every respond and at native
+commit and again at serialized delivery admission; an earlier authenticated
+invocation cannot retain removed rights before either boundary.
+Keep the authoritative disable in the same transaction/admission gate as
+replacement issuance. If it fails, do not finish the sign-in claiming that
+older rights were removed. Test an old retained bearer, including
+in-flight approvals paused before commitment and after commitment but before
+delivery admission. Already admitted handoff is the explicit recall boundary.
 
 ### Audit records
 
-- **`agent_approval_receipts`** on every machine involved: who (`principal_id`,
-  `client_label`), for whom (`on_behalf_of`, `authorization_text`), via
-  (`via_environment_id`, `upstream_receipt_id`), the digest, decision, outcome
-  and command ID. It is listed by `t3_agent_events` for the caller's own
-  receipts, and by an owner-scope WebSocket read for Settings.
-- **On the thread.** `resolvedBy` on the request is an optional, lenient fork
-  field on the `runtime-request.respond` command and on
-  `OrchestrationV2RuntimeRequest`; stock clients ignore it. The resolved
-  approval row renders "Approved once by Gecko Butler for Dan · via
-  BuildMachine" (or "Declined …"). It is visible in web and mobile and in
-  `t3_thread_read`.
-- **`request_closed` events** carry `resolvedBy`, so every subscriber sees
-  who answered.
+Receipt actor data is server-built. Record authenticated session principal,
+application, current authority revision, immediate linked sender (if any),
+asserted initiating client/person/words, exact grant/scope, expected
+incarnation, native command/effect IDs and state transitions.
 
-### The fork ledger: replace, not add
+Project `resolvedBy` only from trusted server metadata; do not accept it
+from an optional public command property. The thread row reads, for example,
+“Approved this request by Gecko Butler for Dan” or “Granted command execution
+for this turn by Gecko Butler for Dan · via BuildMachine”. A native
+commitment awaiting delivery shows that state; delivery failure/uncertainty
+remains visible. Never label a turn grant “Approved once”.
 
-Row 5's rule is "do not add a second ledger". `RoutingStore`'s observation
-inbox cannot be reused (F5): it captures only when polled and is keyed to
-gateway-owned threads. **Decision (needs Dan's approval, since it changes row
-5 from keep):**
+Expose current receipt/status through `t3_approval_request` exact retry and
+a scoped read operation on `ApprovalService`, with owner-authorized Settings
+access. Extend Phase 0 diagnostics rather than claiming an MCP
+`t3_agent_events` tool already exists. Phase 2 `request_closed` carries
+trusted `resolvedBy`, effective scope and delivery state; later failure
+produces its own attention transition.
 
-- `agent_event_facts` becomes the ledger.
-- The observation inbox is frozen from phase 0: no new callers.
-- In phase 4, `t3_lan_task_observe` and `t3_lan_events_ack` are either:
-  - reimplemented as a pull view over `agent_event_facts` for owned threads,
-    keeping their contract (`sourceId` = fact-log epoch, events mapped to the
-    existing `LanTaskObservation` kinds); or
-  - retired with the gateway (row 10) if Dan drops it.
-- Migration 084 then drops `lan_observation_inbox` and
-  `lan_observation_cursors`. `lan_owned_threads` stays.
+### The fork ledger: contract-preserving consolidation
+
+`t3_lan_task_observe` and `t3_lan_events_ack` keep accepting existing and
+new authorized callers throughout Phases 1–3. There is no freeze in Phase 0.
+Keep their tables and behavior until an explicitly reviewed Phase 4 cutover.
+
+The fact log becomes the eventual single source of event facts. A
+compatibility adapter still needs per-principal delivery/ACK state: that is
+consumer state, not a second source of facts. Before switching observe/ACK:
+
+1. Extend the internal fact/reducer model to cover legacy nonterminal
+   `run_state`, work-state snapshots and all existing observation kinds.
+   High-volume compatibility facts need not become webhook catalog events.
+2. Preserve principal/environment/thread ownership fencing, native source
+   identity, independent delivery generation, sequence and anchor-based
+   reset detection. A fact-log epoch is not a drop-in delivery generation.
+3. Copy pending inbox payloads, ACK bits, cursor anchors and delivery
+   generations into an additive compatibility state table without changing
+   issued event/source IDs. Translate only newly ingested observations.
+   An old ACK remains valid only for its original principal/generation;
+   a stale ACK can never acknowledge a new delivery generation.
+4. Run old and adapter reads in shadow against the same immutable input
+   and compare exact pending observations, snapshots and reset outcomes.
+   During cutover, serialize observe/ACK writes; advance only one active
+   ingestion cursor. Exercise disconnect/restart/reset/ACK races.
+5. Take a validated backup and verify every retained fact, subscription,
+   receipt and secret reference plus both work-generation and explicit
+   non-work row/payload invariants. Keep old tables for rollback and record
+   the active adapter generation. Rollback must preserve post-cutover ACKs,
+   not resurrect acknowledged deliveries.
+
+The recommendation is adapter compatibility until Dan explicitly retires the
+gateway contract. Retirement requires his separate decision, a caller
+inventory and cutover evidence. No `DROP TABLE` belongs in 084 or a later
+migration until retirement/cutover verification is complete and the
+destructive cleanup is separately approved. `lan_owned_threads` remains
+while task mutations rely on it. This design authorizes neither retirement
+nor data deletion.
+
+### Phase 1 build plan
+
+This is implementation work for the next phase, not changes made by this
+design revision. Integrate Phase 0's reviewed auth/registration changes first;
+keep 080/081 and all probe behavior. Forwarding and facts are not Phase 1
+dependencies.
+
+| Files (new unless marked edit)                                                                                                                                                                                                              | Contract/work                                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/contracts/src/approvals.ts`; edit `src/index.ts`, `src/orchestratorMcp.ts`                                                                                                                                                        | Grant/provider-profile union, request binding, consent, receipt-state/result and refusal schemas; discriminated action inputs with top-level retry ID                                                                                                     |
+| Edit `packages/contracts/src/auth.ts`                                                                                                                                                                                                       | Independent approval scope, explicit grantor/consent options, live scope-removal command; no operate/full-access alias                                                                                                                                    |
+| Edit `packages/contracts/src/orchestrationV2.ts`                                                                                                                                                                                            | Optional lenient read fields for grant/binding/delivery/audit; internal guarded server response command and effect, not public actor input                                                                                                                |
+| `packages/shared/src/approvalPresentation.ts`; edit `packages/shared/package.json`                                                                                                                                                          | Versioned canonical presentation/grant/operation hashing; explicit subpath export                                                                                                                                                                         |
+| `apps/server/src/approvals/{ApprovalService,ApprovalReceipts}.ts`                                                                                                                                                                           | One typed service for list/read/respond/reconcile; receipt SQL helpers participate in caller transactions                                                                                                                                                 |
+| `apps/server/src/auth/ApprovalAuthority.ts`; edit `EnvironmentAuth.ts`, `EnvironmentAuthPolicy.ts`, `SessionStore.ts`, `McpOAuth.ts`, `mcpOAuthHttp.ts`, `RpcAuthorization.ts`, `apps/server/src/ws.ts`                                     | Persist/strip live opt-in; atomic sign-in downgrade; owner-authorized removal; admission gate; both browser and pairing-code consent                                                                                                                      |
+| Edit `apps/web/src/components/auth/ConnectAgentSurface.tsx`, `apps/web/src/components/settings/{SessionPermissions,ConnectionsSettings,SavedEnvironmentRows}.tsx`                                                                           | Separate checkbox and current approval state/removal, including desktop's shared UI and one-click sign-in path                                                                                                                                            |
+| `apps/server/src/mcp/toolkits/approvals/{tools,handlers}.ts`; edit `mcp/{McpHttpServer,McpInvocationContext,McpToolAccess}.ts`                                                                                                              | Register thin toolkit, correct list/read vs respond authority, task-only classification, remote refusal; reuse both negotiated protocols                                                                                                                  |
+| Edit `apps/server/src/orchestration-v2/{Orchestrator,EventSink,ProjectionStore,EffectWorker,RuntimeRequestService,EffectOutbox,runtimeLayer}.ts`                                                                                            | Under-lock guards, trusted actor, atomic receipt commitment, stable guarded effects, delivery-result events and reconciliation; wire services once                                                                                                        |
+| Edit `packages/provider-core/src/server/ProviderAdapter.ts`; `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts`                                                                                                                  | Guarded response command/admission identity, typed handoff/write/uncertain outcomes and verified Codex permission descriptor. Shared fallback keeps all other profiles app-only without changing their native behavior.                                   |
+| Edit `packages/effect-codex-app-server/src/{client,protocol}.ts`, `_internal/{shared,stdio}.ts` and owned transport-creation bridge/spawn wiring as needed; extend `client.test.ts`, `protocol.test.ts`, `_internal/{shared,stdio}.test.ts` | Raw closed-profile validation before decoding, safe unsupported evidence, command-bound writer completion/failure and cancellation outcomes. Preserve unrelated decoding; do not hand-edit generated schemas. Other provider-package support is deferred. |
+| Edit `apps/web/src/components/chat/TimelinePendingApprovalRow.tsx`, `apps/mobile/src/features/threads/PendingApprovalCard.tsx`                                                                                                              | Show complete permission/effective lifetime, safe attribution and delivery state; no misleading once label                                                                                                                                                |
+| `apps/server/src/persistence/Migrations/082_AgentApprovalAuthorityAndReceipts.ts`; edit `Migrations.ts`, `lan/NativeMaintenance.test.ts`, `scripts/lan/home-repair.ts`, home-repair migration fixtures/tests                                | Additive 082 schema and preservation checks; fresh/080/081 upgrades supported                                                                                                                                                                             |
+| Extend `scripts/lan/agent-events-e2e.ts`; test fixtures under `apps/server/src/orchestration-v2/testkit/`                                                                                                                                   | Phase-selectable approval harness without callbacks, real accounts, paid models, live installs or live links                                                                                                                                              |
+
+Cursor remains explicitly unsupported. Native SDK version/profile uncertainty
+must result in app-only behavior, not a guessed grant. Phase 1 can ship a
+verified Codex permissions subset only. The shared unsupported fallback and
+profile tests enforce app-only for every other provider/request in the matrix.
+Mobile sign-in uses the same hosted consent surface; if its connection entry bypasses that page, route it
+through the shared consent API before exposing approvals. The new server
+scope-removal operation uses the existing access-management permission and
+typed client-runtime RPC command wrapper; neither read-only nor MCP approve
+alone grants session-management authority.
+
+Build order: define contracts and migration; implement authority/removal and
+raw Codex validation and descriptor; implement the guarded transaction,
+serialized delivery admission and native write evidence/recovery; expose MCP
+and UI only after these gates pass; run focused tests and the local harness.
+No editor, live release, model run or event delivery is needed to prove this
+phase.
 
 ## Security analysis
 
-| Constraint                            | How it holds                                                                                                                                                                                                                                                                              |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Native checks preserved               | The tool only dispatches `runtime-request.respond`. The orchestrator's pending, resumable, live-session and provider-enabled checks and the adapter's deferred are unchanged. `DispatchModeLimit` rechecks modes under lock.                                                              |
-| Request freshness and identity        | Binding to `(environment, thread, requestId)`, `pending` and `live`, plus a `presentationDigest` of every displayed field. Late detail changes the digest. Live-only approvals cannot be answered after a provider restart (`not_live`).                                                  |
-| Exact scope                           | Only `accept` (the provider's narrowest grant) or `decline`, and only if offered. No session or always options, no feedback, no URL elicitations. Codex permissions answer with `scope: "turn"`.                                                                                          |
-| Caller permissions                    | The opt-in scope is off by default and requires Supervised or above. Read-only, task-only, thread and linked-chaining callers are refused. A target thread above the caller's modes is refused (`assertTargetWithinLimits`). Fleet caps narrow it live (`CredentialAccessCap`).           |
-| Single-use replay protection          | Two layers: the receipts unique index per request and role, and the orchestrator's pending → resolved transition. `clientRequestId` makes network retries idempotent. A replayed `respond` with a new id gets `already_resolved`.                                                         |
-| Auditability                          | Receipts on every hop, `resolvedBy` on the thread, `request_closed` events. `onBehalfOf` and `authorization` record the human claim, labelled as asserted by the agent.                                                                                                                   |
-| No bypass via prompt or UI automation | Approval goes through a typed tool, never a message to the task, and never through preview or device tools. Nothing auto-approves. Runtime modes, project settings and provider policy are untouched.                                                                                     |
-| Forwarding                            | Two independent keys (the dot's grant and the link's scope). BuildMachine checks before sending. The receiver checks its link. `T3-Mode-Limit` carries the dot's ceiling. The agent cannot forge `attestation`, because the server builds it and the receiver accepts it only from links. |
-| Events: confidentiality               | Delivery is gated on the subscriber's current read access per fact. Secrets are never in payloads. Webhook secrets are in `ServerSecretStore`, not the DB or logs. Thread text is labelled untrusted.                                                                                     |
-| Events: callback abuse (SSRF)         | HTTPS only. Addresses are resolved and validated on every connection, which is then pinned to the validated address. No redirects. The verification challenge proves intent. A 10 s timeout. One in flight per subscription, four overall.                                                |
-| Events: revocation                    | Checked before each attempt, by a 60-second sweep, and immediately on revocation or policy notifications.                                                                                                                                                                                 |
-| Owner never filters                   | No owner argument in any schema (`additionalProperties: false`). The deriver, relay, matcher and visibility checks never read `ownerId` except to fill the payload. Tests prove Dan's, Gavin's and unassigned events all deliver.                                                         |
-| Data preservation                     | Additive migrations only. No change to fleet, peer-link, session or grouping tables. Home repair support for each ID. Delivery tables are outside the work hash.                                                                                                                          |
+| Constraint                    | Enforcement                                                                                                                                                                          |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Exact provider authority      | Initial verified Codex permissions profile only; complete raw payload validated before lossy decoding and bound to exact turn consent. Every other profile stays app-only.           |
+| Apply-time consent            | Expected incarnation, session/generation, presentation revision/digest, grant and offered decision revalidated under native thread admission and at adapter delivery.                |
+| Single native winner          | UI and MCP resolve through the same native lock and EventSink transaction. A loser gets `already_answered`, never a success receipt.                                                 |
+| Recoverable retries           | Immutable operation/retry key, stable command ID, prepared/committed/delivery states and command/outbox reconciliation; no pre-dispatch success marker.                              |
+| Immediate local removal       | Commit and delivery admission serialize with removal and recheck live authority/caps/modes/binding; retained tokens and paused calls cannot cross either boundary after revocation.  |
+| Trusted actor                 | Authenticated principal/immediate link are server-derived. Human words and upstream client identity are labelled assertions. Public commands cannot forge `resolvedBy`.              |
+| Forwarded authority           | Current source grant, outbound write cap, destination link approval cap, link/client provenance or explicit thread delegation, modes and native checks all intersect.                |
+| No forwarding chain           | Every linked caller naming another remote environment is refused, including Full access.                                                                                             |
+| Event confidentiality         | Phase 0 outside-sharing admission plus current per-fact read authorization; relayed access uncertainty holds delivery. No secrets in payloads; prompt/result text is untrusted data. |
+| Callback transport            | Phase 0 owns HTTPS verification, Standard Webhooks, actual-address validation/pinning, redirect refusal and expiry/revocation. This revision does not change that implementation.    |
+| Owners never authorize/filter | No owner argument. Reducer, relay, matcher and wake deliver all authorized owners; directory/assignment coordinates are historical metadata only.                                    |
+| Preservation                  | Additive migrations; independent non-work row/payload/secret checks; legacy ACK/generation contract retained until verified cutover and separately approved cleanup.                 |
 
-**Residual risks:**
-
-- **The human claim is unverifiable.** T3 cannot tell whether Dan really said
-  yes. The dot is trusted for that statement, which is why the scope is opt-in
-  and the receipt records the claim verbatim.
-- **A compromised BuildMachine** (or anyone holding its link credential with
-  the approve scope) can approve on CryoFrog for any principal it claims.
-  CryoFrog trusts the link, not the attestation. That is the same trust it
-  already extends to a full-access link for every other write.
-- **ChatGPT's callback endpoint** is a third party. Event data (titles,
-  approval prompts, result previews) leaves the fleet. That is inherent in the
-  feature, and the reason for `agentEvents.enabled` per machine.
+Residual trust: T3 cannot prove the dot's account of Dan's consent. B
+authenticates A's link, not the dot or Dan; a compromised A can lie within
+the authority B deliberately delegates. Remote revocation cannot recall a
+commit already admitted at B. A 2xx callback is not a wake or human response.
+Event text leaves the fleet only through the separately authorized
+outside-sharing path.
 
 ## Validation
 
@@ -1318,67 +1815,189 @@ gateway-owned threads. **Decision (needs Dan's approval, since it changes row
   - `sending` → `pending` on restart;
   - the watermark never passes a pending event;
   - revocation mid-retry stops delivery.
-- `AgentFactDeriver.test.ts` (with `OrchestratorScenario`):
-  - every catalog kind from real domain events;
-  - an approval whose detail lands late gives revision 2 with
-    `supersedesEventId`;
-  - a crash between commit and derive replays without duplicates;
-  - first start backfills pending requests once;
-  - delegated, scheduled and every-owner threads all produce facts.
-- `AgentFactRelay.test.ts` (with `PeerLinks.testkit`):
-  - cursor persistence across restart;
-  - peer epoch change → replay plus a `gap` fact; dedupe by ID;
-  - an old peer → `unsupported`;
-  - relayed facts are never re-exported.
-- `toolkits/approvals/handlers.test.ts`, one test per refusal code, plus:
-  - an accept reaches the adapter as `accept` (Codex permissions
-    `scope: "turn"`; elicitation without persist);
-  - a decline;
-  - the `clientRequestId` retry returns the same receipt;
-  - a second answer → `already_resolved`;
-  - a stale digest → `presentation_changed`;
-  - a mode-escalation race → `runtime_mode_escalation_denied`;
-  - `resolvedBy` is projected;
-  - questions are refused (`not_an_approval`), and `t3_pending_request` is
-    unchanged.
-- `ApprovalForwarding.test.ts` (two in-process environments, as in
-  `PeerForwarding.test.ts`):
-  - a dot grant without the scope is refused on BuildMachine and nothing is
-    sent;
-  - a link without the scope → `link_not_approved` on the receiver;
-  - with both, receipts on both sides and `resolvedBy.via` = BuildMachine;
-  - a forged `attestation` from a non-linked caller is refused;
-  - `PeerWriteCeiling` read-only blocks the call;
-  - `T3-Mode-Limit` caps it.
-- `McpOAuth.test.ts` / `EnvironmentAuth.test.ts`:
-  - the checkbox is off by default;
-  - the scope is offered only for Supervised and above;
-  - an approver lacking the scope cannot grant it;
-  - `CredentialAccessCap` stripping the scope removes `client.approvals`.
-- `FleetAccessPolicy.test.ts`: the `approvals` flag defaults off, mints the
-  scope only when true, and narrowing removes it live.
-- Owner (`AgentFactDeriver.owner.test.ts`), with a `fleet-users.json` fixture
-  `{dan, gavin}`, `machineOwners`, and threads owned by Dan, owned by Gavin,
-  with no owner, and with an ID missing from the directory:
-  - payloads are `assigned/Dan`, `assigned/Gavin`, `unassigned` (with
-    `machineDefault`) and `unknown_user`;
-  - reassigning Gavin → Dan gives `owner_changed` with a higher revision, and
-    later events carry Dan;
-  - **all** events are delivered to one `t3.task_activity` subscription (the
-    count equals the number of facts).
-- `NativeMaintenance.test.ts` and home-repair tests: new migration IDs are
-  supported, and rows in the new tables leave `workGeneration` unchanged.
+    The Phase 0 tests above are unchanged and remain its builder's responsibility.
+    Add the following Phases 1–4 cases at the lowest relevant layer; extend
+    existing tests where possible.
+
+**Phase 1:**
+
+- `packages/shared/src/approvalPresentation.test.ts`: canonical hashing
+  binds native payload, resource/scope/expiry, incarnation/generation,
+  revision and ordered decisions. Equal reason text with different
+  permissions changes the digest.
+- `packages/contracts/src/approvals.test.ts`, existing auth and
+  orchestration schema tests: reject public actor/attestation fields,
+  malformed/unknown grant profiles, nonconsented turn scope and session/
+  persistent decisions; old read projections decode as app-only.
+- Existing `CodexAdapterV2.test.ts` and owned Codex `client.test.ts`,
+  `_internal/shared.test.ts`, `protocol.test.ts`: verified permissions
+  return the exact complete payload and turn scope only after turn consent.
+  Unknown raw authority fields at top-level, permission, filesystem and
+  network nesting stay app-only before any lossy decode. Both file methods
+  with nonempty `grantRoot` are refused, and rootless/command/elicitation/
+  other-provider profiles stay app-only initially. Exercise the actual
+  writer: deferred completion and queue insertion cannot advance write
+  evidence; failure before enqueue, queue-to-write interruption, completed
+  write and ambiguous post-write failure produce distinct outcomes. No
+  peer-acknowledged result exists without a genuine peer acknowledgment.
+  Extend `_internal/stdio.test.ts` at the acknowledged-write primitive:
+  delay the actual native callback for a small buffered write and assert no
+  `response_written`; then complete/fail/interrupt it. Prove ordering and
+  backpressure across multiple messages without closing stdin between them.
+  A sink-progress result or `drain` alone must fail this regression.
+- `apps/server/src/approvals/ApprovalService.test.ts`,
+  `ApprovalReceipts.test.ts`: exact retry before pending checks, argument
+  change under one key, two clients with the same key, crash after prepare,
+  before/after native commit and after provider send. Reconcile committed
+  native receipt with lost reply; no false success, duplicate response or
+  automatic retry after ambiguous non-idempotent native delivery.
+- Existing `Orchestrator.test.ts` scenarios and
+  `McpToolAccess.race.test.ts`: barrier-controlled UI-vs-MCP race has one
+  winner; request A changes before lock acquisition; same native ID reused
+  in a new session/incarnation; offered decision removed; modes increase;
+  provider payload changes before effect delivery. Check returned code and
+  exact resulting native authority, not just a mock handler call.
+  Pause after EventSink commit but before delivery admission; remove rights,
+  narrow caps/modes or replace binding, then resume. No native handoff may
+  occur; persist `delivery_withheld` and safely reopen only a provably unsent
+  live request under a fresh incarnation. An admitted uncertain send must
+  bypass generic effect-worker retries and must not reopen as unanswered.
+- `mcp/toolkits/approvals/handlers.test.ts`: one representative allowed
+  local flow; action validation, task/thread/read-only refusal, local
+  `environmentId`, remote `forwarding_unavailable`, ask-rule app-only,
+  unchanged `t3_pending_request`. Auth remains enforced if tool visibility
+  is bypassed. Exercise both negotiated tool-call protocols.
+- Existing `McpOAuth.test.ts`, `EnvironmentAuth.test.ts`,
+  `EnvironmentAuthPolicy.test.ts`, `SessionStore.test.ts`, and new
+  `auth/ApprovalAuthority.test.ts`: Full access/ordinary pairing codes
+  do not imply approve; unchecked one-click sign-in stays unchecked; grantor
+  must hold authority; caps strip approve live; independent sign-ins remain
+  different principals. Sign in without approve, then use the retained old
+  bearer. Pause an old call before native commitment, remove permission,
+  resume, and assert no response effect. Full session revocation also stops
+  event delivery in the disposable harness.
+- Migration `082_AgentApprovalAuthorityAndReceipts.test.ts`,
+  `Migrations.test.ts`, `NativeMaintenance.test.ts`,
+  `scripts/lan/home-repair-migrations.test.ts`: fresh/080/081 upgrade,
+  no new rights on old sessions, prepared/uncertain receipt preservation,
+  explicit row/payload/secret-reference verification and work hash stability.
+- One client integration pass on web/desktop and mobile for truthful grant/
+  duration, attribution and pending/failed delivery rendering. Keep UI-only
+  details out of backend policy tests.
+
+**Phase 2:**
+
+- `AgentFactDeriver.test.ts`: stopped deriver replays approval open/change/
+  close in order after projections are already resolved; two approvals on
+  one thread; reused native ID; A → B → A; recurring blockers; secret and
+  source-status occurrences; source/checkpoint gaps; crash around fact/
+  reducer/matcher/watermark transaction. Bootstrap is a single consistent
+  snapshot and accurately marked.
+- `AgentFactDeriver.owner.test.ts` / `AgentEventOwnerJournal.test.ts`:
+  Dan/Gavin/unassigned/unknown owners, reassignment, rename with unchanged
+  assignment, directory absent/unreachable, rebuild after rename, delayed
+  delivery before owner-change arrival, and unavailable fresh routing.
+  Extend `FleetUsers.test.ts` for unchanged successful refresh, stale
+  last-good values, absent/invalid/unavailable results and observation
+  generation/time. Persist each observation before source commitment binds
+  its journal reference; missing freshness never guesses current routing.
+  All authorized events arrive at one subscription without owner filtering.
+- Extend Phase 0 store/delivery tests for facts in the same sequence space:
+  pruning while payloads are pinned, exact expiry, immutable occurrence
+  time, low-cursor replay recomputation, ahead-of-head rejection, explicit
+  pruning/abandonment gaps and separate approval retention. Child attention
+  always matches; child run-finished is off by default.
+
+**Phase 3:**
+
+- `AgentFactRelay.test.ts`: origin-only export, transactional peer cursor/
+  import, replay/dedupe/epoch gaps, recurring source transitions, old peer
+  unsupported, expired/revoked peer, disabled Labs switch, deleted thread,
+  cached authority uncertainty and current access generation revalidation.
+  Include Dan and Gavin without owner-based filtering.
+- `ApprovalForwarding.test.ts`: explicit A → B usable link; authorized
+  link/client-created thread succeeds, unrelated operator thread fails;
+  explicit destination delegation succeeds; wrong initiating client and
+  missing provenance fail. Repeat under Supervised and Full access.
+  Linked A → B → C is refused for both access levels.
+- Retain old receiver token after destination policy removal; pause prepare
+  before commit and revoke delegation; test source grant removal and an
+  in-flight lost remote reply. The result stays uncertain until reconciled,
+  never falsely completed or falsely stopped. Two clients using equal retry
+  keys cannot collide. Validate immediate sender identity independently of
+  asserted human/client fields.
+- `FleetApprovalPolicy.test.ts`: default off, strict canonical signature,
+  destination-only writer, rollback/conflict/invalid data fail closed,
+  newer local revocation wins; old strict FleetAccessPolicy fixtures remain
+  readable/unchanged. `FleetCredentialAccess.test.ts` strips approval scope
+  live without relinking. `PeerWriteCeiling` and `T3-Mode-Limit` still hold.
+
+**Phase 4:** Extend `RoutingStore.test.ts` / `EnvironmentRouting.test.ts`
+and maintenance/repair tests with pending ACKs, independent delivery
+generations, anchored resets, work-state snapshots and nonterminal run-state
+parity. Shadow comparison, restart during cutover, stale ACK and rollback
+must preserve post-cutover acknowledgements. Row counts plus work hash alone
+are not proof.
 
 ### Local end-to-end harness
 
-`scripts/lan/agent-events-e2e.ts`, run with `node` from the build-tools
-toolchain. It needs no paid model.
+Extend `scripts/lan/agent-events-e2e.ts` with explicit phase selection.
+Keep the reviewed Phase 0 mode/default intact. All new modes use temporary
+homes outside installed userdata, `--no-seed`, free replay/fake providers,
+isolated loopback ports and captured child PIDs for cleanup. Print machine-
+readable JSONL with operation/receipt/native command IDs and native-response
+evidence. No model subscription, live fleet credential or dot is needed.
 
-1. **Server A.** Start a T3 dev server from source with a temporary
-   `--home-dir` and `--no-seed`. Being a dev server, it seeds the free
-   `devReplay` ACP agent (`ProviderInstanceRegistryHydration.seedDevReplayInstance`),
-   whose recorded `approval` scenario raises a real `session/request_permission`
-   and whose `question` scenario raises a real elicitation.
+**Phase 1 command:** `node scripts/lan/agent-events-e2e.ts --phase approvals`
+with the build-tools Node directory on PATH/PATHEXT.
+
+1. Start one source dev server A with a fresh temporary home. Drive the
+   actual OAuth authorization-code + PKCE flow using disposable local
+   grantor authority, first without the approval checkbox, then with it.
+   A test fixture may create a deliberately approval-capable pairing code;
+   the ordinary code must remain insufficient. No callback subscription
+   or Phase 2 catalog is required.
+2. Use a local fake Codex app-server permission-request fixture through
+   A's actual provider and protocol path. Read its exact incarnation, raw
+   verified profile, binding and digest. Once consent fails; explicit turn
+   consent sends the exact permission payload. Observe actual write evidence
+   separately from deferred/queue handoff. A new request tests decline.
+3. Use wrong digest, wrong scope, missing opt-in, unsupported profile and
+   ask-rule fixtures. Nothing resolves. Race a paused MCP response with an
+   app response and with a presentation/grant update; prove one accurate
+   winner/refusal. A request that reuses the native ID cannot inherit consent.
+4. Retry an accepted operation with the same key: same receipt/command and
+   current state. Change an argument under that key: conflict. Use a new
+   key on the answered request: `already_answered`, including app winner.
+5. Controlled testkit barriers inject crashes after receipt preparation,
+   before/after EventSink commit, and after adapter send before reply.
+   Restart A and reconcile; demonstrate no false success, duplicate grant
+   or blind resend after uncertainty. Keep the same stored request binding.
+   Test hooks are testkit/dev injection only, not production MCP methods.
+6. **Mandatory local revocation:** retain old tokens, complete sign-in
+   without approvals, and try an old bearer; it cannot respond. Pause a call
+   before native commit, remove its approval permission, release it and
+   assert no response effect. Also pause a committed effect before delivery
+   admission, remove permission/caps or narrow modes, and assert no native
+   write, a withheld receipt and safe app recovery. Separately revoke a whole
+   disposable session and prove subsequent calls fail. Phase 2 adds a queued-delivery stop test.
+7. Use the existing fake Codex app-server fixture for complete permissions,
+   unknown raw permission fields and command/file/elicitation payloads
+   without a paid run. Unsupported profiles, including both file-change
+   methods with `grantRoot`, never send an MCP response. Inject writer
+   failures before/after queueing and after write, proving truthful evidence
+   and no blind retries or accidental persistent defaults.
+   The same local harness reports the supported/unsupported provider matrix.
+
+**Phase 2 command:** `--phase facts`. Reuse the approval checks and add
+a local callback, event replay/restart/retention tests, historical reducer
+cases and all-owner delivery. Keep occurrence time fixed across retries;
+only signing time changes. A failed callback, expiry, session revocation
+and outside-sharing cap stop sending. This is a disposable mandatory test,
+not an optional live-session action.
+
+The callback setup from the shared Phase 0 harness is retained here:
+
 2. **Callback receiver.** A Node HTTPS server with a throwaway CA. A has
    `NODE_EXTRA_CA_CERTS` set to that CA and the dev-only
    `T3CODE_AGENT_EVENTS_ALLOW_LOOPBACK_CALLBACKS=1`, which is refused when
@@ -1389,49 +2008,34 @@ toolchain. It needs no paid model.
      payload against the published schema.
    - It records every delivery to JSONL.
    - A control endpoint can make it return 500, 410 or 413, or time out.
-3. **MCP client.** A minimal `2026-07-28` JSON-RPC client. It completes OAuth
-   with a pairing code from `t3 auth pairing create` and PKCE on a loopback
-   redirect, once with the approve box checked and once without.
-4. **Checks**, in order:
-   - discover shows events; list returns the catalog;
-   - subscribe (`t3.task_activity`, `{}`) verifies the callback;
-   - launch a devReplay `approval` thread **from A's own API, not via the
-     agent**, then expect an `approval` event with the correct digest;
-   - `read` gives the same digest;
-   - `respond` with a wrong digest → refused; without the scope → refused;
-     with the scope and the correct digest → the provider proceeds (the
-     replayed turn completes);
-   - expect `request_closed` with `resolvedBy` and `run_finished`;
-   - the same `respond` again → `already_submitted`; a new `clientRequestId`
-     → `already_resolved`;
-   - a `question` thread → `question` event → answered through
-     `t3_pending_request`;
-   - make the receiver return 500 three times, then restart server A while a
-     delivery is pending. Expect the same `eventId` after restart, with a new
-     timestamp and signature;
-   - unique `eventId`s at the receiver equal facts produced;
-   - stop A between commit and derive (test hook), then restart: no duplicate;
-   - 410 → no further deliveries; 413 → no retry;
-   - refresh with an older cursor → replay; a cursor below the floor →
-     `truncated: true`;
-   - revoke the session → delivery stops within 60 s;
-   - unsubscribe → stops;
-   - owners: the Dan, Gavin, unassigned and reassign sequence, all delivered.
-5. **Native link run.** Start server B the same way, turn Linked environments
-   on for both, and link B → A through the link-request flow with the approve
-   box (Supervised).
-   - Run the `approval` scenario on B.
-   - The event arrives at A's subscriber through the relay, with
-     `relay.viaEnvironmentId = A` and `factKey` naming B.
-   - `respond` through A with `environmentId = B`: receipts on both sides, and
-     B's thread shows "via A".
-   - Repeat with a link without the scope: `link_not_approved`.
-   - Stop B mid-stream: `source_status: unreachable`, then catch-up after
-     restart without duplicates.
 
-The harness also prints a manual checklist for the one Codex-specific path
-it cannot replay: a real `mcpServer/elicitation/request`. That path is covered
-by `CodexAdapterV2.test.ts` with the fake app-server.
+**Phase 3 command:** `--phase fleet`. Start B with a second isolated home.
+Enable native links on A and B; construct A's usable outbound link **to B**
+through B's owner-approved link flow. The reverse B → A link is not a
+substitute. Use two explicitly different initiating client authorizations.
+
+- Launch one B thread through A's linked launch service as client C1; store
+  authenticated link identity + C1 provenance. Forward its approval as C1
+  successfully, then try C2 and refuse.
+- Create a separate operator thread on B. Wake/relay read succeeds but
+  forwarded approval fails until B's operator explicitly grants that
+  link/C1/thread delegation. This keeps wake testing independent of launch.
+- Repeat under both Supervised and Full access links. For the delegated
+  operator thread, the approval-specific target guard permits the exact
+  destination delegation as an alternative to the ordinary same-link fence.
+  Keep native mode/request checks and refuse every other unrelated write;
+  never rewrite the operator thread's creation provenance.
+- Remove destination approval scope/policy while retaining the link token:
+  refuse. Revoke C1 on A before send: nothing is forwarded. Pause remote
+  prepare, revoke B delegation, then commit: refuse. Drop the response after
+  B commits: reconcile one receipt/native answer. Report uncertain in-flight
+  outcomes honestly.
+- Attempt a third hop with a linked caller under Full access: refuse.
+  Disable links, revoke/expire peer credentials, delete the source thread
+  and interrupt peer connectivity; cached facts are withheld until present
+  read authority is established.
+- Relay two different B approvals, recurring blockers, A → B → A details
+  and owner reassign/rename histories without duplicates or lost transitions.
 
 ### Live end-to-end with Gecko Butler
 
@@ -1451,17 +2055,17 @@ from task-launch success.
 **Evidence for each step:** T3's delivery log (`t3_agent_events` and the
 receipts) plus the dot's own message in the subscribed chat, with timestamps.
 
-| Step                     | What happens                                                                                                                                         | Passes when                                                                                                                                                               |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| L0 Discovery             | ChatGPT rescans the plugin                                                                                                                           | The log shows `server/discover` and `events/list`; the plugin page lists the events                                                                                       |
-| L1 Subscribe             | Dan asks the dot, in a fresh chat, to "watch T3 for anything that needs me"                                                                          | `events/subscribe` for `t3.task_activity` with `{}` arguments; verification is 2xx; the subscription is stored                                                            |
-| L2 Wake (phase 0)        | After ≥ 30 min of chat idle, the operator runs `t3 agent-events probe` with a random nonce. It is a `probe` fact delivered only to that subscription | 2xx delivered **and** the dot posts in that chat, unprompted, mentioning the nonce. Record latency. Repeat once                                                           |
-| L3 Approval wake         | The operator starts a Supervised Codex probe thread: "run `echo t3-probe-<nonce>` exactly once"                                                      | `approval` delivered; the dot wakes and tells Dan, quoting the request and digest prefix                                                                                  |
-| L4 Approval submit       | Dan tells the dot to approve that probe once                                                                                                         | `respond` receipt; the command runs; the thread row reads "Approved once by Gecko Butler for Dan · via BuildMachine"; `request_closed` and `run_finished` delivered       |
-| L4b Decline and replay   | A second probe: Dan says decline. Then he asks the dot to submit the first approval again                                                            | Declined natively; the replay → `already_resolved`, and nothing runs                                                                                                      |
-| L5 Forwarded (phase 3)   | As L3–L4, on a new probe thread on CryoFrog (`environmentId`), with the fleet `approvals` flag set for BuildMachine → CryoFrog for the test only     | The relay delivers it with CryoFrog's `factKey`; receipts on both; CryoFrog's row reads "via BuildMachine"; with the flag off → `link_not_approved`                       |
-| L6 Owners                | The operator creates probe threads owned by Dan, owned by Gavin and unassigned, then reassigns Gavin's to Dan                                        | The log shows all four facts delivered with correct `owner` and rising `revision`; Dan asks the dot to list T3 events from the last 15 minutes and it reports all of them |
-| L7 Revocation (optional) | Only with Dan's consent, at the end: revoke the dot's session, run a probe, then sign in again                                                       | No delivery after revocation (`revoked` in the log); subscribing again works                                                                                              |
+| Step                   | What happens                                                                                                                                                 | Passes when                                                                                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L0 Discovery           | ChatGPT rescans the plugin                                                                                                                                   | The log shows `server/discover` and `events/list`; the plugin page lists the events                                                                                  |
+| L1 Subscribe           | Dan asks the dot, in a fresh chat, to "watch T3 for anything that needs me"                                                                                  | `events/subscribe` for `t3.task_activity` with `{}` arguments; verification is 2xx; the subscription is stored                                                       |
+| L2 Wake (phase 0)      | After ≥ 30 min of chat idle, the operator runs `t3 agent-events probe` with a random nonce. It is a `probe` fact delivered only to that subscription         | 2xx delivered **and** the dot posts in that chat, unprompted, mentioning the nonce. Record latency. Repeat once                                                      |
+| L3 Approval wake       | Phase 2: operator starts a supported disposable local approval on BuildMachine                                                                               | All-owner event delivered; dot wakes and reports exact permission, duration and digest; launch is independent evidence                                               |
+| L4 Approval submit     | Phase 1 by polling, or Phase 2 after L3: Dan consents to the displayed grant/scope                                                                           | Receipt reaches committed then response_written with command-bound evidence; truthful turn label; observe provider continuation separately                           |
+| L4b Decline and replay | Dan declines a second request, then retries the first operation                                                                                              | Native decline; exact retry returns same receipt; new key gives already_answered; nothing runs twice                                                                 |
+| L5 Forwarded (Phase 3) | Operator creates a fresh CryoFrog probe, explicitly delegates this link/client/thread through the approval-specific target guard; A has its usable link to B | Event wake independent of linked launch; B commits one response; both receipts correlate; removal or unrelated thread/client refuses, including Full access          |
+| L6 Owners              | Operator creates Dan/Gavin/unassigned probes, reassigns Gavin's to Dan, renames one directory label and delays a delivery                                    | All events delivered with source assignment/directory coordinates; old fact owner unchanged; dot resolves current owner before person-specific notification          |
+| L7 Revocation          | Mandatory end of the agreed disposable-session live sequence: revoke the dedicated dot test session, emit a probe, then explicitly sign in/subscribe again   | No new delivery/call after revocation; local retained-token and queued-attempt evidence confirms enforcement; a new authorization works only with a new subscription |
 
 The dot's choice to stay quiet about Gavin's threads is its own policy. It is
 observed, not asserted as T3 behaviour.
@@ -1470,24 +2074,28 @@ observed, not asserted as T3 behaviour.
 
 Effort is in focused developer-days, including tests. Live steps need Dan.
 
-| Phase                           | Contents                                                                                                                                                                                                | Needs from the owner feature                                                                                                   | Effort |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------ |
-| **0. Transport and wake probe** | `2026-07-28` enablement behind `agentEvents.enabled`, discover patch, `events/*`, subscriptions (081), verification, signer, public-address guard, delivery worker, `t3 agent-events probe`, live L0–L2 | Nothing                                                                                                                        | 4–5 d  |
-| **1. Approvals, local**         | `orchestration:approve` and the checkbox, `t3_approval_request`, receipts (082), `resolvedBy` and its rendering, digest helper, harness approval checks, live L4 by polling (no wake needed)            | Nothing (`read` shows the owner when the shell has it)                                                                         | 4–5 d  |
-| **2. Facts and catalog, local** | Deriver, fact store (083), full catalog and payloads, cursors, replay, `truncated`, revocation sweep, `t3_agent_events`, harness restart, dedupe and owner checks, live L3 and L6 (local)               | **Landed:** `ownerId` on the shell, `thread.owner-set` with its sequence exposed, the server-side `fleet-users.json` directory | 5–6 d  |
-| **3. Fleet**                    | `t3_link_agent_facts`, `AgentFactRelay`, forwarded approvals, the link `approvals` policy flag and link-card checkbox, two-server harness, live L5 and L6 across machines                               | Owner IDs that are the same fleet-wide (already so)                                                                            | 5–6 d  |
-| **4. One ledger**               | Reimplement or retire `t3_lan_task_observe`/`ack` on the fact log, migration 084, rows 4 and 5 to replace                                                                                               | Nothing                                                                                                                        | 2–3 d  |
+| Phase                           | Contents                                                                                                                                                                                                | Needs from the owner feature                                                                                             | Effort |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------ |
+| **0. Transport and wake probe** | `2026-07-28` enablement behind `agentEvents.enabled`, discover patch, `events/*`, subscriptions (081), verification, signer, public-address guard, delivery worker, `t3 agent-events probe`, live L0–L2 | Nothing                                                                                                                  | 4–5 d  |
+| **1. Approvals, local**         | Additive 082, separate opt-in/removal, accurate provider grants, guarded native response, recoverable receipts, trusted audit and `--phase approvals` harness                                           | Merged owner label can be read; no new owner metadata required                                                           | 7–10 d |
+| **2. Facts and catalog, local** | Additive 083, ordered reducer and owner-directory journal, full catalog, matching in shared 081 sequence/outbox, retention and `--phase facts`                                                          | Add source-time directory references and current assignment/directory coordinates; do not assume they landed with owners | 6–8 d  |
+| **3. Fleet**                    | Additive 084, origin-only fact relay/current access validation, link/client provenance and explicit delegation, separate signed policy, one-hop responses, `--phase fleet`                              | Stable owner IDs for attribution only                                                                                    | 7–10 d |
+| **4. Compatible consolidation** | Shadow adapter and legacy event/ACK/generation/snapshot parity, verified cutover and rollback; retain tables                                                                                            | No owner dependency                                                                                                      | 4–6 d  |
 
-That is about 20–25 days in total, plus roughly 3 days of harness work spread
-across phases.
+Phases 1–4 are roughly 24–34 focused developer-days including the added race,
+provider and crash checks; these are planning ranges, not release dates.
+Live steps require Dan. No live tests, release or merge are authorized by
+this design-edit task.
 
-**Order.** Phase 0 comes first because it settles the biggest unknown, whether
-the dot wakes at all, for the least code. If L2 fails, phase 2 is still worth
-building for the pull path (`t3_agent_events`, replay), but the plan must be
-revisited with Dan. Phase 1 is independent of phases 0 and 2 and can be built
-alongside phase 0 by a second agent, with no overlap in files: approvals
-toolkit and auth versus `mcp/events` and `agentEvents`. Migration IDs and the
-final integration are serialised. Phases 2 and 3 follow in order.
+Phase 1 can be built after this design review and Phase 0 integration,
+without waiting for event delivery or a successful wake. Phase 0 and 1
+touch shared auth/registration files: serialize integration, not parallel
+overlapping writes. Phase 2 follows the native approval metadata contract;
+Phase 3 follows both and must pass its own forwarding-authority review.
+Phase 4 may consolidate while maintaining compatibility; explicit retirement
+and destructive cleanup are separate later decisions. Draft the upstream
+discussion before Phase 1, but posting/maintainer response does not block
+authorized fork work.
 
 ## Limitations
 
@@ -1514,29 +2122,29 @@ final integration are serialised. Phases 2 and 3 follow in order.
   Locally, the public-address guard is unit-tested only. The harness runs it
   with the dev-only loopback exception.
 
-- **What a forwarded approval's receiver trusts.** CryoFrog verifies only that
-  the link holds `orchestration:approve` and that the thread is within the
-  modes in `T3-Mode-Limit`. It records but cannot verify the dot's identity,
-  the dot's grant, `onBehalfOf` or `authorization`; those are BuildMachine's
-  assertions. A full-access fleet link is not fenced by `linkOrigin`, so with
-  the flag on, BuildMachine can approve on any CryoFrog thread within the
-  forwarded modes, Gavin's included. That is why the flag is per machine and
-  off by default.
+- **Forwarded trust.** The destination authenticates its immediate link,
+  current destination policy and thread/client delegation. It cannot
+  independently prove Dan's words or the dot's identity asserted by
+  BuildMachine. Full access does not remove approval-specific fencing.
+  Source removal prevents new sends; a remote commit already admitted
+  before cancellation may need status reconciliation. No design claims
+  distributed instantaneous recall.
 - **Human approval is a claim.** T3 records who the agent says approved, not
   proof that they did.
-- **Ordering and loss.** Events may arrive out of order (a retry behind a later
-  success). Lost peer history is reported as `source_status: gap`, not
-  recovered. Abandoned events (after 48 hours) are recoverable only by a
-  re-subscribe with an older cursor while the fact is retained.
-- **Live-only approvals.** An approval pending when the provider process
-  restarts cannot be answered by anyone. The dot gets `blocked: request_lost`
-  and should say so rather than retry.
+- **Ordering and loss.** Arrival/retry order is not source order; clients
+  deduplicate event IDs and use occurrence/transition coordinates. History
+  gaps, abandoned deliveries and unavailable owner freshness are explicit.
+  Replaying requires retained source/fact history.
+- **Live-only approvals.** Durable consent cannot resurrect a lost native
+  deferred. Recovery reconciles the exact old incarnation; a new provider
+  session/request requires a new approval. Uncertain provider delivery
+  remains uncertain rather than “done”.
 - **Upstream divergence.**
   - `2026-07-28` on `/mcp` with an intercepting patch for `events/*`. effect
     may later provide this; we replace the patch then.
   - A fork scope (`orchestration:approve`), a fork tool and an optional fork
-    field (`resolvedBy`) on an upstream command and projection. A database or
-    client moving between stock and fork builds already cannot happen
+    read field (`resolvedBy`) on an upstream projection and guarded internal
+    command. A database or client moving between stock and fork builds already cannot happen
     (migration IDs), and stock clients ignore the field.
   - Upstream #22595 and #26344 were closed for lack of maintainer approval.
     Upstreaming this would need a triaged Ideas discussion (#19534 for events,
@@ -1545,32 +2153,134 @@ final integration are serialised. Phases 2 and 3 follow in order.
 - **Error codes.** OpenAI documents `CallbackEndpointError` as `-32015`; the
   draft spec uses `-32027`. We follow OpenAI and will revisit if they align.
 
-## Decisions for Dan
+## Accepted decisions and remaining choices
 
-1. **Approval opt-in.** A sign-in checkbox, off by default, offered for
-   Supervised and above, granting "approve once or decline" only. Confirm, and
-   confirm that Full access does **not** imply it.
-2. **Fleet link approvals.** A per-machine `approvals` flag in the fleet
-   policy, default off. Which machines, if any, should BuildMachine approve on?
-   With standard (full-access, unfenced) links, it covers every thread there
-   within the dot's modes, Gavin's included. Or should approvals over links be
-   limited to threads the link started (`linkOrigin`) even on full-access
-   links?
-3. **`ask_rule` approvals.** Should approvals raised by the user's own ask
-   rule (`fullAccessOverride: "ask_rule"`) be answerable through MCP, or stay
-   `ui_only`? Recommended: answerable, since the rule asks a human and Dan is
-   the human.
-4. **Ledger.** Approve changing row 5 from keep to replace: the fact log
-   becomes the one ledger. In phase 4, reimplement `t3_lan_task_observe` on it,
-   or retire it with the gateway (row 10)?
-5. **Delegated results.** Child-task `run_finished` events are off by default
-   in a subscription, while approvals, questions and blockers from child tasks
-   are always sent. OK?
-6. **Scope of the first live test.** BuildMachine only for phases 0–2; add
-   CryoFrog in phase 3 with the flag set for the test and then cleared. A
-   disposable `agent-events-probe` project on each. Is L7 (revoking the dot's
-   session) acceptable?
-7. **Retention.** Facts kept 14 days or 50k, deliveries 7 days,
-   subscriptions up to 7 days per refresh. Adjust?
-8. **Upstream.** Open an Ideas discussion proposing the approve scope and MCP
-   Events before or after phase 1?
+Accepted for this design: separate approval checkbox with Full access not
+implying it; per-request accurate scope consent; ask-rule app-only; forwarded
+approvals limited to link/client-started threads or explicit delegation;
+all-owner events without source/transport/wake filtering; child finished
+events off by default while attention remains; BuildMachine first then
+CryoFrog with a dedicated revocable test session; event retention 14 days or
+50,000 with pending-payload pins, deliveries 7 days and refresh at least every
+7 days; upstream **draft only**; no release.
+
+Implementation choices settled here: default subscription renewal 24 hours,
+7-day maximum bounded by session expiry; 48-hour delivery abandonment;
+90-day full approval audit plus authorization-lifetime replay tombstones;
+unknown/session/persistent provider scope app-only. A turn grant still
+requires explicit consent on that request, not a broad opt-in.
+
+Remaining consequential choices do not block Phase 1 design:
+
+- Before Phase 3 live use, name the exact destination links/threads/clients
+  to delegate. CryoFrog's disposable test authority expires/revokes after
+  the test; no unrelated existing task receives it.
+- Before Phase 4 retirement, Dan must explicitly choose to retire the old
+  gateway contract. The default remains a compatible adapter and retained
+  tables; later deletion requires separate approval.
+- Actual live wake/approval timing, discussion posting and any release need
+  their own requested action. This document is not that action.
+
+## Review changes (Phases 1–4)
+
+The numbered mapping refers to the full Astra review of design
+`5cf43fb64d`. Phase 0 findings are listed for integration ownership only;
+their sections/code are not edited in this revision.
+
+| Finding                                      | Handling                                                                                                                                                                                                                           |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Accept is not always once                 | Provider matrix, complete native grant descriptor/digest, explicit turn consent, no session/persistent fallback; truthful scope labels and native-effect tests                                                                     |
+| 2. Apply-time race                           | Expected incarnation/session/generation/revision/digest and offered decision checked under native response lock; adapter last check; UI race has one winner and accurate already_answered                                          |
+| 3. Incorrect receipts/retries                | Durable prepared/committed/delivery/uncertain states, atomic native commitment, stable command ID, reconcile before pending rejection, immutable operation-key binding and explicit forwarding namespace                           |
+| 4. Full-access chaining/forged actor         | Every linked caller naming a remote target refused; hidden link-only contract; authenticated immediate link and server-only actor metadata; other identity claims labelled asserted                                                |
+| 5. Broad machine switch/policy compatibility | Destination link plus initiating client/thread provenance or explicit delegation; owner never ACL; separate signed policy file and live scope stripping preserve strict old readers                                                |
+| 6. Outside sharing/cached access             | Phase 0 owns outside-sharing admission. Phase 3 integrates its predicate with current per-fact source/credential/link/delete checks; cache uncertainty withholds delivery, without owner filtering                                 |
+| 7. Transport admission                       | Phase 0 builder/reviewer owns admission, both protocols, fleet origin marker and discovery diagnostics; dedicated sections untouched                                                                                               |
+| 8. Nonhistorical derivation/identity         | Ordered persisted source reducer, durable occurrence/transition IDs, A → B → A and reused-native-ID cases; reducer/fact/matching/watermark transaction and consistent bootstrap                                                    |
+| 9. Old-token downgrade                       | Explicit scope removal and atomic same-app consent-family downgrade; retained old bearer and paused pre-commit tests; live destination policy cap independent of relinking                                                         |
+| 10. Merged OAuth principals                  | Reuse Phase 0's distinct session principals; consent-family revocation and stable initiating-client provenance are separate, never subscription/receipt identity                                                                   |
+| 11. Expiry/replay/retention                  | Phase 0 owns exact expiry, immutable occurrence time and recomputed cursors. Phase 2 shares its counter, pins unfinished payloads/contiguous range, reports gaps and keeps approval replay retention separate                      |
+| 12. Stale owner labels                       | Source-time assignment revision plus directory generation/digest/observation time, immutable journal and old facts; mandatory fresh origin owner read before personal routing, explicit uncertainty                                |
+| 13. Destructive/incomplete ledger migration  | No drops; keep observe/ACK working; additive compatibility state, nonterminal/snapshot parity, independent ACK generations/anchors and verified cutover/rollback with direct row checks                                            |
+| 14. Incomplete Phase 0 slice/shared edits    | Phase 0's pinned as-built 081/probes/identity/secrets/diagnostics is authoritative; reserve 082+ and serialize shared auth/registration integration                                                                                |
+| 15. Invalid forwarded harness provenance     | Explicit A → B usable link; link/client-started success and unrelated-thread refusal under both access levels; explicitly delegated operator probe keeps wake independent of launch                                                |
+| Additional validation                        | Crash barriers, same-key changed args, actual provider grant effects, old-token/in-flight removal, full-access chaining, expired/revoked peer, retention during retries and delayed owner routing; disposable revocation mandatory |
+| SSRF tests                                   | Phase 0 builder/reviewer owns actual socket-address, mixed DNS and IPv4-in-IPv6 tests; no duplicate transport work here                                                                                                            |
+
+### Sol follow-up review at `16d8c8bfbd`
+
+The initial Phase 1 implementation is narrowed to verified local Codex
+permissions requests. This revision addresses its five findings:
+
+1. Both file approval methods with nonempty `grantRoot` stay app-only;
+   rootless file support is also deferred pending verified changes/lifetime.
+2. Validate the complete raw request before excess fields are discarded;
+   include owned Codex client/decoder files and nested-unknown-field tests.
+3. Serialize current authority/caps/modes/binding checks with removal at
+   delivery admission, carry authorization identity/revision, and persist
+   withheld responses with a guarded fresh-incarnation app recovery path.
+4. Add command-bound protocol writer completion/failure evidence; distinguish
+   handoff, written and actual peer acknowledgment, and keep uncertain sends
+   outside generic execution retries. No unsupported adapter is enabled.
+5. Before Phase 2 journaling, add/persist the FleetUsers observation feed,
+   including unchanged confirmation and failed/absent observations.
+
+The focused Sol recheck at `b392a04532` accepted the narrowed Phase 1
+subject to the acknowledged-write prerequisite. The owned stdio/creation
+bridge, native callback boundary and delayed/failing/interrupted write tests
+are now explicit above. Sink progress cannot satisfy that enablement gate.
+
+## Appendix: upstream Ideas discussion draft
+
+**Draft only — do not post from this task.** Prepare before Phase 1;
+maintainer triage can proceed without blocking authorized fork work. Recheck
+upstream discussion/PR status before an authorized post rather than assuming
+the historical closed PR status is current.
+
+**Title:** Outside assistants: explicit provider-approval authority and
+durable task events
+
+T3 can receive work from an outside MCP client, but that client cannot
+currently be notified when a thread needs attention or submit a provider
+approval through a supported tool. In our LAN fork an OpenAI dot reached T3
+through native MCP and links; polling found the request, but a verbal
+approval could not be delivered to the provider.
+
+We would like feedback on two independently useful capabilities:
+
+1. A separate permission-approval tool, leaving user-input answers unchanged.
+   Approval authority would be explicit opt-in, independent of Full access.
+   Every response would bind the exact provider request incarnation and a
+   digest of the actual permission payload, displayed choices and lifetime,
+   checked again at native commitment. “Accept” is not reliably “once”:
+   Codex permissions and ACP command grants can last for a turn. Broader
+   scope would require per-request consent; unsupported/unknown and
+   ask-rule cases would initially stay in the app.
+2. Durable attention facts for approvals, questions, blockers and terminal
+   runs, with stable occurrence IDs, replay cursors, explicit history gaps
+   and current read/outside-sharing checks. We are prototyping MCP Events
+   while preserving both MCP protocol versions. A callback receipt is
+   separate evidence from waking a real outside assistant.
+
+Responses would use T3's existing native command/receipt/outbox path, with
+recoverable idempotency and trusted responder attribution. For native links,
+the receiver would require explicit destination authority and default to
+threads started by that link and initiating client; existing threads would
+need delegation. Full access would not exempt that check, and another
+forwarding hop would be refused. Owner labels would remain informational:
+they neither authorize responses nor filter readable events.
+
+We intend to retain existing fork observation/ACK contracts until a
+compatibility transition is proven. We are not proposing that upstream
+adopt fork tables, fleet policy or every event category.
+
+Would maintainers prefer a provider-neutral effective-grant/request-binding
+contract first, a separate approval scope/tool, and/or a minimal event-source
+extension point? Is there a preferred MCP transport integration rather than
+an adapter around effect's current capability handling? We can split the
+proposal into those boundaries and contribute focused protocol, race,
+revocation and crash-recovery tests after triage.
+
+Related historical discussions are Ideas #19534 (outside-agent events) and
+#26527 (remote delegated approvals). This draft requests architectural
+feedback; it does not ask maintainers to accept an untriaged implementation.

@@ -60,6 +60,15 @@ describe("V2 preview upgrade", () => {
         [78, "ExcludeAttachmentPlaceholdersFromSearch"],
         [79, "SubagentDeliveryState"],
         [80, "ScheduledTaskOwner"],
+        [81, "AgentEventSubscriptions"],
+        [82, "AgentApprovalAuthorityAndReceipts"],
+        [83, "AgentEventFacts"],
+        [84, "AgentApprovalDelegations"],
+        [85, "AgentEventRelayAndApprovalForwarding"],
+        [86, "AgentGatewayCompatibility"],
+        [87, "AgentEventRelayAuthorityEvidence"],
+        [88, "PeerLinkProvenance"],
+        [89, "AgentApprovalFleetPolicyPublications"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -163,6 +172,15 @@ describe("V2 preview upgrade", () => {
         [78, "ExcludeAttachmentPlaceholdersFromSearch"],
         [79, "SubagentDeliveryState"],
         [80, "ScheduledTaskOwner"],
+        [81, "AgentEventSubscriptions"],
+        [82, "AgentApprovalAuthorityAndReceipts"],
+        [83, "AgentEventFacts"],
+        [84, "AgentApprovalDelegations"],
+        [85, "AgentEventRelayAndApprovalForwarding"],
+        [86, "AgentGatewayCompatibility"],
+        [87, "AgentEventRelayAuthorityEvidence"],
+        [88, "PeerLinkProvenance"],
+        [89, "AgentApprovalFleetPolicyPublications"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

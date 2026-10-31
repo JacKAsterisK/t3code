@@ -7,12 +7,17 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSqliteClient from "../../packages/shared/src/nodeSqliteClient.ts";
-import { OrchestrationV2DomainEventJson } from "../../packages/contracts/src/index.ts";
-import * as EventSink from "../../apps/server/src/orchestration-v2/EventSink.ts";
+import {
+  OrchestrationV2DomainEventJson,
+  type OrchestrationV2DomainEvent,
+} from "../../packages/contracts/src/index.ts";
 import * as EventStore from "../../apps/server/src/orchestration-v2/EventStore.ts";
+import * as EventSink from "../../apps/server/src/orchestration-v2/EventSink.ts";
 import * as ProjectionStore from "../../apps/server/src/orchestration-v2/ProjectionStore.ts";
+import * as TurnItemPositionStore from "../../apps/server/src/orchestration-v2/TurnItemPositionStore.ts";
 import { runMigrations } from "../../apps/server/src/persistence/Migrations.ts";
 import { assertOrdinaryNativePath } from "../../packages/shared/src/nativeHomeSelection.ts";
 
@@ -134,10 +139,12 @@ export async function seedCancellationFixture(
   unfinished = true,
 ) {
   const database = NodeSqliteClient.layer({ filename: file });
-  const stores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
-    Layer.provideMerge(database),
-  );
-  const sink = EventSink.layer.pipe(Layer.provideMerge(stores));
+  const stores = Layer.mergeAll(
+    EventStore.layer,
+    ProjectionStore.layer,
+    TurnItemPositionStore.layer,
+  ).pipe(Layer.provideMerge(database));
+  const writers = EventSink.layer.pipe(Layer.provideMerge(stores));
   const events: Record<string, unknown>[] = [];
   const add = (type: string, payload: Record<string, unknown>) =>
     events.push({ id: `event:fixture:${events.length}`, threadId, type, occurredAt: now, payload });
@@ -359,7 +366,69 @@ export async function seedCancellationFixture(
   }
   await Effect.runPromise(
     Effect.gen(function* () {
-      const service = yield* EventSink.EventSinkV2;
+      const eventStore = yield* EventStore.EventStoreV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const positions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
+      const nativeSink = yield* EventSink.EventSinkV2;
+      const sql = yield* SqlClient.SqlClient;
+      const modern = yield* sql`
+        SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'agent_event_source_state'
+      `;
+      // These genuine schema-67/71 homes predate the source journal. Seed their native
+      // log and projection atomically without the current EventSink's post-83 capture.
+      const service = {
+        write: Effect.fn("seedCancellationFixture.write")(function* (input: {
+          events: ReadonlyArray<OrchestrationV2DomainEvent>;
+        }) {
+          // Follow-up fixtures on an upgraded home keep the real current capture contract.
+          if (modern.length > 0) return yield* nativeSink.write(input);
+          return yield* sql.withTransaction(
+            Effect.gen(function* () {
+              const ordinals = new Map(
+                input.events.flatMap((event) =>
+                  event.type === "run.created" || event.type === "run.updated"
+                    ? [[event.payload.id, event.payload.ordinal] as const]
+                    : [],
+                ),
+              );
+              const events = yield* Effect.forEach(
+                input.events,
+                (
+                  event,
+                ): Effect.Effect<
+                  OrchestrationV2DomainEvent,
+                  TurnItemPositionStore.TurnItemPositionStoreError
+                > =>
+                  event.type === "turn-item.updated"
+                    ? positions
+                        .normalize(
+                          event.payload,
+                          event.payload.runId === null
+                            ? undefined
+                            : ordinals.get(event.payload.runId),
+                        )
+                        .pipe(Effect.map((payload) => ({ ...event, payload })))
+                    : Effect.succeed(event),
+              );
+              const stored = yield* eventStore.append({ events });
+              yield* Effect.forEach(stored, ({ event }) => projectionStore.apply(event), {
+                discard: true,
+              });
+              const sequence = stored.at(-1)?.sequence;
+              if (sequence !== undefined)
+                yield* sql`
+                  INSERT INTO orchestration_v2_projection_metadata
+                    (projection_name, schema_version, last_sequence, updated_at)
+                  VALUES ('thread-projections', ${ProjectionStore.ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION}, ${sequence}, ${now})
+                  ON CONFLICT(projection_name) DO UPDATE SET
+                    schema_version = excluded.schema_version,
+                    last_sequence = excluded.last_sequence,
+                    updated_at = excluded.updated_at
+                `;
+            }),
+          );
+        }),
+      };
       yield* service.write({
         events: yield* Effect.forEach(
           unfinished
@@ -386,7 +455,7 @@ export async function seedCancellationFixture(
         ),
       });
     }).pipe(
-      Effect.provide(sink),
+      Effect.provide(writers),
       Effect.provide([NodeServices.layer, Logger.layer([], { mergeWithExisting: false })]),
       Effect.scoped,
     ),

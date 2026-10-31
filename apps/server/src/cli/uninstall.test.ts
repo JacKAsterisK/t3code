@@ -13,26 +13,39 @@ it.layer(NodeServices.layer)("t3 uninstall launcher", (it) => {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-uninstall-" });
+      const platform = yield* HostProcess.Platform;
+      const executable = platform === "win32" ? "t3.exe" : "t3";
       const versionsDir = path.join(root, "runtime/versions");
-      const exe = path.join(versionsDir, "1.0.0/t3");
-      const otherExe = path.join(root, "other/runtime/versions/1.0.0/t3");
+      const exe = path.join(versionsDir, "1.0.0", executable);
+      const otherExe = path.join(root, "other/runtime/versions/1.0.0", executable);
       const copy = path.join(root, "copy/t3");
       for (const file of [exe, otherExe, copy]) {
         yield* fs.makeDirectory(path.dirname(file), { recursive: true });
         yield* fs.writeFileString(file, "");
       }
-      const ours = path.join(root, "bin/t3");
-      const theirs = path.join(root, "other/bin/t3");
+      const ours = path.join(root, "bin", platform === "win32" ? "t3.cmd" : "t3");
+      const theirs = path.join(root, "other/bin", platform === "win32" ? "t3.cmd" : "t3");
       yield* fs.makeDirectory(path.dirname(ours), { recursive: true });
       yield* fs.makeDirectory(path.dirname(theirs), { recursive: true });
-      yield* fs.symlink(exe, ours);
-      yield* fs.symlink(otherExe, theirs);
+      if (platform === "win32") {
+        yield* fs.writeFileString(ours, `@echo off\r\n"${exe}" %*`);
+        yield* fs.writeFileString(theirs, `@echo off\r\n"${otherExe}" %*`);
+      } else {
+        yield* fs.symlink(exe, ours);
+        yield* fs.symlink(otherExe, theirs);
+      }
+      const find = (launchedAs: string | undefined) =>
+        findOwnedLauncher({ launchedAs, versionsDir }).pipe(
+          Effect.provideService(HostProcess.Environment, {
+            PATH: [path.dirname(ours), path.dirname(theirs)].join(";"),
+          }),
+        );
 
-      assert.equal(yield* findOwnedLauncher({ launchedAs: ours, versionsDir }), ours);
-      assert.isUndefined(yield* findOwnedLauncher({ launchedAs: theirs, versionsDir }));
-      assert.isUndefined(yield* findOwnedLauncher({ launchedAs: copy, versionsDir }));
-      assert.isUndefined(yield* findOwnedLauncher({ launchedAs: undefined, versionsDir }));
-    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+      assert.equal(yield* find(platform === "win32" ? exe : ours), ours);
+      assert.isUndefined(yield* find(platform === "win32" ? otherExe : theirs));
+      assert.isUndefined(yield* find(copy));
+      assert.isUndefined(yield* find(undefined));
+    }).pipe(Effect.scoped),
   );
 });
 

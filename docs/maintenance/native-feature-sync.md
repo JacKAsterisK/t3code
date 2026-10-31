@@ -9,17 +9,30 @@ approval before code or runtime changes.
 ## Baseline
 
 - Upstream: `pingdotgg/t3code` `main` at
-  `54c5f25249961a1aa0b61932329092eadbd9d6fc` (2026-10-31), merged on
-  `lan/release-1.0.29-20261031` for LAN 1.0.29. This sync brings 96 upstream
-  commits since LAN 1.0.28. App, server, desktop and contracts adopt upstream 0.1.6.
-- Previous shipping release: T3 Code LAN 1.0.28, fork
-  `69c6cc07b3570700d35c90551be5231418e34e69`, upstream `cadf7d5fe3`.
-  LAN 1.0.29 remains a candidate until its fresh package passes the LAN
-  functional audits and the Portal publisher verifies the download.
+  `54c5f25249961a1aa0b61932329092eadbd9d6fc` (2026-10-31), confirmed current
+  on `lan/release-1.0.30-20261031`. It is already merged through LAN 1.0.29.
+  App, server, desktop and contracts remain upstream 0.1.6; the fork schema is 90.
+- Previous shipping release: T3 Code LAN 1.0.29, fork
+  `b354a2d6c04350a06afd7316efdabebb235116e7`, published with its full
+  authenticated download verified. LAN 1.0.30 remains a candidate until its
+  single build passes packaged audits and the Portal publisher verifies it.
 - AnvilToad configuration observed 2026-10-28: `linkedEnvironmentsEnabled` unset
   (off); no `userdata\lan-routing.json`, so every `t3_lan_*` call is denied; no
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
+
+## LAN 1.0.30 sync decisions
+
+- Rows 6 and 12: retain the native runtime and access contracts. Correct the
+  Windows verification fixtures to use native launcher shims, real directory
+  junctions, shell-quoted Git command paths, portable Git input/config files,
+  valid trim-sensitive filenames and Git's emitted path separators. The alias
+  replacement cases now run without elevated symlink privileges. Keep the
+  POSIX-specific cases on POSIX; no new skip or timeout allowance is added.
+- Rows 9 and 11: keep the single-build Hub/Portal path. Reuse the immutable
+  129 toolchain generation, including its official public registry metadata
+  correction; production locks, package versions and migration IDs are unchanged.
+  The fleet-startup and bounded update-query fixes from 1.0.29 remain in place.
 
 ## LAN 1.0.29 sync decisions
 

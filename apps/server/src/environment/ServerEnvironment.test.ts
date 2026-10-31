@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off -- The POSIX ownership fixture normalizes its view independently of native Windows paths.
+import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
@@ -25,6 +27,9 @@ const layerServerEnvironment = (baseDir: string) =>
     Layer.provide(ServerSecretStore.layer),
     Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
   );
+
+// Filesystem/subprocess fixtures must use the host even when a case injects another platform.
+const nativePlatform = HostProcess.Platform.defaultValue();
 
 const layerEmptySecretStore = Layer.succeed(
   ServerSecretStore.ServerSecretStore,
@@ -78,7 +83,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const baseDir = yield* fs.makeTempDirectoryScoped();
-      const prefix = `${baseDir}/node`;
+      const prefix = `${baseDir.replaceAll("\\", "/")}/node`;
       const entry = `${prefix}/lib/node_modules/t3/dist/bin.mjs`;
       yield* fs.makeDirectory(`${prefix}/lib/node_modules/t3/dist`, { recursive: true });
       yield* fs.makeDirectory(`${prefix}/bin`, { recursive: true });
@@ -87,10 +92,27 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         `${prefix}/lib/node_modules/t3/package.json`,
         '{"name":"t3","version":"0.0.45","bin":{"t3":"./dist/bin.mjs"}}',
       );
-      yield* fs.symlink(entry, `${prefix}/bin/t3`);
+      const launcher = `${prefix}/bin/t3`;
+      if (nativePlatform !== "win32") yield* fs.symlink(entry, launcher);
+      // The positive ownership contract is POSIX-only. Model its launcher
+      // canonicalization on Windows, where file symlinks need extra privileges.
+      const posixInstallationFs =
+        nativePlatform === "win32"
+          ? {
+              ...fs,
+              realPath: (file: string) =>
+                NodePath.normalize(file) === NodePath.normalize(launcher)
+                  ? Effect.succeed(entry)
+                  : fs.realPath(file).pipe(Effect.map((real) => real.replaceAll("\\", "/"))),
+            }
+          : fs;
       const config = yield* makeServerConfig(baseDir);
       yield* fs.makeDirectory(config.stateDir, { recursive: true });
-      for (const mode of ["web", "desktop"] as const) {
+      for (const [mode, platform] of [
+        ["web", "linux"],
+        ["desktop", "linux"],
+        ["web", "win32"],
+      ] as const) {
         const descriptor = yield* Effect.gen(function* () {
           const environment = yield* ServerEnvironment.ServerEnvironment;
           return yield* environment.getDescriptor;
@@ -103,11 +125,15 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
           ),
           Effect.provideService(HostProcess.Arguments, ["node", entry]),
           Effect.provideService(HostProcess.IsExecutable, false),
-          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Platform, platform),
+          Effect.provideService(
+            FileSystem.FileSystem,
+            platform === "linux" ? posixInstallationFs : fs,
+          ),
           Effect.provideService(HostProcess.Environment, {}),
         );
         expect(descriptor.capabilities.serverInstallation).toEqual(
-          mode === "web" ? { kind: "npm-global", prefix } : undefined,
+          mode === "web" && platform === "linux" ? { kind: "npm-global", prefix } : undefined,
         );
         expect(descriptor.capabilities.serverSelfUpdate).toBe(
           mode === "web" ? undefined : "desktop-managed",

@@ -35,7 +35,11 @@ export function shouldOpenMarkdownFileLinkInBrowserByDefault(path: string): bool
 
 export function rewriteMarkdownFileUriHref(href: string | undefined): string | null {
   if (!href) return null;
-  const target = parseFileUrlHref(normalizeMarkdownLinkDestination(href));
+  const destination = normalizeMarkdownLinkDestination(href);
+  // Windows browsers can parse a single-letter scheme as a drive-relative file URL.
+  // Only authored file URLs belong in this rewrite; absolute drive paths stay unchanged.
+  if (!/^file:/i.test(destination)) return null;
+  const target = parseFileUrlHref(destination);
   return target ? `${target.path}${target.hash}` : null;
 }
 

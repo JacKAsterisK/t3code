@@ -5,6 +5,8 @@ import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodePath from "node:path";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - A real Windows junction gives this account-flow fixture directory links without elevation.
+import * as NodeFSP from "node:fs/promises";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProviderInstanceId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -105,6 +107,15 @@ const encodeCredentials = Schema.encodeEffect(Schema.fromJsonString(Schema.Unkno
 it.layer(layerTest)("CodexDriver", (it) => {
   const checkManagedAccount = (replacementTiming: "unchanged" | "during-probe") =>
     Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      // This test isolates account/catalog ordering; its empty shared home only links directories.
+      // Use the host's privilege-free directory-link mechanism for the fixture on Windows.
+      const fixtureFileSystem = windowsHost
+        ? FileSystem.make({
+            ...fileSystem,
+            symlink: (from, to) => Effect.promise(() => NodeFSP.symlink(from, to, "junction")),
+          })
+        : fileSystem;
       const instanceId = ProviderInstanceId.make("restored-managed-account");
       const credentials = new Map<string, Uint8Array>();
       const catalogTokens: Array<string | undefined> = [];
@@ -148,7 +159,7 @@ it.layer(layerTest)("CodexDriver", (it) => {
         });
         const replaceAccount = store.set(new TextEncoder().encode(replacement)).pipe(Effect.orDie);
         const executable = {
-          executablePath: "/user/bin/codex",
+          executablePath: process.execPath,
           managedVersionDirectory: null,
           source: "local" as const,
           version: "0.156.1",
@@ -252,7 +263,7 @@ it.layer(layerTest)("CodexDriver", (it) => {
         expect(restored.auth.email).toBe("account@example.test");
         expect(restored.runtimePaths?.homePath).toBe(sharedHome);
         expect(restored.runtimePaths?.shadowHomePath).toContain(
-          `providers/codex/${instanceId}/shadow`,
+          NodePath.join("providers", "codex", instanceId, "shadow"),
         );
         const scan = yield* instance.snapshotForCwd!(serverConfig.stateDir).pipe(Effect.exit);
         expect(Exit.isFailure(scan)).toBe(true);
@@ -298,6 +309,7 @@ it.layer(layerTest)("CodexDriver", (it) => {
         const signedOutScan = yield* instance.snapshotForCwd!(serverConfig.stateDir);
         expect(signedOutScan.skills).toEqual([]);
       }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fixtureFileSystem),
         Effect.provideService(ServerSecretStore.ServerSecretStore, secrets),
         Effect.provideService(
           HttpClient.HttpClient,

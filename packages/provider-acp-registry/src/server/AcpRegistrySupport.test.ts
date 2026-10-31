@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Native filesystem fixtures require the host path delimiter and canonical spelling.
+import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
@@ -23,6 +25,12 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as AcpRegistrySupport from "./AcpRegistrySupport.ts";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+
+// Filesystem/subprocess fixtures must use the host even when a case injects another platform.
+const nativePlatform = HostProcess.Platform.defaultValue();
+
+const nativePlatformTarget = `${nativePlatform === "win32" ? "windows" : nativePlatform === "darwin" ? "darwin" : "linux"}-x86_64`;
+const nativeExecutableSuffix = nativePlatform === "win32" ? ".CMD" : "";
 
 const registryUrl = "https://registry.test/registry.json";
 const archiveUrl = "https://registry.test/example-agent.bin";
@@ -54,17 +62,49 @@ function settings(input: Partial<AcpRegistrySettings> = {}): AcpRegistrySettings
 
 function layerResolver(
   execute: Parameters<typeof HttpClient.make>[0],
-  environment: NodeJS.ProcessEnv = process.env,
+  environment?: NodeJS.ProcessEnv,
 ) {
   return Layer.mergeAll(
     NodeServices.layer,
     TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
-    Layer.succeed(HostProcess.Platform, "linux"),
+    Layer.succeed(HostProcess.Platform, nativePlatform),
     Layer.succeed(HostProcess.Architecture, "x64"),
-    Layer.succeed(HostProcess.Environment, environment),
+    Layer.effect(
+      HostProcess.Environment,
+      environment === undefined
+        ? Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const directory = yield* fs.makeTempDirectoryScoped({
+              prefix: "t3-acp-default-tools-",
+            });
+            return (yield* makeFakeNpmToolchain(directory)).environment;
+          })
+        : Effect.succeed(environment),
+    ).pipe(Layer.provide(NodeServices.layer)),
     Layer.succeed(HttpClient.HttpClient, HttpClient.make(execute)),
   );
 }
+
+const writeFakeManager = Effect.fn("AcpRegistrySupport.test.writeFakeManager")(function* (
+  directory: string,
+  name: "npm" | "uv",
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const script = yield* path.fromFileUrl(
+    new URL("./testing/AcpRegistrySupport.tool.fixture.mjs", import.meta.url),
+  );
+  const executable = path.join(directory, `${name}${nativeExecutableSuffix}`);
+  yield* fs.makeDirectory(directory, { recursive: true });
+  yield* fs.writeFileString(
+    executable,
+    nativePlatform === "win32"
+      ? `@echo off\r\n"${process.execPath}" "${script}" ${name} %*\r\n`
+      : `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' '${script.replaceAll("'", "'\\''")}' ${name} "$@"\n`,
+  );
+  yield* fs.chmod(executable, 0o755);
+  return executable;
+});
 
 const makeFakeNpmToolchain = Effect.fn("AcpRegistrySupport.test.makeFakeNpmToolchain")(function* (
   rootDirectory: string,
@@ -73,24 +113,16 @@ const makeFakeNpmToolchain = Effect.fn("AcpRegistrySupport.test.makeFakeNpmToolc
   const path = yield* Path.Path;
   const toolchainBin = path.join(rootDirectory, "fake-node", "bin");
   const globalPrefix = path.join(rootDirectory, "tools", "example-agent", "1.2.3", "npm");
-  const globalBin = path.join(globalPrefix, "bin");
-  const executablePath = path.join(globalBin, "example-agent");
-  const npmPath = path.join(toolchainBin, "npm");
+  const globalBin = nativePlatform === "win32" ? globalPrefix : path.join(globalPrefix, "bin");
+  const executablePath = path.join(globalBin, `example-agent${nativeExecutableSuffix}`);
+  const npmPath = yield* writeFakeManager(toolchainBin, "npm");
   const logPath = path.join(rootDirectory, "npm.log");
-  yield* fileSystem.makeDirectory(toolchainBin, { recursive: true });
   yield* fileSystem.makeDirectory(globalPrefix, { recursive: true });
   yield* fileSystem.writeFileString(logPath, "");
-  yield* fileSystem.copyFile(
-    yield* path.fromFileUrl(
-      new URL("./testing/AcpRegistrySupport.npm.fixture.sh", import.meta.url),
-    ),
-    npmPath,
-  );
-  yield* fileSystem.chmod(npmPath, 0o755);
   return {
     environment: {
       ...process.env,
-      PATH: `${toolchainBin}:${process.env.PATH ?? ""}`,
+      PATH: `${toolchainBin}${NodePath.delimiter}${process.env.PATH ?? process.env.Path ?? ""}`,
       FAKE_NPM_LOG: logPath,
       FAKE_NPM_PREFIX: path.join(rootDirectory, "external-npm-global"),
       FAKE_NPM_MANIFEST: encodeUnknownJson({
@@ -113,20 +145,14 @@ const makeFakeUvToolchain = Effect.fn("AcpRegistrySupport.test.makeFakeUvToolcha
   const path = yield* Path.Path;
   const toolchainBin = path.join(rootDirectory, "fake-uv", "bin");
   const globalBin = path.join(rootDirectory, "tools", "example-agent", "1.2.3", "python", "bin");
-  const executablePath = path.join(globalBin, "fast-agent");
-  const uvPath = path.join(toolchainBin, "uv");
+  const executablePath = path.join(globalBin, `fast-agent${nativeExecutableSuffix}`);
+  const uvPath = yield* writeFakeManager(toolchainBin, "uv");
   const logPath = path.join(rootDirectory, "uv.log");
-  yield* fileSystem.makeDirectory(toolchainBin, { recursive: true });
   yield* fileSystem.writeFileString(logPath, "");
-  yield* fileSystem.copyFile(
-    yield* path.fromFileUrl(new URL("./testing/AcpRegistrySupport.uv.fixture.sh", import.meta.url)),
-    uvPath,
-  );
-  yield* fileSystem.chmod(uvPath, 0o755);
   return {
     environment: {
       ...process.env,
-      PATH: `${toolchainBin}:${process.env.PATH ?? ""}`,
+      PATH: `${toolchainBin}${NodePath.delimiter}${process.env.PATH ?? process.env.Path ?? ""}`,
       FAKE_UV_LOG: logPath,
       FAKE_UV_BIN: path.join(rootDirectory, "external-uv-bin"),
       FAKE_UV_EXECUTABLE: executablePath,
@@ -228,14 +254,14 @@ describe("AcpRegistrySupport", () => {
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const cacheDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-acp-local-" });
-      const commandPath = `${cacheDir}/dsh`;
+      const commandPath = NodePath.join(cacheDir, nativePlatform === "win32" ? "dsh.EXE" : "dsh");
       yield* fileSystem.writeFileString(commandPath, "#!/bin/sh\n");
       yield* fileSystem.chmod(commandPath, 0o755);
       const hostEnvironment = { PATH: "/missing-host-bin", INHERITED: "host", OVERRIDE: "host" };
       const environment = { ...hostEnvironment, PATH: cacheDir, OVERRIDE: "provider" };
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       }).pipe(Effect.provideService(HostProcess.Environment, hostEnvironment));
       const localSettings = decodeAcpRegistrySettings({
@@ -263,7 +289,7 @@ describe("AcpRegistrySupport", () => {
         },
       });
       expect(requests).toEqual([]);
-      expect(yield* fileSystem.exists(`${cacheDir}/tools`)).toBe(false);
+      expect(yield* fileSystem.exists(NodePath.normalize(`${cacheDir}/tools`))).toBe(false);
     }).pipe(
       Effect.scoped,
       Effect.provide(
@@ -279,13 +305,16 @@ describe("AcpRegistrySupport", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const cacheDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-acp-local-path-" });
-      const commandPath = `${cacheDir}/dsh wrapper`;
+      const commandPath = NodePath.join(
+        cacheDir,
+        nativePlatform === "win32" ? "dsh wrapper.EXE" : "dsh wrapper",
+      );
       yield* fileSystem.writeFileString(commandPath, "#!/bin/sh\n");
       yield* fileSystem.chmod(commandPath, 0o755);
       const environment = { PATH: "/unused", INHERITED: "host" };
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       }).pipe(Effect.provideService(HostProcess.Environment, environment));
       const resolved = yield* resolver.resolve(
@@ -305,7 +334,7 @@ describe("AcpRegistrySupport", () => {
       for (const extension of [".cmd", ".BAT"]) {
         const windowsResolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
           cacheDir,
-          toolsDir: `${cacheDir}/tools`,
+          toolsDir: NodePath.normalize(`${cacheDir}/tools`),
           registryUrl,
         }).pipe(
           Effect.provideService(HostProcess.Platform, "win32"),
@@ -336,7 +365,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const environment = { PATH: cacheDir };
@@ -348,10 +377,15 @@ describe("AcpRegistrySupport", () => {
         yield* resolver.resolve(unconfigured, "/workspace", environment).pipe(Effect.flip),
       ).toMatchObject({ reason: "agent_not_configured" });
 
-      const nonExecutable = `${cacheDir}/non-executable`;
+      const nonExecutable = NodePath.normalize(`${cacheDir}/non-executable`);
       yield* fileSystem.writeFileString(nonExecutable, "#!/bin/sh\n");
       yield* fileSystem.chmod(nonExecutable, 0o644);
-      for (const commandPath of ["dsh", `${cacheDir}/missing`, cacheDir, nonExecutable]) {
+      for (const commandPath of [
+        "dsh",
+        NodePath.normalize(`${cacheDir}/missing`),
+        cacheDir,
+        nonExecutable,
+      ]) {
         const localSettings = decodeAcpRegistrySettings({ source: "local", commandPath });
         expect(yield* resolver.inspect(localSettings, environment)).toEqual({
           status: "missing_runner",
@@ -374,7 +408,7 @@ describe("AcpRegistrySupport", () => {
   it.effect("resolves command overrides while preserving registry args and environment", () => {
     const agent = makeAgent({
       binary: {
-        "linux-x86_64": {
+        [nativePlatformTarget]: {
           archive: archiveUrl,
           cmd: "./bin/example-agent",
           args: ["acp", "--stdio"],
@@ -388,12 +422,15 @@ describe("AcpRegistrySupport", () => {
       const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-acp-registry-override-",
       });
-      const commandPath = `${cacheDir}/example-agent`;
+      const commandPath = NodePath.join(
+        cacheDir,
+        nativePlatform === "win32" ? "example-agent.EXE" : "example-agent",
+      );
       yield* fileSystem.writeFileString(commandPath, "#!/bin/sh\n");
       yield* fileSystem.chmod(commandPath, 0o755);
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const resolved = yield* resolver.resolve(settings({ commandPath }), "/workspace", {
@@ -438,7 +475,7 @@ describe("AcpRegistrySupport", () => {
       const toolchain = yield* makeFakeNpmToolchain(cacheDir);
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       }).pipe(Effect.provideService(HostProcess.Environment, toolchain.environment));
 
@@ -448,7 +485,7 @@ describe("AcpRegistrySupport", () => {
       expect(first.spawn).toMatchObject({
         command: toolchain.executablePath,
         args: ["--stdio"],
-        env: { PATH: expect.stringMatching(new RegExp(`^${toolchain.globalBin}:`, "u")) },
+        env: { PATH: expect.stringContaining(`${toolchain.globalBin}${NodePath.delimiter}`) },
       });
       expect(second.spawn.command).toBe(toolchain.executablePath);
       const npmCommands = yield* fileSystem.readFileString(toolchain.logPath);
@@ -484,15 +521,15 @@ describe("AcpRegistrySupport", () => {
       };
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       }).pipe(Effect.provideService(HostProcess.Environment, environment));
 
       const resolved = yield* resolver.resolve(settings(), "/workspace", environment);
       const userGlobalBin = toolchain.globalBin;
       expect(resolved.spawn).toMatchObject({
-        command: path.join(userGlobalBin, "example-agent"),
-        env: { PATH: expect.stringMatching(new RegExp(`^${userGlobalBin}:`, "u")) },
+        command: path.join(userGlobalBin, `example-agent${nativeExecutableSuffix}`),
+        env: { PATH: expect.stringContaining(`${userGlobalBin}${NodePath.delimiter}`) },
       });
     }).pipe(
       Effect.scoped,
@@ -514,12 +551,12 @@ describe("AcpRegistrySupport", () => {
         prefix: "t3-acp-registry-windows-package-path-",
       });
       const toolchain = yield* makeFakeUvToolchain(cacheDir);
-      const linuxResolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
+      const nativeResolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
-      yield* linuxResolver.resolve(settings(), "/workspace", toolchain.environment);
+      yield* nativeResolver.resolve(settings(), "/workspace", toolchain.environment);
 
       const windowsEnvironment = {
         ...toolchain.environment,
@@ -528,7 +565,7 @@ describe("AcpRegistrySupport", () => {
       };
       const windowsResolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       }).pipe(
         Effect.provideService(HostProcess.Platform, "win32"),
@@ -561,7 +598,7 @@ describe("AcpRegistrySupport", () => {
     const binaryBytes = new TextEncoder().encode("#!/bin/sh\necho example\n");
     const agent = makeAgent({
       binary: {
-        "linux-x86_64": {
+        [nativePlatformTarget]: {
           archive: archiveUrl,
           cmd: "./bin/example-agent",
           args: ["acp"],
@@ -577,7 +614,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const first = yield* resolver.resolve(settings(), "/workspace");
@@ -585,7 +622,14 @@ describe("AcpRegistrySupport", () => {
 
       expect(first.spawn.command).toBe(second.spawn.command);
       expect(first.spawn.command).toContain(
-        "/tools/example-agent/1.2.3/linux-x86_64/bin/example-agent",
+        NodePath.join(
+          "tools",
+          "example-agent",
+          "1.2.3",
+          nativePlatformTarget,
+          "bin",
+          "example-agent",
+        ),
       );
       expect(yield* fileSystem.readFileString(first.spawn.command)).toBe(
         "#!/bin/sh\necho example\n",
@@ -620,7 +664,7 @@ describe("AcpRegistrySupport", () => {
       const binaryBytes = new TextEncoder().encode("#!/bin/sh\necho managed\n");
       const agent = makeAgent({
         binary: {
-          "linux-x86_64": {
+          [nativePlatformTarget]: {
             archive: archiveUrl,
             cmd: "./bin/example-agent",
             args: ["acp"],
@@ -638,14 +682,17 @@ describe("AcpRegistrySupport", () => {
         const systemBinDir = yield* fileSystem.makeTempDirectoryScoped({
           prefix: "t3-acp-registry-system-bin-",
         });
-        const systemBinary = path.join(systemBinDir, "example-agent");
+        const systemBinary = path.join(
+          systemBinDir,
+          nativePlatform === "win32" ? "example-agent.EXE" : "example-agent",
+        );
         yield* fileSystem.writeFileString(systemBinary, "#!/bin/sh\necho system\n");
         yield* fileSystem.chmod(systemBinary, 0o755);
         const environment = { PATH: systemBinDir };
 
         const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
           cacheDir,
-          toolsDir: `${cacheDir}/tools`,
+          toolsDir: NodePath.normalize(`${cacheDir}/tools`),
           registryUrl,
         }).pipe(Effect.provideService(HostProcess.Environment, environment));
         yield* resolver.search({ query: "example" });
@@ -701,23 +748,30 @@ describe("AcpRegistrySupport", () => {
   it.effect("installs a tar archive with a root entry and a listing larger than 1 MiB", () => {
     const downloadUrl = "https://registry.test/agent.tar.gz";
     const agent = makeAgent({
-      binary: { "linux-x86_64": { archive: downloadUrl, cmd: "./agent" } },
+      binary: { [nativePlatformTarget]: { archive: downloadUrl, cmd: "./agent" } },
     });
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const cacheDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-acp-root-entry-" });
-      const source = `${cacheDir}/source`;
+      const source = NodePath.normalize(`${cacheDir}/source`);
       yield* fileSystem.makeDirectory(source);
-      yield* fileSystem.writeFileString(`${source}/agent`, "#!/bin/sh\necho managed\n");
+      yield* fileSystem.writeFileString(
+        NodePath.normalize(`${source}/agent`),
+        "#!/bin/sh\necho managed\n",
+      );
       // 5,000 long names list past the generic 1 MiB command output cap.
-      const entries = `${source}/entries`;
+      const entries = NodePath.normalize(`${source}/entries`);
       yield* fileSystem.makeDirectory(entries);
       yield* Effect.forEach(
         Array.from({ length: 5_000 }, (_, index) => index),
-        (index) => fileSystem.writeFileString(`${entries}/${index}-${"e".repeat(240)}`, ""),
+        (index) =>
+          fileSystem.writeFileString(
+            NodePath.normalize(`${entries}/${index}-${"e".repeat(240)}`),
+            "",
+          ),
         { concurrency: 16 },
       );
-      const archivePath = `${cacheDir}/agent.tar.gz`;
+      const archivePath = NodePath.normalize(`${cacheDir}/agent.tar.gz`);
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const tar = yield* spawner.spawn(
         ChildProcess.make("tar", ["-czf", archivePath, "-C", source, "."]),
@@ -726,7 +780,7 @@ describe("AcpRegistrySupport", () => {
       const archive = yield* fileSystem.readFile(archivePath);
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       }).pipe(
         Effect.provideService(
@@ -746,7 +800,9 @@ describe("AcpRegistrySupport", () => {
       yield* resolver.prepare({ agentId: agent.id });
       const resolved = yield* resolver.resolve(settings(), "/workspace", {});
       expect(resolved.spawn.command).toBe(
-        yield* fileSystem.realPath(`${cacheDir}/tools/example-agent/1.2.3/linux-x86_64/agent`),
+        yield* fileSystem.realPath(
+          NodePath.normalize(`${cacheDir}/tools/example-agent/1.2.3/${nativePlatformTarget}/agent`),
+        ),
       );
       expect(yield* fileSystem.readFileString(resolved.spawn.command)).toBe(
         "#!/bin/sh\necho managed\n",
@@ -759,7 +815,7 @@ describe("AcpRegistrySupport", () => {
           TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
         ),
       ),
-      Effect.provideService(HostProcess.Platform, "linux"),
+      Effect.provideService(HostProcess.Platform, nativePlatform),
       Effect.provideService(HostProcess.Architecture, "x64"),
     );
   });
@@ -798,7 +854,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const result = yield* resolver.search({ query: "codex" });
@@ -840,7 +896,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       yield* Effect.all(
@@ -877,14 +933,16 @@ describe("AcpRegistrySupport", () => {
       const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-acp-registry-retry-",
       });
-      yield* fileSystem.makeDirectory(`${cacheDir}/acp-registry`, { recursive: true });
+      yield* fileSystem.makeDirectory(NodePath.normalize(`${cacheDir}/acp-registry`), {
+        recursive: true,
+      });
       yield* fileSystem.writeFileString(
-        `${cacheDir}/acp-registry/registry.json`,
+        NodePath.normalize(`${cacheDir}/acp-registry/registry.json`),
         makeRegistry(agent),
       );
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const offline = yield* resolver.search({ query: "example" });
@@ -924,7 +982,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       yield* resolver.search({ query: "example" });
@@ -962,7 +1020,7 @@ describe("AcpRegistrySupport", () => {
     const binaryAgent = {
       ...makeAgent({
         binary: {
-          "linux-x86_64": { archive: archiveUrl, cmd: "example-agent" },
+          [nativePlatformTarget]: { archive: archiveUrl, cmd: "example-agent" },
         },
       }),
       id: "binary-agent",
@@ -975,7 +1033,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const result = yield* resolver.search({ query: "" });
@@ -1003,7 +1061,7 @@ describe("AcpRegistrySupport", () => {
   it.effect("discards registry agents with blank names or unsafe versions", () => {
     const distribution = {
       binary: {
-        "linux-x86_64": { archive: archiveUrl, cmd: "example-agent" },
+        [nativePlatformTarget]: { archive: archiveUrl, cmd: "example-agent" },
       },
     } satisfies AcpRegistrySupport.AcpRegistryAgent["distribution"];
     const valid = makeAgent(distribution);
@@ -1017,7 +1075,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const result = yield* resolver.search({ query: "" });
@@ -1052,7 +1110,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const result = yield* resolver.search({ query: "" });
@@ -1083,7 +1141,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const invalid = yield* resolver.prepare({ agentId: "bad-npx" }).pipe(Effect.flip);
@@ -1115,7 +1173,7 @@ describe("AcpRegistrySupport", () => {
   it.effect("verifies declared SHA-256 before installing a binary", () => {
     const agent = makeAgent({
       binary: {
-        "linux-x86_64": {
+        [nativePlatformTarget]: {
           archive: archiveUrl,
           cmd: "example-agent",
           sha256: "0".repeat(64),
@@ -1131,7 +1189,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const error = yield* resolver.prepare({ agentId: agent.id }).pipe(Effect.flip);
@@ -1166,13 +1224,16 @@ describe("AcpRegistrySupport", () => {
       const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-acp-registry-cache-",
       });
-      const registryDirectory = `${cacheDir}/acp-registry`;
+      const registryDirectory = NodePath.normalize(`${cacheDir}/acp-registry`);
       yield* fileSystem.makeDirectory(registryDirectory, { recursive: true });
-      yield* fileSystem.writeFileString(`${registryDirectory}/registry.json`, makeRegistry(agent));
+      yield* fileSystem.writeFileString(
+        NodePath.normalize(`${registryDirectory}/registry.json`),
+        makeRegistry(agent),
+      );
       const toolchain = yield* makeFakeNpmToolchain(cacheDir);
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const resolved = yield* resolver.resolve(settings(), "/workspace", toolchain.environment);
@@ -1196,7 +1257,7 @@ describe("AcpRegistrySupport", () => {
   it.effect("rejects unsafe command paths before downloading an archive", () => {
     const agent = makeAgent({
       binary: {
-        "linux-x86_64": {
+        [nativePlatformTarget]: {
           archive: archiveUrl,
           cmd: "../outside",
         },
@@ -1210,7 +1271,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const error = yield* resolver.resolve(settings(), "/workspace").pipe(Effect.flip);
@@ -1238,13 +1299,16 @@ describe("AcpRegistrySupport", () => {
       const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-acp-registry-cold-inspect-",
       });
-      const registryDirectory = `${cacheDir}/acp-registry`;
+      const registryDirectory = NodePath.normalize(`${cacheDir}/acp-registry`);
       yield* fileSystem.makeDirectory(registryDirectory, { recursive: true });
-      yield* fileSystem.writeFileString(`${registryDirectory}/registry.json`, makeRegistry(agent));
+      yield* fileSystem.writeFileString(
+        NodePath.normalize(`${registryDirectory}/registry.json`),
+        makeRegistry(agent),
+      );
 
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const inspection = yield* resolver.inspect(settings());
@@ -1271,14 +1335,17 @@ describe("AcpRegistrySupport", () => {
       const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-acp-registry-effective-env-",
       });
-      const registryDirectory = `${cacheDir}/acp-registry`;
+      const registryDirectory = NodePath.normalize(`${cacheDir}/acp-registry`);
       yield* fileSystem.makeDirectory(registryDirectory, { recursive: true });
-      yield* fileSystem.writeFileString(`${registryDirectory}/registry.json`, makeRegistry(agent));
+      yield* fileSystem.writeFileString(
+        NodePath.normalize(`${registryDirectory}/registry.json`),
+        makeRegistry(agent),
+      );
       const toolchain = yield* makeFakeNpmToolchain(cacheDir);
 
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const hostInspection = yield* resolver.inspect(settings());
@@ -1290,7 +1357,7 @@ describe("AcpRegistrySupport", () => {
       expect(instanceInspection).toMatchObject({ status: "ready", distribution: "npx" });
       expect(resolved.spawn).toMatchObject({
         command: toolchain.executablePath,
-        env: { PATH: expect.stringMatching(new RegExp(`^${toolchain.globalBin}:`, "u")) },
+        env: { PATH: expect.stringContaining(`${toolchain.globalBin}${NodePath.delimiter}`) },
       });
     }).pipe(
       Effect.scoped,
@@ -1307,7 +1374,7 @@ describe("AcpRegistrySupport", () => {
   it.effect("requires a regular executable file in the managed binary cache", () => {
     const agent = makeAgent({
       binary: {
-        "linux-x86_64": {
+        [nativePlatformTarget]: {
           archive: archiveUrl,
           cmd: "bin/example-agent",
         },
@@ -1318,15 +1385,20 @@ describe("AcpRegistrySupport", () => {
       const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-acp-registry-non-file-",
       });
-      const registryDirectory = `${cacheDir}/acp-registry`;
-      const fakeExecutable = `${cacheDir}/tools/example-agent/1.2.3/linux-x86_64/bin/example-agent`;
+      const registryDirectory = NodePath.normalize(`${cacheDir}/acp-registry`);
+      const fakeExecutable = NodePath.normalize(
+        `${cacheDir}/tools/example-agent/1.2.3/${nativePlatformTarget}/bin/example-agent`,
+      );
       yield* fileSystem.makeDirectory(fakeExecutable, { recursive: true });
       yield* fileSystem.makeDirectory(registryDirectory, { recursive: true });
-      yield* fileSystem.writeFileString(`${registryDirectory}/registry.json`, makeRegistry(agent));
+      yield* fileSystem.writeFileString(
+        NodePath.normalize(`${registryDirectory}/registry.json`),
+        makeRegistry(agent),
+      );
 
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       const directoryError = yield* resolver.inspect(settings()).pipe(Effect.flip);
@@ -1336,9 +1408,12 @@ describe("AcpRegistrySupport", () => {
       yield* fileSystem.remove(fakeExecutable, { recursive: true });
       yield* fileSystem.writeFileString(fakeExecutable, "#!/bin/sh\n");
       yield* fileSystem.chmod(fakeExecutable, 0o644);
-      const modeError = yield* resolver.inspect(settings()).pipe(Effect.flip);
-
-      expect(modeError.reason).toBe("archive_invalid");
+      if (nativePlatform === "win32") {
+        expect(yield* resolver.inspect(settings())).toMatchObject({ status: "ready" });
+      } else {
+        const modeError = yield* resolver.inspect(settings()).pipe(Effect.flip);
+        expect(modeError.reason).toBe("archive_invalid");
+      }
 
       yield* fileSystem.chmod(fakeExecutable, 0o755);
       expect(yield* resolver.inspect(settings())).toMatchObject({ status: "ready" });
@@ -1365,18 +1440,31 @@ describe("AcpRegistrySupport", () => {
         const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
           prefix: "t3-acp-registry-uninstall-",
         });
-        const agentRoot = `${cacheDir}/tools/example-agent`;
-        const runnerCache = `${cacheDir}/external-npx-cache/example-agent/package.json`;
-        yield* fileSystem.makeDirectory(`${agentRoot}/1.2.3/linux-x86_64`, { recursive: true });
-        yield* fileSystem.writeFileString(`${agentRoot}/1.2.3/linux-x86_64/agent`, "binary");
-        yield* fileSystem.makeDirectory(`${cacheDir}/external-npx-cache/example-agent`, {
-          recursive: true,
-        });
+        const agentRoot = NodePath.normalize(`${cacheDir}/tools/example-agent`);
+        const runnerCache = NodePath.normalize(
+          `${cacheDir}/external-npx-cache/example-agent/package.json`,
+        );
+        yield* fileSystem.makeDirectory(
+          NodePath.normalize(`${agentRoot}/1.2.3/${nativePlatformTarget}`),
+          {
+            recursive: true,
+          },
+        );
+        yield* fileSystem.writeFileString(
+          NodePath.normalize(`${agentRoot}/1.2.3/${nativePlatformTarget}/agent`),
+          "binary",
+        );
+        yield* fileSystem.makeDirectory(
+          NodePath.normalize(`${cacheDir}/external-npx-cache/example-agent`),
+          {
+            recursive: true,
+          },
+        );
         yield* fileSystem.writeFileString(runnerCache, "{}");
 
         const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
           cacheDir,
-          toolsDir: `${cacheDir}/tools`,
+          toolsDir: NodePath.normalize(`${cacheDir}/tools`),
           registryUrl,
         });
         const hostSettings = yield* TestProviderHost.TestProviderHostSettings;
@@ -1426,24 +1514,39 @@ describe("AcpRegistrySupport", () => {
       const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-acp-uninstall-packages-",
       });
-      const versionRoot = `${cacheDir}/tools/example-agent/1.2.3`;
-      yield* fileSystem.makeDirectory(`${versionRoot}/linux-x86_64`, { recursive: true });
-      yield* fileSystem.writeFileString(`${versionRoot}/linux-x86_64/agent`, "binary");
-      yield* fileSystem.makeDirectory(`${versionRoot}/npm/bin`, { recursive: true });
-      yield* fileSystem.writeFileString(`${versionRoot}/npm/bin/agent`, "package command");
+      const versionRoot = NodePath.normalize(`${cacheDir}/tools/example-agent/1.2.3`);
+      yield* fileSystem.makeDirectory(
+        NodePath.normalize(`${versionRoot}/${nativePlatformTarget}`),
+        {
+          recursive: true,
+        },
+      );
+      yield* fileSystem.writeFileString(
+        NodePath.normalize(`${versionRoot}/${nativePlatformTarget}/agent`),
+        "binary",
+      );
+      yield* fileSystem.makeDirectory(NodePath.normalize(`${versionRoot}/npm/bin`), {
+        recursive: true,
+      });
+      yield* fileSystem.writeFileString(
+        NodePath.normalize(`${versionRoot}/npm/bin/agent`),
+        "package command",
+      );
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
       expect(yield* resolver.uninstallManagedBinary({ agentId: "example-agent" })).toEqual({
         agentId: "example-agent",
         removed: true,
       });
-      expect(yield* fileSystem.exists(`${versionRoot}/linux-x86_64`)).toBe(false);
-      expect(yield* fileSystem.readFileString(`${versionRoot}/npm/bin/agent`)).toBe(
-        "package command",
-      );
+      expect(
+        yield* fileSystem.exists(NodePath.normalize(`${versionRoot}/${nativePlatformTarget}`)),
+      ).toBe(false);
+      expect(
+        yield* fileSystem.readFileString(NodePath.normalize(`${versionRoot}/npm/bin/agent`)),
+      ).toBe("package command");
       expect(yield* resolver.uninstallManagedBinary({ agentId: "example-agent" })).toEqual({
         agentId: "example-agent",
         removed: false,
@@ -1457,7 +1560,7 @@ describe("AcpRegistrySupport", () => {
   it.effect("keeps a binary prepared by another client while an uninstall is waiting", () => {
     const agent = makeAgent({
       binary: {
-        "linux-x86_64": {
+        [nativePlatformTarget]: {
           archive: archiveUrl,
           cmd: "./bin/example-agent",
         },
@@ -1474,7 +1577,7 @@ describe("AcpRegistrySupport", () => {
         });
         const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
           cacheDir,
-          toolsDir: `${cacheDir}/tools`,
+          toolsDir: NodePath.normalize(`${cacheDir}/tools`),
           registryUrl,
         });
 
@@ -1494,7 +1597,7 @@ describe("AcpRegistrySupport", () => {
           agentId: agent.id,
           removed: false,
         });
-        const agentRoot = `${cacheDir}/tools/${agent.id}`;
+        const agentRoot = NodePath.normalize(`${cacheDir}/tools/${agent.id}`);
         expect(yield* fileSystem.exists(agentRoot)).toBe(true);
 
         const hostSettings = yield* TestProviderHost.TestProviderHostSettings;
@@ -1550,12 +1653,12 @@ describe("AcpRegistrySupport", () => {
   it.effect("resolves an installed agent while another agent's download is still running", () => {
     const slowArchiveUrl = "https://registry.test/slow-agent.bin";
     const agent = makeAgent({
-      binary: { "linux-x86_64": { archive: archiveUrl, cmd: "./bin/example-agent" } },
+      binary: { [nativePlatformTarget]: { archive: archiveUrl, cmd: "./bin/example-agent" } },
     });
     const slowAgent = {
       ...agent,
       distribution: {
-        binary: { "linux-x86_64": { archive: slowArchiveUrl, cmd: "./bin/slow-agent" } },
+        binary: { [nativePlatformTarget]: { archive: slowArchiveUrl, cmd: "./bin/slow-agent" } },
       },
       id: "slow-agent",
       name: "Slow Agent",
@@ -1571,7 +1674,7 @@ describe("AcpRegistrySupport", () => {
         });
         const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
           cacheDir,
-          toolsDir: `${cacheDir}/tools`,
+          toolsDir: NodePath.normalize(`${cacheDir}/tools`),
           registryUrl,
         });
 
@@ -1584,7 +1687,14 @@ describe("AcpRegistrySupport", () => {
 
         const resolved = yield* resolver.resolve(settings(), "/workspace");
         expect(resolved.spawn.command).toContain(
-          "/tools/example-agent/1.2.3/linux-x86_64/bin/example-agent",
+          NodePath.join(
+            "tools",
+            "example-agent",
+            "1.2.3",
+            nativePlatformTarget,
+            "bin",
+            "example-agent",
+          ),
         );
         expect(prepareFiber.pollUnsafe()).toBeUndefined();
 
@@ -1620,7 +1730,7 @@ describe("AcpRegistrySupport", () => {
   it.effect("reserves a prepared binary until a configured instance inspects it", () => {
     const agent = makeAgent({
       binary: {
-        "linux-x86_64": {
+        [nativePlatformTarget]: {
           archive: archiveUrl,
           cmd: "./bin/example-agent",
         },
@@ -1634,7 +1744,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
-        toolsDir: `${cacheDir}/tools`,
+        toolsDir: NodePath.normalize(`${cacheDir}/tools`),
         registryUrl,
       });
 

@@ -399,6 +399,17 @@ describe("ChatMarkdown Windows file links", () => {
       chip.getAttribute("href"),
     );
 
+  it("keeps absolute Windows drive links with either path separator", async () => {
+    setup();
+    for (const parseRawHtml of [true, false]) {
+      await using screen = await renderWindows(
+        String.raw`[Notes](D:/work/notes.md) and [Other](C:\work\other.md)`,
+        parseRawHtml,
+      );
+      expect(fileHrefs(screen.container)).toEqual(["D:/work/notes.md", "C:/work/other.md"]);
+    }
+  });
+
   it("still rejects unsafe schemes", async () => {
     setup();
     for (const parseRawHtml of [true, false]) {

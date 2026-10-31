@@ -41,6 +41,10 @@ approval before code or runtime changes.
 - Rows 9 and 11: keep Hub-managed updates. The new npm release metadata RPC is
   inert in LAN builds, as are stock self-update and track switching. Refresh
   staging locks and offline toolchain inventory for upstream dependency changes.
+- Windows integration: reject ambiguous drive-relative Markdown schemes before
+  file-URL rewriting; preserve the visible row across large-preview scroll-scale
+  changes. Native path, subprocess and link fixtures exercise host boundaries
+  without requiring elevated symlink privileges.
 - Schema: no new upstream migration in this sync. The fork head is 89; retain
   additive 81–89 and matching home-repair support. Compatibility cutover remains
   an explicit guarded maintenance operation, not a publication side effect.

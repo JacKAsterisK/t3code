@@ -273,7 +273,7 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
   const first = Math.min(maxFirst, Math.floor(position.top / scale / 29)) + headerRows;
   // The final mounted rows keep their measured height and scroll natively.
   const nativeTail = first - headerRows === maxFirst;
-  const scrollModel = useRef({ scale, maxFirst, heights: [] as number[] });
+  const scrollModel = useRef({ scale, maxFirst, heights: [] as number[], remainder: 0 });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Measure native tail rows and preserve the DOM scroll position when the virtual track scale changes.
   useLayoutEffect(() => {
     const previous = scrollModel.current;
@@ -282,12 +282,13 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
           .filter((row) => Number(row.dataset.previewRow) >= first)
           .map((row) => row.offsetHeight)
       : [];
-    scrollModel.current = { scale, maxFirst, heights };
+    scrollModel.current = { scale, maxFirst, heights, remainder: previous.remainder };
     const node = ref.current;
     if (!node || (previous.scale === scale && previous.maxFirst === maxFirst)) return;
     const previousEnd = previous.maxFirst * 29 * previous.scale;
-    let logicalTop = Math.min(previous.maxFirst * 29, node.scrollTop / previous.scale);
-    let remaining = Math.max(0, node.scrollTop - previousEnd);
+    const previousTop = node.scrollTop + previous.remainder;
+    let logicalTop = Math.min(previous.maxFirst * 29, previousTop / previous.scale);
+    let remaining = Math.max(0, previousTop - previousEnd);
     // Native-tail pixels cross rows of different heights before returning to the scaled track.
     for (const height of previous.heights) {
       logicalTop += Math.min(1, remaining / height) * 29;
@@ -301,8 +302,13 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
       remaining = Math.max(0, remaining - 1);
       if (!remaining) break;
     }
-    node.scrollTop = Math.min(maxFirst * 29, logicalTop) * scale + nativeOffset;
-    setTop(node.scrollTop);
+    const target = Math.min(maxFirst * 29, logicalTop) * scale + nativeOffset;
+    node.scrollTop = target;
+    // A fractional scrollbar pixel spans many rendered pixels on the compressed track.
+    // Retain its rounded-away part through the browser's following scroll event.
+    scrollModel.current.remainder =
+      Math.abs(target - node.scrollTop) < 1 ? target - node.scrollTop : 0;
+    setTop(node.scrollTop + scrollModel.current.remainder);
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Scroll the DOM viewport to a requested line after its virtual track has committed.
   useLayoutEffect(() => {
@@ -315,6 +321,7 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
     const key = `${props.revealRequestId}:${props.revealLine}`;
     if (!node || !props.count || handledReveal.current === key) return;
     const row = Math.min(props.count, Math.max(1, props.revealLine)) - 1;
+    scrollModel.current.remainder = 0;
     node.scrollTop = Math.max(0, (row - headerRows) * 29) * scale;
     setTop(node.scrollTop);
     pendingEnd.current = false;
@@ -425,6 +432,7 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
               : 0)))
     )
       return;
+    scrollModel.current.remainder = 0;
     node.scrollTop = node.scrollHeight;
     setTop(node.scrollTop);
     if (Math.abs(row.getBoundingClientRect().bottom - node.getBoundingClientRect().bottom) < 1)
@@ -455,11 +463,12 @@ function ScaledRows(props: Omit<Parameters<typeof RowPage>[0], "page">) {
           event.preventDefault();
           pendingEnd.current = event.key === "End";
           pendingReveal.current = null;
+          scrollModel.current.remainder = 0;
           node.scrollTop = event.key === "Home" ? 0 : node.scrollHeight;
           setTop(node.scrollTop);
         }
       }}
-      onScroll={(event) => setTop(event.currentTarget.scrollTop)}
+      onScroll={(event) => setTop(event.currentTarget.scrollTop + scrollModel.current.remainder)}
     >
       <div className="relative" style={{ height: scrollHeight }}>
         <div

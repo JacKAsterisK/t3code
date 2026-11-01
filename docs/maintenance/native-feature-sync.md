@@ -8,6 +8,8 @@ approval before code or runtime changes.
 
 ## Baseline
 
+- LAN 1.0.32 preparation: upstream `58a407c093` (2026-11-01), on `lan/1.0.32-mcp-discovery-diagnostics`. Previous published LAN 1.0.31 is `6cd66ca721b910d39fd1fcaa58d31b91a7c6f344`. Application version 0.1.6 and schema 90 are unchanged.
+
 - LAN 1.0.31 upstream refresh: `37d7615a91d880c3776d575e1152b9c955104de2` (2026-11-01), on `lan/1.0.31-peer-dns-fallback`. No native database migration or application-version change. Previous published release is LAN 1.0.30 at `132feb2630ed9aa586197e21b3c6f0c7193dcef1`.
 
 - Previous sync: `pingdotgg/t3code` `main` at
@@ -21,6 +23,13 @@ approval before code or runtime changes.
   (off); no `userdata\lan-routing.json`, so every `t3_lan_*` call is denied; no
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
+
+## LAN 1.0.32 sync decisions
+
+- Keep independent LAN identity/cache directories and the single-build Hub packaging path while adopting upstream prepared server bytecode. Package the new helper and run the existing native artifact checks.
+- Keep renderer registration and guarded update admission while adopting non-blocking remote-open discovery. The combined config-stream test retains pending/cached discovery, buffered settings, ACK ordering and same-session window-disconnect checks.
+- Adopt upstream child-approval presentation, sidebar focus/spacing, release-note highlights and startup profiling. Keep task owners, machine grouping, approval authority and the signed-IP DNS fallback.
+- Add sanitized discovery metadata in the existing rotating trace/log path. This observes admission and capability injection; it does not change discovery, request a rescan or certify platform event registration.
 
 ## LAN 1.0.31 sync decisions
 

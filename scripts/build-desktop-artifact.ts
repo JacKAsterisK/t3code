@@ -3032,6 +3032,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   lanIdentity?: LanBuildIdentity,
 ) {
   const buildConfig: Record<string, unknown> = {
+    afterPack: (yield* Path.Path).join(yield* RepoRoot, "scripts/prepare-server-compile-cache.cjs"),
     appId: lanIdentity?.appId ?? DESKTOP_APP_ID,
     productName: lanIdentity?.productName ?? resolveDesktopProductName(version),
     artifactName:

@@ -19,6 +19,7 @@ import * as Subscriptions from "../../agentEvents/AgentEventSubscriptions.ts";
 import { layerTransport, WebhookTransport } from "../../agentEvents/WebhookSender.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import type * as McpInvocationContext from "../McpInvocationContext.ts";
+import type * as Discovery from "./McpDiscoveryDiagnostics.ts";
 import { classify, type Classified, type RequestId } from "./McpEventsAdmission.ts";
 
 /** The MCP protocol versions `/mcp` registers, decided once at startup. */
@@ -49,6 +50,7 @@ export class McpEventsEndpoint extends Context.Service<
       request: HttpServerRequest.HttpServerRequest,
       scope: McpInvocationContext.McpInvocationScope,
       inner: InnerEffect,
+      diagnostic?: Discovery.Observation,
     ) => HandledEffect;
   }
 >()("t3/mcp/events/McpEventsEndpoint") {}
@@ -87,30 +89,32 @@ export const addEventsCapability = (text: string): CapabilityPatch => {
   };
 };
 
-const patchCapabilities = Effect.fn("McpEventsEndpoint.patchCapabilities")(function* (
-  method: string,
-  response: HttpServerResponse.HttpServerResponse,
-) {
-  if (response.status !== 200) return response;
-  const contentType =
-    response.headers["content-type"] ??
-    (response.body._tag === "Uint8Array" ? response.body.contentType : undefined);
-  const diagnostic = (detail: string) =>
-    Effect.logWarning(
-      "MCP Events: effect's result has an unexpected shape, so this response does not advertise events.",
-      { method, detail, contentType },
-    ).pipe(Effect.as(response));
-  if (response.body._tag !== "Uint8Array") return yield* diagnostic(`a ${response.body._tag} body`);
-  if (!String(contentType ?? "").startsWith("application/json"))
-    return yield* diagnostic("not application/json");
-  const patched = addEventsCapability(new TextDecoder().decode(response.body.body));
-  if (patched._tag === "Unexpected") return yield* diagnostic(patched.detail);
-  return HttpServerResponse.text(patched.body, {
-    status: response.status,
-    headers: response.headers,
-    contentType: "application/json",
-  });
-});
+export const patchCapabilities = Effect.fn("McpEventsEndpoint.patchCapabilities")(
+  (
+    _method: string,
+    response: HttpServerResponse.HttpServerResponse,
+    diagnostic?: Discovery.Observation,
+  ) =>
+    Effect.sync(() => {
+      const skip = (decision: Discovery.Observation["capabilityInjection"]) => {
+        if (diagnostic !== undefined) diagnostic.capabilityInjection = decision;
+        return response;
+      };
+      if (response.status !== 200) return skip("skipped_http_status");
+      if (response.body._tag !== "Uint8Array") return skip("skipped_non_materialized");
+      const contentType = response.headers["content-type"] ?? response.body.contentType;
+      if (!String(contentType ?? "").startsWith("application/json"))
+        return skip("skipped_content_type");
+      const patched = addEventsCapability(new TextDecoder().decode(response.body.body));
+      if (patched._tag === "Unexpected") return skip("skipped_shape");
+      if (diagnostic !== undefined) diagnostic.capabilityInjection = "injected";
+      return HttpServerResponse.text(patched.body, {
+        status: response.status,
+        headers: response.headers,
+        contentType: "application/json",
+      });
+    }),
+);
 
 const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
@@ -185,8 +189,8 @@ const make = Effect.gen(function* () {
           }),
         ),
       ),
-      Effect.catchCause((cause) =>
-        Effect.logError("MCP Events request failed.", { cause }).pipe(
+      Effect.catchCause(() =>
+        Effect.logError("MCP Events request failed.", { errorCategory: "internal_error" }).pipe(
           Effect.as(
             jsonRpc({
               jsonrpc: "2.0",
@@ -201,8 +205,14 @@ const make = Effect.gen(function* () {
   };
 
   const handle: McpEventsEndpoint["Service"]["handle"] = Effect.fn("McpEventsEndpoint.handle")(
-    function* (request, scope, inner) {
-      if (!statelessEnabled || !(yield* enabledNow)) return yield* inner;
+    function* (request, scope, inner, diagnostic) {
+      if (!statelessEnabled || !(yield* enabledNow)) {
+        if (diagnostic !== undefined)
+          diagnostic.admission = statelessEnabled
+            ? "events_disabled_now"
+            : "events_disabled_at_startup";
+        return yield* inner;
+      }
       const owner = scope.client?.sessionId ?? scope.requestNamespace;
       const sessionHeader = request.headers["mcp-session-id"];
       if (request.method === "DELETE") {
@@ -214,6 +224,13 @@ const make = Effect.gen(function* () {
       const body = yield* request.text.pipe(Effect.option);
       if (Option.isNone(body)) return yield* inner;
       const classified = yield* classify({
+        onDecision: (reason) => {
+          if (diagnostic !== undefined) {
+            diagnostic.admission = reason;
+            if (reason !== "accepted" && reason !== "not_events_request")
+              diagnostic.relevant = true;
+          }
+        },
         method: request.method,
         headers: request.headers,
         body: body.value,
@@ -231,7 +248,9 @@ const make = Effect.gen(function* () {
           return yield* dispatch(classified, scope);
         case "Discover":
           return yield* inner.pipe(
-            Effect.flatMap((response) => patchCapabilities("server/discover", response)),
+            Effect.flatMap((response) =>
+              patchCapabilities("server/discover", response, diagnostic),
+            ),
           );
         case "Initialize": {
           const response = yield* inner;
@@ -244,7 +263,7 @@ const make = Effect.gen(function* () {
               return written;
             }),
           );
-          return yield* patchCapabilities("initialize", response);
+          return yield* patchCapabilities("initialize", response, diagnostic);
         }
       }
     },

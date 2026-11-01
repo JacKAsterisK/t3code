@@ -32,6 +32,22 @@ they still line up with the trace. `Logger.tracerLogger` is dropped in that mode
 message is not exported twice and the trace file stops carrying log messages. stdout output and
 SSH-managed launch persistence stay unchanged either way.
 
+### MCP event discovery diagnostics
+
+After updating and restarting the serving environment, look for `MCP discovery metadata`
+in its existing logs or trace events. It records `initialize`, `server/discover`,
+`events/list`, and admission failures using fixed categories and a server-generated
+correlation ID. Compare protocol/header rejection with the capability injection decision.
+`eventsCapabilityPresent: null` means the response could not be inspected, including
+streamed responses; it does not mean the capability was absent. JSON inspection is bounded
+to 64 KiB, and streams are never consumed for diagnostics. Credentials, bodies, external
+IDs and URLs are excluded. These Info records use the existing log level and trace rotation.
+
+This logging does not request a platform rescan or fix discovery. Collect the next actual
+platform attempt before drawing a conclusion; no matching record alone proves neither an
+attempt nor its failure. Unauthenticated requests and header-only refusals can have an
+unknown RPC method because their body is not inspected.
+
 ### Traces
 
 Completed spans are written as NDJSON records to `serverTracePath`. The default depends on how the

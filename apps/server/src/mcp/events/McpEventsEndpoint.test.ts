@@ -11,6 +11,7 @@ import { McpProtocol, McpServer, Tool, Toolkit } from "effect/ai";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { HttpBody, HttpClient, HttpRouter } from "effect/http";
@@ -575,3 +576,124 @@ describe("MCP Events endpoint", () => {
       assert.strictEqual(McpEventsEndpoint.addEventsCapability(body)._tag, "Unexpected", body);
   });
 });
+
+it.effect(
+  "records sanitized discovery metadata for actual HTTP discovery and admission failures",
+  () => {
+    const records: Array<Record<string, unknown>> = [];
+    const logger = Logger.make(({ message }) => {
+      if (Array.isArray(message) && message[0] === "MCP discovery metadata")
+        records.push(message[1] as Record<string, unknown>);
+    });
+    return Effect.gen(function* () {
+      const { post } = yield* serve();
+      const canary = "private-discovery-canary";
+      const discover = yield* post({
+        body: statelessRequest("server/discover", { private: canary }, canary),
+        headers: {
+          ...statelessHeaders("server/discover"),
+          cookie: canary,
+          "x-correlation-id": canary,
+        },
+      });
+      assert.strictEqual(discover.status, 200);
+      const list = yield* post({
+        body: statelessRequest("events/list"),
+        headers: statelessHeaders("events/list"),
+      });
+      assert.strictEqual(list.status, 200);
+      const rejected = yield* post({
+        body: statelessRequest("server/discover"),
+        headers: { ...statelessHeaders("server/discover"), accept: "application/json" },
+      });
+      assert.strictEqual(rejected.status, 406);
+      const unauthorized = yield* post({
+        body: statelessRequest("server/discover", { secret: canary }),
+        headers: statelessHeaders("server/discover"),
+        token: canary,
+      });
+      assert.strictEqual(unauthorized.status, 401);
+      const initialized = yield* post({
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: canary,
+          method: "initialize",
+          params: {
+            protocolVersion: V2025,
+            capabilities: {},
+            clientInfo: { name: canary, version: "1" },
+          },
+        }),
+      });
+      assert.strictEqual(initialized.status, 200);
+      yield* post({
+        body: JSON.stringify({ jsonrpc: "2.0", id: canary, method: "events/list", params: {} }),
+        headers: {
+          "mcp-session-id": initialized.headers["mcp-session-id"]!,
+          "mcp-protocol-version": V2025,
+        },
+      });
+      const mismatch = yield* post({
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: canary,
+          method: "server/discover",
+          params: { _meta: meta(V2025) },
+        }),
+        headers: statelessHeaders("server/discover"),
+      });
+      assert.strictEqual(mismatch.status, 400);
+      // Header rejection must remain visible when a legacy caller has no method header.
+      const legacyRejected = yield* post({
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: canary,
+          method: "initialize",
+          params: {
+            protocolVersion: V2025,
+            capabilities: {},
+            clientInfo: { name: canary, version: "1" },
+          },
+        }),
+        headers: { accept: "application/json" },
+      });
+      assert.strictEqual(legacyRejected.status, 406);
+      yield* post({
+        body: statelessRequest("tools/list"),
+        headers: statelessHeaders("tools/list"),
+      });
+      assert.strictEqual(records.length, 8);
+      assert.strictEqual(records[6]?.admission, "protocol_claim_mismatch");
+      assert.strictEqual(records[6]?.protocolHeaderVersion, V2026);
+      assert.strictEqual(records[6]?.protocolClaimVersion, V2025);
+      assert.strictEqual(records[7]?.admission, "accept_rejected");
+      assert.strictEqual(records[7]?.rpcMethod, "unknown");
+      assert.strictEqual(records[4]?.rpcMethod, "initialize");
+      assert.strictEqual(records[4]?.rpcMethodSource, "body");
+      assert.strictEqual(records[4]?.negotiatedProtocolVersion, V2025);
+      assert.strictEqual(records[4]?.eventsCapabilityPresent, true);
+      assert.strictEqual(records[5]?.eventsCount, 6);
+      assert.strictEqual(records[0]?.rpcMethod, "server/discover");
+      assert.strictEqual(records[0]?.eventsCapabilityPresent, true);
+      assert.strictEqual(records[0]?.capabilityInjection, "injected");
+      assert.strictEqual(records[0]?.protocolVersion, V2026);
+      assert.strictEqual(records[1]?.eventsCount, 6);
+      assert.strictEqual(records[2]?.admission, "accept_rejected");
+      assert.strictEqual(records[2]?.httpStatus, 406);
+      assert.strictEqual(records[3]?.errorCategory, "authentication_rejected");
+      for (const record of records) {
+        assert.match(String(record.correlationId), /^[0-9a-f-]{36}$/u);
+        assert.match(String(record.timestamp), /^\d{4}-\d{2}-\d{2}T/u);
+        assert.isBelow(JSON.stringify(record).length, 1500);
+      }
+      const serialized = JSON.stringify(records);
+      assert.notInclude(serialized, canary);
+      assert.notInclude(serialized, "token-dot");
+      assert.notInclude(serialized, "session-dot");
+    }).pipe(
+      Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+      Effect.scoped,
+      Effect.provide(NodeHttpServer.layerTest),
+    );
+  },
+);

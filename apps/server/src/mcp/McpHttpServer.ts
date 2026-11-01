@@ -25,7 +25,7 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import type * as Types from "effect/Types";
 import { AiError, McpProtocol, McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { HttpEffect, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import {
   DeviceToolError,
   OrchestratorMcpFailure,
@@ -77,6 +77,7 @@ import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as McpEventsEndpoint from "./events/McpEventsEndpoint.ts";
+import * as Discovery from "./events/McpDiscoveryDiagnostics.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
@@ -234,42 +235,73 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
   );
   return Effect.fn("McpHttpServer.authenticateRequest")(function* (httpEffect) {
     const request = yield* HttpServerRequest.HttpServerRequest;
-    const authorization = request.headers.authorization;
-    const token =
-      authorization?.startsWith("Bearer ") === true
-        ? authorization.slice("Bearer ".length).trim()
-        : "";
-    const invocation =
-      (yield* registry.resolve(token)) ??
-      (Option.isSome(clients) && token.length > 0
-        ? yield* clients.value.authenticate(request)
-        : undefined);
-    if (!invocation) {
-      yield* Effect.logWarning("rejected MCP request with an unusable credential", {
-        reason: token.length === 0 ? "missing_bearer_token" : "unknown_or_expired_token",
-      });
-      return unauthorized({
-        request,
-        presentedToken: token.length > 0,
-        offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
-      });
-    }
-    const limited = withModeLimit(invocation, request);
-    if (limited === undefined) return invalidModeLimit;
-    const { linkedEnvironments, agentEventsEnabled } = yield* admissionSettings;
-    if (limited.client?.linked === true && !linkedEnvironments) return linkedEnvironmentsOff;
-    const scope = withIncomingLaunchProvenance(
-      { ...limited, linkedEnvironments, agentEventsEnabled },
-      request.headers,
-    );
-    const inner = httpEffect.pipe(
-      Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
-      Effect.map(normalizeMcpHttpResponse),
-    );
-    return yield* (Option.isSome(events) ? events.value.handle(request, scope, inner) : inner).pipe(
+    const diagnostic = Discovery.begin(request.headers);
+    const run = Effect.gen(function* () {
+      const authorization = request.headers.authorization;
+      const token =
+        authorization?.startsWith("Bearer ") === true
+          ? authorization.slice("Bearer ".length).trim()
+          : "";
+      const invocation =
+        (yield* registry.resolve(token)) ??
+        (Option.isSome(clients) && token.length > 0
+          ? yield* clients.value.authenticate(request)
+          : undefined);
+      if (!invocation) {
+        diagnostic.relevant = true;
+        diagnostic.admission = "authentication_rejected";
+        diagnostic.errorCategory =
+          token.length === 0 ? "authentication_required" : "authentication_rejected";
+        return unauthorized({
+          request,
+          presentedToken: token.length > 0,
+          offerOAuth: Option.isSome(clients) && !looksLikeProviderToken(token),
+        });
+      }
+      const limited = withModeLimit(invocation, request);
+      if (limited === undefined) {
+        diagnostic.relevant = true;
+        diagnostic.admission = "invalid_mode_limit";
+        diagnostic.errorCategory = "invalid_mode_limit";
+        return invalidModeLimit;
+      }
+      const { linkedEnvironments, agentEventsEnabled } = yield* admissionSettings;
+      if (limited.client?.linked === true && !linkedEnvironments) {
+        diagnostic.relevant = true;
+        diagnostic.admission = "linked_environments_disabled";
+        diagnostic.errorCategory = "linked_environments_disabled";
+        return linkedEnvironmentsOff;
+      }
+      if (request.method === "POST" && Discovery.mayInspectRequestBody(request.headers)) {
+        const body = yield* request.text.pipe(Effect.option);
+        if (Option.isSome(body)) Discovery.inspectRequest(diagnostic, body.value);
+      }
+      const scope = withIncomingLaunchProvenance(
+        { ...limited, linkedEnvironments, agentEventsEnabled },
+        request.headers,
+      );
+      const inner = httpEffect.pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+        Effect.map(normalizeMcpHttpResponse),
+      );
+      if (Option.isNone(events)) diagnostic.admission = "endpoint_unavailable";
+      return yield* (
+        Option.isSome(events) ? events.value.handle(request, scope, inner, diagnostic) : inner
+      ).pipe(
+        Effect.tap(() =>
+          agentEventsEnabled && Option.isSome(factSignals) ? factSignals.value.poll : Effect.void,
+        ),
+      );
+    });
+    return yield* run.pipe(
       Effect.tap(() =>
-        agentEventsEnabled && Option.isSome(factSignals) ? factSignals.value.poll : Effect.void,
+        diagnostic.relevant
+          ? HttpEffect.appendPreResponseHandler((_request, response) =>
+              Discovery.logResponse(diagnostic, response).pipe(Effect.as(response)),
+            )
+          : Effect.void,
       ),
+      Effect.onError(() => (diagnostic.relevant ? Discovery.logResponse(diagnostic) : Effect.void)),
     );
   }) satisfies McpAuthMiddleware;
 }).pipe(Effect.withSpan("McpHttpServer.makeAuthMiddleware"));

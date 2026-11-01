@@ -218,7 +218,7 @@ it.effect(
       assert.include(commandError.message, "JacKAsterisK/t3code");
       const repoint = repointLauncher({
         launchedAs: "unused",
-        versionsDir: "unused",
+        baseDir: "unused",
         targetEntryPath: "unused",
       });
       const repointError = yield* repoint.pipe(

@@ -67,6 +67,16 @@ it.live("reaches a trusted fleet peer only at its pinned key and leaves other or
       ]);
       expect(yield* text(origin)).toBe("reached");
       expect(yield* text(plain)).toBe("reached");
+      // A failed DNS route falls back only to the already pinned origin, before sending bytes.
+      yield* trust.replace([
+        {
+          origin,
+          certificate: approved.certificate,
+          publicKeySha256: approved.publicKeySha256,
+          connectHost: "t3-peer-does-not-exist.invalid",
+        },
+      ]);
+      expect(yield* text(origin)).toBe("reached");
       // Peer links forbid redirects, so the code and token never leave the pinned origin.
       const redirected = yield* client
         .get(`${origin}/redirect`)
@@ -74,7 +84,12 @@ it.live("reaches a trusted fleet peer only at its pinned key and leaves other or
       expect(redirected.status).toBe(302);
 
       yield* trust.replace([
-        { origin, certificate: impostor.certificate, publicKeySha256: impostor.publicKeySha256 },
+        {
+          origin,
+          certificate: impostor.certificate,
+          publicKeySha256: impostor.publicKeySha256,
+          connectHost: "t3-peer-does-not-exist.invalid",
+        },
       ]);
       expect((yield* Effect.result(text(origin)))._tag).toBe("Failure");
     }),

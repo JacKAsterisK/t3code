@@ -33,6 +33,8 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import { isLocalLoopbackHost, isTailnetHost } from "@t3tools/shared/hostClassification";
 
+import { peerConnectionFailure } from "@t3tools/shared/fleetTlsProxy";
+import * as Fleet from "../lan/FleetPeerHttpClient.ts";
 import * as Gate from "../auth/ApprovalAdmissionGate.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -204,12 +206,12 @@ const make = Effect.gen(function* () {
     );
 
   /** The environment answering at `origin`, or nothing when it does not answer as T3 Code. */
-  const describe = (origin: string) =>
+  const probe = (origin: string) =>
     clientFor(origin).pipe(
       Effect.flatMap((client) => client.metadata.descriptor()),
       Effect.timeout(probeTimeout(origin)),
-      Effect.option,
     );
+  const describe = (origin: string) => probe(origin).pipe(Effect.option);
 
   const toLink = Effect.fn("PeerLinks.toLink")(function* (row: PeerLinkRow) {
     return {
@@ -603,10 +605,37 @@ const make = Effect.gen(function* () {
       // The token goes only to an address that proves it is this peer, so a
       // reused LAN address or a moved hostname never receives it.
       let fenced = true;
+      const failures: string[] = [];
+      const fleet = yield* Effect.serviceOption(Fleet.FleetPeerTrust);
+      const trusted = Option.isSome(fleet) ? yield* fleet.value.current : [];
       const url = yield* Effect.findFirst(link.urls, (candidate) =>
-        describe(candidate).pipe(
+        probe(candidate).pipe(
+          Effect.match({
+            onFailure: (cause) => {
+              const route = trusted.find((peer) => peer.origin === candidate)?.connectHost;
+              failures.push(
+                candidate +
+                  (route === undefined
+                    ? ""
+                    : " via hostname " + route + " (signed IP available on DNS failure)") +
+                  ": " +
+                  peerConnectionFailure(cause),
+              );
+              return Option.none();
+            },
+            onSuccess: Option.some,
+          }),
           Effect.map((found) => {
-            if (Option.isNone(found) || found.value.environmentId !== environmentId) return false;
+            if (Option.isNone(found)) return false;
+            if (found.value.environmentId !== environmentId) {
+              failures.push(
+                candidate +
+                  ": answered as a different environment (" +
+                  found.value.environmentId +
+                  ")",
+              );
+              return false;
+            }
             fenced = linkLimitsHold(found.value);
             return true;
           }),
@@ -615,7 +644,7 @@ const make = Effect.gen(function* () {
       if (Option.isNone(url)) {
         return yield* new PeerLinkError({
           reason: "unreachable",
-          message: `${link.label} did not answer at ${link.urls.join(", ")}.`,
+          message: `${link.label} could not be reached. ${failures.join("; ")}`,
         });
       }
       // A link made before the peer had to fence linked work, or a peer moved

@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Transient loopback fixtures exercise real Node TLS validation and streaming sockets.
+import type * as NodeNet from "node:net";
 import * as NodeHttp from "node:http";
 import * as NodeHttps from "node:https";
 import * as NodeCrypto from "node:crypto";
@@ -11,6 +12,8 @@ import { createFleetTlsCertificate } from "./fleetTlsCertificate.ts";
 import {
   FLEET_TLS_FORWARD_HEADER,
   fleetTlsRequestOptions,
+  fleetLookup,
+  peerConnectionFailure,
   startFleetProxy,
 } from "./fleetTlsProxy.ts";
 
@@ -102,7 +105,7 @@ it.live(
           response.end("wrong peer");
         });
         const impostorPort = await listen(impostorServer);
-        let endpoint, gateway, wrongGateway;
+        let endpoint, gateway, dnsGateway, wrongGateway;
         try {
           endpoint = await startFleetProxy({
             listen: { address: "127.0.0.1", port: 0 },
@@ -120,18 +123,20 @@ it.live(
             target: endpoint.httpBaseUrl, peerTls: { identity, now },
           });
           assert.deepEqual(await get(gateway.httpBaseUrl), { status: 200, body: "saved identity reached" });
+          dnsGateway = await startFleetProxy({ listen: { address: "127.0.0.1", port: 0 }, target: endpoint.httpBaseUrl, peerTls: { identity: { ...identity, connectHost: "t3-peer-does-not-exist.invalid" }, now } });
+          assert.deepEqual(await get(dnsGateway.httpBaseUrl), { status: 200, body: "saved identity reached" });
           assert.throws(() => fleetTlsRequestOptions({ ...identity, origin: "https://127.0.0.2:4443" }, now));
           assert.throws(() => fleetTlsRequestOptions({ ...identity, publicKeySha256: impostor.publicKeySha256 }, now));
-          const wrongIdentity = { ...identity, origin: "https://127.0.0.1:" + impostorPort };
+          const wrongIdentity = { ...identity, connectHost: "t3-peer-does-not-exist.invalid", origin: "https://127.0.0.1:" + impostorPort };
           wrongGateway = await startFleetProxy({
             listen: { address: "127.0.0.1", port: 0 },
             target: wrongIdentity.origin + "/", peerTls: { identity: wrongIdentity, now },
           });
           assert.equal((await get(wrongGateway.httpBaseUrl)).status, 502);
           assert.equal(impostorRequests, 0);
-          assert.equal(requests, 1);
+          assert.equal(requests, 2);
         } finally {
-          await wrongGateway?.close(); await gateway?.close(); await endpoint?.close();
+          await wrongGateway?.close(); await dnsGateway?.close(); await gateway?.close(); await endpoint?.close();
           await close(impostorServer); await close(backend);
         }
         console.log(JSON.stringify({ passed: true, node: process.versions.node, requests, impostorRequests }));
@@ -165,7 +170,7 @@ it.live(
         expect(result.code).toBe(0);
         expect(JSON.parse(result.stdout)).toMatchObject({
           passed: true,
-          requests: 1,
+          requests: 2,
           impostorRequests: 0,
         });
       });
@@ -433,3 +438,52 @@ it.live("does not follow redirects or allow plaintext/nonlocal gateway fallback"
     });
   }),
 );
+
+it("falls back only on DNS errors and preserves IPv6 lookup results and transport causes", async () => {
+  const peer = {
+    origin: "https://127.0.0.1:3774",
+    connectHost: "peer.test",
+    certificate: "unused",
+    publicKeySha256: "unused",
+  };
+  const result = (lookup: NodeNet.LookupFunction, hostname = "peer.test", all = false) =>
+    new Promise<{
+      error: NodeJS.ErrnoException | null;
+      address: string | import("node:dns").LookupAddress[];
+      family?: number;
+    }>((resolve) =>
+      fleetLookup(peer, lookup)(hostname, { all }, (error, address, family) =>
+        resolve({ error, address, family }),
+      ),
+    );
+  for (const code of ["ENOTFOUND", "EAI_FAIL", "EAI_AGAIN"]) {
+    const failure = Object.assign(new Error("lookup failed"), {
+      code,
+      syscall: "getaddrinfo",
+      hostname: "peer.test",
+    });
+    expect(await result((_host, _options, done) => done(failure, ""))).toEqual({
+      error: null,
+      address: "127.0.0.1",
+      family: 4,
+    });
+    expect(
+      (await result((_host, _options, done) => done(failure, ""), "unrelated.test")).error,
+    ).toBe(failure);
+    expect(peerConnectionFailure({ cause: { cause: failure } })).toBe("DNS " + code + " peer.test");
+  }
+  const addresses = [
+    { address: "::1", family: 6 },
+    { address: "127.0.0.1", family: 4 },
+  ];
+  expect(
+    (await result((_host, _options, done) => done(null, addresses), "peer.test", true)).address,
+  ).toBe(addresses);
+  const timeout = Object.assign(new Error("failed"), {
+    code: "ETIMEDOUT",
+    address: "::1",
+    port: 3774,
+  });
+  expect((await result((_host, _options, done) => done(timeout, ""))).error).toBe(timeout);
+  expect(peerConnectionFailure(timeout)).toBe("timeout ETIMEDOUT ::1 3774");
+});

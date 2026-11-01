@@ -1,3 +1,4 @@
+import { peerConnectionFailure } from "@t3tools/shared/fleetTlsProxy";
 import {
   type EnvironmentId,
   OrchestratorMcpFailure,
@@ -334,30 +335,37 @@ const make = Effect.gen(function* () {
       writeAllowed(input).pipe(
         Effect.andThen(
           effect.pipe(
+            Effect.catchTags({
+              TimeoutError: (cause) =>
+                Effect.fail(
+                  new OrchestratorMcpFailure({
+                    code: "orchestration_error",
+                    message:
+                      "Linked environment " +
+                      input.environmentId +
+                      ": " +
+                      peerConnectionFailure(cause),
+                  }),
+                ),
+              HttpClientError: (cause) =>
+                Effect.fail(
+                  new OrchestratorMcpFailure({
+                    code: "orchestration_error",
+                    message:
+                      "Linked environment " +
+                      input.environmentId +
+                      ": " +
+                      peerConnectionFailure(cause),
+                  }),
+                ),
+            }),
             Effect.tapError((error) =>
               error === writeRefused || error._tag === "PeerMcpBeforeSendRefused"
                 ? Effect.void
                 : links.recordOutcome(input.environmentId, { error: error.message }),
             ),
             Effect.tap(() => links.recordOutcome(input.environmentId, { error: null })),
-            // Recorded above with the transport's own message; the agent hears it plainly.
-            Effect.catchTags({
-              PeerMcpBeforeSendRefused: (error) => Effect.fail(error.failure),
-              TimeoutError: () =>
-                Effect.fail(
-                  new OrchestratorMcpFailure({
-                    code: "orchestration_error",
-                    message: "The linked environment stopped answering.",
-                  }),
-                ),
-              HttpClientError: () =>
-                Effect.fail(
-                  new OrchestratorMcpFailure({
-                    code: "orchestration_error",
-                    message: "The linked environment stopped answering.",
-                  }),
-                ),
-            }),
+            Effect.catchTags({ PeerMcpBeforeSendRefused: (error) => Effect.fail(error.failure) }),
           ),
         ),
       ),

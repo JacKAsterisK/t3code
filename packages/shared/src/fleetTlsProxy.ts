@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- This adapter owns fixed-destination native HTTP/TLS streams and socket disposal.
+import * as NodeDns from "node:dns";
 import * as NodeHttp from "node:http";
 import * as NodeHttps from "node:https";
 import * as NodeTls from "node:tls";
@@ -23,6 +24,83 @@ export interface FleetProxy {
   readonly close: () => Promise<void>;
 }
 
+/** Only name-resolution errors permit a route fallback; socket/TLS failures never replay a request. */
+export const isFleetDnsFailure = (error: unknown): error is NodeJS.ErrnoException =>
+  error instanceof Error &&
+  "code" in error &&
+  ["ENOTFOUND", "EAI_FAIL", "EAI_AGAIN", "EAI_NODATA", "EAI_NONAME"].includes(String(error.code));
+
+/** Preserve every successful DNS answer, including IPv6 and the caller's all-address lookup. */
+export const fleetLookup =
+  (trust: FleetTlsTrust, lookup: NodeNet.LookupFunction = NodeDns.lookup): NodeNet.LookupFunction =>
+  (hostname, options, callback) => {
+    lookup(hostname, options, (error, address, family) => {
+      const target = new URL(trust.origin);
+      if (
+        isFleetDnsFailure(error) &&
+        hostname === trust.connectHost &&
+        target.protocol === "https:" &&
+        target.origin === trust.origin &&
+        NodeNet.isIPv4(target.hostname)
+      ) {
+        // This is a socket lookup result, before TCP/TLS or any HTTP bytes. The unchanged
+        // TLS options still verify the signed origin's certificate and pinned public key.
+        callback(
+          null,
+          options.all ? [{ address: target.hostname, family: 4 }] : target.hostname,
+          4,
+        );
+      } else callback(error, address, family);
+    });
+  };
+
+/** Bounded transport diagnostics, excluding request headers, bodies and credentials. */
+export const peerConnectionFailure = (cause: unknown): string => {
+  const details: string[] = [];
+  const seen = new Set<unknown>();
+  const visit = (value: unknown, depth: number) => {
+    if (depth > 6 || value === null || typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    const error = value as {
+      code?: unknown;
+      syscall?: unknown;
+      hostname?: unknown;
+      address?: unknown;
+      port?: unknown;
+      cause?: unknown;
+      reason?: unknown;
+      errors?: unknown;
+      name?: unknown;
+    };
+    if (typeof error.code === "string") {
+      const phase =
+        error.syscall === "getaddrinfo"
+          ? "DNS"
+          : error.code.includes("TIMEOUT") || error.code === "ETIMEDOUT"
+            ? "timeout"
+            : "connection/TLS";
+      details.push(
+        [phase, error.code, error.hostname, error.address, error.port]
+          .filter((v) => typeof v === "string" || typeof v === "number")
+          .join(" "),
+      );
+    } else if (
+      error.name === "TimeoutError" ||
+      error.name === "TimeoutException" ||
+      (value as { _tag?: unknown })._tag === "TimeoutError"
+    )
+      details.push("connection/descriptor timeout");
+    visit(error.cause, depth + 1);
+    visit(error.reason, depth + 1);
+    if (Array.isArray(error.errors))
+      for (const child of error.errors.slice(0, 4)) visit(child, depth + 1);
+  };
+  visit(cause, 0);
+  return (
+    [...new Set(details)].join("; ").slice(0, 700) || "connection or descriptor request failed"
+  );
+};
+
 export function fleetTlsRequestOptions(
   trust: FleetTlsTrust,
   now: number,
@@ -38,6 +116,7 @@ export function fleetTlsRequestOptions(
     throw new Error("The approved fleet NodeTls identity is invalid.");
   return {
     ca: trust.certificate,
+    lookup: fleetLookup(trust),
     // Electron's Node 24 requires partial-chain trust for the exact pinned, non-CA leaf.
     allowPartialTrustChain: true,
     rejectUnauthorized: true,

@@ -59,10 +59,17 @@ export const layer = Layer.effect(
       const key = trustKey(peer);
       let agent = agents.get(key);
       if (agent === undefined) {
-        const { ca, allowPartialTrustChain, rejectUnauthorized, minVersion, checkServerIdentity } =
-          fleetTlsRequestOptions(peer, now);
+        const {
+          ca,
+          allowPartialTrustChain,
+          rejectUnauthorized,
+          minVersion,
+          checkServerIdentity,
+          lookup,
+        } = fleetTlsRequestOptions(peer, now);
         const connect = undici.buildConnector({
           ca,
+          lookup,
           allowPartialTrustChain,
           rejectUnauthorized,
           minVersion,

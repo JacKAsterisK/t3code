@@ -8,18 +8,26 @@ approval before code or runtime changes.
 
 ## Baseline
 
-- Upstream: `pingdotgg/t3code` `main` at
+- LAN 1.0.31 upstream refresh: `37d7615a91d880c3776d575e1152b9c955104de2` (2026-11-01), on `lan/1.0.31-peer-dns-fallback`. No native database migration or application-version change. Previous published release is LAN 1.0.30 at `132feb2630ed9aa586197e21b3c6f0c7193dcef1`.
+
+- Previous sync: `pingdotgg/t3code` `main` at
   `575579d68ac4bae09f8426a345d4a3eac1e90c67` (2026-10-31), merged on
   `lan/release-1.0.30-20261031`. This adds one upstream commit after LAN 1.0.29.
   App, server, desktop and contracts remain upstream 0.1.6; the fork schema is 90.
-- Previous shipping release: T3 Code LAN 1.0.29, fork
+- Earlier shipping release: T3 Code LAN 1.0.29, fork
   `b354a2d6c04350a06afd7316efdabebb235116e7`, published with its full
-  authenticated download verified. LAN 1.0.30 remains a candidate until its
-  single build passes packaged audits and the Portal publisher verifies it.
-- AnvilToad configuration observed 2026-10-28: `linkedEnvironmentsEnabled` unset
+  authenticated download verified. LAN 1.0.30 was subsequently published and its authenticated download verified.
+- Historical AnvilToad configuration observed 2026-10-28: `linkedEnvironmentsEnabled` unset
   (off); no `userdata\lan-routing.json`, so every `t3_lan_*` call is denied; no
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
+
+## LAN 1.0.31 sync decisions
+
+- Keep task owners and machine grouping alongside upstream sidebar disconnected-state handling, scheduler interruption cleanup and one-time schedules. Keep native update admission around scheduler work.
+- Keep the command-bound acknowledged Codex writer while adopting upstream output-stream failure handling. Preserve approval receipts, authority and delivery boundaries.
+- Adopt upstream desktop host focus, composer, preview-port and provider fixes. Keep the independent LAN identity and single-build release path.
+- Fleet routes retain working IPv6. Only a hostname-resolution error permits the signed numeric origin as a socket-lookup fallback; certificate and key verification are unchanged. Connection errors report the hostname, underlying DNS/socket code and timeout where available. No POST replay, DNS configuration or permission change.
 
 ## LAN 1.0.30 sync decisions
 

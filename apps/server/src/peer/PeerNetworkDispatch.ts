@@ -1,9 +1,9 @@
-﻿// @effect-diagnostics nodeBuiltinImport:off -- This adapter owns DNS pinning and interruptible peer sockets.
+// @effect-diagnostics nodeBuiltinImport:off -- This adapter owns DNS pinning and interruptible peer sockets.
 import * as NodeDns from "node:dns";
 import * as NodeHttp from "node:http";
 import * as NodeHttps from "node:https";
 import * as NodeNet from "node:net";
-import { fleetTlsRequestOptions } from "@t3tools/shared/fleetTlsProxy";
+import { fleetTlsRequestOptions, isFleetDnsFailure } from "@t3tools/shared/fleetTlsProxy";
 import * as Fleet from "../lan/FleetPeerHttpClient.ts";
 import * as Clock from "effect/Clock";
 import * as Option from "effect/Option";
@@ -57,7 +57,13 @@ const execute = Effect.fn("PeerNetworkDispatch.execute")(function* <E>(
   const family = NodeNet.isIP(route);
   const address =
     family === 0
-      ? yield* options.lookup(route).pipe(Effect.mapError(failed))
+      ? yield* options.lookup(route).pipe(
+          Effect.catchIf(
+            (cause) => captured !== undefined && isFleetDnsFailure(cause) && NodeNet.isIPv4(host),
+            () => Effect.succeed({ address: host, family: 4 }),
+          ),
+          Effect.mapError(failed),
+        )
       : { address: route, family };
   if (NodeNet.isIP(address.address) !== address.family || address.family === 0)
     return yield* failed("Invalid resolved peer address");

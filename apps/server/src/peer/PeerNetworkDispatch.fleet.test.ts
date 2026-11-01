@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Isolated production fleet TLS and streaming loopback fixtures.
 import * as NodeHttp from "node:http";
 import type * as NodeTls from "node:tls";
-import { assert, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 import { EnvironmentId, type OrchestratorMcpFailure } from "@t3tools/contracts";
 import { createFleetTlsCertificate } from "@t3tools/shared/fleetTlsCertificate";
 import * as Context from "effect/Context";
@@ -281,4 +281,61 @@ it.live("an HTTP 101 upgrade is refused and its socket is closed deterministical
     if (result._tag === "Failure")
       assert.match(String(result.failure.cause), /upgrades are refused/u);
   }).pipe(Effect.scoped),
+);
+
+it.live("DNS failure uses only the signed IP, preserving admission and certificate rejection", () =>
+  Effect.gen(function* () {
+    const receiver = yield* Fixture.fleetReceiver;
+    const trust = yield* Fleet.FleetPeerTrust;
+    const dispatch = yield* Network.PeerNetworkDispatch;
+    const identity = {
+      origin: receiver.origin,
+      ...receiver.certificate,
+      connectHost: "missing.test",
+    };
+    const dns = {
+      lookup: () =>
+        Effect.fail(
+          Object.assign(new Error("lookup failed"), {
+            code: "ENOTFOUND",
+            syscall: "getaddrinfo",
+            hostname: "missing.test",
+          }),
+        ),
+    };
+    let checks = 0;
+    const send = (admit: Effect.Effect<void>) =>
+      dispatch
+        .execute(
+          HttpClientRequest.post(receiver.origin).pipe(
+            HttpClientRequest.setBody(
+              HttpBody.text(JSON.stringify({ method: "initialize" }), "application/json"),
+            ),
+          ),
+          admit,
+        )
+        .pipe(Effect.provideService(Network.NetworkOptions, dns));
+    yield* trust.replace([identity]);
+    expect(
+      (yield* send(
+        Effect.sync(() => {
+          checks++;
+        }),
+      )).status,
+    ).toBe(200);
+    expect(checks).toBe(1);
+    expect(receiver.received.length).toBe(1);
+    const before = { ...receiver.traffic };
+    yield* send(trust.replace([])).pipe(Effect.result);
+    expect(receiver.traffic).toEqual(before);
+    const wrong = createFleetTlsCertificate({
+      address: "127.0.0.1",
+      now: yield* Clock.currentTimeMillis,
+    });
+    yield* trust.replace([
+      { ...identity, certificate: wrong.certificate, publicKeySha256: wrong.publicKeySha256 },
+    ]);
+    expect((yield* send(Effect.void).pipe(Effect.result))._tag).toBe("Failure");
+    expect(receiver.received.length).toBe(1);
+  }).pipe(Effect.provide(Fleet.layerTrust), Effect.scoped),
 );

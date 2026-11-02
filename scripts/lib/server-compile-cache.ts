@@ -54,15 +54,62 @@ export function seedPreparedCache(prepared: string, active: string, runtime: str
         cacheKey(active, NodePath.join(NodePath.dirname(prepared), entry.module)),
       );
       try {
-        // Node replaces cache files atomically. A directory link would instead allow writes into signed resources.
-        if (process.platform === "win32") NodeFS.linkSync(source, destination);
-        else NodeFS.symlinkSync(source, destination);
+        placeSeed(source, destination);
       } catch {}
-      if (!NodeFS.existsSync(destination)) return false;
+      if (!isSafeSeed(destination)) return false;
     }
     return true;
   } catch {
     return false;
+  }
+}
+
+// Shipped resources must keep one link: Reprint Hub's ownership guard rejects multi-link files.
+// Windows seeds independent copies and replaces multi-link entries; elsewhere a per-file symlink
+// keeps the link count. Never link the directory, which would allow writes into signed resources.
+function placeSeed(source: string, destination: string): void {
+  const existing = NodeFS.lstatSync(destination, { throwIfNoEntry: false });
+  if (existing && !(existing.isFile() && existing.nlink > 1)) return;
+  if (!existing && process.platform !== "win32") {
+    NodeFS.symlinkSync(source, destination);
+    return;
+  }
+  const staged = `${destination}.${process.pid}.seed`;
+  try {
+    NodeFS.rmSync(staged, { force: true });
+    NodeFS.copyFileSync(source, staged, NodeFS.constants.COPYFILE_EXCL);
+    NodeFS.chmodSync(staged, 0o644);
+    NodeFS.renameSync(staged, destination);
+  } finally {
+    NodeFS.rmSync(staged, { force: true });
+  }
+}
+
+function isSafeSeed(destination: string): boolean {
+  const seeded = NodeFS.lstatSync(destination, { throwIfNoEntry: false });
+  if (!seeded) return false;
+  if (seeded.isSymbolicLink())
+    return process.platform !== "win32" && NodeFS.existsSync(destination);
+  return seeded.isFile() && seeded.nlink === 1;
+}
+
+// Drops hard links that earlier builds left in this private cache, including entries for modules a
+// newer build no longer ships and those under other engines' subdirectories, so no cache file keeps a
+// shipped resource above one link. Node regenerates anything removed here.
+export function releaseLinkedEntries(directory: string, depth = 1): void {
+  let names: string[];
+  try {
+    names = NodeFS.readdirSync(directory);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const path = NodePath.join(directory, name);
+    try {
+      const entry = NodeFS.lstatSync(path);
+      if (entry.isFile() && entry.nlink > 1) NodeFS.rmSync(path);
+      else if (entry.isDirectory() && depth > 0) releaseLinkedEntries(path, depth - 1);
+    } catch {}
   }
 }
 
@@ -88,6 +135,7 @@ export function enablePreparedServerCache(entry: string, cacheRoot: string): boo
         } catch {}
       });
     }
+    releaseLinkedEntries(directory);
     const result = NodeModule.enableCompileCache({
       directory,
       portable: true,

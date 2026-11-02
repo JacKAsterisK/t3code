@@ -697,3 +697,133 @@ it.effect(
     );
   },
 );
+
+it.effect("retains events when session initialize carries the stateless version header", () => {
+  const records: Array<Record<string, unknown>> = [];
+  const logger = Logger.make(({ message }) => {
+    if (Array.isArray(message) && message[0] === "MCP discovery metadata")
+      records.push(message[1] as Record<string, unknown>);
+  });
+  return Effect.gen(function* () {
+    const { post } = yield* serve();
+    const params = {
+      protocolVersion: V2025,
+      capabilities: {},
+      clientInfo: { name: "test", version: "1" },
+    };
+    const initialize = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params });
+    const cases = [
+      {
+        name: "session",
+        input: { body: initialize },
+        status: 200,
+        protocol: V2025,
+        events: true,
+        error: null,
+        admission: "accepted",
+        injection: "injected",
+      },
+      {
+        name: "headered session",
+        input: { body: initialize, headers: { "mcp-protocol-version": V2026 } },
+        status: 200,
+        protocol: V2025,
+        events: true,
+        error: null,
+        admission: "accepted",
+        injection: "injected",
+      },
+      {
+        name: "stateless discover",
+        input: {
+          body: statelessRequest("server/discover"),
+          headers: statelessHeaders("server/discover"),
+        },
+        status: 200,
+        protocol: null,
+        events: true,
+        error: null,
+        admission: "accepted",
+        injection: "injected",
+      },
+      {
+        name: "missing metadata",
+        input: {
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "server/discover", params: {} }),
+          headers: statelessHeaders("server/discover"),
+        },
+        status: 400,
+        protocol: null,
+        events: false,
+        error: -32602,
+        admission: "protocol_claim_mismatch",
+        injection: "not_attempted",
+      },
+    ] as const;
+    let headeredSession: string | undefined;
+    for (const row of cases) {
+      const priorRecords = records.length;
+      const response = yield* post(row.input);
+      const result = resultOf(response.text);
+      const capabilities = result?.capabilities as Record<string, unknown> | undefined;
+      assert.strictEqual(response.status, row.status, row.name);
+      assert.strictEqual(response.headers["content-type"], "application/json", row.name);
+      assert.strictEqual(response.headers["mcp-protocol-version"] ?? null, row.protocol, row.name);
+      assert.strictEqual(result?.protocolVersion ?? null, row.protocol, row.name);
+      assert.strictEqual(
+        capabilities !== undefined && Object.hasOwn(capabilities, "events"),
+        row.events,
+        row.name,
+      );
+      assert.strictEqual(errorOf(response.text)?.code ?? null, row.error, row.name);
+      assert.strictEqual(records.length, priorRecords + 1, row.name);
+      const diagnostic = records.at(-1)!;
+      assert.strictEqual(diagnostic.admission, row.admission, row.name);
+      assert.strictEqual(diagnostic.capabilityInjection, row.injection, row.name);
+      assert.strictEqual(diagnostic.responseBodyKind, "Uint8Array", row.name);
+      assert.strictEqual(diagnostic.eventsCapabilityPresent, row.events, row.name);
+      assert.strictEqual(diagnostic.negotiatedProtocolVersion, row.protocol, row.name);
+      if (row.name === "headered session") headeredSession = response.headers["mcp-session-id"];
+    }
+    assert.isDefined(headeredSession);
+    const list = yield* post({
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "events/list", params: {} }),
+      headers: { "mcp-session-id": headeredSession!, "mcp-protocol-version": V2025 },
+    });
+    assert.strictEqual(list.status, 200);
+    assert.strictEqual((resultOf(list.text)!.events as ReadonlyArray<unknown>).length, 6);
+    assert.strictEqual(records.at(-1)?.admission, "accepted");
+    const explicitClaim = yield* post({
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "initialize",
+        params: { ...params, _meta: meta(V2025) },
+      }),
+      headers: { "mcp-protocol-version": V2026, "mcp-method": "initialize" },
+    });
+    assert.strictEqual(explicitClaim.status, 400);
+    assert.isDefined(errorOf(explicitClaim.text));
+    assert.strictEqual(records.at(-1)?.admission, "protocol_claim_mismatch");
+    assert.strictEqual(records.at(-1)?.capabilityInjection, "not_attempted");
+    const unauthenticated = yield* post({
+      body: initialize,
+      headers: { "mcp-protocol-version": V2026 },
+      token: "invalid-fixture",
+    });
+    assert.strictEqual(unauthenticated.status, 401);
+    assert.strictEqual(records.at(-1)?.admission, "authentication_rejected");
+    assert.strictEqual(records.at(-1)?.capabilityInjection, "not_attempted");
+    const unknownSession = yield* post({
+      body: initialize,
+      headers: { "mcp-protocol-version": V2026, "mcp-session-id": "unknown-fixture-session" },
+    });
+    assert.strictEqual(unknownSession.status, 404);
+    assert.strictEqual(records.at(-1)?.admission, "unexpected_session_header");
+    assert.strictEqual(records.at(-1)?.capabilityInjection, "not_attempted");
+  }).pipe(
+    Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+    Effect.scoped,
+    Effect.provide(NodeHttpServer.layerTest),
+  );
+});

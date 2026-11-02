@@ -127,7 +127,14 @@ export const classify = Effect.fn("McpEventsAdmission.classify")(function* (
   const claimPresent = metadata !== undefined && PROTOCOL_VERSION_META in metadata;
   const version = headers[PROTOCOL_VERSION_HEADER];
 
-  if (claimPresent || (input.statelessEnabled && version === AGENT_EVENTS_PROTOCOL_VERSION)) {
+  // Effect keeps header-only initialize stateful when its adapter is registered.
+  const sessionInitialize =
+    method === "initialize" &&
+    input.supportedVersions.includes(McpProtocol.v2025_06_18.protocolVersion);
+  if (
+    claimPresent ||
+    (!sessionInitialize && input.statelessEnabled && version === AGENT_EVENTS_PROTOCOL_VERSION)
+  ) {
     // selectHttpProtocol's stateless branch, then prepareRequest's metadata decoding.
     if (!input.statelessEnabled || version !== AGENT_EVENTS_PROTOCOL_VERSION)
       return other("protocol_header_rejected");

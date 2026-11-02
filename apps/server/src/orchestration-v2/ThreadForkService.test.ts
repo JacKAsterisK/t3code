@@ -134,9 +134,26 @@ const planFork = (
     });
   }).pipe(Effect.provide(ThreadForkService.layer));
 
-it.effect("keeps a fork awake when its source thread is snoozed, and keeps its owner", () =>
+it.effect("resets a fork's pin, snooze, settle and delegation state but keeps its origin", () =>
   Effect.gen(function* () {
-    const sourceThread = { ...makeSourceThread(), ownerId: "dan" };
+    const linkOrigin = { sessionId: "mcp-session:fork-source", label: "Linked laptop" };
+    const sourceThread: OrchestrationV2AppThread = {
+      ...makeSourceThread(),
+      ownerId: "dan",
+      lastSnoozeWakeAt: snoozedAt,
+      pinnedAt: snoozedAt,
+      pinOrderKey: "a0",
+      activeOrderKey: "a1",
+      autoSettleDisabledAt: snoozedAt,
+      delegatedFrom: {
+        environmentId: EnvironmentId.make("linked-environment"),
+        threadId: ThreadId.make("linked-parent"),
+        title: "Linked parent",
+      },
+      historyOrigin: "v1_import",
+      linkOrigin,
+      tags: ["private"],
+    };
     const sourceRun = makeSourceRun("completed");
     const result = yield* planFork(sourceRun, {
       ...makeSourceProjection(sourceRun),
@@ -146,6 +163,15 @@ it.effect("keeps a fork awake when its source thread is snoozed, and keeps its o
     assert.isNull(result.targetThread.snoozedUntil);
     assert.isNull(result.targetThread.snoozedAt);
     assert.equal(result.targetThread.ownerId, "dan");
+    assert.isNull(result.targetThread.lastSnoozeWakeAt);
+    assert.isNull(result.targetThread.pinnedAt);
+    assert.isNull(result.targetThread.pinOrderKey);
+    assert.isNull(result.targetThread.activeOrderKey);
+    assert.isNull(result.targetThread.autoSettleDisabledAt);
+    assert.isUndefined(result.targetThread.delegatedFrom);
+    assert.equal(result.targetThread.historyOrigin, "v1_import");
+    assert.deepEqual(result.targetThread.linkOrigin, linkOrigin);
+    assert.deepEqual(result.targetThread.tags, ["private"]);
     assert.equal(result.targetThread.projectId, sourceThread.projectId);
     assert.equal(result.targetThread.providerInstanceId, sourceThread.providerInstanceId);
     assert.deepEqual(result.targetThread.modelSelection, sourceThread.modelSelection);

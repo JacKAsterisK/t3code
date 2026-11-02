@@ -8,6 +8,8 @@ approval before code or runtime changes.
 
 ## Baseline
 
+- LAN 1.0.33 preparation: full upstream `30654b3e91a51937d1dba18fc83af19d8003f5ca` (2026-11-01), on `lan/1.0.33-mcp-session-initialize`. Previous published LAN 1.0.32 is `a526e4ba83cba19fd1196fe95f4fccbead4bab1e`. Application version remains 0.1.6; schema advances to 91.
+
 - LAN 1.0.32 preparation: upstream `58a407c093` (2026-11-01), on `lan/1.0.32-mcp-discovery-diagnostics`. Previous published LAN 1.0.31 is `6cd66ca721b910d39fd1fcaa58d31b91a7c6f344`. Application version 0.1.6 and schema 90 are unchanged.
 
 - LAN 1.0.31 upstream refresh: `37d7615a91d880c3776d575e1152b9c955104de2` (2026-11-01), on `lan/1.0.31-peer-dns-fallback`. No native database migration or application-version change. Previous published release is LAN 1.0.30 at `132feb2630ed9aa586197e21b3c6f0c7193dcef1`.
@@ -23,6 +25,14 @@ approval before code or runtime changes.
   (off); no `userdata\lan-routing.json`, so every `t3_lan_*` call is denied; no
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
+
+## LAN 1.0.33 sync decisions
+
+- Rows 4–6 and 13: retain strict MCP Events stateless admission, authenticated per-call identity, explicit approval consent and revocation gates. Header-only session initialization follows Effect's stateful adapter, preserving events advertisement; explicit protocol claims still use strict validation. Sanitized discovery logging stays in place. This fixes a reproduced source defect; actual ChatGPT discovery and wake remain unverified.
+- Rows 2–3, 8 and 14: combine upstream thread tags, hidden-thread filtering and mobile list memoization with machine grouping, task owners, owner assignment and per-machine new-task targets. ACP and OpenCode prompts retain owner attribution alongside upstream prompt/steer changes.
+- Rows 6–7 and 9: adopt upstream machine-wide managed policy, provider/runtime ceilings and case-insensitive bearer parsing. Policy locks apply after derived fleet settings; the encrypted fleet listener also refuses remote access when policy disallows it. Policy-driven session revocation uses the fork's guarded authority/grant removal. Independent LAN telemetry remains disabled and stock updates stay inert. No live policy or network setting is changed by this source integration.
+- Row 12: append upstream's boolean settled-override repair as fork migration **091 RepairBooleanSettledOverride**. Preserve identities 001–090, add home-repair support and target schema 91 in the packaged audits.
+- Row 11: adopt upstream's pinned ffi-rs dependency and matching runtime externals. Refresh production staging locks and a new offline toolchain inventory; retain the one-build Windows packaging path and data-preservation audits. No deployment or restart is part of this preparation.
 
 ## LAN 1.0.32 sync decisions
 

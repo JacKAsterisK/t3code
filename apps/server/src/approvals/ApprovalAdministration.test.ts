@@ -1,4 +1,5 @@
-﻿import { assert, it } from "@effect/vitest";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AuthAccessReadScope,
@@ -85,7 +86,7 @@ const fixture = Effect.gen(function* () {
   );
   const services = Admin.layer.pipe(
     Layer.provideMerge(FleetPolicy.layer),
-    Layer.provideMerge(EnvironmentAuth.layer),
+    Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provide(ManagedPolicy.layerTest()))),
     Layer.provideMerge(core),
     Layer.provideMerge(
       Layer.succeed(FleetContext.FleetContext, {

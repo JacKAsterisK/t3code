@@ -42,6 +42,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
 import { parseDeferredTests, selectChangedTests } from "./lib/changed-tests.ts";
 import { generatedCheckInputs } from "./lib/check-inputs.ts";
+import { batchFileArguments, vitePlusCommand } from "./check-changed-command.ts";
 
 const GiB = 1024 ** 3;
 
@@ -176,6 +177,15 @@ export const comparisonBase = Effect.fn("checkChanged.comparisonBase")(function*
 
 const CODE = /\.[cm]?[jt]sx?$/;
 const TEST = /\.test\.[cm]?[jt]sx?$/;
+// CI runs the .github/scripts tests with `node --test`; vitest passes a failing node:test file.
+const NODE_TEST = /^\.github[/\\]scripts[/\\]/;
+export const splitTests = (tests: Iterable<string>) => {
+  const all = [...tests];
+  return {
+    vitestTests: all.filter((file) => !NODE_TEST.test(file)),
+    nodeTests: all.filter((file) => NODE_TEST.test(file)),
+  };
+};
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // A flag wins over its environment variable; either must be a positive integer.
@@ -314,7 +324,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
       if (entry.startsWith(prefix) && TEST.test(entry)) candidates.add(path.join(dir, entry));
     }
   }
-  for (const test of docReaderTests(files)) tests.add(test);
+  for (const test of docReaderTests(files)) candidates.add(test);
   // It reads files other than the ones beside it, so no changed file selects it.
   if (affected.includes("t3"))
     candidates.add("apps/server/src/provider/AgentContextBudget.test.ts");
@@ -322,6 +332,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
     try: () => selectChangedTests(candidates, deferred),
     catch: (error) => `check:changed: ${error instanceof Error ? error.message : String(error)}`,
   });
+  const { vitestTests, nodeTests } = splitTests(tests);
 
   // React Compiler coverage compiles every client source file, so run only the
   // changed files' cases, in one extra step: a -t filter in the main test step
@@ -391,19 +402,12 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
 
   // Output is piped, so keep the colors a terminal would get.
   const env = process.stdout.isTTY ? { FORCE_COLOR: "1" } : {};
-  // Windows cannot spawn vp's .cmd shim without a shell, so run its script with this Node.
-  const vpCommand =
-    platform === "win32"
-      ? {
-          command: yield* HostProcess.ExecutablePath,
-          prefix: [inRoot("node_modules/vite-plus/bin/vp")],
-        }
-      : { command: "vp", prefix: [] };
   const vp = (args: ReadonlyArray<string>, cwd = root) =>
     Effect.scoped(
       Effect.gen(function* () {
+        const [command, commandArgs] = vitePlusCommand(args, platform);
         const handle = yield* spawner.spawn(
-          ChildProcess.make(vpCommand.command, [...vpCommand.prefix, ...args], {
+          ChildProcess.make(command, commandArgs, {
             cwd,
             env,
             extendEnv: true,
@@ -466,10 +470,17 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
 
   const steps: Array<Step<never>> = [
     ...(runPatchCheck ? [{ name: "unused patches", run: checkPatches }] : []),
-    ...(present.length > 0
-      ? [command("format", ["fmt", "--check", "--no-error-on-unmatched-pattern", ...present])]
-      : []),
-    ...(code.length > 0 ? [command("lint", ["lint", ...code])] : []),
+    ...batchFileArguments(present).map((batch, index) =>
+      command(`format ${index + 1}`, [
+        "fmt",
+        "--check",
+        "--no-error-on-unmatched-pattern",
+        ...batch,
+      ]),
+    ),
+    ...batchFileArguments(code).map((batch, index) =>
+      command(`lint ${index + 1}`, ["lint", ...batch]),
+    ),
     ...(runKnip
       ? knipPasses.map((args, index) => command(`knip ${index + 1}/${knipPasses.length}`, args))
       : []),
@@ -495,17 +506,23 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
         ]
       : []),
     // From the repo root, the root vite.config.ts hands each file to its package's config.
-    ...(tests.length > 0
+    ...batchFileArguments(vitestTests).map((batch, index) => ({
+      ...command(`test ${index + 1} (${batch.length} files)`, [
+        "test",
+        "run",
+        "--passWithNoTests",
+        ...batch,
+      ]),
+      serial: true,
+    })),
+    ...(nodeTests.length > 0
       ? [
-          {
-            ...command(`test (${tests.length} files)`, [
-              "test",
-              "run",
-              "--passWithNoTests",
-              ...tests,
-            ]),
-            serial: true,
-          },
+          command(`node --test (${nodeTests.length} files)`, [
+            "exec",
+            "node",
+            "--test",
+            ...nodeTests,
+          ]),
         ]
       : []),
     ...(compilerApps.length > 0

@@ -1,3 +1,4 @@
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -123,7 +124,7 @@ const fleet = FleetCredentialAccess.layerServices.pipe(
 const capLayer = FleetCredentialAccess.layerCapServices.pipe(Layer.provideMerge(fleet));
 const destination = PeerAccess.layerDestination.pipe(Layer.provideMerge(capLayer));
 const services = Layer.mergeAll(
-  EnvironmentAuth.layer,
+  EnvironmentAuth.layer.pipe(Layer.provide(ManagedPolicy.layerTest())),
   Destination.layer.pipe(Layer.provideMerge(Delegations.layer)),
 ).pipe(
   Layer.provideMerge(destination),

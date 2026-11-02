@@ -1,3 +1,4 @@
+import * as ManagedPolicy from "./policy/ManagedPolicy.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Context from "effect/Context";
@@ -36,6 +37,7 @@ it.effect(
             ),
       };
       const context = yield* Settings.layer.pipe(
+        Layer.provide(ManagedPolicy.layerTest()),
         Layer.provide(Secrets.layer),
         Layer.provide(Layer.succeed(FileSystem.FileSystem, observedFs)),
         Layer.build,

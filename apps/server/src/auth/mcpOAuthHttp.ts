@@ -135,6 +135,9 @@ export const layer = HttpApiBuilder.group(
             redirectHost: new URL(resolved.redirectUri).host,
             environmentHost: new URL(urls.issuer).host,
             ...(resolved.taskOnly ? { taskOnly: true, renewable: resolved.renewable } : {}),
+            ...(oauth.runtimeModeCeiling === undefined
+              ? {}
+              : { runtimeModeCeiling: oauth.runtimeModeCeiling }),
             ...(session === undefined
               ? {}
               : {

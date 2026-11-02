@@ -1,3 +1,4 @@
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 // @effect-diagnostics nodeBuiltinImport:off -- Fixture share files are compared byte for byte, and one plain-http request sets its own Host.
 import * as NodeHttp from "node:http";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -185,7 +186,12 @@ const makeMachine = (input: {
       Layer.provide(FleetPeerHttpClient.layer),
       Layer.provideMerge(FleetPeerHttpClient.layerTrust),
       Layer.provide(FetchHttpClient.layer),
-      Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provide(receiverCap))),
+      Layer.provideMerge(
+        EnvironmentAuth.layer.pipe(
+          Layer.provide(ManagedPolicy.layerTest()),
+          Layer.provide(receiverCap),
+        ),
+      ),
       Layer.provideMerge(ServerSettings.layerTest(input.settings)),
       Layer.provide(
         Layer.succeed(FleetContext.FleetContext, {

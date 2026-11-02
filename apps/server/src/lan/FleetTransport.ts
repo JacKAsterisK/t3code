@@ -1,3 +1,5 @@
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as ManagedLimits from "../policy/managedLimits.ts";
 // @effect-diagnostics nodeBuiltinImport:off -- A random per-process mark, never sent off this machine.
 import * as NodeCrypto from "node:crypto";
 import { LanFleetError } from "@t3tools/contracts";
@@ -41,6 +43,7 @@ export class FleetTransport extends Context.Service<
 
 const make = Effect.gen(function* () {
   const config = yield* Config.ServerConfig;
+  const policy = yield* ManagedPolicy.ManagedPolicy;
   const processEnvironment = yield* HostProcess.Environment;
   const vault = yield* Vault.FleetVault;
   const network = yield* Network.FleetNetwork;
@@ -96,6 +99,8 @@ const make = Effect.gen(function* () {
   });
   const ensure = Effect.fn("FleetTransport.ensure")(function* (record: FleetVaultRecord) {
     if (record.tls === undefined) return;
+    if (record.tlsEnabled !== false && !ManagedLimits.allowsRemoteClients(policy))
+      return yield* new LanFleetError({ reason: "configuration" });
     if (record.tlsEnabled === false) {
       if (running !== undefined) {
         yield* Effect.promise(() => running!.proxy.close());

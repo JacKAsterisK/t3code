@@ -93,6 +93,7 @@ import Migration0079 from "./Migrations/079_SubagentDeliveryState.ts";
 import Migration0080 from "./Migrations/080_ScheduledTaskOwner.ts";
 import Migration0082 from "./Migrations/082_AgentApprovalAuthorityAndReceipts.ts";
 import Migration0081 from "./Migrations/081_AgentEventSubscriptions.ts";
+import Migration0091 from "./Migrations/091_RepairBooleanSettledOverride.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -186,6 +187,7 @@ const migrationEntries = [
   [88, "PeerLinkProvenance", Migration0088],
   [89, "AgentApprovalFleetPolicyPublications", Migration0089],
   [90, "ProjectionProjectsPinArchive", Migration0090],
+  [91, "RepairBooleanSettledOverride", Migration0091],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

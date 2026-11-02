@@ -1,4 +1,5 @@
-﻿// @effect-diagnostics nodeBuiltinImport:off -- The fixture owns a captured loopback listener and closes it with its scope.
+import * as ManagedPolicy from "../../policy/ManagedPolicy.ts";
+// @effect-diagnostics nodeBuiltinImport:off -- The fixture owns a captured loopback listener and closes it with its scope.
 import * as NodeHttp from "node:http";
 import { assert } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -94,6 +95,7 @@ export const makeEnvironment = Effect.fn("ApprovalFleetHarness.makeEnvironment")
   );
   const settings = ServerSettings.layerTest({ linkedEnvironmentsEnabled: true });
   const authority = Auth.layer.pipe(
+    Layer.provideMerge(ManagedPolicy.layerTest()),
     Layer.provideMerge(Runtime.layerDestination),
     Layer.provideMerge(database),
     Layer.provideMerge(identity),

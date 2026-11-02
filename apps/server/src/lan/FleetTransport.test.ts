@@ -1,3 +1,4 @@
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, LanFleetError } from "@t3tools/contracts";
@@ -24,6 +25,7 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
     beforeListen?: Effect.Effect<void>;
     events?: string[];
     ipv6Unavailable?: boolean;
+    remoteAllowed?: boolean;
   } = {},
 ) {
   const config = yield* Config.ServerConfig;
@@ -37,6 +39,17 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
   const listenAddresses: string[] = [];
   const services = yield* Layer.build(
     FleetTransport.layerServices.pipe(
+      Layer.provide(
+        ManagedPolicy.layerTest(
+          options.remoteAllowed === false
+            ? {
+                schemaVersion: 1,
+                organization: "Fixture Org",
+                limits: { clients: ["local-browser"] },
+              }
+            : undefined,
+        ),
+      ),
       Layer.provide(
         Layer.succeed(
           HostProcess.Environment,
@@ -306,3 +319,20 @@ it.layer(NodeServices.layer)("confirmed fleet transport", (it) => {
     }).pipe(Effect.provide(configLayer)),
   );
 });
+
+it.effect(
+  "managed remote-client limits refuse saved and newly requested fleet listeners without changing the vault",
+  () =>
+    Effect.gen(function* () {
+      const allowed = yield* fixture();
+      const tls = yield* allowed.transport.prepare(allowed.origin);
+      const record = { ...allowed.identity, tls, tlsEnabled: true };
+      const denied = yield* fixture(record, { remoteAllowed: false });
+      expect(yield* denied.transport.origin).toBeUndefined();
+      expect(denied.stats()).toMatchObject({ starts: 0, saves: 0, record });
+      expect((yield* denied.transport.persist(record).pipe(Effect.flip)).reason).toBe(
+        "configuration",
+      );
+      expect(denied.stats()).toMatchObject({ starts: 0, saves: 0, record });
+    }).pipe(Effect.provide(configLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
+);

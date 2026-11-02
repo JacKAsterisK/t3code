@@ -1,3 +1,4 @@
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
@@ -135,6 +136,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     });
     const transportLayer = managedTls
       ? FleetTransport.layerServices.pipe(
+          Layer.provide(ManagedPolicy.layerTest()),
           Layer.provide(Config.layer(config)),
           Layer.provide(Layer.succeed(FleetVault.FleetVault, vault)),
           Layer.provide(networkLayer),
@@ -146,7 +148,10 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     const build = Effect.fn("FleetEnrollmentTest.build")(
       function* () {
         const enrollmentServices = yield* Layer.build(
-          (productionEnrollment ? FleetEnrollment.layer : FleetEnrollment.layerServices).pipe(
+          (productionEnrollment
+            ? FleetEnrollment.layer.pipe(Layer.provide(ManagedPolicy.layerTest()))
+            : FleetEnrollment.layerServices
+          ).pipe(
             Layer.provide(networkLayer),
             Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)),
             Layer.provide(Layer.succeed(HostProcess.Platform, platform)),

@@ -8,6 +8,7 @@ import {
   ClientWebDeployment,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { RuntimeMode } from "./providerPolicy.ts";
 
 export const ServerAuthPolicy = Schema.Literals([
   "desktop-managed-local",
@@ -527,6 +528,10 @@ export const AuthMcpApprovalDetails = Schema.Struct({
   /** Only scopes held by this session qualify; others need a pairing code. Absent with `csrfToken`. */
   oneClickAccess: Schema.optionalKey(Schema.Array(AuthMcpClientAccess)),
   canGrantApprovals: Schema.optionalKey(Schema.Boolean),
+  /** A managed policy's runtime-mode ceiling; the page loads without the server's config. */
+  runtimeModeCeiling: Schema.optionalKey(
+    Schema.Struct({ organization: Schema.String, maxRuntimeMode: RuntimeMode }),
+  ),
 });
 export type AuthMcpApprovalDetails = typeof AuthMcpApprovalDetails.Type;
 

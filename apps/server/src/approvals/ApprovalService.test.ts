@@ -1,3 +1,4 @@
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ApprovalReceipts from "./ApprovalReceipts.ts";
 import { ApprovalAuditActor } from "./ApprovalContext.ts";
@@ -91,6 +92,7 @@ const environment = ServerEnvironment.layerIdentity.pipe(
   Layer.provide(config),
 );
 const authLayer = EnvironmentAuth.layer.pipe(
+  Layer.provideMerge(ManagedPolicy.layerTest()),
   Layer.provideMerge(database),
   Layer.provideMerge(environment),
   Layer.provide(config),

@@ -1,3 +1,4 @@
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { AuthStandardClientScopes, EnvironmentHttpApi, mcpClientScopes } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
@@ -98,6 +99,7 @@ const layerCap = Layer.effect(
   ),
 ).pipe(Layer.provide(layerAccess));
 const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
+  Layer.provideMerge(ManagedPolicy.layerTest()),
   Layer.provide(layerCap),
   Layer.provide(Sqlite.layerMemory),
   Layer.provideMerge(ServerSecretStore.layer),

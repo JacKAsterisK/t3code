@@ -3,8 +3,9 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import type { ClientOs } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Context from "effect/Context";
-import { telemetryEnabled } from "@t3tools/shared/distribution";
+import { telemetryEnabled as distributionTelemetryEnabled } from "@t3tools/shared/distribution";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -21,6 +22,7 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { getTelemetryIdentity, type TelemetryOwner } from "./Identify.ts";
 
 interface BufferedAnalyticsEvent {
@@ -114,15 +116,37 @@ function serverOsFromNodePlatform(platform: string): ClientOs {
 }
 
 /** @public */
-/** @public */
 export const make = Effect.gen(function* () {
-  if (!telemetryEnabled)
+  if (!distributionTelemetryEnabled)
     return AnalyticsService.of({
       record: Effect.fn("AnalyticsService.record")(() => Effect.void),
       flush: Effect.void,
       recordOwners: Effect.fn("AnalyticsService.recordOwners")(() => Effect.void),
     });
   const telemetryConfig = yield* TelemetryEnvConfig;
+  const hostEnvironment = yield* HostProcess.Environment;
+  const awaitingShellConsent = hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1";
+  // A managed policy can switch analytics off over the environment, never on.
+  const policyAllows =
+    ManagedPolicy.deniedBy(yield* ManagedPolicy.ManagedPolicy, "telemetry") === undefined;
+  // A cached PATH does not establish consent from the current login shell.
+  const telemetryEnabled = Effect.suspend(() => {
+    if (!telemetryConfig.enabled || !policyAllows) return Effect.succeed(false);
+    if (!awaitingShellConsent) return Effect.succeed(true);
+    if (hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1")
+      return Effect.succeed(false);
+    const preference = hostEnvironment.T3CODE_TELEMETRY_ENABLED;
+    return Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(
+      Config.withDefault(true),
+      Effect.provideService(
+        ConfigProvider.ConfigProvider,
+        ConfigProvider.fromEnv({
+          env: preference === undefined ? {} : { T3CODE_TELEMETRY_ENABLED: preference },
+        }),
+      ),
+      Effect.orElseSucceed(() => false),
+    );
+  });
   const httpClient = yield* HttpClient.HttpClient;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const { distinctId, installId } = yield* getTelemetryIdentity;
@@ -179,7 +203,7 @@ export const make = Effect.gen(function* () {
   const sendBatch = Effect.fn("AnalyticsService.sendBatch")(function* (
     events: ReadonlyArray<BufferedAnalyticsEvent>,
   ) {
-    if (!telemetryConfig.enabled || !distinctId) return;
+    if (!(yield* telemetryEnabled) || !distinctId) return;
 
     const payload = {
       api_key: telemetryConfig.posthogKey,
@@ -291,7 +315,7 @@ export const make = Effect.gen(function* () {
 
   const record: AnalyticsService["Service"]["record"] = Effect.fn("AnalyticsService.record")(
     function* (event, properties) {
-      if (!telemetryConfig.enabled || !distinctId) return;
+      if (!(yield* telemetryEnabled) || !distinctId) return;
 
       // Catch Node UUID defects too; best-effort telemetry drops events without UUIDs.
       const uuid = yield* Effect.exit(crypto.randomUUIDv7());

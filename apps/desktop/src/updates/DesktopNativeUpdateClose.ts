@@ -1,3 +1,4 @@
+// @effect-diagnostics extendsNativeError:off effectTryWithoutCatch:off -- The guarded native IPC boundary maps its Node errors and intentionally retains UnknownError for the caller.
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- This native callback adapter owns the bounded Windows close-message and pipe boundary.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";

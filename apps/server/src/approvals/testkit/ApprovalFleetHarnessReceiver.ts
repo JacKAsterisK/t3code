@@ -1,6 +1,6 @@
 ﻿import { assert } from "@effect/vitest";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -70,8 +70,8 @@ export const receiverFixture = Effect.fn("ApprovalFleetHarness.receiverFixture")
   const authenticator = Context.get(authContext, Mcp.McpClientAuthenticator);
   const receiverContext = yield* Layer.build(Receiver.layer).pipe(Effect.provide(b.context));
   const receiver = Context.get(receiverContext, Receiver.ApprovalReceiver);
-  const forwardingKey = `fixture-forward:${yield* (yield* Crypto.Crypto).randomUUIDv4()}`;
-  const forwarderReceiptId = `fixture-forwarder:${yield* (yield* Crypto.Crypto).randomUUIDv4()}`;
+  const forwardingKey = `fixture-forward:${yield* (yield* SecureRandom.SecureRandom).uuidV4()}`;
+  const forwarderReceiptId = `fixture-forwarder:${yield* (yield* SecureRandom.SecureRandom).uuidV4()}`;
   const { environmentId: _destination, ...local } = probe.input;
   const proposal: Wire.ApprovalForwardOperation = {
     version: 1,

@@ -1,9 +1,13 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off - observes the children the launcher spawns with Node built-ins.
 import type * as NodeChildProcess from "node:child_process";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - the free-space probe is a plain Promise callback.
+import * as NodeFS from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { SERVER_EXIT_CODE_STATE_DIR_OWNED } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -28,10 +32,18 @@ import {
 } from "./cloud/serviceProtocol.ts";
 
 const spawnedChildren = vi.hoisted((): Array<NodeChildProcess.ChildProcess> => []);
+const fixtureExecutables = vi.hoisted(() => new Set<string>());
+const nativeWindows = HostProcess.Platform.defaultValue() === "win32";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeChildProcess>();
   const spawn = (...args: Parameters<typeof actual.spawn>) => {
+    // Synthetic runtimes are scripts; Windows needs Node instead of a POSIX shebang.
+    if (nativeWindows && fixtureExecutables.has(args[0]) && Array.isArray(args[1])) {
+      const script = args[0];
+      args[0] = process.execPath;
+      args[1] = [script + ".js", ...args[1]];
+    }
     const child = actual.spawn(...args);
     spawnedChildren.push(child);
     return child;
@@ -115,9 +127,11 @@ const writeFakeRuntime = (
   childSource: string,
 ) =>
   Effect.gen(function* () {
-    const entryPath = path.join(versionDir, "t3");
+    const entryPath = path.join(versionDir, nativeWindows ? "t3.exe" : "t3");
     yield* fs.makeDirectory(versionDir, { recursive: true });
     yield* fs.writeFileString(entryPath, `#!${process.execPath}\n${childSource}`);
+    if (nativeWindows) yield* fs.writeFileString(entryPath + ".js", childSource);
+    fixtureExecutables.add(entryPath);
     yield* fs.chmod(entryPath, 0o755);
     yield* fs.writeFileString(
       path.join(versionDir, ".install-complete"),
@@ -377,35 +391,36 @@ if (context.update?.status === "pending") {
         { token: "initial", update: "pending" },
         { token: "initial", update: "rolled-back" },
       ]);
-      assert.equal(process.env.T3CODE_TEST_SERVICE_TOKEN, "inherited");
+      assert.equal((yield* HostProcess.Environment).T3CODE_TEST_SERVICE_TOKEN, "inherited");
       assert.equal(yield* fs.readFileString(envPath), "T3CODE_TEST_SERVICE_TOKEN=changed\n");
     }),
   );
 
-  it.effect.each(["file", "symlink", "dangling symlink"] as const)(
-    "restores the database when a migrating trial exits, with the database a %s",
-    (kind) =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-db-" });
-        const statePath = path.join(root, "runtime", "service-state.json");
-        const databasePath = path.join(root, "userdata", "state.sqlite");
-        const databaseFile =
-          kind === "file" ? databasePath : path.join(root, "data", "original.sqlite");
-        const linkTarget = kind === "dangling symlink" ? "../original.sqlite" : databaseFile;
-        const original = "database before migration";
-        yield* fs.makeDirectory(path.dirname(databaseFile), { recursive: true });
-        if (kind === "dangling symlink") {
-          yield* fs.makeDirectory(path.join(root, "data", "sub"));
-          yield* fs.symlink(path.join(root, "data", "sub"), path.dirname(databasePath));
-        } else {
-          yield* fs.makeDirectory(path.dirname(databasePath), { recursive: true });
-        }
-        yield* fs.writeFileString(databaseFile, original);
-        if (kind !== "file") yield* fs.symlink(linkTarget, databasePath);
-        const encodedDatabasePath = JSON.stringify(databasePath);
-        const childSource = `
+  for (const kind of ["file", "symlink", "dangling symlink"] as const)
+    it.effect.skipIf(kind !== "file" && !symlinksSupported)(
+      `restores the database when a migrating trial exits, with the database a ${kind}`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-db-" });
+          const statePath = path.join(root, "runtime", "service-state.json");
+          const databasePath = path.join(root, "userdata", "state.sqlite");
+          const databaseFile =
+            kind === "file" ? databasePath : path.join(root, "data", "original.sqlite");
+          const linkTarget = kind === "dangling symlink" ? "../original.sqlite" : databaseFile;
+          const original = "database before migration";
+          yield* fs.makeDirectory(path.dirname(databaseFile), { recursive: true });
+          if (kind === "dangling symlink") {
+            yield* fs.makeDirectory(path.join(root, "data", "sub"));
+            yield* fs.symlink(path.join(root, "data", "sub"), path.dirname(databasePath));
+          } else {
+            yield* fs.makeDirectory(path.dirname(databasePath), { recursive: true });
+          }
+          yield* fs.writeFileString(databaseFile, original);
+          if (kind !== "file") yield* fs.symlink(linkTarget, databasePath);
+          const encodedDatabasePath = JSON.stringify(databasePath);
+          const childSource = `
 import { realpathSync, unlinkSync, writeFileSync } from "node:fs";
 const context = JSON.parse(process.env.T3_SERVICE_LAUNCHER_CONTEXT);
 if (context.update?.status === "pending") {
@@ -421,45 +436,45 @@ if (context.update?.status === "pending") {
   process.exit(0);
 }
 `;
-        for (const version of ["1.0.0", "1.1.0"]) {
-          yield* writeFakeRuntime(
-            fs,
-            path,
-            path.join(root, "runtime", "versions", version),
-            childSource,
+          for (const version of ["1.0.0", "1.1.0"]) {
+            yield* writeFakeRuntime(
+              fs,
+              path,
+              path.join(root, "runtime", "versions", version),
+              childSource,
+            );
+          }
+          yield* Effect.promise(() =>
+            writeServiceState(statePath, {
+              protocol: SERVICE_LAUNCHER_PROTOCOL,
+              activeVersion: "1.0.0",
+            }),
           );
-        }
-        yield* Effect.promise(() =>
-          writeServiceState(statePath, {
-            protocol: SERVICE_LAUNCHER_PROTOCOL,
-            activeVersion: "1.0.0",
-          }),
-        );
 
-        const launcher = new Launcher(
-          root,
-          yield* Effect.promise(() => readServiceState(statePath)),
-        );
-        yield* Effect.promise(() =>
-          launcher.run().then(
-            () => Promise.reject(new Error("launcher unexpectedly completed")),
-            () => Promise.resolve(),
-          ),
-        );
+          const launcher = new Launcher(
+            root,
+            yield* Effect.promise(() => readServiceState(statePath)),
+          );
+          yield* Effect.promise(() =>
+            launcher.run().then(
+              () => Promise.reject(new Error("launcher unexpectedly completed")),
+              () => Promise.resolve(),
+            ),
+          );
 
-        const state = yield* Effect.promise(() => readServiceState(statePath));
-        assert.equal(state.activeVersion, "1.0.0");
-        assert.equal(state.update?.status, "rolled-back");
-        assert.equal(yield* fs.readFileString(databaseFile), original);
-        if (kind !== "file") assert.equal(yield* fs.readLink(databasePath), linkTarget);
-        assert.isFalse(yield* fs.exists(path.join(root, "original.sqlite")));
-        assert.isFalse(yield* fs.exists(`${databasePath}-wal`));
-        assert.isFalse(yield* fs.exists(`${databasePath}-shm`));
-        const updateId = state.update?.id;
-        assert.isDefined(updateId);
-        assert.isFalse(yield* fs.exists(path.join(root, "runtime", "db-backup", updateId)));
-      }),
-  );
+          const state = yield* Effect.promise(() => readServiceState(statePath));
+          assert.equal(state.activeVersion, "1.0.0");
+          assert.equal(state.update?.status, "rolled-back");
+          assert.equal(yield* fs.readFileString(databaseFile), original);
+          if (kind !== "file") assert.equal(yield* fs.readLink(databasePath), linkTarget);
+          assert.isFalse(yield* fs.exists(path.join(root, "original.sqlite")));
+          assert.isFalse(yield* fs.exists(`${databasePath}-wal`));
+          assert.isFalse(yield* fs.exists(`${databasePath}-shm`));
+          const updateId = state.update?.id;
+          assert.isDefined(updateId);
+          assert.isFalse(yield* fs.exists(path.join(root, "runtime", "db-backup", updateId)));
+        }),
+    );
 
   const requestRejectedUpdate = (backupSpaceProbe: Partial<BackupSpaceProbe>) =>
     Effect.gen(function* () {
@@ -615,6 +630,35 @@ setInterval(() => {}, 1_000);
       const state = yield* Effect.promise(() => readServiceState(statePath));
       assert.equal(state.activeVersion, "1.0.0");
       assert.isUndefined(state.update);
+    }),
+  );
+
+  it.effect("reclaims partial backups left by killed updates before checking space", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-orphan-" });
+      const databasePath = path.join(root, "state.sqlite");
+      yield* writeSparseFile(databasePath, 10 * 1024 ** 3);
+      const backupRoot = path.join(root, "runtime", "db-backup");
+      const orphan = path.join(backupRoot, "earlier-update.staging");
+      const completed = path.join(backupRoot, "completed-update");
+      yield* fs.makeDirectory(orphan, { recursive: true });
+      yield* fs.writeFileString(path.join(orphan, "database"), "partial copy");
+      yield* fs.makeDirectory(completed);
+      yield* fs.writeFileString(path.join(completed, "database"), "complete copy");
+
+      // The orphan is what keeps this disk too full for a full copy.
+      const blocker = yield* Effect.promise(() =>
+        databaseBackupBlocker(root, databasePath, {
+          readFreeBytes: () => Promise.resolve((NodeFS.existsSync(orphan) ? 8 : 11) * 1024 ** 3),
+          canClone: () => Promise.resolve(false),
+        }),
+      );
+
+      assert.isUndefined(blocker);
+      assert.isFalse(yield* fs.exists(orphan));
+      assert.isTrue(yield* fs.exists(path.join(completed, "database")));
     }),
   );
 

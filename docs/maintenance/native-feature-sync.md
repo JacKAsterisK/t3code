@@ -8,6 +8,8 @@ approval before code or runtime changes.
 
 ## Baseline
 
+- LAN 1.0.35 preparation: upstream `202d5b5616e3edf65706371e2b8a9c4f486d0a96` (2026-11-06), on `lan/release-1.0.35-20261106`. Previous published LAN 1.0.34 is `ceabe588958f5b1a4acb166d76fb30a711d651b8`. Application version advances to 0.1.7 and the fork schema to 94.
+
 - LAN 1.0.33 preparation: full upstream `30654b3e91a51937d1dba18fc83af19d8003f5ca` (2026-11-01), on `lan/1.0.33-mcp-session-initialize`. Previous published LAN 1.0.32 is `a526e4ba83cba19fd1196fe95f4fccbead4bab1e`. Application version remains 0.1.6; schema advances to 91.
 
 - LAN 1.0.32 preparation: upstream `58a407c093` (2026-11-01), on `lan/1.0.32-mcp-discovery-diagnostics`. Previous published LAN 1.0.31 is `6cd66ca721b910d39fd1fcaa58d31b91a7c6f344`. Application version 0.1.6 and schema 90 are unchanged.
@@ -25,6 +27,14 @@ approval before code or runtime changes.
   (off); no `userdata\lan-routing.json`, so every `t3_lan_*` call is denied; no
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
+
+## LAN 1.0.35 sync decisions
+
+- Rows 2–6 and 13: adopt upstream's scoped MCP registrations, in-process middleware, hosted thread links, crypto services and authenticated HTTP access management. Keep stateless events admission and discovery diagnostics, per-call launch provenance, explicit approval consent, revocation and fleet access ceilings. LAN-origin links retain their direct web origin; upstream hosted links remain available for upstream clients.
+- Rows 1, 7 and 9: keep signed encrypted fleet transport, DNS fallback and the independent LAN identity. Adopt upstream desktop environment handling and graceful quit changes while retaining the guarded shutdown handshake, disabled cloud/telemetry and Hub-owned update path.
+- Rows 3, 8 and 14: adopt upstream mobile workspace layout, queued-thread visibility and scheduler fresh-session binding while retaining machine grouping, task ownership, per-machine task creation and native update admission. The mobile grouping control moves into the shared workspace menu with the native layout.
+- Row 12: preserve migrations 001–091 unchanged and append upstream's index removal, delegated recovery indexes and scheduled-task thread mode as **092 DropOrchestrationEventCorrelationIndex**, **093 DelegatedRecoveryIndexes** and **094 ScheduledTaskThreadMode**. Home-repair inspection and packaged audit targets advance to 94. Adopt upstream projection pruning and its snapshot/recovery checks while retaining fork-owned metadata.
+- Rows 10–11: keep the gateway deferred and use one local Windows candidate with refreshed production staging locks, offline dependencies and toolchain inventory. Publication uses the existing Portal channel; this synchronization does not install or restart a running environment.
 
 ## LAN 1.0.33 sync decisions
 

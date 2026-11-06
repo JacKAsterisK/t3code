@@ -5,7 +5,7 @@
  * writes no marker and runs again at next start. Owners only change by a person's choice after it.
  */
 import { CommandId, ThreadId } from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -43,7 +43,7 @@ export class TaskOwnerBackfillIncompleteError extends Schema.TaggedError<TaskOwn
 }
 
 export const make = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const fleetUsers = yield* FleetUsers.FleetUsers;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const sql = yield* SqlClient.SqlClient;
@@ -74,7 +74,7 @@ export const make = Effect.gen(function* () {
       ORDER BY thread_id
     `;
     // Fresh ids each pass, so a thread a failed pass left is tried again instead of replayed.
-    const pass = yield* crypto.randomUUIDv4();
+    const pass = yield* crypto.uuidV4();
     let assigned = 0;
     let failed = 0;
     for (const row of rows) {

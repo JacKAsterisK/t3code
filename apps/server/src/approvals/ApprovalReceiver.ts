@@ -8,7 +8,7 @@ import * as Wire from "../../../../packages/contracts/src/approvalForwarding.ts"
 import { approvalOperationDigest } from "@t3tools/shared/approvalPresentation";
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -49,7 +49,7 @@ export class ApprovalReceiver extends Context.Service<
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* Digest.Digest;
   const access = yield* Delegations.ApprovalDestinationAccess;
   const delegations = yield* Delegations.ApprovalDelegations;
   const service = yield* Service.ApprovalService;
@@ -256,7 +256,7 @@ const make = Effect.gen(function* () {
     (effect) =>
       effect.pipe(
         Effect.provideService(SqlClient.SqlClient, sql),
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(Digest.Digest, crypto),
         Effect.mapError((cause) =>
           isFailure(cause)
             ? cause

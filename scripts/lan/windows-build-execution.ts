@@ -730,7 +730,11 @@ export function createWindowsBuildExecution(input: {
         throw new Error("The packaged Electron probe is not an independent regular file.");
       candidate = {
         executable,
-        args: [...probe.args],
+        args: probe.args.map((word) => {
+          if (typeof word !== "string")
+            throw new Error("Release probes cannot receive secret arguments.");
+          return word;
+        }),
         dev: stat.dev,
         ino: stat.ino,
         length: stat.size,
@@ -740,11 +744,16 @@ export function createWindowsBuildExecution(input: {
     prepare: (original) => {
       if (original._tag !== "StandardCommand" || original.options.shell)
         throw new Error("Isolated build commands may not use shell execution or pipelines.");
+      const publicArguments = original.args.map((word) => {
+        if (typeof word !== "string")
+          throw new Error("Release builds cannot receive secret arguments.");
+        return word;
+      });
       const executable = original.command;
       if (input.isolation.kind === "windows-native-directory") {
         const selected = [
           executable,
-          ...original.args.filter((argument) =>
+          ...publicArguments.filter((argument) =>
             scriptTools.some((name) => normalize(tools[name]) === normalize(argument)),
           ),
         ];
@@ -777,6 +786,8 @@ export function createWindowsBuildExecution(input: {
       const extra: Record<string, string> = {};
       for (const [key, value] of Object.entries(original.options.env ?? {})) {
         if (value === undefined || env[key] === value) continue;
+        if (typeof value !== "string")
+          throw new Error("Release builds cannot receive secret configuration.");
         if (
           (key === "SOURCE_DATE_EPOCH" &&
             value === "0" &&

@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import type { OrchestrationV2ServerCommand } from "@t3tools/contracts";
@@ -72,7 +73,7 @@ const harness = (defaultOwnerId: string | null, fails: ReadonlySet<string> = new
 const layerBase = Layer.mergeAll(
   SqlitePersistence.layerMemory,
   ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-owner-backfill-" }),
-).pipe(Layer.provideMerge(NodeServices.layer));
+).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 it.effect(
   "gives only unowned live threads the default owner, once, and never again after a restart",

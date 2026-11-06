@@ -1,6 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { approvalPresentationDigest, approvalOperationDigest } from "./approvalPresentation.ts";
 it.effect(
   "binds raw authority, ordered choices, incarnation and asserted consent canonically",
@@ -46,5 +46,5 @@ it.effect(
           consent: { ...operation.consent, authorization: "Different assertion" },
         }),
       );
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(NodeCrypto.layer)),
 );

@@ -1,3 +1,4 @@
+// @effect-diagnostics extendsNativeError:off -- This retained native OAuth boundary maps errors outside the Effect runtime.
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- This external Promise adapter must generate PKCE without an Effect runtime.
 import * as NodeCrypto from "node:crypto";
 import * as Schema from "effect/Schema";

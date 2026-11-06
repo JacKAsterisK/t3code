@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 // @effect-diagnostics nodeBuiltinImport:off -- the harness ages a secret file on disk.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -108,7 +109,7 @@ describe("agent events harness", () => {
           Layer.provideMerge(
             ServerConfig.layerTest(process.cwd(), NodePath.join(directory, "home")),
           ),
-          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
         );
         const services = yield* Layer.build(shared);
         const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -272,7 +273,7 @@ describe("agent events harness", () => {
           Layer.provideMerge(
             ServerConfig.layerTest(process.cwd(), NodePath.join(directory, "home")),
           ),
-          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
         );
         yield* Effect.gen(function* () {
           const secrets = yield* ServerSecretStore.ServerSecretStore;

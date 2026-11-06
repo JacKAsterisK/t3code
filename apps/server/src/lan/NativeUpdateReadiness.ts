@@ -1,3 +1,4 @@
+// @effect-diagnostics effectTryWithoutCatch:off -- The synchronous native generation inspector is mapped by the update readiness boundary.
 // @effect-diagnostics nodeBuiltinImport:off -- Owner-bound native admission records are local OS files.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";

@@ -1,3 +1,4 @@
+import * as SecureRandom from "effect/crypto/SecureRandom";
 // @effect-diagnostics nodeBuiltinImport:off -- Backup destinations use file URIs with SQLite's explicit read-only mode.
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
@@ -11,7 +12,6 @@ import {
 } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -46,7 +46,7 @@ type IngestOptions = {
 type Read = {
   readonly page: LanTaskObserveResult;
   readonly deliverySourceId: EventId;
-  readonly pending: ReadonlyArray<typeof LanTaskObservation.Type>;
+  readonly pending: ReadonlyArray<LanTaskObservation>;
 };
 type ControlRow = Expected & {
   readonly shadow_reads: number;
@@ -147,7 +147,7 @@ export class GatewayCompatibility extends Context.Service<
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
   const gate = yield* Semaphore.make(1);
   const owner = Context.Reference<number | null>("t3/lan/GatewayCompatibility/gateOwner", {
     defaultValue: () => null,
@@ -357,7 +357,7 @@ const make = Effect.gen(function* () {
         page.status !== "ok"
           ? page.sourceId
           : options.reset
-            ? EventId.make(yield* crypto.randomUUIDv4())
+            ? EventId.make(yield* random.uuidV4())
             : (prior?.deliverySourceId ?? page.sourceId);
       const facts =
         current !== undefined ? yield* Facts.appendPage(target.environmentId, page) : undefined;
@@ -554,7 +554,7 @@ const make = Effect.gen(function* () {
                 Facts.digest(backup) !== Facts.digest(live)
               )
                 return yield* new GatewayCompatibilityError({ reason: "backup_stale" });
-              const backupId = `gateway-backup:${yield* crypto.randomUUIDv4()}`;
+              const backupId = `gateway-backup:${yield* random.uuidV4()}`;
               const manifestDigest = Facts.digest(live);
               yield* sql`INSERT INTO agent_gateway_compatibility_backups (backup_id, generation, destination, manifest_json, manifest_digest, shadow_digest)
         VALUES (${backupId}, ${current.generation}, ${input.destination}, ${stableStringify(live)}, ${manifestDigest}, ${current.shadow_digest})`;

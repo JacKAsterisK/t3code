@@ -1,3 +1,4 @@
+// @effect-diagnostics effectTryWithoutCatch:off -- The native endpoint parser returns UnknownError for the surrounding domain error mapper.
 // @effect-diagnostics nodeBuiltinImport:off -- Random request and delivery identifiers contain no machine or credential data.
 import * as NodeCrypto from "node:crypto";
 import {

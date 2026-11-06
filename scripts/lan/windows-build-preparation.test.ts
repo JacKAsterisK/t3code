@@ -1,3 +1,4 @@
+// @effect-diagnostics effectTryWithoutCatch:off -- The fixture exposes filesystem-copy failures as UnknownError for the surrounding test.
 // @effect-diagnostics nodeBuiltinImport:off - Synthetic in-memory preparation inputs; no compiler, installer or application process is launched.
 import { describe, expect } from "vite-plus/test";
 import { it } from "@effect/vitest";

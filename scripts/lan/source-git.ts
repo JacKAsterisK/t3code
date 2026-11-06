@@ -16,6 +16,86 @@ export const APPROVED_NONBUILD_SOURCE_ENTRIES = Object.freeze([
     blob: "2b7a412b8fa0fb7e985b0793321bd4e698f2b6cd",
   }),
   Object.freeze({
+    path: ".repos/alchemy-effect/.agents/skills/alchemy-domain/SKILL.md",
+    mode: "120000" as const,
+    blob: "6c12f5cf901f8d1d00d58641d05559d5fcb5e0cd",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.agents/skills/alchemy-domain/references",
+    mode: "120000" as const,
+    blob: "333292017fde97a3b892ffcf38f79e5eebc06f09",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.claude/skills/alchemy-provider/SKILL.md",
+    mode: "120000" as const,
+    blob: "dcbc967f4dce464314179c7ce5af73ba78765738",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.claude/skills/alchemy-provider/docs.md",
+    mode: "120000" as const,
+    blob: "cd60390a306236b8dd908db0a2aa69dc48e8efa7",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.claude/skills/alchemy-provider/review.md",
+    mode: "120000" as const,
+    blob: "aec921e9655b7b370af8c64cb930d98579fcd5af",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.claude/skills/audit/SKILL.md",
+    mode: "120000" as const,
+    blob: "0773eb6db4721e39daaa53bb47517763fcf0f567",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.claude/skills/audit/procedure.md",
+    mode: "120000" as const,
+    blob: "76facf569c20c78f3d1803457d26e2c51d680565",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.claude/skills/harden/SKILL.md",
+    mode: "120000" as const,
+    blob: "4acc97b3ffcaf9b74825680808fdc1c132320ed6",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.claude/skills/pr-queue/SKILL.md",
+    mode: "120000" as const,
+    blob: "369c3a9aea1b0fd385c43dd116b607615818106f",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.claude/skills/prepare-release/SKILL.md",
+    mode: "120000" as const,
+    blob: "4093850460acbf0d27936cad90743f1d5d26bfbe",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.claude/skills/release-blog/SKILL.md",
+    mode: "120000" as const,
+    blob: "5057f7fa3c9cf4f89beb8a6f913d11d4959fe2dc",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.claude/skills/release-overnight/SKILL.md",
+    mode: "120000" as const,
+    blob: "81f101fc6b96121936f29033f5ff07a11ed9b90a",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.grok/skills/alchemy-provider/SKILL.md",
+    mode: "120000" as const,
+    blob: "dcbc967f4dce464314179c7ce5af73ba78765738",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.grok/skills/alchemy-provider/docs.md",
+    mode: "120000" as const,
+    blob: "cd60390a306236b8dd908db0a2aa69dc48e8efa7",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.grok/skills/alchemy-provider/review.md",
+    mode: "120000" as const,
+    blob: "aec921e9655b7b370af8c64cb930d98579fcd5af",
+  }),
+  Object.freeze({
+    path: ".repos/alchemy-effect/.vscode/tsrs-tsdk/tsgo",
+    mode: "120000" as const,
+    blob: "f816feccf39a99782310a50b8754b220d2e80171",
+  }),
+  Object.freeze({
     path: ".repos/alchemy-effect/submodules/distilled",
     mode: "160000" as const,
     blob: "e02e9d405b8848909f4f746b61b12a663f631c7c",

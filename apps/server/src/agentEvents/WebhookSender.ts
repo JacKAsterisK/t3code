@@ -1,3 +1,4 @@
+// @effect-diagnostics processEnvInEffect:off -- This boundary deliberately reads the process test-harness transport flag.
 // @effect-diagnostics nodeBuiltinImport:off -- the sender pins each TLS connection to checked addresses, which Effect's HTTP client cannot.
 import * as NodeHttps from "node:https";
 import * as NodeNet from "node:net";

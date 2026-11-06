@@ -1,3 +1,4 @@
+// @effect-diagnostics globalJsonInEffect:off -- Only validated acyclic policy snapshots are serialized for change detection.
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- Ed25519 signs only schema-validated policy fields in a canonical order.
 import * as Gate from "../auth/ApprovalAdmissionGate.ts";
 import * as NodeCrypto from "node:crypto";

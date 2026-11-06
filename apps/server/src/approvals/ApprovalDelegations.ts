@@ -9,7 +9,7 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -242,7 +242,7 @@ export const initiatingClientForLaunch = Effect.fn("ApprovalDelegations.initiati
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const access = yield* ApprovalDestinationAccess;
   const identities = new WeakMap<AuthenticatedApprovalPeer, PeerIdentity>();
   const transaction = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -298,7 +298,7 @@ const make = Effect.gen(function* () {
       const subject = yield* owner(ownerSessionId);
       if (sourceEnvironmentId.trim().length === 0)
         return yield* new ApprovalDelegationError({ reason: "invalid_provenance" });
-      const id = `apl_${yield* crypto.randomUUIDv4()}`;
+      const id = `apl_${yield* crypto.uuidV4()}`;
       const now = yield* Clock.currentTimeMillis;
       yield* sql`INSERT INTO agent_approval_destination_links(link_identity_id, source_environment_id, created_by, created_at)
       VALUES (${id}, ${sourceEnvironmentId}, ${subject}, ${now})`;
@@ -310,7 +310,7 @@ const make = Effect.gen(function* () {
     function* (ownerSessionId: string, linkIdentityId: string) {
       const subject = yield* owner(ownerSessionId);
       const old = yield* readLink(linkIdentityId);
-      const id = `apl_${yield* crypto.randomUUIDv4()}`;
+      const id = `apl_${yield* crypto.uuidV4()}`;
       const now = yield* Clock.currentTimeMillis;
       yield* sql`INSERT INTO agent_approval_destination_links(link_identity_id, source_environment_id, created_by, created_at)
       VALUES (${id}, ${old.source_environment_id}, ${subject}, ${now})`;
@@ -414,7 +414,7 @@ const make = Effect.gen(function* () {
       yield* sql`UPDATE agent_approval_delegations SET revoked_at = ${now}
       WHERE thread_id = ${target.threadId} AND link_identity_id = ${target.linkIdentityId}
         AND initiating_client_id = ${target.initiatingClientId} AND revoked_at IS NULL AND policy_revision != ${current.revision}`;
-      const id = `apd_${yield* crypto.randomUUIDv4()}`;
+      const id = `apd_${yield* crypto.uuidV4()}`;
       yield* sql`INSERT INTO agent_approval_delegations(delegation_id, thread_id, link_identity_id,
       initiating_client_id, policy_revision, created_by, created_at)
       VALUES (${id}, ${target.threadId}, ${target.linkIdentityId}, ${target.initiatingClientId}, ${current.revision}, ${subject}, ${now})

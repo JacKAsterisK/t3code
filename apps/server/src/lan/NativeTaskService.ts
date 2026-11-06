@@ -15,7 +15,7 @@ import {
   type LanTaskRespondResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -122,7 +122,7 @@ const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const fs = yield* FileSystem.FileSystem;
   const sql = yield* SqlClient.SqlClient;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* Digest.Digest;
 
   const authorize = Effect.fn("NativeTaskService.authorize")(function* (
     scope: Scope,
@@ -171,10 +171,10 @@ const make = Effect.gen(function* () {
     ]).pipe(Effect.mapError(unavailable));
     const payload = yield* encodeJson(canonical(input)).pipe(Effect.mapError(unavailable));
     const keyDigest = yield* crypto
-      .digest("SHA-256", new TextEncoder().encode(key))
+      .digest(Digest.sha256, new TextEncoder().encode(key))
       .pipe(Effect.mapError(unavailable));
     const payloadDigest = yield* crypto
-      .digest("SHA-256", new TextEncoder().encode(payload))
+      .digest(Digest.sha256, new TextEncoder().encode(payload))
       .pipe(Effect.mapError(unavailable));
     const commandId = CommandId.make(`lan:${Buffer.from(keyDigest).toString("hex")}`);
     const fingerprint = Buffer.from(payloadDigest).toString("hex");

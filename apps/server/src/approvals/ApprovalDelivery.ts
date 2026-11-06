@@ -24,7 +24,7 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import { exceededDispatchModeLimit } from "../orchestration-v2/DispatchModeLimit.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -54,7 +54,7 @@ const make = Effect.gen(function* () {
   const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const sql = yield* SqlClient.SqlClient;
   const settings = yield* ServerSettings.ServerSettingsService;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* Digest.Digest;
   const threadGate = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const native = yield* Orchestrator.OrchestratorV2;
   const authority = yield* Effect.serviceOption(ApprovalAuthority.ApprovalAuthority);
@@ -267,7 +267,7 @@ const make = Effect.gen(function* () {
                         );
                         return yield* handoff;
                       }).pipe(
-                        Effect.provideService(Crypto.Crypto, crypto),
+                        Effect.provideService(Digest.Digest, crypto),
                         Effect.provideService(SqlClient.SqlClient, sql),
                         Effect.catchCause(() => {
                           failureCode = undefined;

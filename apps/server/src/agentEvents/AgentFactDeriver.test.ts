@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, describe, it } from "@effect/vitest";
 import {
   ApplicationProjectEvent,
@@ -94,7 +95,11 @@ const coreForDatabase = <E, R>(database: Layer.Layer<SqlClient.SqlClient, E, R>)
 const core = coreForDatabase(database);
 const environment = { id: "environment-a", label: "Machine A" };
 const instance = Deriver.AgentFactDeriver.pipe(
-  Effect.provide(Deriver.layer(environment).pipe(Layer.provide(NodeServices.layer))),
+  Effect.provide(
+    Deriver.layer(environment).pipe(
+      Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+    ),
+  ),
 );
 const at = "2026-01-01T00:00:00.000Z";
 const thread = {
@@ -235,7 +240,7 @@ describe("AgentFactDeriver", () => {
                   Layer.mock(GitVcsDriver.GitVcsDriver)({}),
                 ),
               ),
-              Layer.provide(NodeServices.layer),
+              Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
             ),
           ),
         );
@@ -278,7 +283,9 @@ describe("AgentFactDeriver", () => {
         assert.deepEqual(yield* sql`SELECT * FROM agent_gateway_compatibility_facts`, []);
         assert.deepEqual(yield* sql`SELECT * FROM agent_event_deliveries`, []);
         const compatibility = yield* Gateway.GatewayCompatibility.pipe(
-          Effect.provide(Gateway.layer.pipe(Layer.provide(NodeServices.layer))),
+          Effect.provide(
+            Gateway.layer.pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+          ),
         );
         const target = {
           principal: "grant:reader",
@@ -426,7 +433,7 @@ describe("AgentFactDeriver", () => {
                   defaultOwnerId: null,
                 }),
               ),
-              Layer.provide(NodeServices.layer),
+              Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
             ),
           ),
         );
@@ -517,7 +524,7 @@ describe("AgentFactDeriver", () => {
               legacyCookieName: undefined,
               streamChanges: Stream.empty,
             }),
-          ).pipe(Layer.provideMerge(NodeServices.layer));
+          ).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
           const services = yield* Layer.build(shared);
           const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
             effect.pipe(Effect.provide(services));
@@ -724,7 +731,7 @@ describe("AgentFactDeriver", () => {
             ),
           );
         }),
-      ).pipe(Effect.provide(NodeServices.layer)),
+      ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
   it.effect(
     "replays open, A → B → A and close after the current projection is already resolved",

@@ -3,6 +3,7 @@
 import * as NodeChildProcess from "node:child_process";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
+import * as Redacted from "effect/Redacted";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import * as Stdio from "effect/Stdio";
@@ -148,16 +149,41 @@ export const makeNodeClient = Effect.fn("CodexNativeProcess.open")(function* (
         command.options.env === undefined
           ? process.env
           : command.options.extendEnv === true
-            ? { ...process.env, ...command.options.env }
-            : command.options.env;
-      const child = NodeChildProcess.spawn(command.command, [...command.args], {
-        ...(command.options.cwd === undefined ? {} : { cwd: command.options.cwd }),
-        env,
-        windowsHide: command.options.windowsHide ?? true,
-        detached: command.options.detached ?? platform !== "win32",
-        shell: command.options.shell ?? false,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+            ? {
+                ...process.env,
+                ...Object.fromEntries(
+                  Object.entries(command.options.env).map(([name, value]) => [
+                    name,
+                    value === undefined
+                      ? undefined
+                      : typeof value === "string"
+                        ? value
+                        : Redacted.value(value),
+                  ]),
+                ),
+              }
+            : Object.fromEntries(
+                Object.entries(command.options.env).map(([name, value]) => [
+                  name,
+                  value === undefined
+                    ? undefined
+                    : typeof value === "string"
+                      ? value
+                      : Redacted.value(value),
+                ]),
+              );
+      const child = NodeChildProcess.spawn(
+        command.command,
+        command.args.map((word) => (typeof word === "string" ? word : Redacted.value(word))),
+        {
+          ...(command.options.cwd === undefined ? {} : { cwd: command.options.cwd }),
+          env,
+          windowsHide: command.options.windowsHide ?? true,
+          detached: command.options.detached ?? platform !== "win32",
+          shell: command.options.shell ?? false,
+          stdio: ["pipe", "pipe", "pipe"],
+        },
+      );
       child.on("error", (cause) =>
         resume(
           Effect.fail(new CodexError.CodexAppServerSpawnError({ command: command.command, cause })),

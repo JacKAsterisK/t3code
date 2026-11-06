@@ -1,4 +1,5 @@
 import * as ManagedPolicy from "../../policy/ManagedPolicy.ts";
+import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
 // @effect-diagnostics nodeBuiltinImport:off -- The fixture owns a captured loopback listener and closes it with its scope.
 import * as NodeHttp from "node:http";
 import { assert } from "@effect/vitest";
@@ -253,8 +254,7 @@ export const serve = Effect.fn("ApprovalFleetHarness.serve")(function* (
   const tools = includeLaunchToolkit
     ? Layer.mergeAll(approvalTools, Mcp.layerProjectRegistration)
     : approvalTools;
-  const mcp = tools.pipe(
-    Layer.provideMerge(Mcp.layerMcpTransport),
+  const mcp = Mcp.layerMcpTransport(tools).pipe(
     Layer.provide(handlerServices),
     Layer.provide(Layer.succeedContext(launchServices)),
     Layer.provide(registry),
@@ -561,4 +561,8 @@ export const statusInput = (input: ApprovalRespondInput) => ({
   threadId: input.threadId,
   clientRequestId: input.clientRequestId,
 });
-export const baseLayer = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);
+export const baseLayer = Layer.mergeAll(
+  NodeServices.layer,
+  NodePlatformCrypto.layer,
+  FetchHttpClient.layer,
+);

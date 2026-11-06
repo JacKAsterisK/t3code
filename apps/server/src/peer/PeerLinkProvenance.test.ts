@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { EnvironmentId } from "@t3tools/contracts";
@@ -21,7 +22,7 @@ import * as Links from "./PeerLinks.ts";
 
 const dependencies = Layer.mergeAll(layerDatabase, Gate.layer).pipe(
   Layer.provideMerge(Config.layerTest(process.cwd(), { prefix: "t3-relay-provenance-" })),
-  Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 const insert = Effect.fn("fixture.pointer")(function* (
   environmentId: string,

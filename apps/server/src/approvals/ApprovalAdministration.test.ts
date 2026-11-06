@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -189,7 +190,7 @@ const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         Layer.provideMerge(
           ServerConfig.layerTest(process.cwd(), { prefix: "t3-approval-administration-test-" }),
         ),
-        Layer.provideMerge(NodeServices.layer),
+        Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       ),
     ),
     Effect.scoped,

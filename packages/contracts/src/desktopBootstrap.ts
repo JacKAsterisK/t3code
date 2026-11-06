@@ -4,6 +4,8 @@ import { PortSchema, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts
 
 // A supervisor must not restart a server refused by the state-directory owner.
 export const SERVER_EXIT_CODE_STATE_DIR_OWNED = 78;
+// A server the managed policy refused, so the desktop app blames the policy rather than the release.
+export const SERVER_EXIT_CODE_MANAGED_POLICY = 77;
 
 /** Private native-desktop stdin command; never accepted on an HTTP endpoint. */
 export const DESKTOP_BACKEND_SHUTDOWN_COMMAND = "t3-desktop-shutdown-v1\n";

@@ -1,3 +1,4 @@
+// @effect-diagnostics globalJsonInEffect:off effectTryWithoutCatch:off -- This file boundary serializes validated JSON and deliberately exposes UnknownError for callers to map.
 // @effect-diagnostics preferSchemaOverJson:off nodeBuiltinImport:off -- Atomic JSON files are decoded at both boundaries; random names prevent concurrent temporary-file collisions.
 import * as NodeCrypto from "node:crypto";
 import { FleetRoster, LanFleetError } from "@t3tools/contracts";

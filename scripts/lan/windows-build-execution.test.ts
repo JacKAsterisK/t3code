@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Redacted from "effect/Redacted";
 import * as NodePath from "node:path";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -722,6 +723,8 @@ it("refuses unknown output programs, shell commands and inherited credential or 
     ChildProcess.make("C:\\T3LAN\\Output\\unapproved.exe", [], { cwd }),
     ChildProcess.make("node", [], { cwd }),
     ChildProcess.make(execution.node, [], { cwd, shell: true }),
+    ChildProcess.make(execution.node, [Redacted.make("synthetic-secret")], { cwd }),
+    ChildProcess.make(execution.node, [], { cwd, env: { CI: Redacted.make("synthetic-secret") } }),
     ChildProcess.make(execution.node, [], { cwd, env: { NODE_OPTIONS: "--require foreign" } }),
     ChildProcess.make(execution.node, [], { cwd, env: { GH_TOKEN: "fixture-credential" } }),
     ChildProcess.make(execution.node, [], { cwd, env: { PATH: "C:\\Foreign" } }),

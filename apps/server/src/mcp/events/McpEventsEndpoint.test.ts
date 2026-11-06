@@ -104,13 +104,15 @@ const serve = (options: { readonly eventsEnabled?: boolean } = {}) =>
         ),
       ),
     );
-    const serverLayer = McpHttpServer.toolkitRegistration(
-      ProbeToolkit,
-      McpToolAccess.toLayer(ProbeToolkit, {
-        probe: McpToolAccess.reads(() => Effect.succeed({ ok: true })),
-      }),
+    const serverLayer = McpHttpServer.layerMcpTransport(
+      McpHttpServer.toolkitRegistration(
+        ProbeToolkit,
+        McpToolAccess.toLayer(ProbeToolkit, {
+          probe: McpToolAccess.reads(() => Effect.succeed({ ok: true })),
+        }),
+      ),
     ).pipe(
-      Layer.provideMerge(McpHttpServer.layerMcpTransport.pipe(Layer.provide(endpoint))),
+      Layer.provide(endpoint),
       Layer.provide(
         Layer.mock(McpSessionRegistry.McpSessionRegistry)({
           resolve: (token) =>

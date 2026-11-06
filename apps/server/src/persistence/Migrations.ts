@@ -94,6 +94,9 @@ import Migration0080 from "./Migrations/080_ScheduledTaskOwner.ts";
 import Migration0082 from "./Migrations/082_AgentApprovalAuthorityAndReceipts.ts";
 import Migration0081 from "./Migrations/081_AgentEventSubscriptions.ts";
 import Migration0091 from "./Migrations/091_RepairBooleanSettledOverride.ts";
+import Migration0092 from "./Migrations/092_DropOrchestrationEventCorrelationIndex.ts";
+import Migration0093 from "./Migrations/093_DelegatedRecoveryIndexes.ts";
+import Migration0094 from "./Migrations/094_ScheduledTaskThreadMode.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -188,6 +191,9 @@ const migrationEntries = [
   [89, "AgentApprovalFleetPolicyPublications", Migration0089],
   [90, "ProjectionProjectsPinArchive", Migration0090],
   [91, "RepairBooleanSettledOverride", Migration0091],
+  [92, "DropOrchestrationEventCorrelationIndex", Migration0092],
+  [93, "DelegatedRecoveryIndexes", Migration0093],
+  [94, "ScheduledTaskThreadMode", Migration0094],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

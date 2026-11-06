@@ -1211,10 +1211,14 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
         const verified = yield* service.verify({ ...request, operation: "verify" });
         assert.equal(verified.workGeneration, observed.workGeneration);
         const after = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
-        // The row keeps every value; 080_ScheduledTaskOwner only adds an empty owner.
+        // The new columns preserve the existing owner and thread reuse behavior.
         assert.deepEqual(
           after.prepare("SELECT * FROM scheduled_tasks").all(),
-          before.map((row) => ({ ...row, owner_id: null })),
+          before.map((row) => ({
+            ...row,
+            owner_id: null,
+            thread_mode: row.thread_id == null ? "new_thread" : "continue",
+          })),
         );
         after.close();
       }).pipe(Effect.provide(testLayer)),
@@ -1242,6 +1246,14 @@ effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {
       const ownedRepair = NativeMaintenance.inspectStoppedRepairWork(dbPath).workGeneration;
       assert.notEqual((yield* service.inspect(request)).workGeneration, observed.workGeneration);
       yield* mutate("UPDATE scheduled_tasks SET owner_id=NULL");
+      assert.equal((yield* service.inspect(request)).workGeneration, observed.workGeneration);
+      yield* mutate(
+        "UPDATE scheduled_tasks SET thread_mode=CASE thread_mode WHEN 'continue' THEN 'new_thread' ELSE 'continue' END",
+      );
+      assert.notEqual((yield* service.inspect(request)).workGeneration, observed.workGeneration);
+      yield* mutate(
+        "UPDATE scheduled_tasks SET thread_mode=CASE WHEN thread_id IS NULL THEN 'new_thread' ELSE 'continue' END",
+      );
       assert.equal((yield* service.inspect(request)).workGeneration, observed.workGeneration);
       assert.notEqual(
         NativeMaintenance.inspectStoppedRepairWork(dbPath).workGeneration,

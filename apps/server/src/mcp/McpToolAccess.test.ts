@@ -193,7 +193,7 @@ export const refusedAtCompileTime = () => {
 
 const probeServer = (threads: Layer.Layer<ThreadManagement.ThreadManagementService>) =>
   McpHttpServer.toolkitRegistration(ProbeToolkit, layerProbeHandlers).pipe(
-    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
     Layer.provideMerge(threads),
   );
 
@@ -403,7 +403,7 @@ const linkedProbeServer = McpHttpServer.toolkitRegistration(
     t3_lan_task_list: McpToolAccess.reads(ranHere),
   }),
 ).pipe(
-  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
   Layer.provideMerge(
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
@@ -512,7 +512,7 @@ it.effect.each([
     }).pipe(
       Effect.provide(
         McpHttpServer.toolkitRegistration(toolkit, handlers).pipe(
-          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
           Layer.provide(
             Layer.mock(ApprovalAuthority.ApprovalAuthority)({
               check: () => Effect.fail(new ApprovalAuthority.ApprovalAuthorityError({ reason })),

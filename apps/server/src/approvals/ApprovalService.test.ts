@@ -1,9 +1,10 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ApprovalReceipts from "./ApprovalReceipts.ts";
 import { ApprovalAuditActor } from "./ApprovalContext.ts";
 import * as Schema from "effect/Schema";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as FileSystem from "effect/FileSystem";
 import { ChildProcess } from "effect/process";
 import { makeNodeClient } from "effect-codex-app-server/node";
@@ -118,7 +119,7 @@ const layer = Service.layer.pipe(
   Layer.provideMerge(Outbox.layer.pipe(Layer.provide(database))),
   Layer.provideMerge(config),
   Layer.provideMerge(ServerSettings.layerTest()),
-  Layer.provide(NodeServices.layer),
+  Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 const seed = Effect.fn("ApprovalFixture.seed")(function* (suffix: string) {
   const native = yield* Orchestrator.OrchestratorV2;
@@ -347,7 +348,10 @@ it.effect(
       );
       assert.equal(context.request?.resolvedBy?.principalId, `session:${fixture.caller.sessionId}`);
       assert.equal(context.request?.resolvedBy?.assertion?.onBehalfOf, "Person");
-    }).pipe(Effect.provide(Layer.mergeAll(layer, NodeServices.layer)), Effect.scoped),
+    }).pipe(
+      Effect.provide(Layer.mergeAll(layer, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      Effect.scoped,
+    ),
 );
 
 it.effect("revocation after prepare and UI races leave exactly one native winner", () =>
@@ -391,7 +395,10 @@ it.effect("revocation after prepare and UI races leave exactly one native winner
         0,
       );
     }
-  }).pipe(Effect.provide(Layer.mergeAll(layer, NodeServices.layer)), Effect.scoped),
+  }).pipe(
+    Effect.provide(Layer.mergeAll(layer, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+    Effect.scoped,
+  ),
 );
 
 it.effect.each(["revocation", "authority-storage", "settings"] as const)(
@@ -621,7 +628,10 @@ it.effect.each(["revocation", "authority-storage", "settings"] as const)(
         receipt.receiptId,
         "startup must not re-dispatch an old receipt already replaced by an app answer",
       );
-    }).pipe(Effect.provide(Layer.mergeAll(layer, NodeServices.layer)), Effect.scoped),
+    }).pipe(
+      Effect.provide(Layer.mergeAll(layer, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      Effect.scoped,
+    ),
 );
 
 it.live(
@@ -647,17 +657,21 @@ it.live(
           fixture.projections.getThreadProjection(fixture.input.threadId).pipe(Effect.orDie),
       });
       yield* HttpRouter.serve(
-        McpHttpServer.layerApprovalToolkit.pipe(
-          Layer.provideMerge(
-            McpServer.layerHttp({
-              name: "approval-http",
-              version: "1",
-              path: "/mcp",
-              protocols: [McpProtocol.v2025_06_18, McpProtocol.v2026_07_28],
-            }),
-          ),
+        McpServer.layerHttp({
+          name: "approval-http",
+          version: "1",
+          path: "/mcp",
+          protocols: [McpProtocol.v2025_06_18, McpProtocol.v2026_07_28],
+          registrations: McpHttpServer.layerApprovalToolkit,
+        }).pipe(
           Layer.provide(threads),
-          Layer.provide(Layer.succeed(McpInvocationContext.McpInvocationContext, scope)),
+          Layer.provide(
+            HttpRouter.middleware<{ provides: McpInvocationContext.McpInvocationContext }>()(
+              (effect) =>
+                Effect.provideService(effect, McpInvocationContext.McpInvocationContext, scope),
+              { global: true },
+            ),
+          ),
         ),
         { disableListenLog: true, disableLogger: true },
       ).pipe(Layer.build);
@@ -739,7 +753,13 @@ it.live(
         assert.include(submitted.raw, "committed");
       }
     }).pipe(
-      Effect.provide(Layer.mergeAll(layer, NodeHttpServer.layerTest, NodeServices.layer)),
+      Effect.provide(
+        Layer.mergeAll(
+          layer,
+          NodeHttpServer.layerTest,
+          Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
+        ),
+      ),
       Effect.scoped,
     ),
 );
@@ -784,7 +804,10 @@ it.effect("a crash after preparation reuses its immutable guard and stable nativ
     const refused = yield* service.respond(answered.input, answered.caller);
     assert.equal(refused.state, "refused");
     assert.equal(refused.failureCode, "already_answered");
-  }).pipe(Effect.provide(Layer.mergeAll(layer, NodeServices.layer)), Effect.scoped),
+  }).pipe(
+    Effect.provide(Layer.mergeAll(layer, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+    Effect.scoped,
+  ),
 );
 
 it.effect(
@@ -868,7 +891,10 @@ it.effect(
           .state,
         "delivery_unknown",
       );
-    }).pipe(Effect.provide(Layer.mergeAll(layer, NodeServices.layer)), Effect.scoped),
+    }).pipe(
+      Effect.provide(Layer.mergeAll(layer, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      Effect.scoped,
+    ),
 );
 
 it.effect(
@@ -922,7 +948,10 @@ it.effect(
         )).request?.status,
         "resolved",
       );
-    }).pipe(Effect.provide(Layer.mergeAll(layer, NodeServices.layer)), Effect.scoped),
+    }).pipe(
+      Effect.provide(Layer.mergeAll(layer, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      Effect.scoped,
+    ),
 );
 
 it.effect(
@@ -981,7 +1010,10 @@ it.effect(
         fixture.caller.sessionId,
       );
       assert.include(JSON.stringify(read), receipt.receiptId);
-    }).pipe(Effect.provide(Layer.mergeAll(layer, NodeServices.layer)), Effect.scoped),
+    }).pipe(
+      Effect.provide(Layer.mergeAll(layer, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      Effect.scoped,
+    ),
 );
 
 class ApprovalOAuthApi extends HttpApi.make("environment").add(
@@ -1021,7 +1053,7 @@ it.live.each(["accept", "decline"] as const)(
         settings: yield* decodeCodexSettings({}),
         environment: {},
         clientFactory: { open: () => Effect.succeed(nativeClient) },
-        crypto: yield* Crypto.Crypto,
+        digest: yield* Digest.Digest,
         fileSystem: yield* FileSystem.FileSystem,
         idAllocator: yield* IdAllocator.IdAllocatorV2,
         serverConfig: yield* ServerConfig.ServerConfig,
@@ -1114,8 +1146,7 @@ it.live.each(["accept", "decline"] as const)(
       const oauth = HttpApiBuilder.layer(ApprovalOAuthApi).pipe(
         Layer.provide(McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer))),
       );
-      const mcp = McpHttpServer.layerApprovalToolkit.pipe(
-        Layer.provideMerge(McpHttpServer.layerMcpTransport),
+      const mcp = McpHttpServer.layerMcpTransport(McpHttpServer.layerApprovalToolkit).pipe(
         Layer.provide(threads),
         Layer.provide(
           McpSessionRegistry.layer.pipe(
@@ -1353,7 +1384,7 @@ it.live.each(["accept", "decline"] as const)(
           NodeHttpServer.layerTest,
           IdAllocator.layer,
           McpProviderSessions.layer,
-          NodeServices.layer,
+          Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
         ),
       ),
       Effect.scoped,
@@ -1398,7 +1429,10 @@ it.effect("a paused exact retry cannot replace admitted write evidence with refu
       (yield* ApprovalReceipts.byCommand(committed.commandId))!.state,
       "response_written",
     );
-  }).pipe(Effect.provide(Layer.mergeAll(layer, NodeServices.layer)), Effect.scoped),
+  }).pipe(
+    Effect.provide(Layer.mergeAll(layer, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+    Effect.scoped,
+  ),
 );
 
 it.effect(
@@ -1433,7 +1467,10 @@ it.effect(
       assert.equal(recovered.commandId, row.command_id);
       const outbox = yield* Outbox.EffectOutboxV2;
       assert.deepEqual(yield* outbox.listByCommandId(CommandId.make(row.command_id)), []);
-    }).pipe(Effect.provide(Layer.mergeAll(layer, NodeServices.layer)), Effect.scoped),
+    }).pipe(
+      Effect.provide(Layer.mergeAll(layer, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      Effect.scoped,
+    ),
 );
 
 it.effect("native approval responses require an explicitly offered decision", () =>
@@ -1458,7 +1495,10 @@ it.effect("native approval responses require an explicitly offered decision", ()
     );
     const outbox = yield* Outbox.EffectOutboxV2;
     assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
-  }).pipe(Effect.provide(Layer.mergeAll(layer, NodeServices.layer)), Effect.scoped),
+  }).pipe(
+    Effect.provide(Layer.mergeAll(layer, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+    Effect.scoped,
+  ),
 );
 
 it.effect(
@@ -1506,5 +1546,8 @@ it.effect(
       const result = yield* service.respond(f.input, f.caller);
       assert.equal(result.state, "committed");
       assert.equal(result.commandId, prepared.command_id);
-    }).pipe(Effect.provide(Layer.mergeAll(layer, NodeServices.layer)), Effect.scoped),
+    }).pipe(
+      Effect.provide(Layer.mergeAll(layer, Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      Effect.scoped,
+    ),
 );

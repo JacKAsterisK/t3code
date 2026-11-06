@@ -1,3 +1,4 @@
+// @effect-diagnostics processEnvInEffect:off -- This fixture temporarily sets and restores the startup-only proxy environment.
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";

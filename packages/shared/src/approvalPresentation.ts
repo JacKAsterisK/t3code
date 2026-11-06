@@ -1,5 +1,5 @@
 import type { ApprovalGrant } from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 
 export function canonicalApprovalJson(value: unknown): string {
@@ -18,9 +18,9 @@ export function canonicalApprovalJson(value: unknown): string {
   return JSON.stringify(normalize(value));
 }
 const hash = Effect.fn("ApprovalPresentation.hash")(function* (domain: string, value: unknown) {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* Digest.Digest;
   const bytes = yield* crypto.digest(
-    "SHA-256",
+    Digest.sha256,
     new TextEncoder().encode(canonicalApprovalJson([domain, 1, value])),
   );
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");

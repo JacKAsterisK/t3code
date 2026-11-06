@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as ManagedPolicy from "./policy/ManagedPolicy.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -68,7 +69,7 @@ it.effect(
       Effect.provide(
         Layer.mergeAll(Gate.layer, Sqlite.layerMemory).pipe(
           Layer.provideMerge(Config.layerTest(process.cwd(), { prefix: "t3-settings-admission-" })),
-          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
         ),
       ),
     ),

@@ -1,5 +1,6 @@
-// @effect-diagnostics nodeBuiltinImport:off -- Native filesystem fixtures require the host path delimiter and canonical spelling.
+// @effect-diagnostics nodeBuiltinImport:off processEnvInEffect:off -- Native subprocess fixtures inherit the host tool lookup path and filesystem spelling.
 import * as NodePath from "node:path";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
@@ -66,7 +67,10 @@ function layerResolver(
 ) {
   return Layer.mergeAll(
     NodeServices.layer,
-    TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
+    NodeCrypto.layer,
+    TestProviderHost.layer().pipe(
+      Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+    ),
     Layer.succeed(HostProcess.Platform, nativePlatform),
     Layer.succeed(HostProcess.Architecture, "x64"),
     Layer.effect(
@@ -812,7 +816,10 @@ describe("AcpRegistrySupport", () => {
       Effect.provide(
         Layer.mergeAll(
           NodeServices.layer,
-          TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer)),
+          NodeCrypto.layer,
+          TestProviderHost.layer().pipe(
+            Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+          ),
         ),
       ),
       Effect.provideService(HostProcess.Platform, nativePlatform),
@@ -1872,6 +1879,6 @@ describe("acpRegistryManagedBinaryDirectories", () => {
         architecture: "x64",
       });
       expect(missing).toEqual([]);
-    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)), Effect.scoped),
   );
 });

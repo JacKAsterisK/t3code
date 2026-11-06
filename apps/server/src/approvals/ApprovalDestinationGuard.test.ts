@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import { ApprovalGuard, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -156,7 +157,7 @@ it.effect(
           NodeSqliteClient.layer({ filename: ":memory:" }),
           Gate.layer,
           Settings.layerTest({ linkedEnvironmentsEnabled: true }),
-          NodeServices.layer,
+          Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
         ),
       ),
       Effect.scoped,

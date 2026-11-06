@@ -71,6 +71,9 @@ describe("V2 preview upgrade", () => {
         [89, "AgentApprovalFleetPolicyPublications"],
         [90, "ProjectionProjectsPinArchive"],
         [91, "RepairBooleanSettledOverride"],
+        [92, "DropOrchestrationEventCorrelationIndex"],
+        [93, "DelegatedRecoveryIndexes"],
+        [94, "ScheduledTaskThreadMode"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -185,6 +188,9 @@ describe("V2 preview upgrade", () => {
         [89, "AgentApprovalFleetPolicyPublications"],
         [90, "ProjectionProjectsPinArchive"],
         [91, "RepairBooleanSettledOverride"],
+        [92, "DropOrchestrationEventCorrelationIndex"],
+        [93, "DelegatedRecoveryIndexes"],
+        [94, "ScheduledTaskThreadMode"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

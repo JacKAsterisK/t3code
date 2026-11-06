@@ -1,3 +1,4 @@
+// @effect-diagnostics globalJsonInEffect:off effectTryWithoutCatch:off -- Roster comparison uses validated JSON; the native parser error is mapped at the directory boundary.
 // @effect-diagnostics preferSchemaOverJson:off nodeBuiltinImport:off -- Compares validated values; hashes directory snapshots and creates observation identities.
 /**
  * T3 Code LAN: the fleet's users, from fleet-users.json beside the roster. Each machine reads it

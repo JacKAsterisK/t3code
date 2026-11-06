@@ -1,3 +1,4 @@
+// @effect-diagnostics globalJsonInEffect:off -- Membership comparison serializes validated acyclic roster data.
 // @effect-diagnostics preferSchemaOverJson:off -- Compares schema-validated records only, to skip unchanged writes.
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";

@@ -3,6 +3,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
@@ -64,45 +65,54 @@ const fakeAppImage = (canMount = true) => {
 };
 
 describe("renderCliShim", () => {
-  it("extracts the AppImage where it cannot be mounted", () => {
-    const { shim } = fakeAppImage(false);
-    const result = run(shim, ["--version"], { APPIMAGE_EXTRACT_AND_RUN: "1" });
-    expect(result.status).toBe(3);
-    expect(result.stdout).toMatch(
-      /squashfs-root\/resources\/app\.asar\/apps\/server\/dist\/bin\.mjs/,
-    );
-  });
+  it.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "extracts the AppImage where it cannot be mounted",
+    () => {
+      const { shim } = fakeAppImage(false);
+      const result = run(shim, ["--version"], { APPIMAGE_EXTRACT_AND_RUN: "1" });
+      expect(result.status).toBe(3);
+      expect(result.stdout).toMatch(
+        /squashfs-root\/resources\/app\.asar\/apps\/server\/dist\/bin\.mjs/,
+      );
+    },
+  );
 
-  it("keeps the install's T3 home under sudo, unless one is set", () => {
-    const root = tempRoot();
-    writeExecutable(NodePath.join(root, "app"), REPORTER);
-    const shim = writeShim(root, {
-      kind: "direct",
-      executable: NodePath.join(root, "app"),
-      entry: "/bin.mjs",
-    });
-    expect(run(shim, []).stdout).toContain(`home=${root}/home`);
-    expect(run(shim, [], { T3CODE_HOME: "/elsewhere" }).stdout).toContain("home=/elsewhere");
-    const relative = NodeChildProcess.spawnSync("./bin/t3", [], { cwd: root, encoding: "utf8" });
-    expect(relative.stdout).toContain(`cli=${shim}`);
-  });
+  it.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "keeps the install's T3 home under sudo, unless one is set",
+    () => {
+      const root = tempRoot();
+      writeExecutable(NodePath.join(root, "app"), REPORTER);
+      const shim = writeShim(root, {
+        kind: "direct",
+        executable: NodePath.join(root, "app"),
+        entry: "/bin.mjs",
+      });
+      expect(run(shim, []).stdout).toContain(`home=${root}/home`);
+      expect(run(shim, [], { T3CODE_HOME: "/elsewhere" }).stdout).toContain("home=/elsewhere");
+      const relative = NodeChildProcess.spawnSync("./bin/t3", [], { cwd: root, encoding: "utf8" });
+      expect(relative.stdout).toContain(`cli=${shim}`);
+    },
+  );
 
-  it("runs an installed app's server directly", () => {
-    const root = tempRoot();
-    const executable = NodePath.join(root, "opt", "T3 Code", "t3code");
-    writeExecutable(executable, REPORTER);
-    const shim = writeShim(root, {
-      kind: "direct",
-      executable,
-      entry: "/opt/T3's/app.asar/bin.mjs",
-    });
-    expect(run(shim, ["browser", "setup"]).stdout.split("\n").slice(1)).toEqual([
-      "/opt/T3's/app.asar/bin.mjs",
-      "browser",
-      "setup",
-      "",
-    ]);
-  });
+  it.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "runs an installed app's server directly",
+    () => {
+      const root = tempRoot();
+      const executable = NodePath.join(root, "opt", "T3 Code", "t3code");
+      writeExecutable(executable, REPORTER);
+      const shim = writeShim(root, {
+        kind: "direct",
+        executable,
+        entry: "/opt/T3's/app.asar/bin.mjs",
+      });
+      expect(run(shim, ["browser", "setup"]).stdout.split("\n").slice(1)).toEqual([
+        "/opt/T3's/app.asar/bin.mjs",
+        "browser",
+        "setup",
+        "",
+      ]);
+    },
+  );
 
   it("writes a Windows launcher that keeps cmd from reinterpreting paths", () => {
     const executable = "C:\\Apps\\R&whoami&X 100%\\!CHANNEL!\\T3 Code.exe";

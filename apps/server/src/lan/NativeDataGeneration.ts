@@ -1,3 +1,4 @@
+// @effect-diagnostics extendsNativeError:off -- This native read-only generation inspector is also used outside Effect.
 // @effect-diagnostics nodeBuiltinImport:off -- Bounded SQLite header reads detect writes without rereading conversation bodies.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";

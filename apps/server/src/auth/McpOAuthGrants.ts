@@ -1,3 +1,4 @@
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import {
   AuthMcpClientAccess,
   AuthSessionId,
@@ -7,7 +8,7 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -121,16 +122,17 @@ export class McpOAuthGrants extends Context.Service<
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const sessions = yield* SessionStore.SessionStore;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* Digest.Digest;
+  const random = yield* SecureRandom.SecureRandom;
   const storageError = (cause: unknown) => new McpOAuthGrantError({ reason: "storage", cause });
   const invalid = () => new McpOAuthGrantError({ reason: "invalid_grant" });
   const hashToken = Effect.fn("McpOAuthGrants.hashToken")(function* (token: string) {
     const digest = yield* crypto
-      .digest("SHA-256", new TextEncoder().encode(token))
+      .digest(Digest.sha256, new TextEncoder().encode(token))
       .pipe(Effect.mapError(storageError));
     return Buffer.from(digest).toString("hex");
   });
-  const secret = crypto.randomBytes(32).pipe(
+  const secret = random.randomBytes(32).pipe(
     Effect.map((bytes) => Buffer.from(bytes).toString("base64url")),
     Effect.mapError(storageError),
   );
@@ -162,7 +164,7 @@ const make = Effect.gen(function* () {
     function* (input) {
       if (input.access === "full-access") return yield* invalid();
       const now = yield* Clock.currentTimeMillis;
-      const grantId = yield* crypto.randomUUIDv4().pipe(Effect.mapError(storageError));
+      const grantId = yield* random.uuidV4().pipe(Effect.mapError(storageError));
       const ttl = input.renewable ? ACCESS_TTL_SECONDS : 30 * 24 * 60 * 60;
       const expiresIn = input.renewable ? GRANT_TTL_SECONDS : ttl;
       const refreshToken = input.renewable ? yield* secret : undefined;

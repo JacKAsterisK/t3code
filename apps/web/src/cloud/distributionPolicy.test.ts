@@ -3,6 +3,7 @@ import { vi } from "vite-plus/test";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
 import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
+import { EnvironmentId } from "@t3tools/contracts";
 
 vi.mock("@t3tools/shared/distribution", async (original) => ({
   ...(await original<typeof import("@t3tools/shared/distribution")>()),
@@ -42,10 +43,10 @@ import {
   isHostedStaticApp,
 } from "../hostedPairing";
 import {
-  linkPrimaryEnvironmentToCloud,
-  unlinkPrimaryEnvironmentFromCloud,
-  updatePrimaryCloudPreferences,
-  readPrimaryCloudLinkState,
+  linkEnvironmentToCloud,
+  unlinkEnvironmentFromCloud,
+  updateCloudPreferences,
+  readCloudLinkState,
 } from "./linkEnvironment";
 
 // Disabled paths must not acquire HTTP, crypto, registry or credential services.
@@ -121,23 +122,23 @@ it.effect(
   "disabled cloud mutations refuse before constructing HTTP clients or reading credentials",
   () => {
     const target = {
-      environmentId: "fixture",
+      environmentId: EnvironmentId.make("fixture"),
       label: "fixture",
       httpBaseUrl: "http://192.0.2.10:3773",
       wsBaseUrl: "ws://192.0.2.10:3773",
     };
     return Effect.gen(function* () {
-      expect(yield* readPrimaryCloudLinkState({ target }).pipe(withoutDependencies)).toBe(null);
+      expect(yield* readCloudLinkState({ target }).pipe(withoutDependencies)).toBe(null);
       for (const result of yield* Effect.all([
-        linkPrimaryEnvironmentToCloud({ target, clerkToken: "fixture" }).pipe(
+        linkEnvironmentToCloud({ target, clerkToken: "fixture" }).pipe(
           Effect.flip,
           withoutDependencies,
         ),
-        unlinkPrimaryEnvironmentFromCloud({ target, clerkToken: "fixture" }).pipe(
+        unlinkEnvironmentFromCloud({ target, clerkToken: "fixture" }).pipe(
           Effect.flip,
           withoutDependencies,
         ),
-        updatePrimaryCloudPreferences({ target, publishAgentActivity: true }).pipe(
+        updateCloudPreferences({ target, publishAgentActivity: true }).pipe(
           Effect.flip,
           withoutDependencies,
         ),

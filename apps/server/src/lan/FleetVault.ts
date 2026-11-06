@@ -1,3 +1,4 @@
+// @effect-diagnostics globalJsonInEffect:off -- The encrypted vault persists a validated acyclic credential document.
 // @effect-diagnostics preferSchemaOverJson:off -- The OS credential store contains a schema-validated local secret, never a shared roster entry.
 import { AsyncEntry, Entry } from "@napi-rs/keyring";
 import { LanFleetError } from "@t3tools/contracts";

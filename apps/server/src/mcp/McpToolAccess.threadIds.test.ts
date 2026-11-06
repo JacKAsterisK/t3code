@@ -127,7 +127,7 @@ const probeServer = McpHttpServer.toolkitRegistration(
     local_thread: McpToolAccess.reads(echo),
   }),
 ).pipe(
-  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
   Layer.provideMerge(Layer.mock(ThreadManagement.ThreadManagementService)(fixtureThreads)),
   // Stands in for a linked environment, answering with where the call went and what it carried.
   Layer.provide(
@@ -224,7 +224,7 @@ it.effect.each([
 );
 
 const orchestratorServer = McpHttpServer.layerOrchestratorToolkit.pipe(
-  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
   Layer.provide(NodeCrypto.layer),
@@ -292,7 +292,7 @@ it.effect("t3_thread_read tells an unknown id from a deleted thread", () =>
 
 const dispatched: Array<string> = [];
 const threadServer = McpHttpServer.layerThreadToolkit.pipe(
-  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
   Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),

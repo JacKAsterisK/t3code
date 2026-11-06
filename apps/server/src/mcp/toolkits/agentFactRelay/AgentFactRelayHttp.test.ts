@@ -105,17 +105,15 @@ const serve = Effect.fn("fixture.relayHttp")(function* (enabled = true) {
     ),
   );
   const relayContext = yield* Layer.build(relay.pipe(Layer.provideMerge(layerDatabase)));
-  const routes = McpHttp.toolkitRegistration(AgentFactRelayToolkit, Handlers.layer).pipe(
+  const routes = McpHttp.layerMcpTransport(
+    McpHttp.toolkitRegistration(AgentFactRelayToolkit, Handlers.layer),
+  ).pipe(
     Layer.provide(Layer.succeedContext(relayContext)),
-    Layer.provideMerge(
-      McpHttp.layerMcpTransport.pipe(
-        Layer.provide(
-          Layer.mock(Endpoint.McpEventsEndpoint)({
-            statelessEnabled: enabled,
-            handle: (_request, _scope, inner) => inner,
-          }),
-        ),
-      ),
+    Layer.provide(
+      Layer.mock(Endpoint.McpEventsEndpoint)({
+        statelessEnabled: enabled,
+        handle: (_request, _scope, inner) => inner,
+      }),
     ),
     Layer.provide(
       Layer.mock(Registry.McpSessionRegistry)({

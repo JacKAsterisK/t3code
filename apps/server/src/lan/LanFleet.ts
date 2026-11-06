@@ -1,3 +1,4 @@
+// @effect-diagnostics effectTryWithoutCatch:off -- Native cryptographic and file parsers are mapped to the existing fleet domain error at their boundary.
 // @effect-diagnostics nodeBuiltinImport:off -- Random delivery identifiers contain no machine or credential data.
 import * as NodeCrypto from "node:crypto";
 import {

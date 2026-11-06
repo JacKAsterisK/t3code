@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 // @effect-diagnostics nodeBuiltinImport:off -- The maintenance CLI runs against disposable files; crash children open only that database.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -237,7 +238,7 @@ it.effect(
       Effect.scoped,
       Effect.provide(
         Layer.mergeAll(
-          NodeServices.layer,
+          Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
           NetService.layer,
           TestConsole.layer,
           ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),

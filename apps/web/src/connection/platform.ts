@@ -314,14 +314,16 @@ const ANALYTICS_DEVICE_ID_KEY = "t3code:analytics-device-id";
 
 // Lives as long as this browser profile's site data. Storage can be blocked, which only drops the id.
 const analyticsDevice = {
-  id: Effect.try(() => {
-    if (!telemetryEnabled) return null;
-    const existing = window.localStorage.getItem(ANALYTICS_DEVICE_ID_KEY);
-    if (existing) return existing;
-    const created = randomUUID();
-    window.localStorage.setItem(ANALYTICS_DEVICE_ID_KEY, created);
-    return created;
-  }).pipe(Effect.option, Effect.map(Option.flatMap(Option.fromNullishOr))),
+  id: Effect.sync(
+    Option.liftThrowable(() => {
+      if (!telemetryEnabled) return null;
+      const existing = window.localStorage.getItem(ANALYTICS_DEVICE_ID_KEY);
+      if (existing) return existing;
+      const created = randomUUID();
+      window.localStorage.setItem(ANALYTICS_DEVICE_ID_KEY, created);
+      return created;
+    }),
+  ).pipe(Effect.map(Option.flatMap(Option.fromNullishOr))),
 };
 
 const layerCapabilities = Layer.effectContext(

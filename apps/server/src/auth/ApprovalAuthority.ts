@@ -7,7 +7,7 @@ import {
 import type { AuthEnvironmentScope } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -109,7 +109,7 @@ export class ApprovalAuthority extends Context.Service<
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const sessions = yield* SessionStore.SessionStore;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const cap = yield* Effect.serviceOption(CredentialAttribution.CredentialAccessCap);
   const { withGate } = yield* ApprovalAdmissionGate.ApprovalAdmissionGate;
   const read = Effect.fn("ApprovalAuthority.read")(
@@ -272,7 +272,7 @@ const make = Effect.gen(function* () {
     function* (input: Parameters<ApprovalAuthority["Service"]["register"]>[0]) {
       const now = yield* Clock.currentTimeMillis;
       const family = CredentialAttribution.attributionRoot(input.grantorSubject) ?? "local-owner";
-      const initiating = yield* crypto.randomUUIDv4();
+      const initiating = yield* crypto.uuidV4();
       yield* sql`INSERT INTO agent_approval_authorizations(session_id, application_id, consent_family_id,
         initiating_client_id, enabled, revision, updated_at, runtime_mode_ceiling, credential_kind) VALUES (${input.sessionId}, ${input.applicationId},
         ${family}, ${initiating}, ${input.enabled ? 1 : 0}, 1, ${now}, ${input.runtimeModeCeiling}, ${input.peerLink === true ? "peer" : "local"})`;

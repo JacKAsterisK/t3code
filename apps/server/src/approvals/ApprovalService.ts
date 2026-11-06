@@ -1,3 +1,4 @@
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as AgentEventOwners from "../agentEvents/AgentEventOwners.ts";
 import { ApprovalTestHooks } from "./ApprovalTestHooks.ts";
 import {
@@ -23,7 +24,7 @@ import {
   approvalOperationDigest,
 } from "@t3tools/shared/approvalPresentation";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -98,7 +99,8 @@ export class ApprovalService extends Context.Service<
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* Digest.Digest;
+  const random = yield* SecureRandom.SecureRandom;
   const authority = yield* ApprovalAuthority.ApprovalAuthority;
   const destinationGuard = yield* Effect.serviceOption(DestinationGuard.ApprovalDestinationGuard);
   const delegations = yield* Effect.serviceOption(Delegations.ApprovalDelegations);
@@ -224,7 +226,7 @@ const make = Effect.gen(function* () {
     },
     (effect) =>
       effect.pipe(
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(Digest.Digest, crypto),
         Effect.provideService(SqlClient.SqlClient, sql),
         Effect.mapError((error) => (isMcpFailure(error) ? error : unavailable())),
       ),
@@ -389,7 +391,7 @@ const make = Effect.gen(function* () {
         return yield* refusePrepared("decision_not_offered");
       if (input.decision === "accept" && input.consent.effectiveScope !== "turn")
         return yield* refusePrepared("scope_consent_required");
-      const receiptId = row?.receipt_id ?? `apr_${yield* crypto.randomUUIDv4()}`;
+      const receiptId = row?.receipt_id ?? `apr_${yield* random.uuidV4()}`;
       const commandId = CommandId.make(row?.command_id ?? `approval:${receiptId}`);
       const freshGuard: ApprovalGuard = {
         receiptId,
@@ -494,7 +496,7 @@ const make = Effect.gen(function* () {
     },
     (effect) =>
       effect.pipe(
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(Digest.Digest, crypto),
         Effect.provideService(SqlClient.SqlClient, sql),
         Effect.mapError((error) => (isMcpFailure(error) ? error : unavailable())),
       ),

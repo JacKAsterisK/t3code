@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import type { SqlError } from "effect/sql/SqlError";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as FleetUsers from "../lan/FleetUsers.ts";
@@ -16,29 +17,30 @@ const absentDirectory: FleetUsers.FleetUsersObservation = {
 };
 
 /** Directory capture precedes the SQL lane; filesystem refresh never runs in a source transaction. */
-export const withTransaction = Effect.fn("AgentEventSourceCapture.withTransaction")(function* <
-  A,
-  E,
-  R,
->(effect: Effect.Effect<A, E, R>) {
-  const sql = yield* SqlClient.SqlClient;
-  const users = yield* Effect.serviceOption(FleetUsers.FleetUsers);
-  // The enclosing capture and SQL transaction own the span for this per-commit callback.
-  const commit = Effect.fnUntraced(function* (observation: FleetUsers.FleetUsersObservation) {
-    return yield* sql.withTransaction(
-      Effect.gen(function* () {
-        const sourceGeneration = yield* Journal.sourceGeneration();
-        yield* Journal.recordObservation(observation);
-        return yield* effect.pipe(
-          Effect.provideService(AgentEventCapture, {
-            sourceGeneration,
-            directoryGeneration: observation.observationGeneration,
-          }),
-        );
-      }),
-    );
+export const withTransaction: <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+) => Effect.Effect<A, E | SqlError | Journal.OwnerJournalConflict, R | SqlClient.SqlClient> =
+  Effect.fn("AgentEventSourceCapture.withTransaction")(function* <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+  ) {
+    const sql = yield* SqlClient.SqlClient;
+    const users = yield* Effect.serviceOption(FleetUsers.FleetUsers);
+    // The enclosing capture and SQL transaction own the span for this per-commit callback.
+    const commit = Effect.fnUntraced(function* (observation: FleetUsers.FleetUsersObservation) {
+      return yield* sql.withTransaction(
+        Effect.gen(function* () {
+          const sourceGeneration = yield* Journal.sourceGeneration();
+          yield* Journal.recordObservation(observation);
+          return yield* effect.pipe(
+            Effect.provideService(AgentEventCapture, {
+              sourceGeneration,
+              directoryGeneration: observation.observationGeneration,
+            }),
+          );
+        }),
+      );
+    });
+    return yield* Option.isSome(users)
+      ? users.value.withObservationSnapshot(commit)
+      : commit(absentDirectory);
   });
-  return yield* Option.isSome(users)
-    ? users.value.withObservationSnapshot(commit)
-    : commit(absentDirectory);
-});

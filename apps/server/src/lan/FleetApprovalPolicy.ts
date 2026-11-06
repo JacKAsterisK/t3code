@@ -1,3 +1,4 @@
+// @effect-diagnostics globalJsonInEffect:off -- Signed policy documents contain validated JSON data.
 // @effect-diagnostics preferSchemaOverJson:off -- SQL retains canonical signed snapshots and their high-watermark.
 import { FleetApprovalPolicy as Entry } from "../../../../packages/contracts/src/fleetApprovalPolicy.ts";
 import * as Clock from "effect/Clock";

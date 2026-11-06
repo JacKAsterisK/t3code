@@ -1,3 +1,4 @@
+import { resolveThreadListV2MachineGrouping } from "./threadListV2";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { createInboxReturnTracker } from "@t3tools/client-runtime/state/thread-inbox";
 import { presentThreadShell } from "@t3tools/client-runtime/state/models";
@@ -14,7 +15,7 @@ import {
   type ThreadMoveAvailability,
 } from "./threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
+import { canSnooze, resolveSnoozePresets } from "@t3tools/client-runtime/state/thread-settled";
 import {
   CommandId,
   EnvironmentId,
@@ -23,8 +24,10 @@ import {
   ProjectId,
   ProviderInstanceId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
+import type { MenuAction } from "@react-native-menu/menu";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
@@ -34,9 +37,10 @@ import {
   buildThreadListV2Items,
   buildThreadListV2ListItems,
   getThreadListV2OrderedSection,
+  layoutThreadListV2RowMenuActions,
   resolveThreadListV2SnoozeMenuSelection,
+  resolveThreadListV2SwipeActions,
   resolveThreadListV2SnoozePresets,
-  resolveThreadListV2MachineGrouping,
   resolveThreadListV2Status,
   resolveThreadListV2WokeAt,
   sortThreadsForListV2,
@@ -97,6 +101,53 @@ describe("resolveThreadListV2SnoozePresets", () => {
     );
     // The evening preset is gone by 19:15; a reading from 10:00 would still offer it.
     expect(presets.map((preset) => preset.id)).not.toContain("at:today:18:00");
+  });
+});
+
+describe("layoutThreadListV2RowMenuActions", () => {
+  const actions = (...ids: string[]): MenuAction[] => ids.map((id) => ({ id, title: id }));
+  const leafIds = (items: readonly MenuAction[]): string[] =>
+    items.flatMap((item) => (item.subactions ? leafIds(item.subactions) : [item.id!]));
+
+  it("keeps every action once while nesting iOS secondary actions under More", () => {
+    const full = {
+      direct: actions("new-thread-on-branch", "copy-thread", "copy-thread-id", "settle", "snooze"),
+      reorder: actions("arrange", "move-up", "move-down"),
+      pin: actions("unpin"),
+      secondary: actions("rename", "regenerate-title", "turn-into-project", "archive", "delete"),
+    };
+    const flat = layoutThreadListV2RowMenuActions({ ...full, nested: false });
+    const nested = layoutThreadListV2RowMenuActions({ ...full, nested: true });
+
+    expect(flat.map((action) => action.id)).toEqual(
+      [...full.direct, ...full.reorder, ...full.pin, ...full.secondary].map((action) => action.id),
+    );
+    expect(nested.map((action) => action.id)).toEqual([
+      "new-thread-on-branch",
+      "copy-thread",
+      "copy-thread-id",
+      "settle",
+      "snooze",
+      "unpin",
+      "more",
+    ]);
+    expect(nested.at(-1)?.subactions?.map((action) => action.id)).toEqual([
+      "arrange-menu",
+      "rename",
+      "regenerate-title",
+      "turn-into-project",
+      "archive",
+      "delete",
+    ]);
+    expect(leafIds(nested).toSorted()).toEqual(leafIds(flat).toSorted());
+
+    // Slim rows only offer "Arrange threads…", which needs no submenu of its own.
+    const slim = layoutThreadListV2RowMenuActions({
+      ...full,
+      reorder: actions("arrange"),
+      nested: true,
+    });
+    expect(slim.at(-1)?.subactions?.[0]?.id).toBe("arrange");
   });
 });
 
@@ -161,32 +212,35 @@ describe("resolveThreadListV2Status", () => {
   );
 });
 
-describe("queued messages keep a settled thread active", () => {
-  const threads = [
-    makeThread({ id: ThreadId.make("active"), title: "Active" }),
-    makeThread({ id: ThreadId.make("settled"), title: "Settled", settledOverride: "settled" }),
-    makeThread({
-      id: ThreadId.make("settled-queued"),
-      title: "Settled with outbox",
-      settledOverride: "settled",
-    }),
-  ];
-  const queuedThreadKeys = new Set([`${environmentId}:settled-queued`]);
+describe("resolveThreadListV2SwipeActions", () => {
+  it("offers snooze for a presented input request and moves it onto the snoozed shelf", () => {
+    const raw = makeRawThreadShell({
+      pendingRuntimeRequest: {
+        id: RuntimeRequestId.make("question"),
+        kind: "user_input",
+        createdAt: DateTime.makeUnsafe(NOW),
+      },
+    });
+    const thread = presentThreadShell(environmentId, raw);
+    expect(thread.pendingUserInputAt).toBe(NOW);
+    expect(
+      resolveThreadListV2SwipeActions({
+        variant: "card",
+        settlementSupported: true,
+        snoozeSupported: true,
+        snoozable: canSnooze(thread, { now: NOW }),
+      }).secondary,
+    ).toBe("snooze");
 
-  it("lists the thread in the active block instead of the settled shelf", () => {
     const layout = buildThreadListV2Items({
-      threads,
+      threads: [{ ...thread, snoozedAt: NOW, snoozedUntil: "2026-06-03T00:00:00.000Z" }],
       environmentId: null,
       searchQuery: "",
       now: NOW,
-      queuedThreadKeys,
+      snoozedShelfExpanded: true,
+      snoozeEnvironmentIds: new Set([environmentId]),
     });
-    expect(layout.items.map((item) => [item.thread.id, item.variant] as const)).toEqual([
-      ["active", "card"],
-      ["settled-queued", "card"],
-      ["settled", "slim"],
-    ]);
-    expect(layout.settledCount).toBe(1);
+    expect(layout.snoozedCount).toBe(1);
   });
 });
 
@@ -1718,6 +1772,35 @@ describe("Working section beta", () => {
       "v2-settled-shelf",
       "settled",
     ]);
+  });
+});
+
+describe("queued messages keep a settled thread active", () => {
+  const threads = [
+    makeThread({ id: ThreadId.make("active"), title: "Active" }),
+    makeThread({ id: ThreadId.make("settled"), title: "Settled", settledOverride: "settled" }),
+    makeThread({
+      id: ThreadId.make("settled-queued"),
+      title: "Settled with outbox",
+      settledOverride: "settled",
+    }),
+  ];
+  const queuedThreadKeys = new Set([`${environmentId}:settled-queued`]);
+
+  it("lists the thread in the active block instead of the settled shelf", () => {
+    const layout = buildThreadListV2Items({
+      threads,
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+      queuedThreadKeys,
+    });
+    expect(layout.items.map((item) => [item.thread.id, item.variant] as const)).toEqual([
+      ["active", "card"],
+      ["settled-queued", "card"],
+      ["settled", "slim"],
+    ]);
+    expect(layout.settledCount).toBe(1);
   });
 });
 

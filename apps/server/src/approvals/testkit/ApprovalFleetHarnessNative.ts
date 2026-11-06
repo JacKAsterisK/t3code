@@ -1,4 +1,5 @@
-﻿import { assert } from "@effect/vitest";
+// @effect-diagnostics processEnvInEffect:off -- The native fixture launches an explicitly isolated provider subprocess.
+import { assert } from "@effect/vitest";
 import {
   CodexSettings,
   CommandId,
@@ -19,7 +20,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -122,7 +123,7 @@ export const startNative = Effect.fn("ApprovalFleetHarness.startNative")(functio
     settings: yield* decodeSettings({}),
     environment: {},
     clientFactory: { open: () => Effect.succeed(client) },
-    crypto: yield* Crypto.Crypto,
+    digest: yield* Digest.Digest,
     fileSystem: yield* FileSystem.FileSystem,
     idAllocator: yield* IdAllocator.IdAllocatorV2,
     serverConfig: config,

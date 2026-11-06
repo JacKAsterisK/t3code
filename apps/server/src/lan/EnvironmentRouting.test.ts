@@ -141,7 +141,7 @@ const metadata: OrchestratorMcpThreadReadResult = {
   nextPosition: null,
   hasMore: false,
 };
-const page: typeof LanTaskObserveResult.Type = {
+const page: LanTaskObserveResult = {
   taskWorkState: "result_available",
   taskResultRunId: runId,
   taskResultStatus: "completed",
@@ -481,7 +481,7 @@ it.effect(
         eventId: EventId.make("event:removed-future"),
         sequence: 9,
       };
-      const current = yield* Ref.make<typeof LanTaskObserveResult.Type>({
+      const current = yield* Ref.make<LanTaskObserveResult>({
         ...page,
         events: [...page.events, future],
         nextCursor: { sourceId, sequence: 9, anchorEventId: future.eventId },

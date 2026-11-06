@@ -1,11 +1,31 @@
 // @effect-diagnostics nodeBuiltinImport:off - Effect has no SOCKS proxy or address block list.
+import * as NodeDnsPromises from "node:dns/promises";
 import * as NodeNet from "node:net";
 
-import { resolveAllowedAddresses } from "@t3tools/shared/publicAddress";
+import { isNonPublicAddress as isLocal } from "@t3tools/shared/publicAddress";
 import * as Effect from "effect/Effect";
 
+// Clash and Mihomo fake-IP DNS answers from here, inside the blocked 198.18.0.0/15.
+const FAKE_IP = new NodeNet.BlockList();
+FAKE_IP.addSubnet("198.18.0.0", 15, "ipv4");
+const MAX_FAKE_IP_HOSTS = 3;
+
 // Connect only to checked addresses to prevent DNS rebinding.
-const publicAddresses = (host: string) => resolveAllowedAddresses(host);
+const publicAddresses = async (host: string, fakeIpHosts: Map<string, string>) => {
+  const addresses = NodeNet.isIP(host)
+    ? [{ address: host, family: NodeNet.isIP(host) }]
+    : await NodeDnsPromises.lookup(host, { all: true, verbatim: true }).catch(() => []);
+  if (addresses.length === 0) return undefined;
+  const local = addresses.some(({ address, family }) => isLocal(address, family));
+  if (!local) return addresses;
+  const fake =
+    !NodeNet.isIP(host) &&
+    addresses.every(({ address, family }) => family === 4 && FAKE_IP.check(address, "ipv4"));
+  if (fake && fakeIpHosts.size < MAX_FAKE_IP_HOSTS && !fakeIpHosts.has(host)) {
+    fakeIpHosts.set(host, addresses[0]!.address);
+  }
+  return undefined;
+};
 
 // SOCKS5 (RFC 1928) replies: success, refused by rule, host unreachable, command unsupported.
 const reply = (code: number) => Buffer.from([5, code, 0, 1, 0, 0, 0, 0, 0, 0]);
@@ -37,10 +57,15 @@ const readRequest = (data: Buffer) => {
 /** Covers requests Chrome's Local Network Access misses, including speculation prefetches. */
 export const publicProxy = Effect.acquireRelease(
   Effect.callback<
-    { readonly server: NodeNet.Server; readonly sockets: Set<NodeNet.Socket> },
+    {
+      readonly server: NodeNet.Server;
+      readonly sockets: Set<NodeNet.Socket>;
+      readonly fakeIpHosts: ReadonlyMap<string, string>;
+    },
     Error
   >((resume) => {
     const sockets = new Set<NodeNet.Socket>();
+    const fakeIpHosts = new Map<string, string>();
     const track = (socket: NodeNet.Socket) => {
       sockets.add(socket);
       socket.on("close", () => sockets.delete(socket));
@@ -76,7 +101,7 @@ export const publicProxy = Effect.acquireRelease(
           early.push(chunk);
         };
         client.on("data", holdEarly);
-        void publicAddresses(request.host).then((addresses) => {
+        void publicAddresses(request.host, fakeIpHosts).then((addresses) => {
           if (client.destroyed) return;
           client.off("data", holdEarly);
           if (addresses === undefined) return refuse(client, 2);
@@ -89,7 +114,7 @@ export const publicProxy = Effect.acquireRelease(
               autoSelectFamily: true,
               lookup: (_host, options, callback) =>
                 options.all
-                  ? callback(null, [...addresses])
+                  ? callback(null, addresses)
                   : callback(null, addresses[0]!.address, addresses[0]!.family),
             }),
           );
@@ -111,7 +136,7 @@ export const publicProxy = Effect.acquireRelease(
     });
     server.listen(0, "127.0.0.1", () => {
       listening = true;
-      resume(Effect.succeed({ server, sockets }));
+      resume(Effect.succeed({ server, sockets, fakeIpHosts }));
     });
   }),
   ({ server, sockets }) =>
@@ -120,8 +145,9 @@ export const publicProxy = Effect.acquireRelease(
       server.close(() => resume(Effect.void));
     }),
 ).pipe(
-  Effect.map(({ server }) => {
+  Effect.map(({ server, fakeIpHosts }) => {
     const address = server.address();
-    return typeof address === "object" && address !== null ? address.port : 0;
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    return { port, fakeIpHosts };
   }),
 );

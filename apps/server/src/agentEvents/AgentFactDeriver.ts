@@ -6,7 +6,7 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as ApprovalPresentation from "../approvals/ApprovalPresentation.ts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -105,7 +105,7 @@ const make = Effect.fn("AgentFactDeriver.make")(function* (environment: {
   readonly label: string;
 }) {
   const sql = yield* SqlClient.SqlClient;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* Digest.Digest;
   const source = yield* SourceStore.OrchestrationEventStore;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const users = yield* FleetUsers.FleetUsers;
@@ -127,7 +127,7 @@ const make = Effect.fn("AgentFactDeriver.make")(function* (environment: {
         threadId: ThreadId.make(threadId),
         request,
         item,
-      }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+      }).pipe(Effect.provideService(Digest.Digest, crypto));
       if (presentation === undefined || request.responseCapability.type !== "live") continue;
       shown.set(request.id, {
         ...presentation,

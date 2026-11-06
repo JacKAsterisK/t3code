@@ -1,3 +1,4 @@
+import { requestUrl } from "../requestUrl.ts";
 // Loopback-only hubs expose shell execution or unauthenticated actions.
 // Proxy with environment read scope for streams and operate scope for input and tuning.
 import { AuthOrchestrationReadScope, AuthOrchestrationOperateScope } from "@t3tools/contracts";
@@ -8,6 +9,7 @@ import * as Option from "effect/Option";
 import {
   HttpClient,
   HttpClientRequest,
+  HttpMethod,
   HttpRouter,
   HttpServerRequest,
   HttpServerResponse,
@@ -137,6 +139,9 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
 ) {
   const httpClient = HttpClient.withScope(yield* HttpClient.HttpClient);
   const method = request.method;
+  if (!HttpMethod.isHttpMethod(method)) {
+    return HttpServerResponse.text("Method Not Allowed", { status: 405 });
+  }
   const upstreamRequest = HttpClientRequest.make(method)(upstreamUrl).pipe(
     HttpClientRequest.setHeaders({
       ...forwardHeaders(request, new URL(upstreamUrl).origin),
@@ -178,7 +183,7 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
 
 const handler = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
-  const url = HttpServerRequest.toURL(request);
+  const url = requestUrl(request);
   if (Option.isNone(url)) {
     return HttpServerResponse.text("Bad Request", { status: 400 });
   }

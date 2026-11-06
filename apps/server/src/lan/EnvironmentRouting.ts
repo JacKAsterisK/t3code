@@ -47,7 +47,7 @@ type Targeted<A> = A & {
   readonly runtimeCeiling?: RuntimeMode;
   readonly replayFromStart?: boolean;
 };
-type Result = typeof LanRoutedResult.Type;
+type Result = LanRoutedResult;
 const decodeEnvelope = Schema.decodeUnknownEffect(LanRoutedResult);
 const decodeLaunch = Schema.decodeUnknownEffect(LanTaskLaunchResult);
 const decodeList = Schema.decodeUnknownEffect(OrchestratorMcpThreadListResult);

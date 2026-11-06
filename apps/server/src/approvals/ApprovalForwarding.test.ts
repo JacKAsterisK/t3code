@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import {
   AuthSessionId,
@@ -283,7 +284,7 @@ const fixture = Effect.fn("ForwardingFixture.make")(function* (
 });
 const dependencies = Layer.mergeAll(
   NodeSqliteClient.layer({ filename: ":memory:" }),
-  NodeServices.layer,
+  Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
 );
 
 it.effect(
@@ -649,7 +650,10 @@ it.effect.each(["list", "read"] as const)(
       assert.deepEqual(f.readIdentities, [undefined]);
       assert.deepEqual(yield* f.sql`SELECT * FROM agent_approval_forward_operations`, []);
     }).pipe(
-      Effect.provide([NodeSqliteClient.layer({ filename: ":memory:" }), NodeServices.layer]),
+      Effect.provide([
+        NodeSqliteClient.layer({ filename: ":memory:" }),
+        Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
+      ]),
       Effect.scoped,
     ),
 );

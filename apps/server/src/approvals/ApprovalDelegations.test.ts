@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import {
   AuthOrchestrationApproveScope,
@@ -162,7 +163,10 @@ const fixture = Effect.gen(function* () {
       );
   return { sql, service, linkId, port, gate, seedThread, authenticate, enablePolicy };
 });
-const database = Layer.merge(NodeSqliteClient.layer({ filename: ":memory:" }), NodeServices.layer);
+const database = Layer.merge(
+  NodeSqliteClient.layer({ filename: ":memory:" }),
+  Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
+);
 
 it.effect.each(["approval-required", "full-access"] as const)(
   "requires exact link/client creation provenance or destination delegation at %s access",

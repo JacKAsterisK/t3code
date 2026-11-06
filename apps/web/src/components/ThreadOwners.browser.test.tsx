@@ -78,7 +78,7 @@ async function renderFleetApp(router: ReturnType<typeof fleetRouter>) {
 }
 
 const row = (thread: { readonly title: string }) =>
-  page.getByRole("treeitem", { name: new RegExp(thread.title) });
+  page.getByTestId("sidebar-row-card").filter({ hasText: thread.title });
 const ownerSet = (threadId: string, ownerId: string) =>
   expect.objectContaining({ type: "thread.owner.set", threadId, ownerId });
 

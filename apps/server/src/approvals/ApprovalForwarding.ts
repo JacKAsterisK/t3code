@@ -1,3 +1,4 @@
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import {
   ApprovalFailureCode,
   ApprovalReceiptResult,
@@ -12,7 +13,7 @@ import {
 } from "@t3tools/shared/approvalPresentation";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -100,7 +101,8 @@ export class ApprovalForwarding extends Context.Service<
 const make = Effect.gen(function* () {
   const hooks = yield* ApprovalTestHooks;
   const sql = yield* SqlClient.SqlClient;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* Digest.Digest;
+  const random = yield* SecureRandom.SecureRandom;
   const authority = yield* Authority.ApprovalAuthority;
   const sessions = yield* SessionStore.SessionStore;
   const peers = yield* PeerMcpClient.PeerMcpClient;
@@ -373,7 +375,7 @@ const make = Effect.gen(function* () {
     (effect) =>
       reconcileGate.withPermit(effect).pipe(
         Effect.provideService(SqlClient.SqlClient, sql),
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(Digest.Digest, crypto),
         Effect.catchCause((cause) =>
           Effect.logWarning("Linked approval reconciliation could not scan.", { cause }),
         ),
@@ -498,7 +500,7 @@ const make = Effect.gen(function* () {
           message: "This retry key already identifies a different approval operation.",
         });
       if (row === undefined) {
-        const receiptId = `apf_${yield* crypto.randomUUIDv4()}`;
+        const receiptId = `apf_${yield* random.uuidV4()}`;
         const key = `fwd:${yield* approvalOperationDigest(["approval-v1", here, current.initiating_client_id, input.clientRequestId])}`;
         const { environmentId: _target, ...localInput } = input;
         const proposal: Wire.ApprovalForwardOperation = {
@@ -590,7 +592,7 @@ const make = Effect.gen(function* () {
     (effect) =>
       effect.pipe(
         Effect.provideService(SqlClient.SqlClient, sql),
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(Digest.Digest, crypto),
         Effect.mapError((cause) =>
           isFailure(cause)
             ? cause

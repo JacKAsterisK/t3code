@@ -96,24 +96,29 @@ it.each([
       denied.push(name);
       throw new Error(`Unexpected desktop entry port: ${name}`);
     };
-    const compileCache =
-      entry === "src/boot.ts"
-        ? await NodeFSP.readFile(NodePath.join(root, "compileCache.cjs"), "utf8")
-        : undefined;
-    const evaluate = (code: string) => {
+    const sources = new Map<string, string>();
+    for (const file of await NodeFSP.readdir(root, { withFileTypes: true }))
+      if (file.isFile() && file.name.endsWith(".cjs"))
+        sources.set(file.name, await NodeFSP.readFile(NodePath.join(root, file.name), "utf8"));
+    const modules = new Map<string, { exports: unknown }>();
+    const evaluate = (filename: string): unknown => {
+      const cached = modules.get(filename);
+      if (cached) return cached.exports;
+      const code = sources.get(filename);
+      NodeAssert.notEqual(code, undefined, `Missing generated module ${filename}`);
       const exports = {};
-      new NodeVM.Script(`(function(require,module,exports,process){\n${code}\n})`).runInNewContext(
-        {},
-      )(
+      const module = { exports: exports as unknown };
+      modules.set(filename, module);
+      new NodeVM.Script(
+        `(function(require,module,exports,process,__filename,__dirname){\n${code}\n})`,
+      ).runInNewContext({})(
         (id: string) => {
-          if (id === "./compileCache.cjs" && compileCache !== undefined) {
-            evaluate(compileCache);
-            return {};
-          }
           if (id === "./main.cjs" && entry === "src/boot.ts") {
             events.push("main");
             return {};
           }
+          if (/^\.\/[A-Za-z0-9_-]+\.cjs$/u.test(id) && sources.has(id.slice(2)))
+            return evaluate(id.slice(2));
           if (id === "node:module")
             return {
               enableCompileCache: (location: string) => {
@@ -124,6 +129,9 @@ it.each([
           if (id === "node:os")
             return { tmpdir: () => NodePath.join(root, "temp"), homedir: () => root };
           if (id === "node:path") return NodePath;
+          // The bundled prepared-cache helpers import these ports, but ordinary boot
+          // must not call them. Empty ports fail if that contract changes.
+          if (["node:fs", "node:v8", "node:zlib", "node:url"].includes(id)) return {};
           if (id === "electron")
             return {
               contextBridge: {
@@ -143,13 +151,16 @@ it.each([
             };
           return refuse(`external require ${id}`)();
         },
-        { exports },
+        module,
         exports,
         { platform: "win32", env: {} },
+        NodePath.join(root, filename),
+        root,
       );
+      return module.exports;
     };
     const output = entry === "src/boot.ts" ? "boot.cjs" : "preload.cjs";
-    evaluate(await NodeFSP.readFile(NodePath.join(root, output), "utf8"));
+    evaluate(output);
     NodeAssert.deepEqual(denied, []);
     if (entry === "src/boot.ts") {
       NodeAssert.deepEqual(cachePaths, [NodePath.join(root, "temp", "T3CodeLAN", "compile-cache")]);

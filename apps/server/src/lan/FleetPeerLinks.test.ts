@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 // @effect-diagnostics nodeBuiltinImport:off -- Fixture share files are compared byte for byte, and one plain-http request sets its own Host.
 import * as NodeHttp from "node:http";
@@ -233,7 +234,7 @@ const makeMachine = (input: {
       ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-fleet-link-" })),
       Layer.provide(Layer.succeed(HostProcess.Environment, input.launchEnvironment)),
-      Layer.provideMerge(NodeServices.layer),
+      Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       Layer.fresh,
       Layer.build,
     );
@@ -284,12 +285,12 @@ const serveBehindFleetEndpoint = (machine: Machine) =>
         Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
         Layer.provide(AuthHttp.layerAuthenticatedAuth),
       ),
-      McpHttpServer.toolkitRegistration(CallerToolkit, callerHandlers).pipe(
-        Layer.provideMerge(McpHttpServer.layerMcpTransport),
+      McpHttpServer.layerMcpTransport(
+        McpHttpServer.toolkitRegistration(CallerToolkit, callerHandlers),
+      ).pipe(
         Layer.provide(
           Layer.mock(McpSessionRegistry.McpSessionRegistry)({
-            // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
-            resolve: () => Effect.succeed(undefined),
+            resolve: () => Effect.undefined,
           }),
         ),
         Layer.provide(McpOAuth.layerMcpClientAuthenticator),
@@ -564,7 +565,7 @@ it.live(
         ).toBe(true);
         expect(yield* shareSnapshot(fleet.share)).toEqual(fleetFiles);
       }),
-    ).pipe(Effect.provide(NodeServices.layer)),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.live(
@@ -614,7 +615,7 @@ it.live(
           ),
         ).toBe(true);
       }),
-    ).pipe(Effect.provide(NodeServices.layer)),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.live(
@@ -650,7 +651,7 @@ it.live(
         expect(Option.getOrUndefined(link)?.access).toBe<AuthMcpClientAccess>("read-only");
         expect(yield* callerAccess(fleet)).toBe("read-only");
       }),
-    ).pipe(Effect.provide(NodeServices.layer)),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.live(
@@ -689,7 +690,7 @@ it.live(
         expect(Option.getOrUndefined(link)?.access).toBe<AuthMcpClientAccess>("read-only");
         expect(yield* callerAccess(fleet)).toBe("read-only");
       }),
-    ).pipe(Effect.provide(NodeServices.layer)),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.live(
@@ -769,7 +770,7 @@ it.live(
         expect(yield* callerAccess(fleet)).toBe("read-only");
         expect(yield* linked.linkSessions(cryoFrog)).toHaveLength(1);
       }),
-    ).pipe(Effect.provide(NodeServices.layer)),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.live("never keeps a link above an access list that narrows during a pass", () =>
@@ -834,7 +835,7 @@ it.live("never keeps a link above an access list that narrows during a pass", ()
       expect(Option.getOrUndefined(revokingLink)?.access).toBe<AuthMcpClientAccess>("read-only");
       expect(yield* callerAccess(revoking)).toBe("read-only");
     }),
-  ).pipe(Effect.provide(NodeServices.layer)),
+  ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 /** Runs `change` once, right after `machine`'s `reads`-th access read from now. */
@@ -877,7 +878,7 @@ it.live("withdraws a peer-link code whose access narrowed while it was published
       expect((yield* linkOf)?.access).toBe<AuthMcpClientAccess>("read-only");
       expect(yield* callerAccess(fleet)).toBe("read-only");
     }),
-  ).pipe(Effect.provide(NodeServices.layer)),
+  ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.live("does nothing on either machine while the adapter is off", () =>
@@ -906,7 +907,7 @@ it.live("does nothing on either machine while the adapter is off", () =>
       expect(yield* linking.links.list).toEqual([]);
       expect(yield* linking.trust.current).toEqual([]);
     }),
-  ).pipe(Effect.provide(NodeServices.layer)),
+  ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.live("widens and narrows one pair's link through an exception, with no prompt", () =>
@@ -983,7 +984,7 @@ it.live("widens and narrows one pair's link through an exception, with no prompt
       const link = yield* linking.links.get(pandaMedic.peer.environmentId);
       expect(Option.getOrUndefined(link)?.access).toBe<AuthMcpClientAccess>("read-only");
     }),
-  ).pipe(Effect.provide(NodeServices.layer)),
+  ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.live("keeps reading through an exception's removal that the receiver reads first", () =>
@@ -1040,7 +1041,7 @@ it.live("keeps reading through an exception's removal that the receiver reads fi
         codes.filter((code) => FleetAccessPolicy.credentialAccess(code) === "standard"),
       ).toEqual([]);
     }),
-  ).pipe(Effect.provide(NodeServices.layer)),
+  ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.live("narrows an exception's link once its receiver becomes standard, and widens it back", () =>
@@ -1109,7 +1110,7 @@ it.live("narrows an exception's link once its receiver becomes standard, and wid
       expect(yield* callerAccess(fleet)).toBe("full-access");
       expect(yield* writeAccess(fleet)).toBe("full-access");
     }),
-  ).pipe(Effect.provide(NodeServices.layer)),
+  ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.live(
@@ -1173,5 +1174,5 @@ it.live(
         expect(yield* writeAccess(fleet)).toBe("capability_denied");
         expect(yield* linked.linkSessions(cryoFrog)).toHaveLength(1);
       }),
-    ).pipe(Effect.provide(NodeServices.layer)),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );

@@ -1,3 +1,4 @@
+// @effect-diagnostics globalJsonInEffect:off -- The maintenance wire response contains validated JSON data.
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- The offline native lease helper reads closed SQLite state and hashes files without loading the server runtime.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -368,6 +369,9 @@ const addedNullColumns = ["owner_id"];
 const durableRowJson = (row: Readonly<Record<string, unknown>>) => {
   const durable = { ...row };
   for (const column of addedNullColumns) if (durable[column] === null) delete durable[column];
+  // Migration 094 records the reuse behavior already implied by the task's thread binding.
+  const priorThreadMode = durable.thread_id == null ? "new_thread" : "continue";
+  if (durable.thread_mode === priorThreadMode) delete durable.thread_mode;
   return JSON.stringify(durable);
 };
 

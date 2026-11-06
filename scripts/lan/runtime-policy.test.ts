@@ -1,3 +1,4 @@
+// @effect-diagnostics effectTryWithoutCatch:off processEnvInEffect:off -- This fixture imports isolated policy modules and controls their process environment explicitly.
 // @effect-diagnostics nodeBuiltinImport:off -- These subprocess fixtures run freshly compiled public policy without application startup or installed data.
 import { it } from "@effect/vitest";
 import { expect } from "vite-plus/test";

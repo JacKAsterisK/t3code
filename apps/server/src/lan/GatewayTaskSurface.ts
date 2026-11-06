@@ -154,7 +154,7 @@ export const observeGatewayTask = async (options: {
   readonly threadId: ThreadId;
   readonly accept: (event: {
     readonly key: string;
-    readonly fact: typeof LanTaskObservation.Type;
+    readonly fact: LanTaskObservation;
   }) => Promise<void>;
   readonly acceptState?: (state: {
     readonly taskWorkState: LanTaskObserveResult["taskWorkState"];

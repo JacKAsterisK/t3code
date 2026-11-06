@@ -450,7 +450,7 @@ it("falls back only on DNS errors and preserves IPv6 lookup results and transpor
     new Promise<{
       error: NodeJS.ErrnoException | null;
       address: string | import("node:dns").LookupAddress[];
-      family?: number;
+      family: number | undefined;
     }>((resolve) =>
       fleetLookup(peer, lookup)(hostname, { all }, (error, address, family) =>
         resolve({ error, address, family }),

@@ -1,10 +1,11 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { AuthStandardClientScopes, EnvironmentHttpApi, mcpClientScopes } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Etag from "effect/http/Etag";
@@ -156,11 +157,11 @@ const makeLayerRoutes = (capture: (services: Services) => void) =>
     Layer.provide(layerConfig),
     Layer.provideMerge(
       HttpPlatform.layer.pipe(
-        Layer.provideMerge(NodeServices.layer),
+        Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
         Layer.provideMerge(Etag.layerWeak),
       ),
     ),
-    Layer.provide(NodeServices.layer),
+    Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -192,8 +193,8 @@ const mcpRequest = (token: string) =>
 const withRoutes = <A, E>(use: (handler: Handler, services: Services) => Effect.Effect<A, E>) =>
   Effect.gen(function* () {
     resetFleet();
-    const crypto = yield* Crypto.Crypto;
-    const context = Context.make(Crypto.Crypto, crypto);
+    const crypto = yield* SecureRandom.SecureRandom;
+    const context = Context.make(SecureRandom.SecureRandom, crypto);
     let services: Services | undefined;
     return yield* Effect.acquireUseRelease(
       Effect.sync(() =>
@@ -212,7 +213,7 @@ const withRoutes = <A, E>(use: (handler: Handler, services: Services) => Effect.
         }),
       (web) => Effect.promise(() => web.dispose()),
     );
-  }).pipe(Effect.provide(NodeServices.layer));
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 /** A renewable task grant for `t3_lan_*` routing, approved with `code` the way a gateway gets one. */
 const approveTaskGrant = (handler: Handler, code: string) =>

@@ -49,19 +49,17 @@ const core = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
   Layer.provideMerge(layerDatabase),
 );
 const sink = (label: string) =>
-  EventSink.EventSinkV2.pipe(
-    Effect.provide(
-      EventSink.layer.pipe(
-        Layer.provide(
-          FleetUsers.layerStatic({
-            users: [{ id: "dan", name: label }],
-            machineId: null,
-            defaultOwnerId: null,
-          }),
-        ),
+  Layer.build(
+    EventSink.layer.pipe(
+      Layer.provide(
+        FleetUsers.layerStatic({
+          users: [{ id: "dan", name: label }],
+          machineId: null,
+          defaultOwnerId: null,
+        }),
       ),
     ),
-  );
+  ).pipe(Effect.map((services) => Context.get(services, EventSink.EventSinkV2)));
 
 describe("AgentEventSourceCapture", () => {
   it.effect(

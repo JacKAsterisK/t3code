@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import type { ManagedUpdatesPolicy } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -193,30 +194,32 @@ it.layer(NodeServices.layer)("t3 update under a managed policy", (it) => {
 });
 
 it.layer(NodeServices.layer)("t3 update launcher", (it) => {
-  it.effect("repoints a symlink that lives in a runtime versions tree", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
-      const oldExe = path.join(root, "runtime/versions/1.0.0/t3");
-      const newExe = path.join(root, "runtime/versions/2.0.0/t3");
-      const launcher = path.join(root, "bin/t3");
-      for (const file of [oldExe, newExe]) {
-        yield* fs.makeDirectory(path.dirname(file), { recursive: true });
-        yield* fs.writeFileString(file, "");
-      }
-      yield* fs.makeDirectory(path.dirname(launcher), { recursive: true });
-      yield* fs.symlink(oldExe, launcher);
+  it.effect.skipIf(!symlinksSupported)(
+    "repoints a symlink that lives in a runtime versions tree",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
+        const oldExe = path.join(root, "runtime/versions/1.0.0/t3");
+        const newExe = path.join(root, "runtime/versions/2.0.0/t3");
+        const launcher = path.join(root, "bin/t3");
+        for (const file of [oldExe, newExe]) {
+          yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+          yield* fs.writeFileString(file, "");
+        }
+        yield* fs.makeDirectory(path.dirname(launcher), { recursive: true });
+        yield* fs.symlink(oldExe, launcher);
 
-      const repointed = yield* repointLauncher({
-        launchedAs: launcher,
-        baseDir: root,
-        targetEntryPath: newExe,
-      });
+        const repointed = yield* repointLauncher({
+          launchedAs: launcher,
+          baseDir: root,
+          targetEntryPath: newExe,
+        });
 
-      assert.deepStrictEqual(Option.getOrUndefined(repointed), launcher);
-      assert.equal(yield* fs.readLink(launcher), newExe);
-    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+        assert.deepStrictEqual(Option.getOrUndefined(repointed), launcher);
+        assert.equal(yield* fs.readLink(launcher), newExe);
+      }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect.each([
@@ -228,61 +231,64 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
     { name: "an unterminated launcher record", recorded: "/opt/t" },
     // Another process's append is cut short after t3 update reads the records.
     { name: "a record cut short after the read", recorded: "/opt/t3\n", cut: "/opt/t" },
-  ])("keeps the runtime a repointed launcher off PATH points at with $name", ({ recorded, cut }) =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
-      yield* TestClock.setTime(Duration.toMillis(Duration.days(1)));
-      for (const version of ["1.0.0", "2.0.0"]) {
-        const directory = path.join(root, "runtime/versions", version);
-        yield* fs.makeDirectory(directory, { recursive: true });
-        yield* fs.writeFileString(path.join(directory, "t3"), "");
-        yield* fs.writeFileString(path.join(directory, ".install-complete"), `${version}\n`);
-        yield* fs.utimes(path.join(directory, ".install-complete"), 0, 0);
-      }
-      if (recorded !== undefined) {
-        yield* fs.writeFileString(path.join(root, "runtime/launchers"), recorded);
-      }
-      // A launcher in the T3 home itself, which neither PATH nor the default bin dir reaches.
-      const launcher = path.join(root, "t3");
-      yield* fs.symlink(path.join(root, "runtime/versions/1.0.0/t3"), launcher);
+  ])(
+    "keeps the runtime a repointed launcher off PATH points at with $name",
+    ({ recorded, cut }) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
+        yield* TestClock.setTime(Duration.toMillis(Duration.days(1)));
+        for (const version of ["1.0.0", "2.0.0"]) {
+          const directory = path.join(root, "runtime/versions", version);
+          yield* fs.makeDirectory(directory, { recursive: true });
+          yield* fs.writeFileString(path.join(directory, "t3"), "");
+          yield* fs.writeFileString(path.join(directory, ".install-complete"), `${version}\n`);
+          yield* fs.utimes(path.join(directory, ".install-complete"), 0, 0);
+        }
+        if (recorded !== undefined) {
+          yield* fs.writeFileString(path.join(root, "runtime/launchers"), recorded);
+        }
+        // A launcher in the T3 home itself, which neither PATH nor the default bin dir reaches.
+        const launcher = path.join(root, "t3");
+        yield* fs.symlink(path.join(root, "runtime/versions/1.0.0/t3"), launcher);
 
-      const launchersFile = path.join(root, "runtime/launchers");
-      yield* repointLauncher({
-        launchedAs: launcher,
-        baseDir: root,
-        targetEntryPath: path.join(root, "runtime/versions/2.0.0/t3"),
-      }).pipe(
-        Effect.provideService(FileSystem.FileSystem, {
-          ...fs,
-          readFileString: (file, encoding) =>
-            fs
-              .readFileString(file, encoding)
-              .pipe(
-                Effect.tap(() =>
-                  cut === undefined || file !== launchersFile
-                    ? Effect.void
-                    : fs.writeFileString(file, cut, { flag: "a" }),
+        const launchersFile = path.join(root, "runtime/launchers");
+        yield* repointLauncher({
+          launchedAs: launcher,
+          baseDir: root,
+          targetEntryPath: path.join(root, "runtime/versions/2.0.0/t3"),
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            readFileString: (file, encoding) =>
+              fs
+                .readFileString(file, encoding)
+                .pipe(
+                  Effect.tap(() =>
+                    cut === undefined || file !== launchersFile
+                      ? Effect.void
+                      : fs.writeFileString(file, cut, { flag: "a" }),
+                  ),
                 ),
-              ),
-        }),
-      );
-      // A later server start prunes with no idea how this machine launches t3.
-      const removed = yield* prunePinnedRuntimes({ baseDir: root, keep: [] }).pipe(
-        Effect.provideService(ProcessRunner.ProcessRunner, unrelatedLsof),
-        Effect.provideService(HostProcess.Platform, "darwin"),
-        Effect.provideService(HostProcess.Environment, { PATH: "" }),
-        Effect.provideService(HostProcess.HomeDirectory, root),
-      );
+          }),
+        );
+        // A later server start prunes with no idea how this machine launches t3.
+        const removed = yield* prunePinnedRuntimes({ baseDir: root, keep: [] }).pipe(
+          Effect.provideService(ProcessRunner.ProcessRunner, unrelatedLsof),
+          Effect.provideService(HostProcess.Platform, "darwin"),
+          Effect.provideService(HostProcess.Environment, { PATH: "" }),
+          Effect.provideService(HostProcess.HomeDirectory, root),
+        );
 
-      assert.deepStrictEqual(removed, ["1.0.0"]);
-      // macOS temp dirs sit behind the /var -> /private/var symlink, so compare canonical paths.
-      assert.equal(
-        yield* fs.realPath(launcher),
-        yield* fs.realPath(path.join(root, "runtime/versions/2.0.0/t3")),
-      );
-    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+        assert.deepStrictEqual(removed, ["1.0.0"]);
+        // macOS temp dirs sit behind the /var -> /private/var symlink, so compare canonical paths.
+        assert.equal(
+          yield* fs.realPath(launcher),
+          yield* fs.realPath(path.join(root, "runtime/versions/2.0.0/t3")),
+        );
+      }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+    { skip: !symlinksSupported },
   );
 
   const launcherFixture = Effect.fnUntraced(function* () {
@@ -300,7 +306,7 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
     return { root, oldExe, newExe, launcher, launchersFile: path.join(root, "runtime/launchers") };
   });
 
-  it.effect("records a relative launcher path as absolute", () =>
+  it.effect.skipIf(!symlinksSupported)("records a relative launcher path as absolute", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -316,22 +322,24 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
     }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 
-  it.effect("fails instead of repointing a launcher it cannot record", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const { root, oldExe, newExe, launcher, launchersFile } = yield* launcherFixture();
-      // Appending to a directory fails the way a read-only or full disk would.
-      yield* fs.makeDirectory(launchersFile);
+  it.effect.skipIf(!symlinksSupported)(
+    "fails instead of repointing a launcher it cannot record",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const { root, oldExe, newExe, launcher, launchersFile } = yield* launcherFixture();
+        // Appending to a directory fails the way a read-only or full disk would.
+        yield* fs.makeDirectory(launchersFile);
 
-      const result = yield* repointLauncher({
-        launchedAs: launcher,
-        baseDir: root,
-        targetEntryPath: newExe,
-      }).pipe(Effect.exit);
+        const result = yield* repointLauncher({
+          launchedAs: launcher,
+          baseDir: root,
+          targetEntryPath: newExe,
+        }).pipe(Effect.exit);
 
-      assert.isTrue(Exit.isFailure(result));
-      assert.equal(yield* fs.readLink(launcher), oldExe);
-    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+        assert.isTrue(Exit.isFailure(result));
+        assert.equal(yield* fs.readLink(launcher), oldExe);
+      }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect.each(["recording", "repointing"] as const)(
@@ -368,9 +376,10 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
           .includes(launcher);
         assert.isFalse(repointed && !recorded);
       }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+    { skip: !symlinksSupported },
   );
 
-  it.effect("leaves a plain copy or a foreign symlink alone", () =>
+  it.effect.skipIf(!symlinksSupported)("leaves a plain copy or a foreign symlink alone", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;

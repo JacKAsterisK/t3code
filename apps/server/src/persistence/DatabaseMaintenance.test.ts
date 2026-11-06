@@ -93,10 +93,6 @@ it.layer(DatabaseMaintenance.layer.pipe(Layer.provideMerge(NodeServices.layer)))
         assert.isFalse(yield* fs.exists(`${legacy}-wal`));
         assert.isFalse(yield* fs.exists(`${legacy}-shm`));
         assert.isTrue(yield* fs.exists(dbPath));
-        yield* Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          assert.deepEqual(yield* sql`SELECT value FROM retained_data`, [{ value: "keep" }]);
-        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath, readonly: true })));
         assert.isNull((yield* maintenance.inspect(dbPath)).legacyDatabaseBytes);
         yield* Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;

@@ -17,6 +17,14 @@ export function configuredHostedAppUrl(): string {
   return import.meta.env.VITE_HOSTED_APP_URL?.trim() || DEFAULT_HOSTED_APP_URL;
 }
 
+/**
+ * The hosted app that copied thread links open through. Null in the LAN distribution, which has no
+ * hosted app, so its copies use native `t3-thread://` links instead.
+ */
+export function threadLinkHostedAppUrl(): string | null {
+  return isLanDistribution ? null : configuredHostedAppUrl();
+}
+
 function configuredBackendUrl(): string {
   return import.meta.env.VITE_HTTP_URL?.trim() || import.meta.env.VITE_WS_URL?.trim() || "";
 }

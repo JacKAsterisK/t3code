@@ -41,6 +41,7 @@ import {
   buildHostedChannelSelectionUrl,
   configuredHostedAppUrl,
   isHostedStaticApp,
+  threadLinkHostedAppUrl,
 } from "../hostedPairing";
 import {
   linkEnvironmentToCloud,
@@ -114,6 +115,8 @@ it("LAN pairing stays on the native server and refuses hosted cloud routes", () 
     "direct native",
   );
   expect(() => configuredHostedAppUrl()).toThrow("disabled");
+  // Copied thread links fall back to native t3-thread:// links instead of throwing mid-render.
+  expect(threadLinkHostedAppUrl()).toBeNull();
   expect(() => buildHostedChannelSelectionUrl({ channel: "nightly" })).toThrow("Hub");
   expect(isHostedStaticApp(new URL("https://app.t3.codes"))).toBe(false);
 });

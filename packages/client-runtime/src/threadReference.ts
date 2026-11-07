@@ -4,7 +4,7 @@ import type {
   ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
-import { hostedThreadLink } from "@t3tools/shared/threadLinks";
+import { formatThreadLink, hostedThreadLink } from "@t3tools/shared/threadLinks";
 
 import { resolveThreadCurrentPullRequestLink } from "./threadPullRequests.ts";
 
@@ -22,18 +22,22 @@ export interface ThreadReferenceCopyTarget {
 }
 
 /**
- * A link that opens the thread from anywhere, through `hostedAppUrl`, this build's hosted app. It
- * pastes back as a chip into any composer whose agent reads that thread's machine.
+ * A link that opens the thread from anywhere, through `hostedAppUrl`, this build's hosted app. A
+ * null `hostedAppUrl` means the build has none, so the link is a native `t3-thread://` Markdown link.
+ * Either pastes back as a chip into any composer whose agent reads that thread's machine.
  */
 export function threadChipCopyTarget(
   threadRef: ScopedThreadRef,
   title: string,
-  hostedAppUrl?: string,
+  hostedAppUrl?: string | null,
 ): ThreadReferenceCopyTarget {
   const record = threadContextRecord(threadRef, title);
   return {
     kind: "thread",
-    value: hostedThreadLink(threadRef, hostedAppUrl),
+    value:
+      hostedAppUrl === null
+        ? formatThreadLink(threadRef, record.title)
+        : hostedThreadLink(threadRef, hostedAppUrl),
     description: record.title,
     fragment: { version: 1, source: { environmentId: threadRef.environmentId }, records: [record] },
     clipboardTarget: "thread",
@@ -49,7 +53,8 @@ export function resolveThreadReferenceCopyTarget(input: {
   readonly openPanelPullRequestUrl?: string | null | undefined;
   readonly pullRequests?: ReadonlyArray<ThreadPullRequestLink> | undefined;
   readonly linkedPullRequestUrl?: string | null;
-  readonly hostedAppUrl?: string;
+  /** Null means the build has no hosted app; see `threadChipCopyTarget`. */
+  readonly hostedAppUrl?: string | null;
 }): ThreadReferenceCopyTarget | null {
   if (input.openPanelPullRequestUrl === null) return null;
   const pullRequestUrl =

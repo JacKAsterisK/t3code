@@ -112,4 +112,15 @@ describe("resolveThreadReferenceCopyTarget", () => {
         ?.value,
     ).toBe("https://preview.t3.codes/threads/env-1/thread-1");
   });
+
+  it("copies a native thread link that pastes back as the same chip when the build has no hosted app", () => {
+    const target = resolveThreadReferenceCopyTarget({ ...thread, hostedAppUrl: null });
+    const pasted = decodeComposerContextFragment(encodeComposerContextFragment(target!.fragment!));
+
+    expect(target!.value).toBe("[Fix the login flow](t3-thread://v2/env-1/thread-1)");
+    expect(threadLinkContextReferences(target!.value, pasted!.records, () => undefined)).toEqual({
+      text: `[Fix the login flow](t3-context://v1/thread/${pasted!.records[0]!.contextId})`,
+      records: pasted!.records,
+    });
+  });
 });

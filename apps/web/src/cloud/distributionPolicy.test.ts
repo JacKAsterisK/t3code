@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - pins the reviewed callers by scanning real source files on disk.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import { expect, it } from "@effect/vitest";

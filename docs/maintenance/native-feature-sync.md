@@ -8,6 +8,8 @@ approval before code or runtime changes.
 
 ## Baseline
 
+- LAN 1.0.37 preparation: upstream `dff0b1159b7e` (2026-11-08), on `lan/upstream-sync-20261107`. Previous published LAN 1.0.36 is `6660ea19b3133a1293260bd941007c07a20b7b13`. Application version 0.1.7 and schema 94 are unchanged; upstream added no migrations.
+
 - LAN 1.0.35 preparation: upstream `202d5b5616e3edf65706371e2b8a9c4f486d0a96` (2026-11-06), on `lan/release-1.0.35-20261106`. Previous published LAN 1.0.34 is `ceabe588958f5b1a4acb166d76fb30a711d651b8`. Application version advances to 0.1.7 and the fork schema to 94.
 
 - LAN 1.0.33 preparation: full upstream `30654b3e91a51937d1dba18fc83af19d8003f5ca` (2026-11-01), on `lan/1.0.33-mcp-session-initialize`. Previous published LAN 1.0.32 is `a526e4ba83cba19fd1196fe95f4fccbead4bab1e`. Application version remains 0.1.6; schema advances to 91.
@@ -27,6 +29,13 @@ approval before code or runtime changes.
   (off); no `userdata\lan-routing.json`, so every `t3_lan_*` call is denied; no
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
+
+## LAN 1.0.37 sync decisions
+
+- Rows 4, 6 and 13: keep the LAN approval and fleet RPC guards beside upstream's new provider-auth guard, and adopt upstream's ceiling-resolved MCP access default (`auto`) with the LAN approvals toggle.
+- Row 2: keep the `t3_lan_*` task-client route; its descriptions now send general-access callers to `t3_environment_links` ([LAN task routing](../operations/lan-task-routing.md#when-an-agent-should-use-these-tools)).
+- Row 12: migrations 001–094 unchanged.
+- Hosted-link callers stay pinned by the `distributionPolicy.test.ts` guard; upstream added none. Usage limits adopt upstream's pooled cross-environment page; the fork adds only a stale-reading notice for kept readings older than 30 minutes.
 
 ## LAN 1.0.35 sync decisions
 

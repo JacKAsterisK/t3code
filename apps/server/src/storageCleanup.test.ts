@@ -1867,9 +1867,9 @@ describe("orphan worktree reports", () => {
       Effect.gen(function* () {
         const fixture = yield* cleanupFixture();
         fixture.setThreads([]);
-        const replay = `${fixture.config.worktreesDir}/repository/replay`;
-        const deep = `${fixture.config.worktreesDir}/repository/deep`;
-        const worktrees = [`${deep}/a/b`, `${replay}/1376`];
+        const replay = NodePath.normalize(`${fixture.config.worktreesDir}/repository/replay`);
+        const deep = NodePath.normalize(`${fixture.config.worktreesDir}/repository/deep`);
+        const worktrees = [NodePath.join(deep, "a", "b"), NodePath.join(replay, "1376")];
         for (const [index, worktree] of worktrees.entries()) {
           yield* fixture.command(fixture.repo, [
             "worktree",
@@ -1897,8 +1897,8 @@ describe("orphan worktree reports", () => {
       Effect.gen(function* () {
         const fixture = yield* cleanupFixture();
         fixture.setThreads([]);
-        const replay = `${fixture.config.worktreesDir}/repository/replay`;
-        const worktree = `${replay}/1376`;
+        const replay = NodePath.normalize(`${fixture.config.worktreesDir}/repository/replay`);
+        const worktree = NodePath.join(replay, "1376");
         yield* fixture.command(fixture.repo, ["worktree", "add", "-b", "locked", worktree]);
         yield* fixture.command(fixture.repo, ["worktree", "lock", worktree]);
         yield* fixture.fs.rename(worktree, `${replay}/moved`);

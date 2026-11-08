@@ -369,7 +369,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
         ),
       );
       if (input.prints !== undefined) {
-        expect(lines.join("\n")).toContain(input.prints.replace("<baseDir>", baseDir));
+        // Host commands are PowerShell-quoted on Windows (cli/invocation.ts).
+        const baseDirArgs =
+          HostProcess.Platform.defaultValue() === "win32"
+            ? `"--base-dir" "${baseDir}"`
+            : `--base-dir ${baseDir}`;
+        expect(lines.join("\n")).toContain(
+          input.prints.replace("--base-dir <baseDir>", baseDirArgs),
+        );
       }
       if (input.reportStatus) {
         expect(JSON.parse(lines.join("\n"))).toMatchObject({

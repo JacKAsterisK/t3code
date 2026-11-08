@@ -13,6 +13,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
@@ -244,148 +245,151 @@ describe("AntigravityAdapterV2 session open", () => {
 });
 
 describe("AntigravityAdapterV2 client file system", () => {
-  it.effect("serves confined reads and leaves edits to the agent's diff tools", () =>
-    Effect.gen(function* () {
-      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const host = yield* ProviderHost.ProviderHost;
-      const mockAgentPath = yield* path.fromFileUrl(
-        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
-      );
-      type RuntimeService = AcpSessionRuntime.AcpSessionRuntime["Service"];
-      // effect-acp keeps the last handler registered per method; so does this.
-      let readTextFile: Parameters<RuntimeService["handleReadTextFile"]>[0] | undefined;
-      let writeTextFile: Parameters<RuntimeService["handleWriteTextFile"]>[0] | undefined;
-      const logs = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-antigravity-log-" });
-      const requestLog = path.join(logs, "requests.ndjson");
-      const crypto = yield* SecureRandom.SecureRandom;
-      const instanceId = ProviderInstanceId.make("antigravity-containment-test");
-      const adapter = yield* makeAntigravityAdapterV2({
-        instanceId,
-        selfInvocation: yield* resolveSelfInvocation(),
-        makeRuntime: (input) =>
-          makeAntigravityAcpRuntime({
-            ...input,
-            childProcessSpawner,
-            spawn: {
-              command: process.execPath,
-              args: [mockAgentPath],
-              cwd: input.cwd,
-              env: { T3_ACP_ANTIGRAVITY: "1", T3_ACP_REQUEST_LOG_PATH: requestLog },
-            },
-          }).pipe(
-            Effect.provideService(SecureRandom.SecureRandom, crypto),
-            Effect.map((runtime): RuntimeService => ({
-              ...runtime,
-              handleReadTextFile: (handler) =>
-                Effect.sync(() => {
-                  readTextFile = handler;
-                }).pipe(Effect.andThen(runtime.handleReadTextFile(handler))),
-              handleWriteTextFile: (handler) =>
-                Effect.sync(() => {
-                  writeTextFile = handler;
-                }).pipe(Effect.andThen(runtime.handleWriteTextFile(handler))),
-            })),
-          ),
-        withProcess: (_stop, task) => task,
-        defaultModel: Effect.undefined,
-      });
-      const workspace = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-antigravity-workspace-",
-      });
-      const outside = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-antigravity-outside-",
-      });
-      const outsideFile = path.join(outside, "secret.txt");
-      yield* fileSystem.writeFileString(outsideFile, "secret");
-      const attachment = path.join(host.paths.attachmentsDir, "pasted.txt");
-      yield* fileSystem.writeFileString(attachment, "pasted");
+  // The escaping-symlink fixture needs symlink support (Windows: Developer Mode or elevation).
+  it.effect.skipIf(!symlinksSupported)(
+    "serves confined reads and leaves edits to the agent's diff tools",
+    () =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const host = yield* ProviderHost.ProviderHost;
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        type RuntimeService = AcpSessionRuntime.AcpSessionRuntime["Service"];
+        // effect-acp keeps the last handler registered per method; so does this.
+        let readTextFile: Parameters<RuntimeService["handleReadTextFile"]>[0] | undefined;
+        let writeTextFile: Parameters<RuntimeService["handleWriteTextFile"]>[0] | undefined;
+        const logs = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-antigravity-log-" });
+        const requestLog = path.join(logs, "requests.ndjson");
+        const crypto = yield* SecureRandom.SecureRandom;
+        const instanceId = ProviderInstanceId.make("antigravity-containment-test");
+        const adapter = yield* makeAntigravityAdapterV2({
+          instanceId,
+          selfInvocation: yield* resolveSelfInvocation(),
+          makeRuntime: (input) =>
+            makeAntigravityAcpRuntime({
+              ...input,
+              childProcessSpawner,
+              spawn: {
+                command: process.execPath,
+                args: [mockAgentPath],
+                cwd: input.cwd,
+                env: { T3_ACP_ANTIGRAVITY: "1", T3_ACP_REQUEST_LOG_PATH: requestLog },
+              },
+            }).pipe(
+              Effect.provideService(SecureRandom.SecureRandom, crypto),
+              Effect.map((runtime): RuntimeService => ({
+                ...runtime,
+                handleReadTextFile: (handler) =>
+                  Effect.sync(() => {
+                    readTextFile = handler;
+                  }).pipe(Effect.andThen(runtime.handleReadTextFile(handler))),
+                handleWriteTextFile: (handler) =>
+                  Effect.sync(() => {
+                    writeTextFile = handler;
+                  }).pipe(Effect.andThen(runtime.handleWriteTextFile(handler))),
+              })),
+            ),
+          withProcess: (_stop, task) => task,
+          defaultModel: Effect.undefined,
+        });
+        const workspace = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-antigravity-workspace-",
+        });
+        const outside = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-antigravity-outside-",
+        });
+        const outsideFile = path.join(outside, "secret.txt");
+        yield* fileSystem.writeFileString(outsideFile, "secret");
+        const attachment = path.join(host.paths.attachmentsDir, "pasted.txt");
+        yield* fileSystem.writeFileString(attachment, "pasted");
 
-      const threadId = ThreadId.make("thread-antigravity-containment");
-      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        cwd: workspace,
-      });
-      const modelSelection = { instanceId, model: "gemini-test-low" } as const;
-      const session = yield* adapter.openSession({
-        threadId,
-        providerSessionId: ProviderSessionId.make("provider-session-antigravity-containment"),
-        modelSelection,
-        runtimePolicy,
-      });
-      yield* session.ensureThread({ threadId, modelSelection, runtimePolicy });
-      const initialize = (yield* fileSystem.readFileString(requestLog))
-        .trim()
-        .split("\n")
-        .map(
-          (line) =>
-            JSON.parse(line) as {
-              method?: string;
-              params?: { clientCapabilities?: { fs?: unknown }; clientInfo?: { name?: string } };
-            },
-        )
-        .find((request) => request.method === "initialize");
-      assert.deepEqual(initialize?.params?.clientCapabilities?.fs, {
-        readTextFile: true,
-        writeTextFile: false,
-      });
-      assert.equal(initialize?.params?.clientInfo?.name, "zed");
-      assert.isUndefined(writeTextFile);
-      if (readTextFile === undefined) {
-        return yield* Effect.die("Antigravity sessions must serve client file reads");
-      }
-      const context = (method: string) => ({ requestId: `test-${method}`, method });
+        const threadId = ThreadId.make("thread-antigravity-containment");
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: workspace,
+        });
+        const modelSelection = { instanceId, model: "gemini-test-low" } as const;
+        const session = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-antigravity-containment"),
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* session.ensureThread({ threadId, modelSelection, runtimePolicy });
+        const initialize = (yield* fileSystem.readFileString(requestLog))
+          .trim()
+          .split("\n")
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                method?: string;
+                params?: { clientCapabilities?: { fs?: unknown }; clientInfo?: { name?: string } };
+              },
+          )
+          .find((request) => request.method === "initialize");
+        assert.deepEqual(initialize?.params?.clientCapabilities?.fs, {
+          readTextFile: true,
+          writeTextFile: false,
+        });
+        assert.equal(initialize?.params?.clientInfo?.name, "zed");
+        assert.isUndefined(writeTextFile);
+        if (readTextFile === undefined) {
+          return yield* Effect.die("Antigravity sessions must serve client file reads");
+        }
+        const context = (method: string) => ({ requestId: `test-${method}`, method });
 
-      const insidePath = path.join(workspace, "src", "inside.ts");
-      yield* fileSystem.makeDirectory(path.dirname(insidePath), { recursive: true });
-      yield* fileSystem.writeFileString(insidePath, "inside");
-      const pasted = yield* readTextFile(
-        { sessionId: "mock-session-1", path: attachment },
-        context("fs/read_text_file"),
-      );
-      assert.equal(pasted.content, "pasted");
-      yield* fileSystem.writeFileString(insidePath, "\uFEFFfirst\né中🙂\nlast");
-      const sliced = yield* readTextFile(
-        { sessionId: "mock-session-1", path: insidePath, line: 2, limit: 1 },
-        context("fs/read_text_file"),
-      );
-      assert.equal(sliced.content, "é中🙂");
-      yield* fileSystem.writeFileString(insidePath, "inside");
-      for (const [name, bytes] of [
-        ["image.png", new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
-        ["data.bin", new Uint8Array([0x61, 0, 0x62])],
-      ] as const) {
-        const binaryPath = path.join(workspace, name);
-        yield* fileSystem.writeFile(binaryPath, bytes);
-        const binaryRead = yield* readTextFile(
-          { sessionId: "mock-session-1", path: binaryPath },
+        const insidePath = path.join(workspace, "src", "inside.ts");
+        yield* fileSystem.makeDirectory(path.dirname(insidePath), { recursive: true });
+        yield* fileSystem.writeFileString(insidePath, "inside");
+        const pasted = yield* readTextFile(
+          { sessionId: "mock-session-1", path: attachment },
           context("fs/read_text_file"),
-        ).pipe(Effect.flip);
-        assert.propertyVal(binaryRead, "code", -32602, `${name} is refused as binary`);
-      }
+        );
+        assert.equal(pasted.content, "pasted");
+        yield* fileSystem.writeFileString(insidePath, "\uFEFFfirst\né中🙂\nlast");
+        const sliced = yield* readTextFile(
+          { sessionId: "mock-session-1", path: insidePath, line: 2, limit: 1 },
+          context("fs/read_text_file"),
+        );
+        assert.equal(sliced.content, "é中🙂");
+        yield* fileSystem.writeFileString(insidePath, "inside");
+        for (const [name, bytes] of [
+          ["image.png", new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+          ["data.bin", new Uint8Array([0x61, 0, 0x62])],
+        ] as const) {
+          const binaryPath = path.join(workspace, name);
+          yield* fileSystem.writeFile(binaryPath, bytes);
+          const binaryRead = yield* readTextFile(
+            { sessionId: "mock-session-1", path: binaryPath },
+            context("fs/read_text_file"),
+          ).pipe(Effect.flip);
+          assert.propertyVal(binaryRead, "code", -32602, `${name} is refused as binary`);
+        }
 
-      const outsideRead = yield* readTextFile(
-        { sessionId: "mock-session-1", path: outsideFile },
-        context("fs/read_text_file"),
-      ).pipe(Effect.exit);
-      assert.isTrue(Exit.isFailure(outsideRead));
-      const linkPath = path.join(workspace, "linked-secret.txt");
-      yield* fileSystem.symlink(outsideFile, linkPath);
-      const linkedRead = yield* readTextFile(
-        { sessionId: "mock-session-1", path: linkPath },
-        context("fs/read_text_file"),
-      ).pipe(Effect.exit);
-      assert.isTrue(Exit.isFailure(linkedRead), "a read through an escaping symlink is denied");
-      const insideLink = path.join(workspace, "inside-link.ts");
-      yield* fileSystem.symlink(insidePath, insideLink);
-      const viaInsideLink = yield* readTextFile(
-        { sessionId: "mock-session-1", path: insideLink },
-        context("fs/read_text_file"),
-      );
-      assert.equal(viaInsideLink.content, "inside");
-    }).pipe(Effect.provide(layerSession), Effect.scoped),
+        const outsideRead = yield* readTextFile(
+          { sessionId: "mock-session-1", path: outsideFile },
+          context("fs/read_text_file"),
+        ).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(outsideRead));
+        const linkPath = path.join(workspace, "linked-secret.txt");
+        yield* fileSystem.symlink(outsideFile, linkPath);
+        const linkedRead = yield* readTextFile(
+          { sessionId: "mock-session-1", path: linkPath },
+          context("fs/read_text_file"),
+        ).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(linkedRead), "a read through an escaping symlink is denied");
+        const insideLink = path.join(workspace, "inside-link.ts");
+        yield* fileSystem.symlink(insidePath, insideLink);
+        const viaInsideLink = yield* readTextFile(
+          { sessionId: "mock-session-1", path: insideLink },
+          context("fs/read_text_file"),
+        );
+        assert.equal(viaInsideLink.content, "inside");
+      }).pipe(Effect.provide(layerSession), Effect.scoped),
   );
 });
 

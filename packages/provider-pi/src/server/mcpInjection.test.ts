@@ -14,6 +14,7 @@ import * as Option from "effect/Option";
 import * as NodePath from "effect/Path";
 import * as NodeFS from "effect/FileSystem";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   buildPiRpcLaunch,
   materializePiT3McpExtension,
@@ -164,48 +165,51 @@ describe("materializePiT3McpExtension", () => {
   // A pi launch concurrent with the materialize reads the extension file from
   // disk; a truncate-then-write exposes an empty or partial file mid-write and
   // the launch loads a broken extension.
-  it.live("never exposes a torn extension file to a concurrent reader", () =>
-    Effect.gen(function* () {
-      const fs = yield* NodeFS.FileSystem;
-      const path = yield* NodePath.Path;
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-atomic-" });
-      const anomalies: Array<string> = [];
-      const stopAfter = 120;
-      const writer = yield* Effect.forkChild(
-        Effect.gen(function* () {
-          for (let index = 0; index < stopAfter; index += 1) {
-            yield* fs
-              .remove(path.join(directory, "pi-t3-mcp-extension.ts"), { force: true })
-              .pipe(Effect.ignore);
-            yield* Effect.all(
-              [materializePiT3McpExtension(directory), materializePiT3McpExtension(directory)],
-              { concurrency: "unbounded" },
-            );
-          }
-        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-      );
-      const reader = yield* Effect.forkChild(
-        Effect.forever(
+  // Windows refuses to rename over a file another handle holds open, so this race is POSIX-only.
+  it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "never exposes a torn extension file to a concurrent reader",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* NodeFS.FileSystem;
+        const path = yield* NodePath.Path;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-atomic-" });
+        const anomalies: Array<string> = [];
+        const stopAfter = 120;
+        const writer = yield* Effect.forkChild(
           Effect.gen(function* () {
-            const text = yield* fs
-              .readFileString(path.join(directory, "pi-t3-mcp-extension.ts"))
-              .pipe(Effect.option);
-            if (Option.isNone(text)) return; // Missing between writes: legitimate.
-            // A read that SUCCEEDS must return the full extension: an empty or
-            // partial read means the writer truncated the file mid-write.
-            if (text.value.length === 0) {
-              anomalies.push("empty: truncated mid-write");
-            } else if (text.value.length !== PI_T3_MCP_EXTENSION_SOURCE.length) {
-              anomalies.push(
-                `partial: ${text.value.length} of ${PI_T3_MCP_EXTENSION_SOURCE.length} chars`,
+            for (let index = 0; index < stopAfter; index += 1) {
+              yield* fs
+                .remove(path.join(directory, "pi-t3-mcp-extension.ts"), { force: true })
+                .pipe(Effect.ignore);
+              yield* Effect.all(
+                [materializePiT3McpExtension(directory), materializePiT3McpExtension(directory)],
+                { concurrency: "unbounded" },
               );
             }
-          }),
-        ),
-      );
-      yield* Fiber.join(writer);
-      yield* Fiber.interrupt(reader);
-      expect(anomalies).toEqual([]);
-    }).pipe(Effect.provide(NodeServices.layer)),
+          }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+        );
+        const reader = yield* Effect.forkChild(
+          Effect.forever(
+            Effect.gen(function* () {
+              const text = yield* fs
+                .readFileString(path.join(directory, "pi-t3-mcp-extension.ts"))
+                .pipe(Effect.option);
+              if (Option.isNone(text)) return; // Missing between writes: legitimate.
+              // A read that SUCCEEDS must return the full extension: an empty or
+              // partial read means the writer truncated the file mid-write.
+              if (text.value.length === 0) {
+                anomalies.push("empty: truncated mid-write");
+              } else if (text.value.length !== PI_T3_MCP_EXTENSION_SOURCE.length) {
+                anomalies.push(
+                  `partial: ${text.value.length} of ${PI_T3_MCP_EXTENSION_SOURCE.length} chars`,
+                );
+              }
+            }),
+          ),
+        );
+        yield* Fiber.join(writer);
+        yield* Fiber.interrupt(reader);
+        expect(anomalies).toEqual([]);
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

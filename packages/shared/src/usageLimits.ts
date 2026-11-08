@@ -624,6 +624,26 @@ export function limitsNotice(limits: ServerProviderUsageLimits): string | null {
   return limits.windows.length === 0 ? "No limits reported." : null;
 }
 
+/**
+ * Health probes run every 1 to 15 minutes and the usage page probes on open. A failed probe keeps
+ * the last good reading, so a reading older than this is a snapshot, not current use.
+ */
+const STALE_LIMITS_AFTER_MS = 30 * MINUTE;
+
+/** Milliseconds since the provider reported `limits`, or null for an unreadable timestamp. */
+export function limitsCheckedAgo(limits: ServerProviderUsageLimits, now: number): number | null {
+  const checkedAt = Date.parse(limits.checkedAt);
+  return Number.isFinite(checkedAt) ? Math.max(0, now - checkedAt) : null;
+}
+
+/** Explains bars drawn from an old reading; null while the reading is recent or already explained. */
+export function staleLimitsNotice(limits: ServerProviderUsageLimits, now: number): string | null {
+  if (limitsNotice(limits) !== null) return null;
+  const age = limitsCheckedAgo(limits, now);
+  if (age === null || age < STALE_LIMITS_AFTER_MS) return null;
+  return `Last checked ${formatDuration(age)} ago, so these limits may be out of date.`;
+}
+
 export function remainingPercent(window: ServerProviderUsageWindow): number {
   return Math.round(100 - Math.max(0, Math.min(100, window.usedPercent)));
 }

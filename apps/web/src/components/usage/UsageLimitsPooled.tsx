@@ -6,13 +6,16 @@ import {
   collectLimitPools,
   cursorUsageWindowDetails,
   displayLimitWindows,
+  formatDuration,
   formatResetsIn,
   type LimitAccount,
   type LimitPool,
   type LimitPoolMember,
   type LimitPoolWindow,
+  limitsCheckedAgo,
   paceRemainingPercent,
   remainingPercent,
+  staleLimitsNotice,
 } from "@t3tools/shared/usageLimits";
 import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { normalizeProviderAccentColor } from "@t3tools/client-runtime/state/provider-instance-display";
@@ -152,6 +155,8 @@ function SegmentPopover({
   const remaining = remainingPercent(window);
   const timeLeft = paceRemainingPercent(window, now);
   const resetsIn = formatResetsIn(window, now);
+  const checkedAgo = limitsCheckedAgo(account.limits, now);
+  const stale = staleLimitsNotice(account.limits, now) !== null;
   const where =
     account.environments.length > 0
       ? account.environments.map((environment) => environment.label).join(", ")
@@ -192,6 +197,12 @@ function SegmentPopover({
           </Row>
         ) : null}
         {timeLeft !== null ? <Row label="Even pace">{timeLeft}% left by now</Row> : null}
+        {checkedAgo !== null ? (
+          <Row label="Checked">
+            {checkedAgo < 60_000 ? "just now" : `${formatDuration(checkedAgo)} ago`}
+            {stale ? " · may be out of date" : ""}
+          </Row>
+        ) : null}
         {reset && reset.restoresPercent > 0 ? (
           <Row label="Restores">+{reset.restoresPercent}% of pool</Row>
         ) : null}
@@ -612,7 +623,7 @@ export function UsageLimitsPooled({
   const [segmentPopover] = useState(() => PopoverCreateHandle<SegmentPayload>());
   const segmentPopoverActions = useRef<PopoverPrimitive.Root.Actions | null>(null);
   const pools = collectLimitPools(collectLimitAccounts(presentations), now);
-  const notices = collectLimitNotices(presentations);
+  const notices = [...collectLimitNotices(presentations), ...staleAccountNotices(pools, now)];
   const externalLinks = collectExternalUsageLinks(presentations);
   return (
     <div className="flex flex-col gap-8">
@@ -677,6 +688,24 @@ export function UsageLimitsPooled({
       <LimitNotices notices={notices} />
     </div>
   );
+}
+
+/** Names accounts by instance and machine, never by e-mail, since notices are not redacted. */
+function staleAccountNotices(pools: readonly LimitPool[], now: number): readonly string[] {
+  const notices = pools.flatMap((pool) =>
+    pool.accounts.flatMap((account) => {
+      const notice = staleLimitsNotice(account.limits, now);
+      if (notice === null) return [];
+      const name =
+        account.displayName ?? providerClients.get(account.driver)?.label ?? String(account.driver);
+      const where =
+        account.environments.length > 0
+          ? account.environments.map((environment) => environment.label).join(", ")
+          : account.sourceLabel;
+      return [`${where ? `${where} · ` : ""}${name}: ${notice}`];
+    }),
+  );
+  return [...new Set(notices)];
 }
 
 function LimitNotices({ notices }: { readonly notices: readonly string[] }) {

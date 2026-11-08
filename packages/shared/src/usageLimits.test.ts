@@ -23,6 +23,7 @@ import {
   paceRemainingPercent,
   usesChatGptSharing,
   resolveNewThreadModelSelection,
+  staleLimitsNotice,
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
@@ -150,6 +151,31 @@ describe("new thread model fallback", () => {
         ],
       }).selection,
     ).toEqual(usesFallback ? fallback : defaultSelection);
+  });
+});
+
+describe("stale readings", () => {
+  it("flags bars kept from a reading older than half an hour", () => {
+    const limits = { checkedAt: "2026-09-03T10:55:00.000Z", windows: [window] };
+    expect(staleLimitsNotice(limits, now)).toBe(
+      "Last checked 1h 5m ago, so these limits may be out of date.",
+    );
+  });
+
+  it("stays quiet for a recent reading", () => {
+    const limits = { checkedAt: "2026-09-03T11:31:00.000Z", windows: [window] };
+    expect(staleLimitsNotice(limits, now)).toBeNull();
+  });
+
+  it("leaves unavailable and empty readings to their own notice", () => {
+    const checkedAt = "2026-09-02T12:00:00.000Z";
+    expect(
+      staleLimitsNotice(
+        { checkedAt, windows: [window], unavailable: { reason: "probeFailed" } },
+        now,
+      ),
+    ).toBeNull();
+    expect(staleLimitsNotice({ checkedAt, windows: [] }, now)).toBeNull();
   });
 });
 

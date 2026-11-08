@@ -17,6 +17,7 @@ import {
   paceOf,
   paceRemainingPercent,
   remainingPercent,
+  staleLimitsNotice,
 } from "@t3tools/shared/usageLimits";
 import { type ReactNode, useContext, useRef, useState } from "react";
 import { Atom } from "effect/reactivity";
@@ -174,6 +175,7 @@ export function AccountLimits(props: {
   const color = normalizeProviderAccentColor(props.accentColor) ?? providerColor;
   if (!limits) return null;
   const notice = limitsNotice(limits);
+  const stale = staleLimitsNotice(limits, now);
   const externalUsage = limits.externalUsage;
   const padding = dense ? "px-4 py-3" : "p-4";
   return (
@@ -206,6 +208,7 @@ export function AccountLimits(props: {
           ))}
         </View>
       )}
+      {stale ? <Text className="text-sm text-foreground-muted">{stale}</Text> : null}
       {externalUsage ? (
         <Pressable
           accessibilityRole="link"

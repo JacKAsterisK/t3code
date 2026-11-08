@@ -1,3 +1,5 @@
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 import { expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
@@ -119,6 +121,27 @@ it("LAN pairing stays on the native server and refuses hosted cloud routes", () 
   expect(threadLinkHostedAppUrl()).toBeNull();
   expect(() => buildHostedChannelSelectionUrl({ channel: "nightly" })).toThrow("Hub");
   expect(isHostedStaticApp(new URL("https://app.t3.codes"))).toBe(false);
+});
+
+it("LAN-throwing hosted helpers keep only their reviewed callers", () => {
+  // Upstream merges add hosted-link callers; in LAN builds these helpers throw. The 1.0.35 merge
+  // crashed the thread view that way. Route new callers through threadLinkHostedAppUrl() or gate
+  // them on isLanDistribution, then add them here.
+  const root = NodePath.resolve(import.meta.dirname, "..");
+  const callers = NodeFS.readdirSync(root, { recursive: true, encoding: "utf8" })
+    .filter((file) => /\.tsx?$/.test(file) && !/\.test\.tsx?$/.test(file))
+    .filter((file) =>
+      /\b(?:configuredHostedAppUrl|buildHostedChannelSelectionUrl)\(/.test(
+        NodeFS.readFileSync(NodePath.join(root, file), "utf8"),
+      ),
+    )
+    .map((file) => file.replaceAll("\\", "/"))
+    .toSorted();
+  expect(callers).toEqual([
+    "components/promptLinks/copyPromptLink.ts",
+    "components/settings/SettingsPanels.tsx",
+    "hostedPairing.ts",
+  ]);
 });
 
 it.effect(

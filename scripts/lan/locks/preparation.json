@@ -4,11 +4,11 @@
   "sourceInputs": {
     "apps/desktop/package.json": "3362bcd666010edc8da5cf75167bd61a02657f99038ae984f4935a5c653af074",
     "apps/server/package.json": "57653c19d043385889c2a0f47ab7ad95db23e381ebd7646c32c16d511290e406",
-    "package.json": "f974c0de625b66cc6bedeb4974b9efe5d3570d61d9278b3378738dbd4dd46c08",
+    "package.json": "3a1da29d86a9b5c302a333ad9f50c5aa63c7043aeb7516fcc027bbd6258c7c00",
     "patches/@ff-labs__fff-node@0.11.0.patch": "cc71fcec015f4d39bc96ae2e2bf6b0ca678124c722c66a7841efce9d34b5983c",
     "patches/node-pty@1.2.0-beta.15.patch": "f1e680afec85f650699ea756f91f469844ec4c976f4f168492a45c6b3f67d651",
-    "pnpm-lock.yaml": "f9ea0079253121c93f01f5682632fb3ea010d95dee660c8a8fede7b8920d0fca",
-    "pnpm-workspace.yaml": "21c5bdd187304dced639adc2e495b9fc5743720dc6a03a1f2df58306160465ab"
+    "pnpm-lock.yaml": "dc4238d4401bc922a741a3332825fb9bb7e86f133b6455ec54dabb606f8f09a8",
+    "pnpm-workspace.yaml": "20071b9da1fc9cfca9d5193182bb28757975c42cbcc84207370c0287e2b34e9d"
   },
   "stages": {
     "desktop": {

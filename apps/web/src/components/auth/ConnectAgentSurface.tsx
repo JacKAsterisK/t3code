@@ -19,6 +19,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { PrimaryEnvironmentHttpClient } from "~/environments/primary/httpClient";
 import { runPrimaryHttp } from "~/lib/runtime";
 import { cn } from "~/lib/utils";
+import { resolveMcpAccess } from "./ConnectAgentSurface.logic";
 import { runtimeModeConfig } from "../chat/runtimeModeConfig";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
@@ -101,7 +102,11 @@ function oneClickApproves(
 export function ConnectAgentSurface() {
   const [authorization] = useState(readAuthorizationRequest);
   const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
-  const [access, setAccess] = useState<AuthMcpClientAccess>("read-only");
+  const [requestedAccess, setAccess] = useState<AuthMcpClientAccess>("auto");
+  const access = resolveMcpAccess(
+    requestedAccess,
+    loaded.status === "ready" ? loaded.details.runtimeModeCeiling : undefined,
+  );
   const [approvals, setApprovals] = useState(false);
   const [pairingCode, setPairingCode] = useState("");
   const [errorMessage, setErrorMessage] = useState("");

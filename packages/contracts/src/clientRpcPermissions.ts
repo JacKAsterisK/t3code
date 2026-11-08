@@ -5,6 +5,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthPreviewOperateScope,
+  AuthProvidersManageScope,
   AuthSettingsWriteScope,
   AuthEnvironmentMaintainScope,
   AuthSourceControlWriteScope,
@@ -21,6 +22,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.serverSyncLanFleet]: AuthEnvironmentMaintainScope,
   [WS_METHODS.serverGetLanFleetSetup]: AuthEnvironmentMaintainScope,
   [WS_METHODS.serverConfigureLanFleet]: AuthEnvironmentMaintainScope,
+  [WS_METHODS.providerAuthRemoveMethod]: AuthProvidersManageScope,
   [WS_METHODS.previewClose]: AuthPreviewOperateScope,
   // Stopping a server signals its processes, as closing a terminal does.
   [WS_METHODS.previewStopLocalServer]: AuthTerminalOperateScope,

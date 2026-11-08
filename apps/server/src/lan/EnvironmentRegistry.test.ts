@@ -51,7 +51,13 @@ it.layer(NodeServices.layer)("EnvironmentRegistry isolated configuration", (it) 
       const serverConfig = yield* Config.ServerConfig;
       const registry = yield* Registry.EnvironmentRegistry;
       const file = path.join(serverConfig.stateDir, "lan-routing.json");
-      assert.equal((yield* registry.read.pipe(Effect.flip)).code, "capability_denied");
+      const missing = yield* registry.read.pipe(Effect.flip);
+      assert.equal(missing.code, "capability_denied");
+      // The optional route being off must not read as an unreachable machine.
+      assert.equal(
+        missing.message,
+        "Optional LAN task-client routing is disabled or its administrator configuration is invalid. This is not a reachability result for any machine.",
+      );
       yield* fs.writeFileString(file, JSON.stringify(config()));
       assert.deepEqual(yield* registry.read, config());
       yield* fs.writeFileString(file, JSON.stringify({ ...config(), grants: [] }));

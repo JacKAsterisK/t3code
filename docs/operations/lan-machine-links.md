@@ -452,7 +452,8 @@ upstream linked environment, so in-app agents use `t3_environment_links` and
 tools, which have refused every in-app thread since they were added; only outside
 task clients can use them. Each link carries the access the destination's Machine
 access list gives this machine: standard is `full-access`, read-only is
-`read-only`.
+`read-only`. Outside agents with general access use the same route; see
+[when an agent should use the LAN task tools](lan-task-routing.md#when-an-agent-should-use-these-tools).
 
 Links form only once the fleet has a Machine access list, adopted from a starting
 list or saved in Settings. Until then no machine asks for or offers a link, since

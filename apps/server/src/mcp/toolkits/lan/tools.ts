@@ -24,7 +24,7 @@ export const LanToolkit = Toolkit.make(
   Tool.make("t3_lan_environments", {
     ...shared,
     description:
-      "List environments explicitly approved for this authenticated task client. Configured routes are not a proof of reachability or authentication. Native IDs are always scoped to environmentId.",
+      "Optional route for an administrator-configured, scoped LAN task client: list the environments approved for this credential. It is not how to find the user's machines: a general-access client lists linked machines with `t3_environment_links` and reads them with the standard T3 tools and that `environmentId`. An empty list or a disabled-routing error is not a reachability result for any machine. A grant, read-only or task-only refusal is an authorization decision: report it, and never retry it through another tool. Task-only credentials use only these tools and the projects their grant names. Configured routes are not a proof of reachability or authentication. Native IDs are always scoped to environmentId.",
     success: Schema.Array(LanEnvironmentSummary),
   })
     .annotate(Tool.Readonly, true)
@@ -41,7 +41,7 @@ export const LanToolkit = Toolkit.make(
   Tool.make("t3_lan_task_list", {
     ...shared,
     description:
-      "List visible native tasks in one approved machine/project. Only explicitly exposed or client-created threads are returned. Continue nextCursor even if a filtered page is empty.",
+      "List visible native tasks in one approved machine/project for a configured LAN task client. Only explicitly exposed or client-created threads are returned. Continue nextCursor even if a filtered page is empty. General-access clients list threads with `t3_thread_list` and an `environmentId` from `t3_environment_links`.",
     parameters: LanToolParameters.t3_lan_task_list,
     success: LanRoutedResult,
   })
@@ -50,7 +50,7 @@ export const LanToolkit = Toolkit.make(
   Tool.make("t3_lan_task_read", {
     ...shared,
     description:
-      "Read the bounded native transcript/status of an explicitly exposed or client-created task on its owning machine.",
+      "Read the bounded native transcript/status of an explicitly exposed or client-created task on its owning machine, for a configured LAN task client. General-access clients use `t3_thread_read` with the thread's `environmentId`.",
     parameters: LanToolParameters.t3_lan_task_read,
     success: LanRoutedResult,
   })

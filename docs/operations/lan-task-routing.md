@@ -5,6 +5,32 @@ as a native T3 MCP client to each enrolled destination. Tasks retain the
 destination's environment, thread and run IDs. There is no local wrapper thread
 or Switchyard run. Existing same-environment delegation is unchanged.
 
+## When an agent should use these tools
+
+The `t3_lan_*` tools serve one kind of caller: a task client an administrator
+configured with a scoped grant, including its durable event replay.
+Every other agent works on the user's machines through linked environments:
+`t3_environment_links`, then `t3_environment_read`, `t3_project_list`,
+`t3_project_read` and the `t3_thread_*` tools with the returned
+`environmentId`, within the access each link carries. The native equivalent of
+each LAN tool is in the
+[native link adapter mapping](../maintenance/native-link-adapter.md).
+
+Read these two outcomes differently:
+
+- **The route is not set up.** A missing or invalid `lan-routing.json` gives
+  "Optional LAN task-client routing is disabled…"; a configuration without a
+  grant for this caller gives an empty `t3_lan_environments` list. Neither says
+  anything about whether a machine is reachable. Do not create a task client,
+  credentials or grants to satisfy an ordinary read.
+- **The action was refused.** A grant refusal, a read-only machine or a
+  task-only credential's refusal is an authorization decision. Report it. Do
+  not retry the action through another tool or route. A task-only credential
+  uses only the LAN task tools and the projects its grant names.
+
+Replay and detection through `t3_lan_task_observe` do not prove that a
+receiving assistant was woken.
+
 ## Enroll an environment
 
 Enrollment is an administrator operation. Obtain approval before provisioning

@@ -17,7 +17,9 @@ export class EnvironmentRegistry extends Context.Service<
 const invalid = () =>
   new OrchestratorMcpFailure({
     code: "capability_denied",
-    message: "LAN routing is disabled or its administrator configuration is invalid.",
+    // Describes only the optional task-client route, so callers do not read it as an unreachable machine.
+    message:
+      "Optional LAN task-client routing is disabled or its administrator configuration is invalid. This is not a reachability result for any machine.",
   });
 
 const make = Effect.gen(function* () {

@@ -252,3 +252,16 @@ the fork, so every release ships current upstream. No release skips this.
 - If upstream changed dependencies, refresh the staging locks
   (`scripts/lan/prepare-stage-locks.ts`), the offline store and the toolchain
   manifest, per [LAN distribution](docs/operations/lan-distribution.md).
+
+## Reaching the other machines
+
+To read or work on another fleet machine, its projects or threads, call
+`t3_environment_links`, then the standard tools (`t3_environment_read`,
+`t3_project_list`, `t3_project_read`, `t3_thread_*`) with the returned
+`environmentId`, within the access the link carries. The `t3_lan_*` tools serve
+only an administrator-configured, scoped task client. "LAN task-client routing
+is disabled" or an empty `t3_lan_environments` list means only that this
+optional route is not set up, never that a machine is unreachable; do not add a
+task client, credentials or grants to get past it. A refusal is an
+authorization decision: report it, and never retry it through another route. See
+[LAN task routing](docs/operations/lan-task-routing.md#when-an-agent-should-use-these-tools).

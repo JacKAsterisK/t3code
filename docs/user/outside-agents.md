@@ -7,10 +7,19 @@ Codex in your own terminal, ChatGPT, and bots that support MCP. Each agent signs
 in once, and you choose what it may do.
 
 For direct access, register each machine's MCP URL with the agent. Its standard
-T3 tools act on that machine. For one entry point across an approved LAN fleet,
-connect a fleet client to the gateway environment: its `t3_lan_*` tools select
-the destination machine. Fleet credentials keep their machine, project and task
-limits; they do not become general-access credentials.
+T3 tools act on that machine, and `t3_environment_links` lists your other linked
+machines: the agent passes a listed `environmentId` to the same tools to work
+there, within the access that link carries. That is the route for ordinary work
+on your machines, projects and threads.
+
+For one entry point across an approved LAN fleet, an administrator can instead
+set up a scoped fleet task client on the gateway environment: its `t3_lan_*`
+tools select the destination machine. Fleet credentials keep their machine,
+project and task limits; they do not become general-access credentials. An
+agent that has no such client sees those tools report no environments or that
+LAN routing is disabled. That means only that this optional route is not set
+up, not that a machine is unreachable, and it is no reason to add a task client
+or credentials.
 
 ## Get the MCP URL
 

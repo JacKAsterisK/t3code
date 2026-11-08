@@ -115,6 +115,26 @@ it.effect("shows the LAN task tools to outside clients but never to an in-app th
   });
 });
 
+// Outside clients see these tools beside the native ones but get no in-app system text, so the
+// LAN descriptions carry the route choice themselves.
+it("sends ordinary machine reads to linked environments without inviting a route around a refusal", () => {
+  const { t3_lan_environments, t3_lan_task_list, t3_lan_task_read } = LanToolkit.tools;
+  const environments = t3_lan_environments.description ?? "";
+  expect(environments).toContain(
+    "Optional route for an administrator-configured, scoped LAN task client",
+  );
+  expect(environments).toContain(
+    "a general-access client lists linked machines with `t3_environment_links`",
+  );
+  expect(environments).toContain("not a reachability result for any machine");
+  expect(environments).toContain("report it, and never retry it through another tool");
+  expect(environments).toContain(
+    "Task-only credentials use only these tools and the projects their grant names",
+  );
+  expect(t3_lan_task_list.description).toContain("`t3_thread_list`");
+  expect(t3_lan_task_read.description).toContain("`t3_thread_read`");
+});
+
 it("acts at an administrator's ceiling for a client approved above it", () => {
   const scope = (
     access: McpInvocationContext.McpClientCaller["access"],

@@ -66,14 +66,14 @@ describe("UsageLimitsPooled ChatGPT usage card", () => {
 
 function claudeAccount(input: {
   readonly instanceId: string;
-  readonly displayName: string;
+  readonly displayName?: string;
   readonly email: string;
   readonly limitsCheckedAt: string;
 }): ServerProvider {
   return {
     instanceId: ProviderInstanceId.make(input.instanceId),
     driver: ProviderDriverKind.make("claudeAgent"),
-    displayName: input.displayName,
+    ...(input.displayName ? { displayName: input.displayName } : {}),
     enabled: true,
     installed: true,
     version: "2.1.0",
@@ -148,5 +148,44 @@ describe("UsageLimitsPooled stale readings", () => {
       .toBeVisible();
     await expect.element(screen.getByText(/Claude Personal: Last checked/)).not.toBeInTheDocument();
     await expect.element(screen.getByText(/work@example\.com/)).not.toBeInTheDocument();
+  });
+});
+
+describe("UsageLimitsPooled stale readings for unnamed accounts", () => {
+  it("keeps two unnamed accounts on one machine apart by their chip initials", async () => {
+    const stale = "2026-10-25T14:00:00.000Z";
+    const presentations = new Map([
+      [
+        EnvironmentId.make("desk"),
+        {
+          entry: { target: { label: "Desk" } },
+          serverConfig: {
+            providers: [
+              claudeAccount({
+                instanceId: "claude_a",
+                email: "alex@north.example",
+                limitsCheckedAt: stale,
+              }),
+              claudeAccount({
+                instanceId: "claude_b",
+                email: "sam@west.example",
+                limitsCheckedAt: stale,
+              }),
+            ],
+          },
+        },
+      ],
+    ]);
+    await using screen = await render(
+      <UsageLimitsPooled presentations={presentations} now={Date.parse(checkedAt)} />,
+    );
+
+    await expect
+      .element(screen.getByText(/^Desk · Claude \(AN\): Last checked 2h 0m ago/))
+      .toBeVisible();
+    await expect
+      .element(screen.getByText(/^Desk · Claude \(SW\): Last checked 2h 0m ago/))
+      .toBeVisible();
+    await expect.element(screen.getByText(/@(north|west)\.example/)).not.toBeInTheDocument();
   });
 });

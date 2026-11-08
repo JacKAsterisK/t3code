@@ -690,14 +690,19 @@ export function UsageLimitsPooled({
   );
 }
 
-/** Names accounts by instance and machine, never by e-mail, since notices are not redacted. */
+/**
+ * Names accounts by instance and machine, never by e-mail, since notices are not redacted. Unnamed
+ * accounts carry the initials their chip already shows, so two on one machine stay distinct.
+ */
 function staleAccountNotices(pools: readonly LimitPool[], now: number): readonly string[] {
   const notices = pools.flatMap((pool) =>
     pool.accounts.flatMap((account) => {
       const notice = staleLimitsNotice(account.limits, now);
       if (notice === null) return [];
+      const provider = providerClients.get(account.driver)?.label ?? String(account.driver);
       const name =
-        account.displayName ?? providerClients.get(account.driver)?.label ?? String(account.driver);
+        account.displayName ??
+        (account.email ? `${provider} (${accountInitials(account.email)})` : provider);
       const where =
         account.environments.length > 0
           ? account.environments.map((environment) => environment.label).join(", ")

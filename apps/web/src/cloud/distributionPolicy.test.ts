@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - pins the reviewed callers by scanning real source files on disk.
 import * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
@@ -124,17 +125,20 @@ it("LAN pairing stays on the native server and refuses hosted cloud routes", () 
   expect(isHostedStaticApp(new URL("https://app.t3.codes"))).toBe(false);
 });
 
-it("LAN-throwing hosted helpers keep only their reviewed callers", () => {
-  // Upstream merges add hosted-link callers; in LAN builds these helpers throw. The 1.0.35 merge
-  // crashed the thread view that way. Route new callers through threadLinkHostedAppUrl() or gate
-  // them on isLanDistribution, then add them here.
+it("LAN-throwing hosted helpers keep only their reviewed callers", async () => {
+  // In LAN builds these helpers throw (the 1.0.35 merge crashed the thread view that way). Route
+  // new callers through threadLinkHostedAppUrl() or gate them on isLanDistribution, then add them
+  // here. Reads run concurrently: sequential sync reads overran the test budget under suite load.
   const root = NodePath.resolve(import.meta.dirname, "..");
-  const callers = NodeFS.readdirSync(root, { recursive: true, encoding: "utf8" })
-    .filter((file) => /\.tsx?$/.test(file) && !/\.test\.tsx?$/.test(file))
-    .filter((file) =>
-      /\b(?:configuredHostedAppUrl|buildHostedChannelSelectionUrl)\(/.test(
-        NodeFS.readFileSync(NodePath.join(root, file), "utf8"),
-      ),
+  const sources = NodeFS.readdirSync(root, { recursive: true, encoding: "utf8" }).filter(
+    (file) => /\.tsx?$/.test(file) && !/\.test\.tsx?$/.test(file),
+  );
+  const contents = await Promise.all(
+    sources.map((file) => NodeFSP.readFile(NodePath.join(root, file), "utf8")),
+  );
+  const callers = sources
+    .filter((_, index) =>
+      /\b(?:configuredHostedAppUrl|buildHostedChannelSelectionUrl)\(/.test(contents[index] ?? ""),
     )
     .map((file) => file.replaceAll("\\", "/"))
     .toSorted();

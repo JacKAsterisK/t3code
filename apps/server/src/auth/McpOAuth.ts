@@ -19,6 +19,7 @@ import {
   AuthOrchestrationReadScope,
   MCP_PEER_LINK_SOFTWARE_ID,
   mcpClientScopes,
+  parseMcpApprovalCode,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
@@ -559,8 +560,15 @@ const make = Effect.gen(function* () {
           "Permission approvals require task access; a peer link also needs an approval-capable pairing code.",
       });
     let approvalSubject: string | undefined;
+    let access = decision.access;
     if (decision._tag === "pairing-code") {
-      ({ subject: approvalSubject } = yield* environmentAuth
+      // An approval code is for one app's sign-in, never for linking another environment.
+      if (input.authorization.client.peerLink && parseMcpApprovalCode(decision.code)) {
+        return yield* new McpOAuthPageError({
+          description: "Linking needs a plain pairing code, not an app approval code.",
+        });
+      }
+      ({ subject: approvalSubject, access } = yield* environmentAuth
         .consumeMcpApprovalCode(decision.code, decision.access, approvals)
         .pipe(
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
@@ -589,10 +597,10 @@ const make = Effect.gen(function* () {
       }
       approvalSubject = session.subject;
     }
-    const code = yield* mintCode(input.authorization, decision.access, approvalSubject, approvals);
+    const code = yield* mintCode(input.authorization, access, approvalSubject, approvals);
     yield* Effect.logInfo("Approved an MCP client sign-in.", {
       client: input.authorization.client.name,
-      access: decision.access,
+      access,
       method: decision._tag,
     });
     return redirectWith(input.authorization.redirectUri, {

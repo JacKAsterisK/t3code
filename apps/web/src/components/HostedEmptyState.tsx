@@ -11,6 +11,7 @@ import { isElectron } from "../env";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { useRelayEnvironmentDiscovery } from "../state/environments";
 import { CommandBlock } from "./CommandBlock";
+import { InstallT3Commands } from "./InstallT3Commands";
 import { useT3ConnectAuthPrompt } from "./clerk/useT3ConnectAuthPrompt";
 import { CloudEnvironmentConnectRows } from "./cloud/CloudEnvironmentConnectList";
 import { Button } from "./ui/button";
@@ -89,7 +90,7 @@ function T3ConnectSteps() {
         )}
       </SetupStep>
       <SetupStep number={2}>
-        <RunOnComputer command="npx t3 connect" />
+        <RunOnComputer command="t3 connect" />
         {isSignedIn ? (
           <div className="mt-4 space-y-1.5">
             <CloudEnvironmentConnectRows
@@ -123,7 +124,7 @@ function PairingSteps() {
         {isLanDistribution ? (
           <p>Open T3 Code LAN on the approved computer and create a pairing link in Connections.</p>
         ) : (
-          <RunOnComputer command="npx t3 pair" />
+          <RunOnComputer command="t3 pair" />
         )}
       </SetupStep>
       <SetupStep number={2}>
@@ -154,7 +155,12 @@ function RunOnComputer({ command }: { readonly command: string }) {
   return (
     <>
       <p>Run on your computer:</p>
-      <CommandBlock command={command} className="mt-2" />
+      {/* T3 Code LAN: the public t3 installers are not part of a LAN install. */}
+      {isLanDistribution ? (
+        <CommandBlock command={command} className="mt-2" />
+      ) : (
+        <InstallT3Commands command={command} className="mt-2" />
+      )}
       {DESKTOP_DOWNLOAD_URL ? (
         <a
           className="mt-2 inline-block text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"

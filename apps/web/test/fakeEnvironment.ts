@@ -21,6 +21,7 @@ import {
   WsRpcGroup,
   type VcsStatusStreamEvent,
   type OrchestrationProjectShell,
+  type OrchestrationV2Command,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2Run,
   type OrchestrationV2ShellStreamItem,
@@ -100,7 +101,10 @@ const configFor = (environment: typeof descriptor): ServerConfig => ({
         status: "ready",
         auth: { status: "authenticated" },
         checkedAt: "2026-03-17T19:12:28.000Z",
-        models: [{ slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null }],
+        models: [
+          { slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null },
+          { slug: "gpt-5.5", name: "GPT-5.5", isCustom: false, capabilities: null },
+        ],
       },
     ],
     availableEditors: [],
@@ -339,15 +343,10 @@ const json = (body: unknown, status = 200) =>
 const threadSubscribers = new Map<string, Queue.Queue<OrchestrationV2ThreadStreamItem>>();
 let terminalMetadataSubscriber: Queue.Queue<TerminalMetadataStreamEvent> | null = null;
 let threads: ReadonlyArray<FakeThread> = [];
+let dispatched: OrchestrationV2Command[] = [];
+let acceptCommands = false;
 let sequence = 1;
 let fleetUsers: FleetUsersDirectory | undefined;
-// Commands the app dispatched to either machine, oldest first.
-let dispatched: Array<unknown> = [];
-
-/** Every orchestration command the app has dispatched since the environment was installed. */
-export function dispatchedCommands(): ReadonlyArray<unknown> {
-  return dispatched;
-}
 let vcsStatusSubscriber: Queue.Queue<VcsStatusStreamEvent> | null = null;
 
 const subscribe = <A>(first: ReadonlyArray<A>, register?: (queue: Queue.Queue<A>) => () => void) =>
@@ -396,12 +395,12 @@ function sessionFor(
             }
           : undefined,
       ),
-    // Accepted without events: a pending one would hold up the thread's next command, which runs
-    // after it.
-    [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (input: unknown) =>
-      Effect.sync(() => {
-        dispatched.push(input);
-        return { sequence };
+    // Recorded, and accepted only when the scenario asks, since a pending command holds every
+    // later command on its thread. Accepted commands' events never arrive.
+    [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
+      Effect.suspend(() => {
+        dispatched.push(command);
+        return acceptCommands ? Effect.succeed({ sequence: sequence + 1 }) : Effect.never;
       }),
     [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: () =>
       subscribe<OrchestrationV2ShellStreamItem>([
@@ -536,11 +535,13 @@ export function installFakeEnvironment(
   options: {
     readonly remoteScopes?: ReadonlyArray<AuthEnvironmentScope>;
     readonly fleetUsers?: FleetUsersDirectory;
+    readonly acceptCommands?: boolean;
   } = {},
 ): Disposable {
   threads = fixtures;
   fleetUsers = options.fleetUsers;
   dispatched = [];
+  acceptCommands = options.acceptCommands === true;
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
     if (url.origin === REMOTE_ORIGIN && options.remoteScopes !== undefined)
@@ -566,8 +567,14 @@ export function installFakeEnvironment(
       threads = [];
       fleetUsers = undefined;
       dispatched = [];
+      acceptCommands = false;
     },
   };
+}
+
+/** Commands the app dispatched to the environment, oldest first. */
+export function dispatchedCommands(): ReadonlyArray<OrchestrationV2Command> {
+  return dispatched;
 }
 
 type ThreadEvent = Extract<OrchestrationV2ThreadStreamItem, { readonly kind: "event" }>["event"];

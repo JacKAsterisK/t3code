@@ -35,3 +35,5 @@ export const APP_VERSION =
   lanBuildIdentity?.applicationVersion ?? (import.meta.env.APP_VERSION || "0.0.0");
 export const DESKTOP_DOWNLOAD_URL =
   lanBuildIdentity === undefined ? "https://t3.codes/download" : null;
+// Redirects to the App Store or Google Play to match the phone that opens it.
+export const MOBILE_APP_URL = "https://t3.codes/mobile";

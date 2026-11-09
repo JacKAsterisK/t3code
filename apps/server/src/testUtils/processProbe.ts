@@ -20,6 +20,8 @@ export const makeProcessProbe = Effect.gen(function* () {
         }
       }
     });
+    // Windows resets the socket when the fixture is killed; "close" still follows and marks exit.
+    socket.on("error", () => {});
     socket.on("close", () => {
       sockets.delete(socket);
       Deferred.doneUnsafe(exited, Effect.void);

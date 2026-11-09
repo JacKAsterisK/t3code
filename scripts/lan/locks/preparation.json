@@ -2,22 +2,22 @@
   "schemaVersion": 1,
   "mode": "exact-root-lock-projection",
   "sourceInputs": {
-    "apps/desktop/package.json": "3362bcd666010edc8da5cf75167bd61a02657f99038ae984f4935a5c653af074",
-    "apps/server/package.json": "57653c19d043385889c2a0f47ab7ad95db23e381ebd7646c32c16d511290e406",
-    "package.json": "3a1da29d86a9b5c302a333ad9f50c5aa63c7043aeb7516fcc027bbd6258c7c00",
+    "apps/desktop/package.json": "f625935090d082317132da3f69fcfab6227ffb3694bd6603b4745c77624ca1a4",
+    "apps/server/package.json": "933e99db252597828b1519615206c30713e53c7fa84be65c57c611663bfa7906",
+    "package.json": "aa5e33cb4b847e091494511b5c25eb45fe0cac13ee18c10eb33939f98343c506",
     "patches/@ff-labs__fff-node@0.11.0.patch": "cc71fcec015f4d39bc96ae2e2bf6b0ca678124c722c66a7841efce9d34b5983c",
     "patches/node-pty@1.2.0-beta.15.patch": "f1e680afec85f650699ea756f91f469844ec4c976f4f168492a45c6b3f67d651",
-    "pnpm-lock.yaml": "dc4238d4401bc922a741a3332825fb9bb7e86f133b6455ec54dabb606f8f09a8",
-    "pnpm-workspace.yaml": "20071b9da1fc9cfca9d5193182bb28757975c42cbcc84207370c0287e2b34e9d"
+    "pnpm-lock.yaml": "7fa150e13d81ddddd45e90cf63756457ecf4bd22811bfd21adaa5f278e6b448e",
+    "pnpm-workspace.yaml": "eab08c83089cd057f8c9a8f1cb4f117c9432e9bc8a8903a421e80be90c5d8bf8"
   },
   "stages": {
     "desktop": {
-      "sha256": "e0331766f2a79822f83d72b15c6afa036a80474e069189b9608f1bbe6274c3af",
+      "sha256": "94e19860358a19fbaf295f214e02fcae8f1757164655e64e915ba60e3ac29682",
       "snapshots": 66,
       "packageManagerVerificationRequired": "pnpm@12.14.0"
     },
     "server": {
-      "sha256": "fade4a0fddd721695fa3ba12cb90ae16c0c50530792e9f6cbf4c44afb1f3d83a",
+      "sha256": "4762f9c14fce735b307245255677e622b999bf53eea321052e66c0800a4212f7",
       "snapshots": 78,
       "packageManagerVerificationRequired": "pnpm@12.14.0"
     }

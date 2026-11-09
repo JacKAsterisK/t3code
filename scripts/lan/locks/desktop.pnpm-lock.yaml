@@ -168,28 +168,27 @@ overrides:
   micromark: 4.0.2
   mdast-util-to-hast: 13.2.1
   alchemy: 2.0.0-beta.85
-  expo-audio: 58.0.9
-  expo-network: 58.0.3
-  '@clerk/expo-native-components': 0.4.0
-  expo-sharing: 58.0.19
-  expo-widgets: 58.0.20
+  expo-audio: 58.0.11
+  expo-network: 58.0.4
+  '@clerk/expo-native-components': 0.4.4
+  expo-sharing: 58.0.22
+  expo-widgets: 58.0.27
   '@ff-labs/fff-node': 0.11.0
-  '@legendapp/list': 3.3.5
+  '@legendapp/list': 3.7.2
   '@pierre/diffs': 1.6.1
   '@react-native-ai/apple': 0.12.0
   '@react-native-menu/menu': 2.0.0
   '@react-navigation/native-stack': 7.21.0
   dbus-next: 0.10.2
   node-pty: 1.2.0-beta.15
-  react-native-gesture-handler: 3.3.0
+  react-native-gesture-handler: 3.5.0
   react-native-reanimated: 4.7.1
-  react-native-keyboard-controller: 1.22.8
+  react-native-keyboard-controller: 1.23.0
   react-native-pdf-jsi: 5.0.0
   react-native-webview: 14.0.1
-  '@expo/ui': 58.0.20
-  '@expo/fingerprint': 0.21.5
+  react-native-svg: 15.16.1
   app-builder-lib: 26.16.1
-  expo-modules-core: 58.0.22
+  expo-modules-core: 58.0.30
   '@exodus/bytes>@noble/hashes': 1.8.0
   '@react-navigation/core': 7.24.0
   dbus-next>usocket: '-'
@@ -201,16 +200,16 @@ overrides:
   '@anthropic-ai/claude-agent-sdk>@anthropic-ai/claude-agent-sdk-linux-x64-musl': '-'
   '@anthropic-ai/claude-agent-sdk>@anthropic-ai/claude-agent-sdk-win32-arm64': '-'
   '@anthropic-ai/claude-agent-sdk>@anthropic-ai/claude-agent-sdk-win32-x64': '-'
-  '@clerk/backend': 3.25.0
-  '@clerk/clerk-js': 6.40.0
+  '@clerk/backend': 3.27.0
+  '@clerk/clerk-js': 6.42.3
   '@clerk/clerk-js>@base-org/account': '-'
   '@clerk/clerk-js>@coinbase/wallet-sdk': '-'
   '@clerk/clerk-js>@wallet-standard/core': '-'
-  '@clerk/electron': 0.1.3
+  '@clerk/electron': 0.1.10
   '@clerk/electron-passkeys': 0.0.3
-  '@clerk/expo': 4.14.0
-  '@clerk/react': 6.18.0
-  '@clerk/shared': 4.41.0
+  '@clerk/expo': 4.15.1
+  '@clerk/react': 6.18.6
+  '@clerk/shared': 4.44.1
   '@effect/atom-react': 4.1.2
   '@effect/platform-bun': 4.1.2
   '@effect/platform-node': 4.1.2
@@ -219,9 +218,8 @@ overrides:
   '@effect/vitest': 4.1.2
   '@effect/vitest>vitest': '-'
   '@expo/dom-webview': 58.0.2
-  '@expo/metro-config': 58.0.14
-  expo-constants: 58.0.12
-  expo-sharing>@expo/config-plugins: 58.0.9
+  expo-constants: 58.0.15
+  expo-sharing>@expo/config-plugins: 58.0.12
   expo-sharing>@expo/config-types: 58.0.3
   '@pierre/trees>@pierre/theming': 1.0.2
   remark-math>micromark-extension-math: npm:micromark-extension-llm-math@3.1.0
@@ -234,13 +232,13 @@ overrides:
   '@opencode/protocol>effect': 4.1.2
   '@opencode/schema>effect': 4.1.2
   node-abi: 4.33.0
-  '@react-native/metro-config': 0.88.0
+  '@react-native/metro-config': 0.88.1
   electron-webauthn>@electron-webauthn/macos: 1.3.1
   '@electron-webauthn/macos>objc-js': 1.5.0
   lightningcss: 1.33.0
   tailwindcss: 4.3.3
   '@types/ws@^8': 8.18.2
-  undici@^8: 8.11.2
+  undici@^8: 8.12.4
   ws@^8: 8.22.0
   vite: npm:@voidzero-dev/vite-plus-core@1.4.0
   vite-plus: 1.4.0
@@ -258,8 +256,8 @@ importers:
         specifier: 0.0.3
         version: 0.0.3
       '@crowecawcaw/xa11y':
-        specifier: 0.13.0
-        version: 0.13.0
+        specifier: 0.15.4
+        version: 0.15.4
       '@napi-rs/keyring':
         specifier: ^1.3.0
         version: 1.3.0
@@ -303,47 +301,48 @@ packages:
     resolution: {integrity: sha512-OHhIe88qDL+FxyBalXdXNHAS5eEramr6Rerp+6iNkfkjqT8rx4hHNmfpmjg5/T1/am8QfknbOBZkqoXZlCrjPg==}
     engines: {node: '>=20.9.0'}
 
-  '@crowecawcaw/xa11y-darwin-arm64@0.13.0':
-    resolution: {integrity: sha512-wT+f9lbE6IfSPs8unb7IHr6/V/EkB4SCMFisTtV3jsTseCKr4/vkgpI1LRdul2r+KrmgQ4JxRpUDVB25dmpqNw==}
+  '@crowecawcaw/xa11y-darwin-arm64@0.15.4':
+    resolution: {integrity: sha512-/8I+o3JR2tY8thwH/lEcmIuyTxHY8rLW422UFFcP0jI4XRD4+kx5fSjSGV2QIUaQ9tlNsyZkPS0cTYX4oF9GKw==}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [darwin]
 
-  '@crowecawcaw/xa11y-darwin-x64@0.13.0':
-    resolution: {integrity: sha512-8QtLjTzciLIFOTWX1wZRTh6lg+Cw35Rc0VcDtJspS3baHiqkTZD6UyeZKhu5awSirbYZWLeXTuyY2CHCfaQ9rw==}
+  '@crowecawcaw/xa11y-darwin-x64@0.15.4':
+    resolution: {integrity: sha512-sCEfQrpVXyDwacL2PqsUiLUKUN2lhiBZ8dwW8R1/NuLYJTygGVz0UI1Tuk/td/i6RPupIHAgBgjwNo9Ci1KU0w==}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [darwin]
 
-  '@crowecawcaw/xa11y-linux-arm64-gnu@0.13.0':
-    resolution: {integrity: sha512-Yad7Bo25pqyowd92yLxGqr59ASSf7zr6lhzoufeCJU62eOq96jEQhhQw0TlvRU8aRI1ksgSuiUivoxNjYP2/gg==}
+  '@crowecawcaw/xa11y-linux-arm64-gnu@0.15.4':
+    resolution: {integrity: sha512-v0l2K3vqY4t9a8dK5j2EFZkjOknUv1j89zN++uuYLT5qR4TBbQFJs9ZcqxzLPwO1SqMXlO+LD4W+Ssx5JyQRjg==}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@crowecawcaw/xa11y-linux-x64-gnu@0.13.0':
-    resolution: {integrity: sha512-h/7UoAr2X8iSHaBsNFt7uW1Ft14zgintTACNYMTX8WFwE+WXdHe3vtJmxa/bG+N8imWSGH1Xkzg52YJaa/C+bw==}
+  '@crowecawcaw/xa11y-linux-x64-gnu@0.15.4':
+    resolution: {integrity: sha512-ajyJr5J+4YyAtdca7Gdeus18boAaRyNL6JTkk9QG48YXCgLx16y2dOvT0PvpbIPsc31VAH5RcvoHpnRW7E3sJQ==}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@crowecawcaw/xa11y-win32-arm64-msvc@0.13.0':
-    resolution: {integrity: sha512-3vmwZxNg7s6qXdSmYve3EE/zh7vZx75jUxi29odguy9llUvWpWFguvvXJ8EFYh13+TwxchibxnImlZb1XpKG+g==}
+  '@crowecawcaw/xa11y-win32-arm64-msvc@0.15.4':
+    resolution: {integrity: sha512-RfF0CIHXruhg3mQB3xPpItUgiB+Rh9RdHQ9fMLBd2wtCt8V9jtdcOu37EMrPDKt5ClpAxUr0/kxJrhfrX8ZzSQ==}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [win32]
 
-  '@crowecawcaw/xa11y-win32-x64-msvc@0.13.0':
-    resolution: {integrity: sha512-7kWYSj6AZKIN89EirGJQTkeaCJrElwFXOp9eQKd55vUFGZw2YARGY5HfpXha2BKGgZgT2IRR4CJrmgz2Nb1ETw==}
+  '@crowecawcaw/xa11y-win32-x64-msvc@0.15.4':
+    resolution: {integrity: sha512-fnx8+QGU76m+F6D3Va+fMg1jq/bOpvTU6tbnfF0pCg93wvsuJ0+xO/MJlFnCZVeOagPm0+wDBVBLUC1cvQOAmw==}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
 
-  '@crowecawcaw/xa11y@0.13.0':
-    resolution: {integrity: sha512-WTYHwlBhImGmmMt81crxaRvNdZXlBNemFyrP5GGHj2WeDTJMBrHgHTaladTypXHXrviFFBBGROl5moijRQ4ODA==}
+  '@crowecawcaw/xa11y@0.15.4':
+    resolution: {integrity: sha512-aDGW67yj0OPGc8Oo/IJZpZy/252D+qi9rcrlT8T+mXLjsn5+58Ha6cq921O58Yq6aGvNikXBMbap0J6/fM2Mlg==}
     engines: {node: '>=18'}
+    hasBin: true
 
   '@electron-internal/extract-zip@1.0.5':
     resolution: {integrity: sha512-+bqFCP98pLI0Tt0XQo1TmlXtwjWchISndDOxCkEcIuUgXWpBnLyRI+2DU+mesvnMMX6L1XDqYNA0lXNDHd/yiA==}
@@ -617,8 +616,8 @@ packages:
   undici-types@7.16.0:
     resolution: {integrity: sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw==}
 
-  undici@7.29.1:
-    resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
+  undici@7.30.2:
+    resolution: {integrity: sha512-mLyPQnHwUxaM/rideoK/+KL8DaAJLRl4aBCfmX444aCSLnIaomqPLtNRe2jdCYcsk5wZzXrDIQC8ZeYNRAYyIA==}
     engines: {node: '>=20.18.1'}
 
 snapshots:
@@ -642,32 +641,32 @@ snapshots:
       '@clerk/electron-passkeys-win32-arm64-msvc': 0.0.3
       '@clerk/electron-passkeys-win32-x64-msvc': 0.0.3
 
-  '@crowecawcaw/xa11y-darwin-arm64@0.13.0':
+  '@crowecawcaw/xa11y-darwin-arm64@0.15.4':
     optional: true
 
-  '@crowecawcaw/xa11y-darwin-x64@0.13.0':
+  '@crowecawcaw/xa11y-darwin-x64@0.15.4':
     optional: true
 
-  '@crowecawcaw/xa11y-linux-arm64-gnu@0.13.0':
+  '@crowecawcaw/xa11y-linux-arm64-gnu@0.15.4':
     optional: true
 
-  '@crowecawcaw/xa11y-linux-x64-gnu@0.13.0':
+  '@crowecawcaw/xa11y-linux-x64-gnu@0.15.4':
     optional: true
 
-  '@crowecawcaw/xa11y-win32-arm64-msvc@0.13.0':
+  '@crowecawcaw/xa11y-win32-arm64-msvc@0.15.4':
     optional: true
 
-  '@crowecawcaw/xa11y-win32-x64-msvc@0.13.0':
+  '@crowecawcaw/xa11y-win32-x64-msvc@0.15.4':
     optional: true
 
-  '@crowecawcaw/xa11y@0.13.0':
+  '@crowecawcaw/xa11y@0.15.4':
     optionalDependencies:
-      '@crowecawcaw/xa11y-darwin-arm64': 0.13.0
-      '@crowecawcaw/xa11y-darwin-x64': 0.13.0
-      '@crowecawcaw/xa11y-linux-arm64-gnu': 0.13.0
-      '@crowecawcaw/xa11y-linux-x64-gnu': 0.13.0
-      '@crowecawcaw/xa11y-win32-arm64-msvc': 0.13.0
-      '@crowecawcaw/xa11y-win32-x64-msvc': 0.13.0
+      '@crowecawcaw/xa11y-darwin-arm64': 0.15.4
+      '@crowecawcaw/xa11y-darwin-x64': 0.15.4
+      '@crowecawcaw/xa11y-linux-arm64-gnu': 0.15.4
+      '@crowecawcaw/xa11y-linux-x64-gnu': 0.15.4
+      '@crowecawcaw/xa11y-win32-arm64-msvc': 0.15.4
+      '@crowecawcaw/xa11y-win32-x64-msvc': 0.15.4
 
   '@electron-internal/extract-zip@1.0.5': {}
 
@@ -690,7 +689,7 @@ snapshots:
       semver: 7.8.5
       sumchecker: 3.0.1(supports-color@8.1.1)
     optionalDependencies:
-      undici: 7.29.1
+      undici: 7.30.2
     transitivePeerDependencies:
       - supports-color
 
@@ -888,5 +887,5 @@ snapshots:
 
   undici-types@7.16.0: {}
 
-  undici@7.29.1:
+  undici@7.30.2:
     optional: true

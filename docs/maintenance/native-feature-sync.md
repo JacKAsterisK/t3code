@@ -8,7 +8,7 @@ approval before code or runtime changes.
 
 ## Baseline
 
-- LAN 1.0.37 preparation: upstream `dff0b1159b7e` (2026-11-08), on `lan/upstream-sync-20261107`. Previous published LAN 1.0.36 is `6660ea19b3133a1293260bd941007c07a20b7b13`. Application version 0.1.7 and schema 94 are unchanged; upstream added no migrations.
+- LAN 1.0.37 preparation: upstream `12f3244e0593` (2026-11-09, Claude Fable 5.2), on `lan/upstream-sync-20261107`. Previous published LAN 1.0.36 is `6660ea19b3133a1293260bd941007c07a20b7b13`. Application version 0.1.7 and schema 94 are unchanged; upstream added no migrations.
 
 - LAN 1.0.35 preparation: upstream `202d5b5616e3edf65706371e2b8a9c4f486d0a96` (2026-11-06), on `lan/release-1.0.35-20261106`. Previous published LAN 1.0.34 is `ceabe588958f5b1a4acb166d76fb30a711d651b8`. Application version advances to 0.1.7 and the fork schema to 94.
 
@@ -35,6 +35,7 @@ approval before code or runtime changes.
 - Rows 4, 6 and 13: keep the LAN approval and fleet RPC guards beside upstream's new provider-auth guard, and adopt upstream's ceiling-resolved MCP access default (`auto`) with the LAN approvals toggle.
 - Row 2: keep the `t3_lan_*` task-client route; its descriptions now send general-access callers to `t3_environment_links` ([LAN task routing](../operations/lan-task-routing.md#when-an-agent-should-use-these-tools)).
 - Row 12: migrations 001–094 unchanged.
+- Second merge to `12f3244e0593` for Claude Fable 5.2. Rows 4–6: upstream level-bound approval codes (`AUTO-…`, subject names the level) coexist with LAN approval-capable codes; a code is never both, and the sign-in page hides the approvals option for a level-bound code. Upstream's "Use T3 Code in another app" wizard needs T3 Connect, so LAN builds show it as unavailable. Rows 1 and 9: peer-link describe adopts upstream's rejected-certificate error over the LAN probe diagnostics; the desktop first-launch `t3` install keeps the LAN command name. Plan mode is removed upstream, with the fork's owner stamp on its implement-in-new-thread path. The LAN empty state never shows the public `t3` installers. Production staging locks refreshed (Clerk, Expo and React Native minor updates).
 - Hosted-link callers stay pinned by the `distributionPolicy.test.ts` guard; upstream added none. Usage limits adopt upstream's pooled cross-environment page; the fork adds only a stale-reading notice for kept readings older than 30 minutes.
 
 ## LAN 1.0.35 sync decisions

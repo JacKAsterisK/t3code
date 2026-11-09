@@ -8,14 +8,11 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 const require = NodeModule.createRequire(import.meta.url);
 const { compileModsAsync } = require("expo/config-plugins");
 const { getConfig } = require("expo/config");
+// A relative archive name: GNU tar reads a drive letter (C:\…) in -f as a remote host.
 const template = NodeChildProcess.execFileSync(
   "tar",
-  [
-    "-xOf",
-    NodePath.join(NodePath.dirname(require.resolve("expo/package.json")), "template.tgz"),
-    "package/android/app/src/main/java/com/helloworld/MainActivity.kt",
-  ],
-  { encoding: "utf8" },
+  ["-xOf", "template.tgz", "package/android/app/src/main/java/com/helloworld/MainActivity.kt"],
+  { cwd: NodePath.dirname(require.resolve("expo/package.json")), encoding: "utf8" },
 );
 const projectRoots = [];
 

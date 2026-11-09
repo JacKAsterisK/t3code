@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -73,7 +74,8 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("names this install's launcher when t3 is not on PATH", () =>
+  // Its fixtures are symlinks (Windows: Developer Mode or elevation).
+  it.effect.skipIf(!symlinksSupported)("names this install's launcher when t3 is not on PATH", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -194,70 +196,78 @@ it.layer(NodeServices.layer)("manual server installation ownership", (it) => {
     }),
   );
 
-  it.effect("requires the npm prefix's bin to point to the running package", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped();
-      const prefix = path.join(root, "bunx-tools");
-      const packageRoot = path.join(prefix, "lib/node_modules/t3");
-      const entry = path.join(packageRoot, "dist/bin.mjs");
-      const globalBin = path.join(prefix, "bin/t3");
-      yield* fs.makeDirectory(path.dirname(entry), { recursive: true });
-      yield* fs.makeDirectory(path.dirname(globalBin), { recursive: true });
-      yield* fs.writeFileString(entry, "");
-      yield* fs.writeFileString(
-        path.join(packageRoot, "package.json"),
-        '{"name":"t3","version":"0.0.45","bin":{"t3":"./dist/bin.mjs"}}',
-      );
-      const resolve = resolveServerInstallation.pipe(
-        Effect.provideService(HostProcess.Arguments, ["node", entry]),
-        Effect.provideService(HostProcess.IsExecutable, false),
-        Effect.provideService(HostProcess.Platform, "linux"),
-      );
-      expect(yield* resolve).toBeNull();
-      yield* fs.symlink(entry, globalBin);
-      expect(yield* resolve).toEqual({ kind: "npm-global", prefix });
-      yield* fs.remove(globalBin);
-      yield* fs.writeFileString(globalBin, "an unrelated t3 command");
-      expect(yield* resolve).toBeNull();
-      expect(yield* resolve.pipe(Effect.provideService(HostProcess.Platform, "win32"))).toBeNull();
-    }),
-  );
-
-  it.effect("proves the downloaded executable was started by a global npm launcher", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped();
-      const prefix = path.join(root, "bunx-tools");
-      const packageRoot = path.join(prefix, "lib/node_modules/t3");
-      const launcher = path.join(packageRoot, "bin/t3.mjs");
-      const executable = path.join(root, ".t3/runtime/versions/1.0.0/t3");
-      yield* fs.makeDirectory(path.dirname(launcher), { recursive: true });
-      yield* fs.makeDirectory(path.dirname(executable), { recursive: true });
-      yield* fs.makeDirectory(path.join(prefix, "bin"));
-      yield* fs.writeFileString(launcher, "");
-      yield* fs.writeFileString(executable, "");
-      yield* fs.symlink(launcher, path.join(prefix, "bin/t3"));
-      const resolve = resolveServerInstallation.pipe(
-        Effect.provideService(HostProcess.ExecutablePath, executable),
-        Effect.provideService(HostProcess.Arguments, [executable, executable]),
-        Effect.provideService(HostProcess.IsExecutable, true),
-        Effect.provideService(HostProcess.Platform, "linux"),
-        Effect.provideService(HostProcess.Environment, { T3CODE_NPM_LAUNCHER_PATH: launcher }),
-      );
-      for (const [version, expected] of [
-        ["0.0.1", null],
-        [packageJson.version, { kind: "npm-global", prefix }],
-      ] as const) {
+  // POSIX npm prefix layout under a linux platform; Windows paths read as a bunx cache. Its fixture is also a symlink.
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "requires the npm prefix's bin to point to the running package",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped();
+        const prefix = path.join(root, "bunx-tools");
+        const packageRoot = path.join(prefix, "lib/node_modules/t3");
+        const entry = path.join(packageRoot, "dist/bin.mjs");
+        const globalBin = path.join(prefix, "bin/t3");
+        yield* fs.makeDirectory(path.dirname(entry), { recursive: true });
+        yield* fs.makeDirectory(path.dirname(globalBin), { recursive: true });
+        yield* fs.writeFileString(entry, "");
         yield* fs.writeFileString(
           path.join(packageRoot, "package.json"),
-          `{"name":"t3","version":"${version}","bin":{"t3":"./bin/t3.mjs"}}`,
+          '{"name":"t3","version":"0.0.45","bin":{"t3":"./dist/bin.mjs"}}',
         );
-        expect(yield* resolve).toEqual(expected);
-      }
-    }),
+        const resolve = resolveServerInstallation.pipe(
+          Effect.provideService(HostProcess.Arguments, ["node", entry]),
+          Effect.provideService(HostProcess.IsExecutable, false),
+          Effect.provideService(HostProcess.Platform, "linux"),
+        );
+        expect(yield* resolve).toBeNull();
+        yield* fs.symlink(entry, globalBin);
+        expect(yield* resolve).toEqual({ kind: "npm-global", prefix });
+        yield* fs.remove(globalBin);
+        yield* fs.writeFileString(globalBin, "an unrelated t3 command");
+        expect(yield* resolve).toBeNull();
+        expect(
+          yield* resolve.pipe(Effect.provideService(HostProcess.Platform, "win32")),
+        ).toBeNull();
+      }),
+  );
+
+  // Its fixtures are symlinks (Windows: Developer Mode or elevation).
+  it.effect.skipIf(!symlinksSupported)(
+    "proves the downloaded executable was started by a global npm launcher",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped();
+        const prefix = path.join(root, "bunx-tools");
+        const packageRoot = path.join(prefix, "lib/node_modules/t3");
+        const launcher = path.join(packageRoot, "bin/t3.mjs");
+        const executable = path.join(root, ".t3/runtime/versions/1.0.0/t3");
+        yield* fs.makeDirectory(path.dirname(launcher), { recursive: true });
+        yield* fs.makeDirectory(path.dirname(executable), { recursive: true });
+        yield* fs.makeDirectory(path.join(prefix, "bin"));
+        yield* fs.writeFileString(launcher, "");
+        yield* fs.writeFileString(executable, "");
+        yield* fs.symlink(launcher, path.join(prefix, "bin/t3"));
+        const resolve = resolveServerInstallation.pipe(
+          Effect.provideService(HostProcess.ExecutablePath, executable),
+          Effect.provideService(HostProcess.Arguments, [executable, executable]),
+          Effect.provideService(HostProcess.IsExecutable, true),
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.provideService(HostProcess.Environment, { T3CODE_NPM_LAUNCHER_PATH: launcher }),
+        );
+        for (const [version, expected] of [
+          ["0.0.1", null],
+          [packageJson.version, { kind: "npm-global", prefix }],
+        ] as const) {
+          yield* fs.writeFileString(
+            path.join(packageRoot, "package.json"),
+            `{"name":"t3","version":"${version}","bin":{"t3":"./bin/t3.mjs"}}`,
+          );
+          expect(yield* resolve).toEqual(expected);
+        }
+      }),
   );
 
   it.effect("leaves local, standalone, missing and unreadable installs unknown", () =>

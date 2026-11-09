@@ -78,6 +78,9 @@ function makeHungProcess(): ChildProcessSpawner.ChildProcessHandle {
   });
 }
 
+// Tests swap process.env for a bare one, which on Windows leaves Node no TEMP to make folders in.
+const tempRoot = process.env.TEMP === undefined ? undefined : { directory: process.env.TEMP };
+
 function withProcessEnv<A, E, R>(
   env: NodeJS.ProcessEnv,
   effect: Effect.Effect<A, E, R>,
@@ -114,7 +117,7 @@ function runShellEnvironment(input: {
     DesktopEnvironment.DesktopEnvironment,
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const stateDir = input.stateDir ?? (yield* fs.makeTempDirectoryScoped());
+      const stateDir = input.stateDir ?? (yield* fs.makeTempDirectoryScoped(tempRoot));
       return DesktopEnvironment.DesktopEnvironment.of({
         platform: input.platform,
         stateDir,
@@ -194,7 +197,7 @@ describe("DesktopShellEnvironment", () => {
     () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
-        const stateDir = yield* fs.makeTempDirectoryScoped();
+        const stateDir = yield* fs.makeTempDirectoryScoped(tempRoot);
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner.pipe(
           Effect.provide(NodeServices.layer),
         );
@@ -288,7 +291,7 @@ describe("DesktopShellEnvironment", () => {
   ])("ignores an unusable cache and still starts before discovery: %s", (contents) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const stateDir = yield* fs.makeTempDirectoryScoped();
+      const stateDir = yield* fs.makeTempDirectoryScoped(tempRoot);
       yield* fs.writeFileString(`${stateDir}/shell-environment-cache.json`, contents);
       const started = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
@@ -323,7 +326,7 @@ describe("DesktopShellEnvironment", () => {
     () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
-        const stateDir = yield* fs.makeTempDirectoryScoped();
+        const stateDir = yield* fs.makeTempDirectoryScoped(tempRoot);
         const contents = encodeCache({
           version: 1,
           key: '["darwin","/test-home","/bin/zsh",""]',

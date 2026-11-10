@@ -32,12 +32,17 @@ export async function buildHomeRepair(outDir: string) {
     clean: false,
     sourcemap: false,
     dts: false,
+    // Packaging ships only native-home-repair.mjs, so a split chunk would be missing at runtime.
+    outputOptions: { codeSplitting: false },
     deps: {
       alwaysBundle: [/.*/],
       // Normal event projection imports parser utilities; the offline artifact must have no package dependencies.
       onlyBundle: [/.*/],
     },
   });
+  const modules = NodeFS.readdirSync(outDir).filter((name) => /\.[cm]?js$/u.test(name));
+  if (modules.length !== 1 || modules[0] !== "native-home-repair.mjs")
+    throw new Error("The repair helper must bundle into one self-contained module.");
   for (const name of ["schema", "fixture", "contract"])
     NodeFS.copyFileSync(
       NodePath.join(import.meta.dirname, `home-repair.${name}.json`),

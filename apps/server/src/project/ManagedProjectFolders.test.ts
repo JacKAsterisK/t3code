@@ -3,6 +3,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { CommandId, ProjectId, ThreadId, VcsProcessSpawnError } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -307,29 +308,32 @@ it.effect("leaves threads in other projects alone", () =>
   ),
 );
 
-it.effect("still knows No project when its folder is the target of a symlinked Scratch", () =>
-  withScratch(({ baseDir }) =>
-    Effect.gen(function* () {
-      const scratch = yield* ManagedProjectFolders.ManagedProjectFolders;
-      const projects = yield* ProjectService.ProjectService;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* requireRoot;
-      const target = path.join(baseDir, "visible-chats");
-      yield* fileSystem.makeDirectory(target);
-      yield* fileSystem.symlink(target, root);
-      const { projectId } = yield* scratch.ensureScratchProject;
-      yield* projects.update({
-        commandId: CommandId.make("command:point-at-target"),
-        projectId,
-        workspaceRoot: target,
-      });
+// Its Scratch folder is a symlink (Windows: Developer Mode or elevation).
+it.effect.skipIf(!symlinksSupported)(
+  "still knows No project when its folder is the target of a symlinked Scratch",
+  () =>
+    withScratch(({ baseDir }) =>
+      Effect.gen(function* () {
+        const scratch = yield* ManagedProjectFolders.ManagedProjectFolders;
+        const projects = yield* ProjectService.ProjectService;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* requireRoot;
+        const target = path.join(baseDir, "visible-chats");
+        yield* fileSystem.makeDirectory(target);
+        yield* fileSystem.symlink(target, root);
+        const { projectId } = yield* scratch.ensureScratchProject;
+        yield* projects.update({
+          commandId: CommandId.make("command:point-at-target"),
+          projectId,
+          workspaceRoot: target,
+        });
 
-      assert.isTrue(yield* scratch.isScratchProject(projectId));
-      assert.equal((yield* scratch.ensureScratchProject).projectId, projectId);
-      assert.deepStrictEqual(yield* scratch.scratchRoot, Option.some(target));
-    }),
-  ),
+        assert.isTrue(yield* scratch.isScratchProject(projectId));
+        assert.equal((yield* scratch.ensureScratchProject).projectId, projectId);
+        assert.deepStrictEqual(yield* scratch.scratchRoot, Option.some(target));
+      }),
+    ),
 );
 
 const GIT_IDENTITY_KEYS = [

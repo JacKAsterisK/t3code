@@ -103,19 +103,23 @@ describe("electron development launcher", () => {
     assert.notInclude(script, "node_modules/electron");
   });
 
-  it("restores execute permissions on an unchanged launcher", () => {
-    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-launcher-"));
-    const launcherPath = NodePath.join(directory, "launcher");
-    try {
-      writeDevelopmentLauncherScript(launcherPath, "/runtime/Electron");
-      NodeFS.chmodSync(launcherPath, 0o644);
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- NTFS has no POSIX execute bits.
+  it.skipIf(NodeOS.platform() === "win32")(
+    "restores execute permissions on an unchanged launcher",
+    () => {
+      const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-launcher-"));
+      const launcherPath = NodePath.join(directory, "launcher");
+      try {
+        writeDevelopmentLauncherScript(launcherPath, "/runtime/Electron");
+        NodeFS.chmodSync(launcherPath, 0o644);
 
-      assert.isFalse(writeDevelopmentLauncherScript(launcherPath, "/runtime/Electron"));
-      assert.equal(NodeFS.statSync(launcherPath).mode & 0o777, 0o755);
-    } finally {
-      NodeFS.rmSync(directory, { recursive: true, force: true });
-    }
-  });
+        assert.isFalse(writeDevelopmentLauncherScript(launcherPath, "/runtime/Electron"));
+        assert.equal(NodeFS.statSync(launcherPath).mode & 0o777, 0o755);
+      } finally {
+        NodeFS.rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 // Supply inert imports so the real startup runs without launching Electron or signalling processes.

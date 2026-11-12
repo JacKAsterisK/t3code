@@ -134,6 +134,8 @@ const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
     downloads: () => downloads,
   };
 });
+// Fixtures run #!/bin/sh fakes and emulate darwin's bare tar and exec bits; Windows cannot.
+const windowsHost = HostProcess.Platform.defaultValue() === "win32";
 const terminalState = (installation: CodexInstallation.CodexInstallation["Service"]) =>
   installation.changes.pipe(
     Stream.filter((state) => ["succeeded", "failed", "cancelled"].includes(state.phase)),
@@ -143,8 +145,9 @@ const terminalState = (installation: CodexInstallation.CodexInstallation["Servic
 
 it.effect.each(["0.156.0", "0.156.1", "0.156.2", "0.157.0"])(
   "reuses installed Codex %s without downloading or taking ownership of it",
-  (version) =>
+  (version, ctx) =>
     Effect.gen(function* () {
+      if (windowsHost) return ctx.skip();
       const h = yield* makeHarness({ local: { version } });
       expect(yield* h.installation.start).toMatchObject({
         source: "local",
@@ -180,8 +183,9 @@ it.effect.each([
   { version: "unknown" },
   { version: "0.156.1", appServerFails: true },
   { version: "0.156.1", versionFails: true },
-])("downloads the pinned release when the local CLI is unsupported or broken: %j", (local) =>
+])("downloads the pinned release when the local CLI is unsupported or broken: %j", (local, ctx) =>
   Effect.gen(function* () {
+    if (windowsHost) return ctx.skip();
     const h = yield* makeHarness({ local });
     expect((yield* h.installation.state).installedVersion).toBeNull();
     yield* h.installation.start;
@@ -210,7 +214,7 @@ const compileNative = Effect.fn("test.compileNative")(function* (
   expect(yield* compiler.exitCode).toBe(0);
 }, Effect.scoped);
 
-it.effect("rechecks compatibility after the local executable is replaced", () =>
+it.effect.skipIf(windowsHost)("rechecks compatibility after the local executable is replaced", () =>
   Effect.gen(function* () {
     const h = yield* makeHarness({ local: { version: "0.156.1" } });
     expect((yield* h.installation.resolve()).source).toBe("local");
@@ -225,50 +229,54 @@ it.effect("rechecks compatibility after the local executable is replaced", () =>
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it.effect("rechecks a cached local executable when the shared manifest policy changes", () =>
-  Effect.gen(function* () {
-    let manifest = ModelManifest.BUNDLED_MODEL_MANIFEST;
-    const h = yield* makeHarness({
-      local: { version: "0.156.0" },
-      manifestCurrent: Effect.sync(() => manifest),
-    });
-    expect((yield* h.installation.resolve()).source).toBe("local");
-    manifest = {
-      ...manifest,
-      compatibility: [
-        {
-          driver: "codex",
-          t3CodeRange: ">=0.0.42",
-          ranges: [
-            { range: ">=0.156.1", status: "supported" },
-            { range: "<0.156.1", status: "broken" },
-          ],
-        },
-      ],
-    };
-    yield* h.installation.start;
-    expect((yield* terminalState(h.installation)).phase).toBe("succeeded");
-    expect((yield* h.installation.resolve()).source).toBe("managed");
-    expect(h.downloads()).toBe(1);
-    expect((yield* h.fs.readFileString(h.probeLog)).trim().split("\n")).toEqual([
-      "--version",
-      "app-server --help",
-    ]);
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+it.effect.skipIf(windowsHost)(
+  "rechecks a cached local executable when the shared manifest policy changes",
+  () =>
+    Effect.gen(function* () {
+      let manifest = ModelManifest.BUNDLED_MODEL_MANIFEST;
+      const h = yield* makeHarness({
+        local: { version: "0.156.0" },
+        manifestCurrent: Effect.sync(() => manifest),
+      });
+      expect((yield* h.installation.resolve()).source).toBe("local");
+      manifest = {
+        ...manifest,
+        compatibility: [
+          {
+            driver: "codex",
+            t3CodeRange: ">=0.0.42",
+            ranges: [
+              { range: ">=0.156.1", status: "supported" },
+              { range: "<0.156.1", status: "broken" },
+            ],
+          },
+        ],
+      };
+      yield* h.installation.start;
+      expect((yield* terminalState(h.installation)).phase).toBe("succeeded");
+      expect((yield* h.installation.resolve()).source).toBe("managed");
+      expect(h.downloads()).toBe(1);
+      expect((yield* h.fs.readFileString(h.probeLog)).trim().split("\n")).toEqual([
+        "--version",
+        "app-server --help",
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it.effect("uses bundled Codex compatibility when the remote manifest omits its policy", () =>
-  Effect.gen(function* () {
-    const h = yield* makeHarness({
-      local: { version: "0.156.0" },
-      manifestCurrent: Effect.succeed({
-        ...ModelManifest.BUNDLED_MODEL_MANIFEST,
-        compatibility: [],
-      }),
-    });
-    expect((yield* h.installation.start).source).toBe("local");
-    expect(h.downloads()).toBe(0);
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+it.effect.skipIf(windowsHost)(
+  "uses bundled Codex compatibility when the remote manifest omits its policy",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({
+        local: { version: "0.156.0" },
+        manifestCurrent: Effect.succeed({
+          ...ModelManifest.BUNDLED_MODEL_MANIFEST,
+          compatibility: [],
+        }),
+      });
+      expect((yield* h.installation.start).source).toBe("local");
+      expect(h.downloads()).toBe(0);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.effect.each([
@@ -276,8 +284,9 @@ it.effect.each([
   { kind: "native", name: "volta-shim" },
   { kind: "native", name: "mise" },
   { kind: "native", name: "aqua-proxy" },
-])("preserves the invoked name of $kind $name launcher symlinks", ({ kind, name }) =>
+])("preserves the invoked name of $kind $name launcher symlinks", ({ kind, name }, ctx) =>
   Effect.gen(function* () {
+    if (windowsHost) return ctx.skip();
     const h = yield* makeHarness({ local: { version: "0.156.1" } });
     const launcher = `${h.baseDir}/${name}`;
     if (kind === "native") {
@@ -310,7 +319,7 @@ int main(int argc, char **argv) {
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it.effect(
+it.effect.skipIf(windowsHost)(
   "installs the complete verified package in tools/codex/version and survives a restart",
   () =>
     Effect.gen(function* () {
@@ -330,61 +339,65 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it.effect("requires an update before running an older activated managed installation", () =>
-  Effect.gen(function* () {
-    const first = yield* makeHarness();
-    yield* first.installation.start;
-    yield* terminalState(first.installation);
-    const executable = yield* first.installation.resolve();
-    const oldDirectory = `${first.installation.managedDirectory}/0.155.1`;
-    yield* first.fs.rename(executable.managedVersionDirectory!, oldDirectory);
-    for (const name of ["codex-package.json", ".install-complete.json"]) {
-      const file = `${oldDirectory}/${name}`;
+it.effect.skipIf(windowsHost)(
+  "requires an update before running an older activated managed installation",
+  () =>
+    Effect.gen(function* () {
+      const first = yield* makeHarness();
+      yield* first.installation.start;
+      yield* terminalState(first.installation);
+      const executable = yield* first.installation.resolve();
+      const oldDirectory = `${first.installation.managedDirectory}/0.155.1`;
+      yield* first.fs.rename(executable.managedVersionDirectory!, oldDirectory);
+      for (const name of ["codex-package.json", ".install-complete.json"]) {
+        const file = `${oldDirectory}/${name}`;
+        yield* first.fs.writeFileString(
+          file,
+          (yield* first.fs.readFileString(file)).replaceAll("0.156.1", "0.155.1"),
+        );
+      }
       yield* first.fs.writeFileString(
-        file,
-        (yield* first.fs.readFileString(file)).replaceAll("0.156.1", "0.155.1"),
+        `${first.installation.managedDirectory}/active.json`,
+        '{"version":"0.155.1"}',
       );
-    }
-    yield* first.fs.writeFileString(
-      `${first.installation.managedDirectory}/active.json`,
-      '{"version":"0.155.1"}',
-    );
-    const restarted = yield* makeHarness({ baseDir: first.baseDir });
-    expect((yield* Effect.flip(restarted.installation.resolve())).detail).toContain(
-      "outside the supported range",
-    );
-    yield* restarted.installation.start;
-    expect((yield* terminalState(restarted.installation)).phase).toBe("succeeded");
-    expect((yield* restarted.installation.resolve()).version).toBe("0.156.1");
-    expect(restarted.downloads()).toBe(1);
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      const restarted = yield* makeHarness({ baseDir: first.baseDir });
+      expect((yield* Effect.flip(restarted.installation.resolve())).detail).toContain(
+        "outside the supported range",
+      );
+      yield* restarted.installation.start;
+      expect((yield* terminalState(restarted.installation)).phase).toBe("succeeded");
+      expect((yield* restarted.installation.resolve()).version).toBe("0.156.1");
+      expect(restarted.downloads()).toBe(1);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it.effect("updates an older supported managed installation to the pinned release on startup", () =>
-  Effect.gen(function* () {
-    const first = yield* makeHarness();
-    yield* first.installation.start;
-    yield* terminalState(first.installation);
-    const executable = yield* first.installation.resolve();
-    const oldDirectory = `${first.installation.managedDirectory}/0.156.0`;
-    yield* first.fs.rename(executable.managedVersionDirectory!, oldDirectory);
-    for (const name of ["codex-package.json", ".install-complete.json"]) {
-      const file = `${oldDirectory}/${name}`;
+it.effect.skipIf(windowsHost)(
+  "updates an older supported managed installation to the pinned release on startup",
+  () =>
+    Effect.gen(function* () {
+      const first = yield* makeHarness();
+      yield* first.installation.start;
+      yield* terminalState(first.installation);
+      const executable = yield* first.installation.resolve();
+      const oldDirectory = `${first.installation.managedDirectory}/0.156.0`;
+      yield* first.fs.rename(executable.managedVersionDirectory!, oldDirectory);
+      for (const name of ["codex-package.json", ".install-complete.json"]) {
+        const file = `${oldDirectory}/${name}`;
+        yield* first.fs.writeFileString(
+          file,
+          (yield* first.fs.readFileString(file)).replaceAll("0.156.1", "0.156.0"),
+        );
+      }
       yield* first.fs.writeFileString(
-        file,
-        (yield* first.fs.readFileString(file)).replaceAll("0.156.1", "0.156.0"),
+        `${first.installation.managedDirectory}/active.json`,
+        '{"version":"0.156.0"}',
       );
-    }
-    yield* first.fs.writeFileString(
-      `${first.installation.managedDirectory}/active.json`,
-      '{"version":"0.156.0"}',
-    );
-    const restarted = yield* makeHarness({ baseDir: first.baseDir });
-    expect((yield* restarted.installation.state).operationId).not.toBeNull();
-    expect((yield* terminalState(restarted.installation)).phase).toBe("succeeded");
-    expect((yield* restarted.installation.resolve()).version).toBe("0.156.1");
-    expect(restarted.downloads()).toBe(1);
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      const restarted = yield* makeHarness({ baseDir: first.baseDir });
+      expect((yield* restarted.installation.state).operationId).not.toBeNull();
+      expect((yield* terminalState(restarted.installation)).phase).toBe("succeeded");
+      expect((yield* restarted.installation.resolve()).version).toBe("0.156.1");
+      expect(restarted.downloads()).toBe(1);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.effect("rejects corrupted downloads without publishing a runtime", () =>
@@ -495,38 +508,42 @@ it.effect("cancels an in-flight download and cleans the staging directory", () =
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it.effect("protects active process leases and removes the runtime after release", () =>
-  Effect.gen(function* () {
-    const { installation, fs } = yield* makeHarness();
-    yield* installation.start;
-    yield* terminalState(installation);
-    const leaseScope = yield* Scope.make();
-    yield* installation.acquire().pipe(Effect.provideService(Scope.Scope, leaseScope));
-    expect((yield* Effect.flip(installation.remove())).detail).toContain("Stop Codex sessions");
-    yield* Scope.close(leaseScope, Exit.void);
-    yield* installation.remove();
-    expect(yield* fs.exists(installation.managedDirectory)).toBe(false);
-    expect((yield* installation.state).installedVersion).toBeNull();
-    expect((yield* installation.state).executablePath).toBeNull();
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+it.effect.skipIf(windowsHost)(
+  "protects active process leases and removes the runtime after release",
+  () =>
+    Effect.gen(function* () {
+      const { installation, fs } = yield* makeHarness();
+      yield* installation.start;
+      yield* terminalState(installation);
+      const leaseScope = yield* Scope.make();
+      yield* installation.acquire().pipe(Effect.provideService(Scope.Scope, leaseScope));
+      expect((yield* Effect.flip(installation.remove())).detail).toContain("Stop Codex sessions");
+      yield* Scope.close(leaseScope, Exit.void);
+      yield* installation.remove();
+      expect(yield* fs.exists(installation.managedDirectory)).toBe(false);
+      expect((yield* installation.state).installedVersion).toBeNull();
+      expect((yield* installation.state).executablePath).toBeNull();
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it.effect("keeps an activated runtime when a later update fails verification", () =>
-  Effect.gen(function* () {
-    const first = yield* makeHarness();
-    yield* first.installation.start;
-    yield* terminalState(first.installation);
-    const update = yield* makeHarness({
-      baseDir: first.baseDir,
-      options: { releaseAsset: { ...asset, version: "0.156.2", sha256: "0".repeat(64) } },
-    });
-    expect((yield* update.installation.state).executablePath).toBe(
-      (yield* first.installation.resolve()).executablePath,
-    );
-    yield* update.installation.start;
-    expect((yield* terminalState(update.installation)).phase).toBe("failed");
-    expect((yield* update.installation.resolve()).version).toBe("0.156.1");
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+it.effect.skipIf(windowsHost)(
+  "keeps an activated runtime when a later update fails verification",
+  () =>
+    Effect.gen(function* () {
+      const first = yield* makeHarness();
+      yield* first.installation.start;
+      yield* terminalState(first.installation);
+      const update = yield* makeHarness({
+        baseDir: first.baseDir,
+        options: { releaseAsset: { ...asset, version: "0.156.2", sha256: "0".repeat(64) } },
+      });
+      expect((yield* update.installation.state).executablePath).toBe(
+        (yield* first.installation.resolve()).executablePath,
+      );
+      yield* update.installation.start;
+      expect((yield* terminalState(update.installation)).phase).toBe("failed");
+      expect((yield* update.installation.resolve()).version).toBe("0.156.1");
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 // Stands in for Windows' bsdtar: CRLF listings, and extraction writes the Windows layout.

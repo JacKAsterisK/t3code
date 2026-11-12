@@ -711,72 +711,75 @@ describe("ssh tunnel scripts", () => {
       }),
   );
 
-  it.live("concurrent launches on one remote home record the server that owns it", () =>
-    // The second row's server never publishes server-runtime.json.
-    Effect.forEach([1_500, null], (publishDelayMs) =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-launch-" });
-        const serversFile = path.join(home, "servers");
-        yield* Effect.addFinalizer(() =>
-          fs.readFileString(serversFile).pipe(
-            Effect.map((pids) => {
-              for (const pid of pids.split("\n").filter(Boolean)) {
-                try {
-                  process.kill(Number(pid), "SIGKILL");
-                } catch {}
-              }
-            }),
-            Effect.ignore,
-          ),
-        );
-        const serverScript = path.join(home, "fake-t3.cjs");
-        yield* fs.writeFileString(serverScript, fakeT3Serve(publishDelayMs));
-        // A launch that died holding the lock must not block or double-admit later ones.
-        const launchLock = path.join(home, ".t3", "ssh-launch", ".launch.lock");
-        yield* fs.makeDirectory(path.dirname(launchLock), { recursive: true });
-        yield* fs.writeFileString(launchLock, "999999999\n");
-        const targets = [
-          { alias: "devbox", hostname: "devbox", username: null, port: null },
-          { alias: "devbox-tailnet", hostname: "devbox-tailnet", username: null, port: null },
-        ];
-
-        const launches = yield* Effect.forEach(
-          targets,
-          (target) =>
-            SshTunnel.launchOrReuseRemoteServer(target, undefined, {
-              nodeScriptPath: serverScript,
-            }),
-          { concurrency: "unbounded" },
-        ).pipe(Effect.provide(localRemoteShellLayer(home)));
-
-        const ownerPid = Number(
-          yield* fs.readFileString(path.join(home, ".t3", "userdata", "server.lock")),
-        );
-        assert.sameMembers(
-          launches.map((launch) => launch.remoteServerKind),
-          ["managed", "external"],
-        );
-        assert.equal(launches[0]!.remotePort, launches[1]!.remotePort);
-        assert.deepEqual((yield* fs.readFileString(serversFile)).trim().split("\n"), [
-          String(ownerPid),
-        ]);
-        for (const [index, launch] of launches.entries()) {
-          if (launch.remoteServerKind !== "managed") continue;
-          const stateKey = yield* remoteStateKey(targets[index]!);
-          const recordedPid = yield* fs.readFileString(
-            path.join(home, ".t3", "ssh-launch", stateKey, "pid"),
+  // The remote script records `$!`, which MSYS sh reports as its own PID, not the Windows server's.
+  it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "concurrent launches on one remote home record the server that owns it",
+    () =>
+      // The second row's server never publishes server-runtime.json.
+      Effect.forEach([1_500, null], (publishDelayMs) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-launch-" });
+          const serversFile = path.join(home, "servers");
+          yield* Effect.addFinalizer(() =>
+            fs.readFileString(serversFile).pipe(
+              Effect.map((pids) => {
+                for (const pid of pids.split("\n").filter(Boolean)) {
+                  try {
+                    process.kill(Number(pid), "SIGKILL");
+                  } catch {}
+                }
+              }),
+              Effect.ignore,
+            ),
           );
-          assert.equal(
-            Number(recordedPid.trim()),
-            ownerPid,
-            `${targets[index]!.alias} reported a managed server, but its recorded PID is not the server that owns the remote home`,
+          const serverScript = path.join(home, "fake-t3.cjs");
+          yield* fs.writeFileString(serverScript, fakeT3Serve(publishDelayMs));
+          // A launch that died holding the lock must not block or double-admit later ones.
+          const launchLock = path.join(home, ".t3", "ssh-launch", ".launch.lock");
+          yield* fs.makeDirectory(path.dirname(launchLock), { recursive: true });
+          yield* fs.writeFileString(launchLock, "999999999\n");
+          const targets = [
+            { alias: "devbox", hostname: "devbox", username: null, port: null },
+            { alias: "devbox-tailnet", hostname: "devbox-tailnet", username: null, port: null },
+          ];
+
+          const launches = yield* Effect.forEach(
+            targets,
+            (target) =>
+              SshTunnel.launchOrReuseRemoteServer(target, undefined, {
+                nodeScriptPath: serverScript,
+              }),
+            { concurrency: "unbounded" },
+          ).pipe(Effect.provide(localRemoteShellLayer(home)));
+
+          const ownerPid = Number(
+            yield* fs.readFileString(path.join(home, ".t3", "userdata", "server.lock")),
           );
-        }
-        assert.isFalse(yield* fs.exists(launchLock));
-      }).pipe(Effect.scoped),
-    ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+          assert.sameMembers(
+            launches.map((launch) => launch.remoteServerKind),
+            ["managed", "external"],
+          );
+          assert.equal(launches[0]!.remotePort, launches[1]!.remotePort);
+          assert.deepEqual((yield* fs.readFileString(serversFile)).trim().split("\n"), [
+            String(ownerPid),
+          ]);
+          for (const [index, launch] of launches.entries()) {
+            if (launch.remoteServerKind !== "managed") continue;
+            const stateKey = yield* remoteStateKey(targets[index]!);
+            const recordedPid = yield* fs.readFileString(
+              path.join(home, ".t3", "ssh-launch", stateKey, "pid"),
+            );
+            assert.equal(
+              Number(recordedPid.trim()),
+              ownerPid,
+              `${targets[index]!.alias} reported a managed server, but its recorded PID is not the server that owns the remote home`,
+            );
+          }
+          assert.isFalse(yield* fs.exists(launchLock));
+        }).pipe(Effect.scoped),
+      ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 });
 

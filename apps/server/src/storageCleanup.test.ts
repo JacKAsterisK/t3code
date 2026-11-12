@@ -25,6 +25,7 @@ import {
   type TerminalSummary,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as ServerConfig from "./config.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
@@ -2889,17 +2890,16 @@ describe("storage cleanup reports and local file policies", () => {
       }),
     ),
   );
-  it.live.each([
-    ["missing", "symlink"],
-    ["tracked.txt", "symlink"],
-    ["missing", "file"],
-    ["tracked.txt", "file"],
-  ] as const)("compares flagged tracked symlinks by target (%s as a %s)", ([target, kind]) =>
+  const comparesFlaggedTrackedLink = ([target, kind]: readonly [
+    "missing" | "tracked.txt",
+    "symlink" | "file",
+  ]) =>
     runCleanupTest(
       Effect.gen(function* () {
         const { service, fs, worktree, command } = yield* cleanupFixture();
-        yield* fs.symlink("tracked.txt", `${worktree}/link`);
-        yield* command(worktree, ["add", "link"]);
+        yield* fs.writeFileString(`${worktree}/link`, "tracked.txt");
+        const blob = (yield* command(worktree, ["hash-object", "-w", "link"])).stdout.trim();
+        yield* command(worktree, ["update-index", "--add", "--cacheinfo", `120000,${blob},link`]);
         yield* command(worktree, ["commit", "-m", "link"]);
         yield* command(worktree, ["update-index", "--assume-unchanged", "link"]);
         yield* fs.remove(`${worktree}/link`);
@@ -2914,7 +2914,22 @@ describe("storage cleanup reports and local file policies", () => {
             : { outcome: "removed" },
         );
       }),
-    ),
+    );
+  // Its checkout is a symlink (Windows: Developer Mode or elevation).
+  it.live.each([
+    ["missing", "symlink"],
+    ["tracked.txt", "symlink"],
+  ] as const)(
+    "compares flagged tracked symlinks by target (%s as a %s)",
+    comparesFlaggedTrackedLink,
+    { skip: !symlinksSupported },
+  );
+  it.live.each([
+    ["missing", "file"],
+    ["tracked.txt", "file"],
+  ] as const)(
+    "compares flagged tracked symlinks by target (%s as a %s)",
+    comparesFlaggedTrackedLink,
   );
   it.live.each([
     ["uncommitted-changes", "untracked", "Local changes exceed the inspection limit"],

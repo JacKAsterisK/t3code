@@ -55,7 +55,7 @@ const cursorBackendUrl = await vi.hoisted(async () => {
   return url;
 });
 
-const { Agent, ConfigurationError } = loadCursorSdk();
+const { Agent, ConfigurationError, JsonlLocalAgentStore } = loadCursorSdk();
 
 describe("CursorAdapterV2", () => {
   it.effect.each([
@@ -1815,25 +1815,28 @@ describe("CursorAdapterV2", () => {
         USERPROFILE: home,
         CURSOR_CONFIG_DIR: path.join(home, ".cursor"),
       });
+      const options = makeCursorAgentOptions({
+        apiKey: "synthetic-cursor-api-key",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("cursor"),
+          model: "composer-2",
+        },
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: home,
+        },
+        threadId: ThreadId.make("cursor-attribution-thread"),
+        mcpSession: undefined,
+        platform: "linux",
+      });
       const agent = yield* Effect.acquireRelease(
         Effect.promise(() =>
-          Agent.create(
-            makeCursorAgentOptions({
-              apiKey: "synthetic-cursor-api-key",
-              modelSelection: {
-                instanceId: ProviderInstanceId.make("cursor"),
-                model: "composer-2",
-              },
-              runtimePolicy: {
-                runtimeMode: "full-access",
-                interactionMode: "default",
-                cwd: home,
-              },
-              threadId: ThreadId.make("cursor-attribution-thread"),
-              mcpSession: undefined,
-              platform: "linux",
-            }),
-          ),
+          Agent.create({
+            ...options,
+            // The default SQLite store stays open for the process, which keeps Windows from removing the temp home.
+            local: { ...options.local, store: new JsonlLocalAgentStore(path.join(home, "agents")) },
+          }),
         ),
         (agent) => Effect.sync(() => agent.close()),
       );

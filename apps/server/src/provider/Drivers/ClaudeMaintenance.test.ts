@@ -7,6 +7,7 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   invalidateLatestProviderVersion,
@@ -40,6 +41,10 @@ const snapshot: ServerProvider = {
   slashCommands: [],
   skills: [],
 };
+
+// Unix native fixtures symlink the launcher (Windows: Developer Mode or elevation).
+const needsSymlink = (install: string, platform: NodeJS.Platform = "linux") =>
+  !symlinksSupported && (install === "xdgNative" || (install === "native" && platform !== "win32"));
 
 const fixture = Effect.fn("ClaudeMaintenance.test.fixture")(function* (
   install: "native" | "xdgNative" | "npm" | "wrapper" = "native",
@@ -204,8 +209,9 @@ it.layer(NodeServices.layer)("ClaudeMaintenance", (it) => {
       advisory: "behind_latest",
       npm: true,
     },
-  ])("advertises the installable version for $name", (row) =>
+  ])("advertises the installable version for $name", (row, ctx) =>
     Effect.gen(function* () {
+      if (needsSymlink(row.npm ? "npm" : "native")) return ctx.skip();
       const f = yield* fixture(row.npm ? "npm" : "native");
       if (row.settings) yield* f.fs.writeFileString(f.settingsPath, row.settings);
       const requests: string[] = [];
@@ -249,8 +255,9 @@ it.layer(NodeServices.layer)("ClaudeMaintenance", (it) => {
     { name: "Windows custom path", platform: "win32", programFiles: "D:/Programs" },
   ] as const)(
     "separates channel caches and honors $name managed overrides and feed invalidation",
-    (row) =>
+    (row, ctx) =>
       Effect.gen(function* () {
+        if (needsSymlink("native", row.platform)) return ctx.skip();
         const f = yield* fixture("native", row.platform, row.programFiles);
         const requests: string[] = [];
         const client = HttpClient.make((request) => {
@@ -307,8 +314,9 @@ it.layer(NodeServices.layer)("ClaudeMaintenance", (it) => {
       install: "xdgNative",
       lockKey: "claudeAgent-native",
     },
-  ] as const)("resolves the native launcher path for $name", (row) =>
+  ] as const)("resolves the native launcher path for $name", (row, ctx) =>
     Effect.gen(function* () {
+      if (needsSymlink(row.install)) return ctx.skip();
       const f = yield* fixture(row.install);
       const resolve = yield* f.makeResolution.pipe(
         Effect.provideService(
@@ -320,119 +328,123 @@ it.layer(NodeServices.layer)("ClaudeMaintenance", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("automatic refresh rereads the native channel while preserving both caches", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      const requests: string[] = [];
-      const client = HttpClient.make((request) => {
-        requests.push(request.url);
-        return Effect.succeed(
-          HttpClientResponse.fromWeb(
-            request,
-            new Response(request.url.endsWith("/stable") ? "2.1.308" : "2.1.315"),
-          ),
-        );
-      });
-      const resolveMaintenance = yield* f.makeResolution.pipe(
-        Effect.provideService(HttpClient.HttpClient, client),
-      );
-      const versions = yield* ProviderLatestVersions.make();
-      const publications = yield* Queue.unbounded<ServerProvider>();
-      yield* makeManagedServerProvider({
-        resolveMaintenance,
-        getSettings: Effect.succeed({ enabled: true }),
-        streamSettings: Stream.empty,
-        haveSettingsChanged: () => false,
-        initialSnapshot: () => Effect.succeed(snapshot),
-        checkProvider: Effect.succeed(snapshot),
-        refreshInterval: "1 minute",
-        enrichSnapshot: ({ snapshot, publishSnapshot }) =>
-          resolveMaintenance().pipe(
-            Effect.flatMap((maintenance) =>
-              enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenance),
+  it.effect.skipIf(needsSymlink("native"))(
+    "automatic refresh rereads the native channel while preserving both caches",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const requests: string[] = [];
+        const client = HttpClient.make((request) => {
+          requests.push(request.url);
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              new Response(request.url.endsWith("/stable") ? "2.1.308" : "2.1.315"),
             ),
-            Effect.provideService(HttpClient.HttpClient, client),
-            Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, versions),
-            Effect.flatMap((enriched) =>
-              publishSnapshot(enriched).pipe(
-                Effect.andThen(Queue.offer(publications, enriched)),
-                Effect.asVoid,
-              ),
-            ),
-          ),
-      }).pipe(
-        Effect.provide(
-          Layer.mock(ProviderHost.ProviderHost)({
-            paths: {
-              cwd: f.directory,
-              baseDir: f.directory,
-              stateDir: f.directory,
-              providerStatusCacheDir: f.directory,
-              attachmentsDir: f.directory,
-            },
-            settings: {
-              get: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-              withSnapshot: (use) => use(DEFAULT_SERVER_SETTINGS),
-              changes: Stream.empty,
-              subscribe: Effect.succeed(Stream.empty),
-            },
-            shouldRunBackgroundWork: () => Effect.succeed(true),
-            resolveAttachmentPath: () => null,
-          }),
-        ),
-      );
-      expect((yield* Queue.take(publications)).versionAdvisory).toMatchObject({
-        latestVersion: "2.1.315",
-        status: "behind_latest",
-      });
-      expect(requests).toHaveLength(1);
-
-      for (const channel of ["stable", "stable", "latest"] as const) {
-        yield* f.fs.writeFileString(
-          f.settingsPath,
-          JSON.stringify({ autoUpdatesChannel: channel }),
-        );
-        yield* TestClock.adjust("1 minute");
-        expect((yield* Queue.take(publications)).versionAdvisory).toMatchObject({
-          latestVersion: channel === "stable" ? "2.1.308" : "2.1.315",
-          status: channel === "stable" ? "current" : "behind_latest",
+          );
         });
-        expect(requests).toEqual([
-          "https://downloads.claude.ai/claude-code-releases/latest",
-          "https://downloads.claude.ai/claude-code-releases/stable",
-        ]);
-        expect(f.installationReads()).toBe(1);
-      }
-    }).pipe(Effect.scoped),
-  );
-
-  it.effect("bounds stalled feed bodies and skips disabled update checks", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      let requests = 0;
-      const client = HttpClient.make((request) => {
-        requests++;
-        return Effect.succeed(
-          HttpClientResponse.fromWeb(request, new Response(new ReadableStream())),
-        );
-      });
-      const resolve = yield* f.makeResolution.pipe(
-        Effect.provideService(HttpClient.HttpClient, client),
-      );
-      const capabilities = yield* resolve();
-      const enrich = (enabled: boolean) =>
-        enrichProviderSnapshotWithVersionAdvisory(snapshot, capabilities, {
-          enableProviderUpdateChecks: enabled,
-        }).pipe(
-          Effect.provide(ProviderLatestVersions.layer),
+        const resolveMaintenance = yield* f.makeResolution.pipe(
           Effect.provideService(HttpClient.HttpClient, client),
         );
-      expect((yield* enrich(false)).versionAdvisory?.status).toBe("unknown");
-      expect(requests).toBe(0);
-      const pending = yield* enrich(true).pipe(Effect.forkChild({ startImmediately: true }));
-      yield* TestClock.adjust("4 seconds");
-      expect((yield* Fiber.join(pending)).versionAdvisory?.status).toBe("unknown");
-      expect(requests).toBe(1);
-    }).pipe(Effect.scoped),
+        const versions = yield* ProviderLatestVersions.make();
+        const publications = yield* Queue.unbounded<ServerProvider>();
+        yield* makeManagedServerProvider({
+          resolveMaintenance,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => Effect.succeed(snapshot),
+          checkProvider: Effect.succeed(snapshot),
+          refreshInterval: "1 minute",
+          enrichSnapshot: ({ snapshot, publishSnapshot }) =>
+            resolveMaintenance().pipe(
+              Effect.flatMap((maintenance) =>
+                enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenance),
+              ),
+              Effect.provideService(HttpClient.HttpClient, client),
+              Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, versions),
+              Effect.flatMap((enriched) =>
+                publishSnapshot(enriched).pipe(
+                  Effect.andThen(Queue.offer(publications, enriched)),
+                  Effect.asVoid,
+                ),
+              ),
+            ),
+        }).pipe(
+          Effect.provide(
+            Layer.mock(ProviderHost.ProviderHost)({
+              paths: {
+                cwd: f.directory,
+                baseDir: f.directory,
+                stateDir: f.directory,
+                providerStatusCacheDir: f.directory,
+                attachmentsDir: f.directory,
+              },
+              settings: {
+                get: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+                withSnapshot: (use) => use(DEFAULT_SERVER_SETTINGS),
+                changes: Stream.empty,
+                subscribe: Effect.succeed(Stream.empty),
+              },
+              shouldRunBackgroundWork: () => Effect.succeed(true),
+              resolveAttachmentPath: () => null,
+            }),
+          ),
+        );
+        expect((yield* Queue.take(publications)).versionAdvisory).toMatchObject({
+          latestVersion: "2.1.315",
+          status: "behind_latest",
+        });
+        expect(requests).toHaveLength(1);
+
+        for (const channel of ["stable", "stable", "latest"] as const) {
+          yield* f.fs.writeFileString(
+            f.settingsPath,
+            JSON.stringify({ autoUpdatesChannel: channel }),
+          );
+          yield* TestClock.adjust("1 minute");
+          expect((yield* Queue.take(publications)).versionAdvisory).toMatchObject({
+            latestVersion: channel === "stable" ? "2.1.308" : "2.1.315",
+            status: channel === "stable" ? "current" : "behind_latest",
+          });
+          expect(requests).toEqual([
+            "https://downloads.claude.ai/claude-code-releases/latest",
+            "https://downloads.claude.ai/claude-code-releases/stable",
+          ]);
+          expect(f.installationReads()).toBe(1);
+        }
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.skipIf(needsSymlink("native"))(
+    "bounds stalled feed bodies and skips disabled update checks",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        let requests = 0;
+        const client = HttpClient.make((request) => {
+          requests++;
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(request, new Response(new ReadableStream())),
+          );
+        });
+        const resolve = yield* f.makeResolution.pipe(
+          Effect.provideService(HttpClient.HttpClient, client),
+        );
+        const capabilities = yield* resolve();
+        const enrich = (enabled: boolean) =>
+          enrichProviderSnapshotWithVersionAdvisory(snapshot, capabilities, {
+            enableProviderUpdateChecks: enabled,
+          }).pipe(
+            Effect.provide(ProviderLatestVersions.layer),
+            Effect.provideService(HttpClient.HttpClient, client),
+          );
+        expect((yield* enrich(false)).versionAdvisory?.status).toBe("unknown");
+        expect(requests).toBe(0);
+        const pending = yield* enrich(true).pipe(Effect.forkChild({ startImmediately: true }));
+        yield* TestClock.adjust("4 seconds");
+        expect((yield* Fiber.join(pending)).versionAdvisory?.status).toBe("unknown");
+        expect(requests).toBe(1);
+      }).pipe(Effect.scoped),
   );
 });

@@ -1,5 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeURL from "node:url";
 import { assert, it } from "@effect/vitest";
 import {
   ChatAttachmentId,
@@ -1048,7 +1049,8 @@ it.effect("serves an image on the host only when an agent reply the guest sees s
     const { orchestrator, guestShares } = yield* shareThread;
     const runId = yield* ownerRun;
     const fileSystem = yield* FileSystem.FileSystem;
-    const directory = yield* fileSystem.makeTempDirectoryScoped();
+    // A file: URL names a Windows path with forward slashes, so every path here uses them.
+    const directory = (yield* fileSystem.makeTempDirectoryScoped()).replaceAll("\\", "/");
     const shot = `${directory}/my shot.png`;
     const fileUrl = `${directory}/file-url.png`;
     const page = `${directory}/page.png`;
@@ -1107,7 +1109,7 @@ it.effect("serves an image on the host only when an agent reply the guest sees s
       events: [
         item("item:agent-images", 1, {
           type: "assistant_message",
-          text: `Done: ![Shot](<${shot}>) ![Other](file://${encodeURI(fileUrl)}) ![Page](${page})`,
+          text: `Done: ![Shot](<${shot}>) ![Other](${NodeURL.pathToFileURL(fileUrl).href}) ![Page](${page})`,
         }),
         // A guest's sent message is a user message; it must not open files on the host.
         item("item:guest-image", 2, { type: "user_message", text: `![Mine](${fromUser})` }),

@@ -2856,7 +2856,7 @@ describe("ClaudeAdapterV2 native fork", () => {
 
         assert.equal(openedQueries[0]?.options.resume, forkedSessionId);
         assert.equal(openedQueries[0]?.options.sessionId, undefined);
-        assert.equal(openedQueries[0]?.options.cwd, NodePath.resolve("/workspace"));
+        assert.equal(openedQueries[0]?.options.cwd, "/workspace");
       }).pipe(
         Effect.provide(
           Layer.mergeAll(

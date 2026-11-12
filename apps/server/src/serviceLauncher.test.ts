@@ -637,7 +637,10 @@ process.exit(0);
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service 100% & <test>-" });
+      // Windows file names cannot contain < or >; % and & still exercise its quoting.
+      const root = yield* fs.makeTempDirectoryScoped({
+        prefix: nativeWindows ? "t3-service 100% & (test)-" : "t3-service 100% & <test>-",
+      });
       const statePath = path.join(root, "runtime", "service-state.json");
       const databasePath = path.join(root, "userdata", "state.sqlite");
       const activatedPath = path.join(root, "activated");
@@ -959,8 +962,10 @@ if (context.update?.status === "pending") {
 
   it.effect.each(["wal", "delete"] as const)(
     "backs up a %s-mode database (online when WAL) and restores its final state",
-    (journalMode) =>
+    (journalMode, ctx) =>
       Effect.gen(function* () {
+        // The database is a symlink (Windows: Developer Mode or elevation).
+        if (!symlinksSupported) return ctx.skip();
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-online-" });

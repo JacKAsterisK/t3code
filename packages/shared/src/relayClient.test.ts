@@ -11,6 +11,7 @@ import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -151,47 +152,55 @@ const layerInstallRuntime = (platform: NodeJS.Platform) =>
   );
 
 describe("RelayClient", () => {
-  it.effect("cancels a contended install without removing the other installer's lock", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-cloudflared-test-" });
-      const directory = `${baseDir}/tools/cloudflared/${RelayClient.CLOUDFLARED_VERSION}/linux-x64`;
-      const lockPath = `${directory}/cloudflared.lock`;
-      yield* fileSystem.makeDirectory(directory, { recursive: true });
-      yield* fileSystem.writeFileString(lockPath, "other-installer");
-      const contended = yield* Deferred.make<void>();
-      const manager = yield* RelayClient.makeCloudflaredRelayClient({ baseDir }).pipe(
-        Effect.provideService(FileSystem.FileSystem, {
-          ...fileSystem,
-          rename: (from, to) =>
-            fileSystem
-              .rename(from, to)
-              .pipe(
-                Effect.tapError(() =>
-                  to === lockPath ? Deferred.succeed(contended, undefined) : Effect.void,
+  // Windows rename replaces a legacy file lock instead of failing, so the lock is not contended there.
+  it.effect.skipIf(windowsHost)(
+    "cancels a contended install without removing the other installer's lock",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-cloudflared-test-",
+        });
+        const directory = `${baseDir}/tools/cloudflared/${RelayClient.CLOUDFLARED_VERSION}/linux-x64`;
+        const lockPath = `${directory}/cloudflared.lock`;
+        yield* fileSystem.makeDirectory(directory, { recursive: true });
+        yield* fileSystem.writeFileString(lockPath, "other-installer");
+        const contended = yield* Deferred.make<void>();
+        const manager = yield* RelayClient.makeCloudflaredRelayClient({ baseDir }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fileSystem,
+            rename: (from, to) =>
+              fileSystem
+                .rename(from, to)
+                .pipe(
+                  Effect.tapError(() =>
+                    to === lockPath ? Deferred.succeed(contended, undefined) : Effect.void,
+                  ),
                 ),
-              ),
-        }),
-      );
-      const installing = yield* manager.install.pipe(Effect.forkChild);
-      yield* Deferred.await(contended);
-      yield* Fiber.interrupt(installing);
-      expect(yield* fileSystem.readFileString(lockPath)).toBe("other-installer");
-    }).pipe(
-      Effect.scoped,
-      Effect.provide(
-        Layer.mergeAll(
-          NodeServices.layer,
-          NodeCrypto.layer,
-          layerHttpClient(new Uint8Array()),
-          layerSpawner([]),
-          layerHostRuntime({ PATH: "" }),
+          }),
+        );
+        const installing = yield* manager.install.pipe(Effect.forkChild);
+        yield* Deferred.await(contended);
+        yield* Fiber.interrupt(installing);
+        expect(yield* fileSystem.readFileString(lockPath)).toBe("other-installer");
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            NodeCrypto.layer,
+            layerHttpClient(new Uint8Array()),
+            layerSpawner([]),
+            layerHostRuntime({ PATH: "" }),
+          ),
         ),
       ),
-    ),
   );
 
-  it.effect.each(["live owner", "recent legacy"] as const)("keeps a lock with a %s", (kind) =>
+  // Windows rename replaces a legacy file lock instead of failing, so only POSIX keeps one.
+  it.effect.each(
+    windowsHost ? (["live owner"] as const) : (["live owner", "recent legacy"] as const),
+  )("keeps a lock with a %s", (kind) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-cloudflared-test-" });
@@ -284,7 +293,14 @@ describe("RelayClient", () => {
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-cloudflared-test-" });
-      const lockPath = `${baseDir}/tools/cloudflared/${RelayClient.CLOUDFLARED_VERSION}/linux-x64/cloudflared.lock`;
+      const lockPath = (yield* Path.Path).join(
+        baseDir,
+        "tools",
+        "cloudflared",
+        RelayClient.CLOUDFLARED_VERSION,
+        "linux-x64",
+        "cloudflared.lock",
+      );
       const abandoned = "2147483647-exited-installer";
       const replacement = `${process.pid}-replacement`;
       yield* fileSystem.makeDirectory(lockPath, { recursive: true });
@@ -294,11 +310,11 @@ describe("RelayClient", () => {
       const manager = yield* RelayClient.makeCloudflaredRelayClient({ baseDir }).pipe(
         Effect.provideService(FileSystem.FileSystem, {
           ...fileSystem,
-          readDirectory: (path) =>
-            fileSystem.readDirectory(path).pipe(
+          readDirectory: (directory) =>
+            fileSystem.readDirectory(directory).pipe(
               Effect.tap((entries) =>
                 Effect.gen(function* () {
-                  if (path !== lockPath) return;
+                  if (directory !== lockPath) return;
                   if (replaced) {
                     expect(entries).toEqual([replacement]);
                     yield* Deferred.succeed(checked, undefined);

@@ -107,7 +107,8 @@ export type NativeBuildValidationReceipt = typeof NativeBuildValidationReceipt.T
 export const TOOLCHAIN_LIMITS = Object.freeze({
   files: 400_000,
   bytes: 16 * 1024 ** 3,
-  manifestBytes: 64 * 1024 ** 2,
+  // The offline pnpm store keeps every past lockfile's packages; generation 138 needs about 65 MiB.
+  manifestBytes: 96 * 1024 ** 2,
 });
 
 export const ToolchainManifest = Schema.Struct({

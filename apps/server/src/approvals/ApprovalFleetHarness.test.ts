@@ -1043,11 +1043,23 @@ it.live.each(["approval-required", "full-access"] as const)(
         runtimeMode: access,
         interactionMode: "default",
         clientRequestId: `creation-provenance:${access}`,
-        initiatingClientId: other.initiatingClientId,
       };
       const beforeA = yield* a.sql`SELECT thread_id FROM orchestration_v2_projection_threads`;
       const beforeB = yield* b.sql`SELECT thread_id FROM orchestration_v2_projection_threads`;
       const beforeProjects = yield* b.sql`SELECT project_id FROM projection_projects`;
+      const forged = yield* client.call(
+        { ...launchInput, initiatingClientId: other.initiatingClientId },
+        "t3_thread_launch",
+      );
+      assert.include(
+        (forged.error as { message?: string } | undefined)?.message,
+        'Unknown argument "initiatingClientId"',
+        stringify(forged),
+      );
+      assert.deepEqual(
+        yield* b.sql`SELECT thread_id FROM orchestration_v2_projection_threads`,
+        beforeB,
+      );
       for (const fault of [sourceFailure, destinationFailure]) {
         yield* Ref.set(fault, true);
         assert.equal(
@@ -1134,7 +1146,7 @@ it.live.each(["approval-required", "full-access"] as const)(
         originSequence: origins[0]!.created_sequence,
         authorityBasis: "origin",
         explicitDelegations: 0,
-        ignoredForgedPublicClientId: other.initiatingClientId,
+        refusedForgedPublicClientId: other.initiatingClientId,
         nativeCommandId: committed.forwarding.commandId,
         state: status.state,
         boundaryEvidence: status.deliveryEvidence?.boundary,

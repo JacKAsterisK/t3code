@@ -394,6 +394,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
   const desktopShutdownOnStdin = bootstrap?.desktopShutdownOnStdin;
   const desktopTelemetryFd = bootstrap?.desktopTelemetryFd;
   const desktopTelemetryControlFd = bootstrap?.desktopTelemetryControlFd;
+  const desktopAppUpdate = bootstrap?.desktopAppUpdate;
   const desktopBrowserFd = bootstrap?.desktopBrowserFd;
   const desktopBrowserControlFd = bootstrap?.desktopBrowserControlFd;
   const resourceMonitorPath = bootstrap?.resourceMonitorPath;
@@ -528,6 +529,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     ...(desktopShutdownOnStdin === undefined ? {} : { desktopShutdownOnStdin }),
     desktopTelemetryFd,
     desktopTelemetryControlFd,
+    ...(desktopAppUpdate === undefined ? {} : { desktopAppUpdate }),
     desktopBrowserFd,
     desktopBrowserControlFd,
     resourceMonitorPath,

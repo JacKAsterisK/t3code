@@ -9,6 +9,7 @@ import {
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2TurnItem,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
   RunAttemptId,
@@ -18,7 +19,6 @@ import {
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderCommitBatch from "./ProviderCommitBatch.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -85,9 +85,10 @@ const CurrentProviderBatch = Context.Reference<ProviderBatchPublication | undefi
 );
 
 export interface EventSinkV2Shape {
-  readonly consumeProviderEvents: <E, R, E2, R2>(
-    source: Stream.Stream<ProviderAdapter.ProviderAdapterV2Event, E, R>,
-    process: (event: ProviderAdapter.ProviderAdapterV2Event) => Effect.Effect<void, E2, R2>,
+  /** Items that are not provider snapshots, such as a consumer's own control items, never batch. */
+  readonly consumeProviderEvents: <A extends { readonly type: string }, E, R, E2, R2>(
+    source: Stream.Stream<A, E, R>,
+    process: (event: A) => Effect.Effect<void, E2, R2>,
     after: Effect.Effect<boolean, E2, R2>,
     canBatch: Effect.Effect<boolean, never, R2>,
   ) => Effect.Effect<
@@ -133,6 +134,11 @@ export interface EventSinkV2Shape {
     readonly runId: RunId;
     readonly activeAttemptId: RunAttemptId;
     readonly expectedStatus: OrchestrationV2Run["status"];
+    /** Also refuse while this run interrupt request is stored without its result. */
+    readonly unlessInterruptRequested?: {
+      readonly requestId: OrchestrationV2TurnItem["id"];
+      readonly resultId: OrchestrationV2TurnItem["id"];
+    };
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects?: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<
@@ -564,6 +570,24 @@ const layerBase: Layer.Layer<
                 committed: false as const,
                 storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
               };
+            }
+            if (input.unlessInterruptRequested !== undefined) {
+              const { requestId, resultId } = input.unlessInterruptRequested;
+              const pending = yield* sql<{ readonly pending: number }>`
+                SELECT EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_turn_items
+                  WHERE thread_id = ${input.threadId} AND turn_item_id = ${requestId}
+                ) AND NOT EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_turn_items
+                  WHERE thread_id = ${input.threadId} AND turn_item_id = ${resultId}
+                ) AS pending
+              `;
+              if (pending[0]?.pending === 1) {
+                return {
+                  committed: false as const,
+                  storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+                };
+              }
             }
 
             const normalized = yield* normalizeEvents(

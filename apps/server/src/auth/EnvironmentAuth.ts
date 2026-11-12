@@ -593,9 +593,6 @@ export class EnvironmentAuth extends Context.Service<
       { readonly subject: string; readonly access: AuthMcpClientAccess },
       ServerAuthMcpApprovalCodeError | ServerAuthInternalError
     >;
-    readonly authenticateBrowserSession: (
-      request: HttpServerRequest.HttpServerRequest,
-    ) => Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError>;
   }
 >()("t3/auth/EnvironmentAuth") {}
 
@@ -1497,22 +1494,6 @@ export const make = Effect.gen(function* () {
       Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
     );
 
-  const authenticateBrowserSession: EnvironmentAuth["Service"]["authenticateBrowserSession"] = (
-    request,
-  ) => {
-    const credential = resolveRequestCredential(request);
-    if (!credential || !isBrowserCookieCredential(credential.source)) {
-      return Effect.fail(new ServerAuthMissingCredentialError({}));
-    }
-    return authenticateRequest(request).pipe(
-      Effect.filterOrFail(
-        (session) => session.method === "browser-session-cookie",
-        () => new ServerAuthInvalidCredentialError({ diagnostic: "Not a browser session." }),
-      ),
-      Effect.withSpan("EnvironmentAuth.authenticateBrowserSession"),
-    );
-  };
-
   const consumeMcpApprovalCode: EnvironmentAuth["Service"]["consumeMcpApprovalCode"] = (
     code,
     access,
@@ -1570,7 +1551,6 @@ export const make = Effect.gen(function* () {
     authenticateMcpClient,
     issueMcpClientSession,
     consumeMcpApprovalCode,
-    authenticateBrowserSession,
   });
 });
 
@@ -1641,7 +1621,7 @@ export const layer = Layer.effect(EnvironmentAuth, make).pipe(
   Layer.provideMerge(EnvironmentAuthPolicy.layer),
 );
 
-const layerStorage = Layer.mergeAll(ServerSecretStore.layer, SqlitePersistence.layerConfig);
+const layerStorage = Layer.mergeAll(ServerSecretStore.layer, SqlitePersistence.layerCliConfig);
 
 export const layerRuntime = layer.pipe(
   Layer.provideMerge(ManagedPolicy.layer),

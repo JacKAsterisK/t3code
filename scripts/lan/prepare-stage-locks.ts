@@ -78,7 +78,7 @@ export async function prepareProductionStageLocks(root: string, write = false) {
   for (const stage of Object.values(describeProductionStages(snapshot).stages))
     for (const path of Object.values(stage.workspace.patchedDependencies ?? {})) {
       relativeWindowsPath(path);
-      supplied.set(path, await readValidationFile(NodePath.join(root, path), 1024 ** 2));
+      supplied.set(path, await readValidationFile(NodePath.join(root, path), 16 * 1024 ** 2));
     }
   const { files, inputs } = projectProductionStageFiles(snapshot);
   for (const [path, bytes] of inputs)

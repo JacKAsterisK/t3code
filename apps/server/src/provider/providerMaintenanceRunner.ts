@@ -25,6 +25,7 @@ import * as NodeUtil from "node:util";
 
 import * as ModelManifest from "./ModelManifest.ts";
 import { resolveProviderCompatibility } from "./providerCompatibility.ts";
+import * as ProviderInstallationGate from "./ProviderInstallationGate.ts";
 import * as ProviderRegistry from "./ProviderRegistry.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
 import {
@@ -94,6 +95,18 @@ interface VerifiedProviderRefresh {
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
+const OPENCODE_SERVER_RESTART_MESSAGE =
+  "OpenCode CLI updated. Restart the configured local OpenCode server to use the new version.";
+
+const needsOpenCodeServerRestart = (providers: ReadonlyArray<ServerProvider>) =>
+  providers.some(
+    (provider) =>
+      provider.driver === ProviderDriverKind.make("opencode") &&
+      provider.installedVersion != null &&
+      provider.version != null &&
+      provider.installedVersion !== provider.version,
+  );
+
 const runProviderMaintenanceCommandWithSpawner = Effect.fn("ProviderMaintenanceRunner.runCommand")(
   function* (input: {
     readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
@@ -111,6 +124,8 @@ const runProviderMaintenanceCommandWithSpawner = Effect.fn("ProviderMaintenanceR
           .spawn(
             ChildProcess.make(resolved.command, resolved.args, {
               shell: resolved.shell,
+              // Nothing answers an update command, so one that reads stdin must see EOF, not wait.
+              stdin: "ignore",
               ...env,
             }),
           )
@@ -251,18 +266,14 @@ function commandOutput(result: ProviderMaintenanceCommandResult): string | null 
 }
 
 // Codex ends a failed install.ps1 run with "Error: `powershell …` failed with status exit code: 1".
-const EXIT_STATUS_LINE = /\b(?:failed|exited) with (?:status |exit )*code\b/i;
+// An updater's own "Request failed with status code 403" is a reason, not a trailing status line.
+const EXIT_STATUS_LINE = /\b(?:failed with status exit code|exited with (?:exit )?code)\b/i;
 const POWERSHELL_ERROR_POSITION = /^At (?:line:\d+|.+:\d+) char:\d+$/;
+const NAMES_ERROR = /error|fail/i;
 
 // PowerShell prints an error as its wrapped message, "At line:N char:M", then "+ …" details.
 // Write-Error prefixes the message with the invoking command line.
-function lastReasonInOutput(output: string): string | null {
-  const lines = output.split(/\r\n|\r|\n/).map((line) => toProgressLine(line) ?? "");
-  const lastIndex = lines.findLastIndex(Boolean);
-  const reasonIndex = lines.findLastIndex((line) => line !== "" && !EXIT_STATUS_LINE.test(line));
-  if (reasonIndex < 0) {
-    return lastIndex < 0 ? null : lines[lastIndex]!;
-  }
+function powerShellErrorMessage(lines: ReadonlyArray<string>, reasonIndex: number): string | null {
   let positionIndex = reasonIndex;
   while (
     positionIndex > 0 &&
@@ -271,7 +282,7 @@ function lastReasonInOutput(output: string): string | null {
     positionIndex--;
   }
   if (positionIndex === 0 || !POWERSHELL_ERROR_POSITION.test(lines[positionIndex]!)) {
-    return lines[reasonIndex]!;
+    return null;
   }
   let start = positionIndex;
   while (start > 0 && lines[start - 1] !== "") {
@@ -285,9 +296,40 @@ function lastReasonInOutput(output: string): string | null {
   return toProgressLine(fromWriteError && separator >= 0 ? message.slice(separator + 3) : message);
 }
 
-// Updaters print their reason last, usually on stderr.
-function lastOutputReason(result: ProviderMaintenanceCommandResult): string | null {
-  return lastReasonInOutput(result.stderr) ?? lastReasonInOutput(result.stdout);
+interface OutputReason {
+  /** A PowerShell error record, or the last line naming an error. */
+  readonly preferred: string | null;
+  /** The last line that is not a trailing exit-status line. */
+  readonly last: string | null;
+}
+
+function reasonInOutput(output: string): OutputReason {
+  const lines = output.split(/\r\n|\r|\n/).map((line) => toProgressLine(line) ?? "");
+  const lastIndex = lines.findLastIndex(Boolean);
+  const reasonIndex = lines.findLastIndex((line) => line !== "" && !EXIT_STATUS_LINE.test(line));
+  if (reasonIndex < 0) {
+    return { preferred: null, last: lastIndex < 0 ? null : lines[lastIndex]! };
+  }
+  return {
+    preferred:
+      powerShellErrorMessage(lines, reasonIndex) ??
+      lines.findLast(
+        (line) => line !== "" && !EXIT_STATUS_LINE.test(line) && NAMES_ERROR.test(line),
+      ) ??
+      null,
+    last: lines[reasonIndex]!,
+  };
+}
+
+// Updaters report on stderr, but may follow their error with hints (`claude update`
+// ends with "Try running claude doctor"), so prefer the line naming an error.
+function failureReason(result: ProviderMaintenanceCommandResult): string | null {
+  const streams = [result.stderr, result.stdout].map(reasonInOutput);
+  return (
+    streams.map((stream) => stream.preferred).find(Boolean) ??
+    streams.map((stream) => stream.last).find(Boolean) ??
+    null
+  );
 }
 
 function failureMessage(result: ProviderMaintenanceCommandResult): string {
@@ -298,7 +340,7 @@ function failureMessage(result: ProviderMaintenanceCommandResult): string {
     result.exitCode !== null && result.exitCode !== 0
       ? `Update command exited with code ${result.exitCode}`
       : "Update command failed";
-  const reason = lastOutputReason(result);
+  const reason = failureReason(result);
   return reason ? `${summary}: ${reason}` : `${summary}.`;
 }
 
@@ -333,6 +375,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
   const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
+  const installationGate = yield* ProviderInstallationGate.ProviderInstallationGate;
   const runMaintenanceCommand = (
     update: ProviderMaintenanceCommandAction,
     onProgress: (line: string) => Effect.Effect<void>,
@@ -344,6 +387,28 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       onProgress,
       ...(update.env ? { env: update.env } : {}),
     });
+  // Instances with other homes or accounts can still run the binary this update replaces. The
+  // lock key names the package manager location, so other drivers there keep their own package.
+  const instancesSharingInstallation = Effect.fn(
+    "ProviderMaintenanceRunner.instancesSharingInstallation",
+  )(function* (instanceId: ProviderInstanceId, provider: ProviderDriverKind, lockKey: string) {
+    const providers = yield* providerRegistry.getProviders;
+    const shared = yield* Effect.forEach(
+      providers.filter(
+        (candidate) => candidate.instanceId !== instanceId && candidate.driver === provider,
+      ),
+      (candidate) =>
+        providerRegistry
+          .getProviderMaintenanceCapabilitiesForInstance(candidate.instanceId, candidate.driver)
+          .pipe(
+            Effect.map((capabilities) =>
+              capabilities.update?.lockKey === lockKey ? [candidate.instanceId] : [],
+            ),
+          ),
+      { concurrency: "unbounded" },
+    );
+    return [instanceId, ...shared.flat()];
+  });
   const commandCoordinator = yield* makeProviderMaintenanceCommandCoordinator({
     makeAlreadyRunningError: () =>
       new ServerProviderUpdateError({
@@ -429,6 +494,8 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       });
     }
 
+    const startedAtRef = yield* Ref.make<string | null>(null);
+    const settled = yield* Ref.make(false);
     const setUpdateState = (state: ServerProviderUpdateState | null) =>
       providerRegistry.setProviderMaintenanceActionState({
         instanceId,
@@ -446,9 +513,13 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
 
     const runProviderUpdate = Effect.fn("ProviderMaintenanceRunner.runProviderUpdate")(
       function* () {
+        // Uninterruptible, so a dropped request cannot leave settled set without the state.
         const finish = (state: ServerProviderUpdateState) =>
-          setUpdateState(state).pipe(Effect.map((providers) => ({ providers })));
-        const startedAtRef = yield* Ref.make<string | null>(null);
+          Ref.set(settled, true).pipe(
+            Effect.andThen(setUpdateState(state)),
+            Effect.map((providers) => ({ providers })),
+            Effect.uninterruptible,
+          );
 
         const runCommandAndVerify = Effect.fn("ProviderMaintenanceRunner.runCommandAndVerify")(
           function* () {
@@ -553,14 +624,26 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
                     status: "succeeded",
                     startedAt,
                     finishedAt: yield* nowIso,
-                    message: "Already up to date.",
+                    message: needsOpenCodeServerRestart(precheck.verifiedProviders)
+                      ? OPENCODE_SERVER_RESTART_MESSAGE
+                      : "Already up to date.",
                   }),
                 );
               }
             }
 
-            yield* setRunningMessage(`Running ${describeCommand(command)}`);
-            const result = yield* runMaintenanceCommand(command, setRunningMessage);
+            const sharingInstances = yield* instancesSharingInstallation(
+              instanceId,
+              provider,
+              update.lockKey,
+            );
+            yield* setRunningMessage("Waiting for running provider work to finish.");
+            const result = yield* installationGate.update(
+              sharingInstances,
+              setRunningMessage(`Running ${describeCommand(command)}`).pipe(
+                Effect.andThen(runMaintenanceCommand(command, setRunningMessage)),
+              ),
+            );
             const finishedAt = yield* nowIso;
             if (result.timedOut || result.exitCode !== 0) {
               yield* Effect.logWarning("Provider update command failed", {
@@ -626,7 +709,9 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
                   ? "Update command completed, but T3 Code could not verify the provider version."
                   : stillOutdated
                     ? "Update command completed, but T3 Code still detects an outdated provider version."
-                    : "Provider updated.",
+                    : needsOpenCodeServerRestart(verifiedProviders)
+                      ? OPENCODE_SERVER_RESTART_MESSAGE
+                      : "Provider updated.",
                 output: commandOutput(result),
               }),
             );
@@ -661,6 +746,21 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         run: runProviderUpdate(),
       })
       .pipe(
+        // A dropped request interrupts the update; a "running" state would spin until restart.
+        Effect.onInterrupt(() =>
+          Effect.gen(function* () {
+            // A finished state stays, even if the request drops while it is being written.
+            if (yield* Ref.get(settled)) return;
+            yield* setUpdateState(
+              makeUpdateState({
+                status: "failed",
+                startedAt: yield* Ref.get(startedAtRef),
+                finishedAt: yield* nowIso,
+                message: "Update stopped before it finished.",
+              }),
+            );
+          }).pipe(Effect.ignore),
+        ),
         Effect.mapError((error) =>
           isServerProviderUpdateError(error)
             ? new ServerProviderUpdateError({

@@ -14,7 +14,13 @@ import {
   type PersistedComposerImageAttachment,
   useComposerDraftStore,
 } from "../../composerDraftStore";
-import { useHandleNewThread } from "../../hooks/useHandleNewThread";
+import {
+  LAST_USED_PROJECT_STORAGE_KEY,
+  lastUsedProjectKeySchema,
+  useHandleNewThread,
+} from "../../hooks/useHandleNewThread";
+import { scopedProjectKey } from "@t3tools/client-runtime/environment";
+import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { getClientSettings, useClientSettings } from "../../hooks/useSettings";
 import { readThreadShell } from "../../state/entities";
@@ -241,10 +247,30 @@ export function SnapShotCoordinator() {
     activeDraftThread,
     activeThread,
     defaultProjectRef,
+    defaultProjectFallbackReady,
     handleNewThread,
     routeDraftId,
     routeThreadRef,
   } = useHandleNewThread();
+  const [lastUsedProjectKey, setLastUsedProjectKey] = useLocalStorage(
+    LAST_USED_PROJECT_STORAGE_KEY,
+    null,
+    lastUsedProjectKeySchema,
+  );
+  const currentProject = activeThread ?? activeDraftThread;
+  const currentProjectKey = currentProject
+    ? scopedProjectKey({
+        environmentId: currentProject.environmentId,
+        projectId: currentProject.projectId,
+      })
+    : null;
+  const rememberProject = useEffectEvent((projectKey: string) => {
+    if (projectKey !== lastUsedProjectKey) setLastUsedProjectKey(projectKey);
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Persist route changes without overwriting project choices from other tabs.
+  useEffect(() => {
+    if (currentProjectKey) rememberProject(currentProjectKey);
+  }, [currentProjectKey]);
   const captureSound = useClientSettings((settings) =>
     settings.snapShotPlaySound ? settings.snapShotSound : null,
   );
@@ -359,6 +385,7 @@ export function SnapShotCoordinator() {
             ? resolveExistingSnapShotTarget(capturedTarget, routeThreadRef)
             : null;
           if (!target) {
+            if (!defaultProjectFallbackReady) continue;
             await dismissSnapShotAnimation(item.id);
             reportOnce(
               item.id,
@@ -419,6 +446,7 @@ export function SnapShotCoordinator() {
   };
 
   const drainPending = useEffectEvent(() => drain());
+  const hasDefaultProject = defaultProjectRef !== null;
   const handleSnapShotEvent = useEffectEvent(
     (bridge: DesktopBridge, event: DesktopSnapShotEvent) => {
       if (event.type === "failed" && event.id) settleNativeSnapShotUpdate(event.id);
@@ -493,10 +521,15 @@ export function SnapShotCoordinator() {
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to SnapShot events from the desktop bridge and drains pending ones while enabled
   useLayoutEffect(() => {
     const bridge = getDesktopSnapShotBridge();
-    if (!bridge || !enabled) return;
-    void drainPending();
+    if (
+      !bridge ||
+      !enabled ||
+      (!defaultProjectFallbackReady && !hasDefaultProject && !lastRouteTarget)
+    )
+      return;
+    void Promise.resolve(drainingRef.current).then(() => drainPending());
     return bridge.onSnapShotEvent((event) => handleSnapShotEvent(bridge, event));
-  }, [enabled]);
+  }, [enabled, defaultProjectFallbackReady, hasDefaultProject, lastRouteTarget]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- attaches window blur, focus and visibilitychange listeners to dismiss or drain SnapShot animations
   useEffect(() => {

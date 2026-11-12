@@ -83,6 +83,7 @@ import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexA
 import * as Service from "./ApprovalService.ts";
 import * as Presentation from "./ApprovalPresentation.ts";
 import { ApprovalTestHooks } from "./ApprovalTestHooks.ts";
+import { layerCloudUnlinked } from "../lan/cloudUnlinked.testkit.ts";
 
 const decodeCodexSettings = Schema.decodeEffect(CodexSettings);
 const instanceId = ProviderInstanceId.make("codex");
@@ -1144,7 +1145,9 @@ it.live.each(["accept", "decline"] as const)(
           fixture.projections.getThreadProjection(fixture.input.threadId).pipe(Effect.orDie),
       });
       const oauth = HttpApiBuilder.layer(ApprovalOAuthApi).pipe(
-        Layer.provide(McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer))),
+        Layer.provide(
+          McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer), Layer.provide(layerCloudUnlinked)),
+        ),
       );
       const mcp = McpHttpServer.layerMcpTransport(McpHttpServer.layerApprovalToolkit).pipe(
         Layer.provide(threads),

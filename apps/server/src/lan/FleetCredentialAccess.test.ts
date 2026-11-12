@@ -33,6 +33,7 @@ import * as FleetCredentialAccess from "./FleetCredentialAccess.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import { syntheticFleetPeer } from "./FleetDelivery.fixtures.ts";
 import * as FleetGrantAttribution from "./FleetGrantAttribution.ts";
+import { layerCloudUnlinked } from "./cloudUnlinked.testkit.ts";
 
 // CryoFrog's server, receiving calls from AnvilToad. Only synthetic identities and an in-memory
 // database are used.
@@ -141,6 +142,7 @@ const makeLayerRoutes = (capture: (services: Services) => void) =>
       Layer.provide(
         McpOAuthHttp.layer.pipe(
           Layer.provide(McpOAuth.layer),
+          Layer.provide(layerCloudUnlinked),
           Layer.provide(
             FleetGrantAttribution.layerServices.pipe(
               Layer.provide(Layer.succeed(FleetContext.FleetContext, context)),

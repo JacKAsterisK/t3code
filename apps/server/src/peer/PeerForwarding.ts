@@ -107,19 +107,17 @@ const make = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
 
   /**
-   * The caller's own limits, which travel with every forwarded call: the peer sees only the
+   * The caller's own limits and thread, which travel with every forwarded call: the peer sees only the
    * link's credential, so a caller that may not control threads here is refused here. Work a
    * link started never uses this environment's links, since the peer would see this
    * environment's session instead of that link, and its fence could not hold.
    */
-  const checkedCaller = (scope: Scope) =>
+  const forwardingCaller = (scope: Scope) =>
     readCaller().pipe(
       Effect.tap((caller) => assertNotLinked(caller, "use this environment's links")),
       Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
       Effect.provideService(ThreadManagement.ThreadManagementService, threads),
     );
-  const callerLimits = (scope: Scope) =>
-    checkedCaller(scope).pipe(Effect.map((caller) => caller.limits));
 
   /**
    * Every caller here reaches the peer as the one link session, so a retry
@@ -142,7 +140,7 @@ const make = Effect.gen(function* () {
     params: unknown,
     writes: boolean,
   ) {
-    const { limits, caller } = yield* checkedCaller(scope);
+    const { caller, limits } = yield* forwardingCaller(scope);
     const encoded = (yield* Schema.encodeUnknownEffect(parameters as Schema.Encoder<unknown>)(
       params,
     ).pipe(Effect.mapError(unavailable))) as Record<string, unknown>;
@@ -168,6 +166,15 @@ const make = Effect.gen(function* () {
           Effect.mapError(unavailable),
         )
       : undefined;
+    // So a message sent there names the thread that sent it, even to a client that cannot reach here.
+    const sender =
+      caller === undefined
+        ? undefined
+        : {
+            environmentId: scope.environmentId,
+            threadId: caller.id,
+            title: caller.title,
+          };
     return yield* peers.call({
       environmentId,
       ...(initiatingClientId === undefined ? {} : { initiatingClientId }),
@@ -175,6 +182,7 @@ const make = Effect.gen(function* () {
       arguments: args,
       limits,
       writes,
+      ...(sender === undefined ? {} : { sender }),
       success: success as Schema.Decoder<A>,
     });
   });
@@ -277,7 +285,7 @@ const make = Effect.gen(function* () {
 
   const listLinks: PeerForwarding["Service"]["links"] = Effect.fn("PeerForwarding.listLinks")(
     function* (scope) {
-      yield* callerLimits(scope);
+      yield* forwardingCaller(scope);
       yield* requireEnabled;
       const listed = yield* links.list.pipe(
         Effect.mapError(

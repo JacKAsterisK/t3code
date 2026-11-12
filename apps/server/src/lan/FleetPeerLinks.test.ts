@@ -63,6 +63,7 @@ import * as FleetMcpOrigin from "./FleetMcpOrigin.ts";
 import * as FleetPeerHttpClient from "./FleetPeerHttpClient.ts";
 import * as FleetPeerLinks from "./FleetPeerLinks.ts";
 import * as FleetTransport from "./FleetTransport.ts";
+import { layerCloudUnlinked } from "./cloudUnlinked.testkit.ts";
 
 // What the synthetic fleet endpoint stamps on what it forwards; the server's own is random.
 const FORWARDED_MARK = "synthetic-forwarded-mark";
@@ -183,7 +184,12 @@ const makeMachine = (input: {
       Layer.provideMerge(FleetMcpOrigin.layer),
       // This machine's own list caps every write it sends over a link.
       Layer.provideMerge(PeerMcpClient.layer.pipe(Layer.provide(FleetPeerLinks.layerWriteCeiling))),
-      Layer.provideMerge(PeerLinks.layer),
+      Layer.provideMerge(
+        PeerLinks.layer.pipe(
+          // Peers here are served on 127.0.0.1, so only `localhost` stands for this machine.
+          Layer.provide(Layer.succeed(PeerLinks.LoopbackHost, (host) => host === "localhost")),
+        ),
+      ),
       Layer.provide(FleetPeerHttpClient.layer),
       Layer.provideMerge(FleetPeerHttpClient.layerTrust),
       Layer.provide(FetchHttpClient.layer),
@@ -281,7 +287,9 @@ const serveBehindFleetEndpoint = (machine: Machine) =>
     const server = yield* Layer.build(Layer.fresh(NodeHttpServer.layerTest));
     const routes = Layer.mergeAll(
       HttpApiBuilder.layer(FleetPeerTestApi).pipe(
-        Layer.provide(McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer))),
+        Layer.provide(
+          McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer), Layer.provide(layerCloudUnlinked)),
+        ),
         Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
         Layer.provide(AuthHttp.layerAuthenticatedAuth),
       ),

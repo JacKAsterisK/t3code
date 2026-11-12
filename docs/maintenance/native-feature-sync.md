@@ -8,6 +8,8 @@ approval before code or runtime changes.
 
 ## Baseline
 
+- Upstream sync 2026-11-12: upstream `ee90bdc940` (680 commits after `12f3244e0593`), on `lan/upstream-sync-20261112`. Not yet released. Upstream migrations 081 and 082 become fork 095 (ProjectionMessageSearchText) and 096 (TurnItemConversationIndex); schema 96.
+
 - LAN 1.0.37 preparation: upstream `12f3244e0593` (2026-11-09, Claude Fable 5.2), on `lan/upstream-sync-20261107`. Previous published LAN 1.0.36 is `6660ea19b3133a1293260bd941007c07a20b7b13`. Application version 0.1.7 and schema 94 are unchanged; upstream added no migrations.
 
 - LAN 1.0.35 preparation: upstream `202d5b5616e3edf65706371e2b8a9c4f486d0a96` (2026-11-06), on `lan/release-1.0.35-20261106`. Previous published LAN 1.0.34 is `ceabe588958f5b1a4acb166d76fb30a711d651b8`. Application version advances to 0.1.7 and the fork schema to 94.
@@ -29,6 +31,15 @@ approval before code or runtime changes.
   (off); no `userdata\lan-routing.json`, so every `t3_lan_*` call is denied; no
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
+
+## 2026-11-12 sync decisions
+
+- Row 12: upstream migrations append as 095–096, registered in `home-repair.ts` `supportedMigrationIds`.
+- Rows 2–6 and 13: adopt upstream's sender-thread forwarding (`T3-Sender-Thread`), `tool_search` with deferred tool listing, the loopback refusal and the address guard for existing peer links. The fork's `writes` flag, owner stamp, admission checks and approvals mint gate stay. Deferred listing also hides the LAN tools and `usage_report` until a client loads them through `tool_search`. Upstream's hosted agent-approval redirect is gated on `isLanDistribution`, so LAN builds keep the local `/connect-agent` page. OAuth HTTP now reads `CloudLink`; fork tests provide an unlinked stub (`lan/cloudUnlinked.testkit.ts`).
+- Rows 9 and 11: adopt upstream's Windows `t3 service` launcher options and launcher protocol. The LAN client stays unmanaged (`protocol: undefined`), and `nativeUpdatesEnabled` still guards both launchers and the Electron updater, which adds upstream's AppImage relaunch inside the gate.
+- Row 11: staging locks refreshed (playwright-core 1.64.1, patched `@cursor/sdk` 1.2.0). `prepare-stage-locks.ts` now reads patch files up to 16 MiB, like its other inputs. Upstream's Cursor SDK patch is 5.1 MiB, because it diffs minified bundles. The cap only bounds build-time input reads.
+- Windows-only upstream test failures, also failing on upstream itself on Windows and not reached by LAN builds: `pinnedRuntime` (6) and `serviceLauncherClient` (5) need symlink privilege; `serviceSelectionLock` (1) and `bootService` "serializes a local install…" (1) hit EPERM when renaming a directory onto an existing one.
+- Scheduler: adopt upstream's missed-slot and run-failure recording. Run-failure recording forks outside native admission, so it never holds off updates while it waits for a run's outcome. `cancelDelegatedTask` is admitted like the other delegated writes.
 
 ## LAN 1.0.37 sync decisions
 

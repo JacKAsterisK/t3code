@@ -171,11 +171,12 @@ overrides:
   expo-audio: 58.0.11
   expo-network: 58.0.4
   '@clerk/expo-native-components': 0.4.4
+  '@cursor/sdk': 1.2.0
   expo-sharing: 58.0.22
   expo-widgets: 58.0.27
   '@ff-labs/fff-node': 0.11.0
   '@legendapp/list': 3.7.2
-  '@pierre/diffs': 1.6.1
+  '@pierre/diffs': 1.7.0-beta.3
   '@react-native-ai/apple': 0.12.0
   '@react-native-menu/menu': 2.0.0
   '@react-navigation/native-stack': 7.21.0
@@ -184,10 +185,11 @@ overrides:
   react-native-gesture-handler: 3.5.0
   react-native-reanimated: 4.7.1
   react-native-keyboard-controller: 1.23.0
-  react-native-pdf-jsi: 5.0.0
+  react-native-pdf-jsi: 6.1.0
   react-native-webview: 14.0.1
   react-native-svg: 15.16.1
   app-builder-lib: 26.16.1
+  electron-updater: 6.8.9
   expo-modules-core: 58.0.30
   '@exodus/bytes>@noble/hashes': 1.8.0
   '@react-navigation/core': 7.24.0
@@ -243,10 +245,13 @@ overrides:
   vite: npm:@voidzero-dev/vite-plus-core@1.4.0
   vite-plus: 1.4.0
   yaml: ^2.9.0
+  '@vercel/routing-utils>path-to-regexp': 6.3.0
+  '@vercel/config>zod': 4.6.7
 
 packageExtensionsChecksum: sha256-069gZLxPQdt/oqtAg+p09TANKzNWSmNEZSo+3zTy/+U=
 
 patchedDependencies:
+  '@cursor/sdk@1.2.0': 57f502128bf6accd976963b126e227c86a45d815a53a8dc450461beae3bed4a4
   '@ff-labs/fff-node@0.11.0': cc71fcec015f4d39bc96ae2e2bf6b0ca678124c722c66a7841efce9d34b5983c
   node-pty@1.2.0-beta.15: f1e680afec85f650699ea756f91f469844ec4c976f4f168492a45c6b3f67d651
 
@@ -256,7 +261,7 @@ importers:
     dependencies:
       '@cursor/sdk':
         specifier: 1.2.0
-        version: 1.2.0(zod@4.6.7)
+        version: 1.2.0(patch_hash=57f502128bf6accd976963b126e227c86a45d815a53a8dc450461beae3bed4a4)(zod@4.6.7)
       '@ff-labs/fff-bin-win32-x64':
         specifier: 0.11.0
         version: 0.11.0
@@ -273,8 +278,8 @@ importers:
         specifier: 1.2.0-beta.15
         version: 1.2.0-beta.15(patch_hash=f1e680afec85f650699ea756f91f469844ec4c976f4f168492a45c6b3f67d651)
       playwright-core:
-        specifier: 1.60.0
-        version: 1.60.0
+        specifier: 1.64.1
+        version: 1.64.1
       transcribe-cpp:
         specifier: 0.4.1
         version: 0.4.1
@@ -688,9 +693,9 @@ packages:
   node-pty@1.2.0-beta.15:
     resolution: {integrity: sha512-vORSzHXi4Ofl7HemVWpuudLqCPdaQb4LfpRCUpE5HPxhp4JYscl8zZwxh11p26v2wvW24WMwnMfLjhRLixrfxA==}
 
-  playwright-core@1.60.0:
-    resolution: {integrity: sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==}
-    engines: {node: '>=18'}
+  playwright-core@1.64.1:
+    resolution: {integrity: sha512-BC4s8y6SEVA6Q1rSxZTto8hI1KUI3xXlHGZgvGqP4IqPdI/a6FX9H29IDNz7vKo9l21b6LfYosScPL6M3xxyDQ==}
+    engines: {node: '>=20'}
     hasBin: true
 
   transcribe-cpp@0.4.1:
@@ -732,7 +737,7 @@ snapshots:
   '@cursor/sdk-win32-x64@1.2.0':
     optional: true
 
-  '@cursor/sdk@1.2.0(zod@4.6.7)':
+  '@cursor/sdk@1.2.0(patch_hash=57f502128bf6accd976963b126e227c86a45d815a53a8dc450461beae3bed4a4)(zod@4.6.7)':
     dependencies:
       '@bufbuild/protobuf': 1.10.0
       '@connectrpc/connect': 1.7.0(@bufbuild/protobuf@1.10.0)
@@ -995,7 +1000,7 @@ snapshots:
     dependencies:
       node-addon-api: 7.1.1
 
-  playwright-core@1.60.0: {}
+  playwright-core@1.64.1: {}
 
   transcribe-cpp@0.4.1:
     dependencies:

@@ -52,7 +52,7 @@ export const layer = (env: FleetEnvironment) =>
           runForThread: () => Effect.succeed({ status: "no-script" }),
         }),
         Layer.mock(Terminal.TerminalManager)({ close: () => Effect.void }),
-        Layer.mock(Git.GitWorkflowService)({}),
+        Layer.mock(Git.GitWorkflowService)({ currentBranch: () => Effect.succeed(null) }),
         Layer.mock(GitDriver.GitVcsDriver)({}),
         Layer.mock(Providers.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
         Layer.mock(Repositories.SourceControlRepositoryService)({}),

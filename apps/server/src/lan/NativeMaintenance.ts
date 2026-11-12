@@ -362,6 +362,7 @@ const derivedColumns = [
   "source_provider_instance_id",
   "target_provider_instance_id",
   "completion_delivery_state",
+  "search_text",
 ];
 // Columns a migration adds as null for every existing row. Null hashes as absent, so adding one
 // changes no work; a row that holds a value hashes it.

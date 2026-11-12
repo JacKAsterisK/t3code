@@ -20,9 +20,11 @@ import {
   WS_METHODS,
   WsRpcGroup,
   type VcsStatusStreamEvent,
+  type ModelSelection,
   type OrchestrationProjectShell,
   type OrchestrationV2Command,
   type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2ShellStreamItem,
   type OrchestrationV2ThreadProjection,
@@ -82,8 +84,37 @@ const auth = {
   sessionCookieName: "t3_session",
 };
 
+const readyProvider = (
+  instanceId: string,
+  driver: string,
+  models: ReadonlyArray<{ readonly slug: string; readonly name: string }>,
+) => ({
+  instanceId,
+  driver,
+  enabled: true,
+  installed: true,
+  version: "1.0.0",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-03-17T19:12:28.000Z",
+  models: models.map((model) => ({ ...model, isCustom: false, capabilities: null })),
+});
+export const CODEX_PROVIDER = readyProvider(CODEX, "codex", [
+  { slug: "gpt-5.4", name: "GPT-5.4" },
+  { slug: "gpt-5.5", name: "GPT-5.5" },
+]);
+export const CLAUDE_PROVIDER = {
+  ...readyProvider("claudeAgent", "claudeAgent", [
+    { slug: "claude-opus-4-6", name: "Claude Opus 4.6" },
+  ]),
+  slashCommands: [{ name: "compact" }],
+};
+
 const decodeServerConfig = Schema.decodeUnknownSync(ServerConfig);
-const configFor = (environment: typeof descriptor): ServerConfig => ({
+const makeServerConfig = (
+  environment: typeof descriptor,
+  providers: ReadonlyArray<unknown>,
+): ServerConfig => ({
   ...decodeServerConfig({
     environment,
     auth,
@@ -91,22 +122,7 @@ const configFor = (environment: typeof descriptor): ServerConfig => ({
     keybindingsConfigPath: "/workspace/.t3/keybindings.json",
     keybindings: [],
     issues: [],
-    providers: [
-      {
-        instanceId: CODEX,
-        driver: "codex",
-        enabled: true,
-        installed: true,
-        version: "1.0.0",
-        status: "ready",
-        auth: { status: "authenticated" },
-        checkedAt: "2026-03-17T19:12:28.000Z",
-        models: [
-          { slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: null },
-          { slug: "gpt-5.5", name: "GPT-5.5", isCustom: false, capabilities: null },
-        ],
-      },
-    ],
+    providers,
     availableEditors: [],
     observability: {
       logsDirectoryPath: "/workspace/.t3/logs",
@@ -121,8 +137,12 @@ const configFor = (environment: typeof descriptor): ServerConfig => ({
   }),
   keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
 });
-const serverConfig = configFor(descriptor);
-const remoteServerConfig = configFor(remoteDescriptor);
+let serverConfig = makeServerConfig(descriptor, [CODEX_PROVIDER]);
+let remoteServerConfig = makeServerConfig(remoteDescriptor, [CODEX_PROVIDER]);
+const setProviders = (providers: ReadonlyArray<unknown>) => {
+  serverConfig = makeServerConfig(descriptor, providers);
+  remoteServerConfig = makeServerConfig(remoteDescriptor, providers);
+};
 
 const projectShell = (id: ProjectId, title: string): OrchestrationProjectShell => ({
   id,
@@ -185,13 +205,19 @@ export function assistantItem(
   } satisfies OrchestrationV2TurnItem;
 }
 
-function run(threadId: ThreadId, id: RunId, ordinal: number, userMessageId: string) {
+function run(
+  threadId: ThreadId,
+  id: RunId,
+  ordinal: number,
+  userMessageId: string,
+  modelSelection: ModelSelection = MODEL,
+) {
   return {
     id,
     threadId,
     ordinal,
-    providerInstanceId: CODEX,
-    modelSelection: MODEL,
+    providerInstanceId: modelSelection.instanceId,
+    modelSelection,
     providerThreadId: null,
     userMessageId: MessageId.make(userMessageId),
     rootNodeId: null,
@@ -208,21 +234,31 @@ function run(threadId: ThreadId, id: RunId, ordinal: number, userMessageId: stri
 export interface FakeThread {
   /** Makes this a side chat of that thread. */
   readonly sideChatOf?: ThreadId;
+  /** Makes this an older settled thread the shell leaves out; only its family read returns it. */
+  readonly olderSettled?: true;
   readonly id: ThreadId;
   readonly title: string;
   readonly ownerId?: string | null;
+  /** Defaults to GPT-5.4 on Codex. */
+  readonly modelSelection?: ModelSelection;
+  /** The first is the thread's active provider thread. */
+  readonly providerThreads?: ReadonlyArray<OrchestrationV2ProviderThread>;
   readonly runs: ReadonlyArray<OrchestrationV2Run>;
   readonly items: ReadonlyArray<OrchestrationV2TurnItem>;
 }
 
 /** A thread of `turns` user prompts, each answered in markdown with a list and inline code. */
-export function threadWithHistory(name: string, turns: number): FakeThread {
+export function threadWithHistory(
+  name: string,
+  turns: number,
+  modelSelection: ModelSelection = MODEL,
+): FakeThread {
   const id = ThreadId.make(name);
   const runs: OrchestrationV2Run[] = [];
   const items: OrchestrationV2TurnItem[] = [];
   for (let turn = 0; turn < turns; turn++) {
     const runId = RunId.make(`${name}-run-${turn}`);
-    runs.push(run(id, runId, turn + 1, `${name}-user-${turn}`));
+    runs.push(run(id, runId, turn + 1, `${name}-user-${turn}`, modelSelection));
     items.push(
       userItem(id, runId, `${name}-user-${turn}`, turn * 2, `${name}: question ${turn}`),
       assistantItem(
@@ -235,22 +271,23 @@ export function threadWithHistory(name: string, turns: number): FakeThread {
       ),
     );
   }
-  return { id, title: `Thread ${name}`, runs, items };
+  return { id, title: `Thread ${name}`, modelSelection, runs, items };
 }
 
 function shellOf(thread: FakeThread, projectId = PROJECT_ID): OrchestrationV2ThreadShell {
   const latest = thread.runs.at(-1);
+  const modelSelection = thread.modelSelection ?? MODEL;
   return {
     id: thread.id,
     projectId,
     title: thread.title,
-    providerInstanceId: CODEX,
-    modelSelection: MODEL,
+    providerInstanceId: modelSelection.instanceId,
+    modelSelection,
     runtimeMode: "full-access",
     interactionMode: "default",
     branch: "main",
     worktreePath: null,
-    activeProviderThreadId: null,
+    activeProviderThreadId: thread.providerThreads?.[0]?.id ?? null,
     lineage: {
       rootThreadId: thread.sideChatOf ?? thread.id,
       parentThreadId: thread.sideChatOf ?? null,
@@ -273,8 +310,8 @@ function shellOf(thread: FakeThread, projectId = PROJECT_ID): OrchestrationV2Thr
     createdAt: AT,
     updatedAt: AT,
     archivedAt: null,
-    settledOverride: null,
-    settledAt: null,
+    settledOverride: thread.olderSettled ? "settled" : null,
+    settledAt: thread.olderSettled ? AT : null,
     lastVisitedAt: AT,
     deletedAt: null,
     ...(thread.ownerId === undefined ? {} : { ownerId: thread.ownerId }),
@@ -303,7 +340,7 @@ function projectionOf(thread: FakeThread, projectId = PROJECT_ID): Orchestration
       interactionMode: shell.interactionMode,
       branch: shell.branch,
       worktreePath: shell.worktreePath,
-      activeProviderThreadId: null,
+      activeProviderThreadId: shell.activeProviderThreadId,
       lineage: shell.lineage,
       forkedFrom: null,
       createdBy: "user",
@@ -311,8 +348,8 @@ function projectionOf(thread: FakeThread, projectId = PROJECT_ID): Orchestration
       createdAt: AT,
       updatedAt: AT,
       archivedAt: null,
-      settledOverride: null,
-      settledAt: null,
+      settledOverride: shell.settledOverride,
+      settledAt: shell.settledAt,
       lastVisitedAt: AT,
       deletedAt: null,
     },
@@ -321,7 +358,7 @@ function projectionOf(thread: FakeThread, projectId = PROJECT_ID): Orchestration
     nodes: [],
     subagents: [],
     providerSessions: [],
-    providerThreads: [],
+    providerThreads: [...(thread.providerThreads ?? [])],
     providerTurns: [],
     runtimeRequests: [],
     messages: [],
@@ -364,12 +401,20 @@ const subscribe = <A>(first: ReadonlyArray<A>, register?: (queue: Queue.Queue<A>
 
 // One machine: the app's own environment, whose thread events tests can push, or the remote.
 function sessionFor(
-  baseConfig: ServerConfig,
+  baseConfig: () => ServerConfig,
   machineProject: OrchestrationProjectShell,
   live: boolean,
 ): EnvironmentConnectionLease["session"] {
-  const currentConfig = (): ServerConfig =>
-    fleetUsers === undefined ? baseConfig : { ...baseConfig, fleetUsers };
+  const currentConfig = (): ServerConfig => {
+    const config = baseConfig();
+    return {
+      ...config,
+      // A server only leaves threads out of the shell when it serves their families.
+      ...(threads.some((thread) => thread.olderSettled) ? { shellThreadFamilies: true } : {}),
+      ...(fleetUsers === undefined ? {} : { fleetUsers }),
+    };
+  };
+  const shellOfHere = (thread: FakeThread) => shellOf(thread, machineProject.id);
   const handlers: Record<string, (input: never) => unknown> = {
     [WS_METHODS.subscribeTerminalMetadata]: () =>
       subscribe<TerminalMetadataStreamEvent>(
@@ -410,7 +455,7 @@ function sessionFor(
             schemaVersion: 1,
             snapshotSequence: sequence,
             projects: [machineProject],
-            threads: threads.map((thread) => shellOf(thread, machineProject.id)),
+            threads: threads.filter((thread) => !thread.olderSettled).map(shellOfHere),
             archivedThreads: [],
           },
         },
@@ -440,6 +485,16 @@ function sessionFor(
           : undefined,
       );
     },
+    [ORCHESTRATION_V2_WS_METHODS.getThreadFamily]: (input: { readonly threadId: ThreadId }) => {
+      const rootOf = (thread: FakeThread) => thread.sideChatOf ?? thread.id;
+      const requested = threads.find((candidate) => candidate.id === input.threadId);
+      return Effect.succeed({
+        snapshotSequence: sequence,
+        threads: requested
+          ? threads.filter((thread) => rootOf(thread) === rootOf(requested)).map(shellOfHere)
+          : [],
+      });
+    },
     [WS_METHODS.subscribeServerConfig]: () =>
       subscribe([{ version: 1 as const, type: "snapshot" as const, config: currentConfig() }]),
   };
@@ -465,8 +520,8 @@ function sessionFor(
     closed: Effect.never,
   };
 }
-const session = sessionFor(serverConfig, project, true);
-const remoteSession = sessionFor(remoteServerConfig, remoteProject, false);
+const session = sessionFor(() => serverConfig, project, true);
+const remoteSession = sessionFor(() => remoteServerConfig, remoteProject, false);
 
 /** Stands in for client-runtime's ConnectionDriver: each connection opens its machine's session. */
 export const fakeDriver = {
@@ -536,10 +591,12 @@ export function installFakeEnvironment(
     readonly remoteScopes?: ReadonlyArray<AuthEnvironmentScope>;
     readonly fleetUsers?: FleetUsersDirectory;
     readonly acceptCommands?: boolean;
+    readonly providers?: ReadonlyArray<unknown>;
   } = {},
 ): Disposable {
   threads = fixtures;
   fleetUsers = options.fleetUsers;
+  setProviders(options.providers ?? [CODEX_PROVIDER]);
   dispatched = [];
   acceptCommands = options.acceptCommands === true;
   globalThis.fetch = async (input, init) => {
@@ -566,6 +623,7 @@ export function installFakeEnvironment(
       globalThis.fetch = realFetch;
       threads = [];
       fleetUsers = undefined;
+      setProviders([CODEX_PROVIDER]);
       dispatched = [];
       acceptCommands = false;
     },

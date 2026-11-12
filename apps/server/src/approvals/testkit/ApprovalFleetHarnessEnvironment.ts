@@ -69,6 +69,7 @@ import * as Wire from "../../../../../packages/contracts/src/approvalForwarding.
 import { CodexProviderCapabilitiesV2 } from "../../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "@t3tools/contracts";
 import * as SqlClient from "effect/sql/SqlClient";
+import { layerCloudUnlinked } from "../../lan/cloudUnlinked.testkit.ts";
 
 const stringify = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const parse = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
@@ -261,7 +262,9 @@ export const serve = Effect.fn("ApprovalFleetHarness.serve")(function* (
     Layer.provide(authenticator),
   );
   const oauth = HttpApiBuilder.layer(ApprovalFleetOAuthApi).pipe(
-    Layer.provide(OAuthHttp.layer.pipe(Layer.provide(OAuth.layer))),
+    Layer.provide(
+      OAuthHttp.layer.pipe(Layer.provide(OAuth.layer), Layer.provide(layerCloudUnlinked)),
+    ),
   );
   const ownedListener = yield* Effect.sync(() => NodeHttp.createServer());
   yield* Effect.addFinalizer(() =>

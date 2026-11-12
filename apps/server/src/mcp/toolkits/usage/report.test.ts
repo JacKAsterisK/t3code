@@ -2,10 +2,10 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
-  ProviderThreadId,
   UsageDay,
   UsageLimitSourceId,
   type ServerProvider,
+  type TurnTokenUsage,
   type UsageBucket,
   type UsageSummary,
 } from "@t3tools/contracts";
@@ -14,13 +14,15 @@ import { createOverrideRateTable } from "../../../usage/usagePricing.ts";
 import {
   claimSources,
   dedupeLimitAccounts,
+  defaultRowLimit,
   groupRows,
   limitAccounts,
   normalizeGroupBy,
   resolveWindow,
   summaryRows,
-  threadTurnRows,
+  turnRows,
 } from "./report.ts";
+import type { LedgerTurn } from "./turnLedger.ts";
 
 const claude = ProviderDriverKind.make("claudeAgent");
 
@@ -135,12 +137,12 @@ describe("limit windows", () => {
     usageLimits: {
       checkedAt: "2026-11-12T10:00:00.000Z",
       windows: [
-        { id: "five_hour", kind: "session", label: "Session", usedPercent: 30 },
+        { id: "five_hour", kind: "session", label: "Session", usedPercent: 33.33 },
         { id: "seven_day", label: "Weekly", usedPercent: 60, ...weekly },
         {
           id: "seven_day_fable",
           label: "Weekly · Fable",
-          usedPercent: 80,
+          usedPercent: 104,
           resetsAt: "2026-11-15T00:00:00.000Z",
           ...weekly,
         },
@@ -214,6 +216,12 @@ describe("limit windows", () => {
     expect(windows("pool@example.com")).toEqual([
       { id: "seven_day", label: "Weekly", source: "probe", checkedAt: "2026-11-12T07:00:00.000Z" },
     ]);
+    // Agents present what is left; an overage reads as empty.
+    expect(
+      accounts
+        .find((account) => account.email === "spd@example.com")
+        ?.windows.map((window) => window.remainingPercent),
+    ).toEqual([66.7, 40, 0]);
   });
 
   it("keeps the latest reading of a login two environments report", () => {
@@ -232,77 +240,63 @@ describe("limit windows", () => {
 });
 
 describe("thread-turn attribution", () => {
-  const providerThreadId = ProviderThreadId.make("provider-thread:1");
-  const at = (iso: string) => DateTime.makeUnsafe(iso);
+  type Complete = Extract<TurnTokenUsage, { readonly usageStatus: "complete" }>;
   const turn = (
-    completedAt: string,
-    usage: NonNullable<Parameters<typeof threadTurnRows>[0]["turns"][number]["turnTokenUsage"]>,
-  ) => ({
-    providerThreadId,
-    startedAt: at(completedAt),
-    completedAt: at(completedAt),
-    model: "claude-fable-5-2",
-    turnTokenUsage: usage,
+    threadId: string,
+    at: string,
+    usage: Omit<Complete, "usageScope" | "hasSubagents" | "usageStatus">,
+    model: string | null = "claude-fable-5-2",
+  ): LedgerTurn => ({
+    threadId,
+    threadTitle: threadId === "thread:a" ? "Coil dressing" : "Perf bench",
+    projectId: "project:reprint",
+    projectTitle: "Reprint",
+    driver: claude,
+    providerInstanceId: "claude-spd",
+    at,
+    model,
+    usage: { usageScope: "main_agent", hasSubagents: false, usageStatus: "complete", ...usage },
   });
-  const common = { usageScope: "main_agent", hasSubagents: false } as const;
+  const overrides = createOverrideRateTable({
+    "claude-fable-5-2": {
+      inputCostPerMillionTokens: 10,
+      outputCostPerMillionTokens: 50,
+      cacheReadCostPerMillionTokens: 1,
+      cacheWriteCostPerMillionTokens: 12.5,
+    },
+  });
+  const week = {
+    sinceDay: UsageDay.make("2026-11-06"),
+    untilDay: UsageDay.make("2026-11-12"),
+    timeZone: "UTC",
+  };
 
   it("prices the cache split, counts turns without one, and keeps subagent tokens apart", () => {
-    const result = threadTurnRows({
+    const result = turnRows({
       turns: [
-        turn("2026-11-12T10:00:00.000Z", {
-          ...common,
-          usageStatus: "complete",
+        turn("thread:a", "2026-11-12T10:00:00.000Z", {
           inputTokens: 1_000_000,
           cachedInputTokens: 800_000,
           cacheCreationTokens: 100_000,
           outputTokens: 10_000,
           otherUsage: { inputTokens: 5_000, outputTokens: 100 },
         }),
-        turn("2026-11-11T10:00:00.000Z", {
-          ...common,
-          usageStatus: "complete",
-          inputTokens: 200_000,
-          outputTokens: 0,
-        }),
-        turn("2026-11-12T11:00:00.000Z", {
-          ...common,
-          usageStatus: "complete",
+        turn("thread:a", "2026-11-11T10:00:00.000Z", { inputTokens: 200_000, outputTokens: 0 }),
+        turn("thread:a", "2026-11-12T11:00:00.000Z", {
           inputTokens: 9,
           outputTokens: 9,
           localCommand: true,
         }),
-        turn("2026-10-01T10:00:00.000Z", {
-          ...common,
-          usageStatus: "complete",
-          inputTokens: 9,
-          outputTokens: 9,
-        }),
-      ],
-      providerThreads: [
-        {
-          id: providerThreadId,
-          driver: claude,
-          providerInstanceId: ProviderInstanceId.make("claude-spd"),
-        },
+        // The ledger read widens day windows to every UTC offset; the local day cuts it.
+        turn("thread:a", "2026-11-05T23:00:00.000Z", { inputTokens: 9, outputTokens: 9 }),
       ],
       rates: new Map(),
-      overrides: createOverrideRateTable({
-        "claude-fable-5-2": {
-          inputCostPerMillionTokens: 10,
-          outputCostPerMillionTokens: 50,
-          cacheReadCostPerMillionTokens: 1,
-          cacheWriteCostPerMillionTokens: 12.5,
-        },
-      }),
-      window: {
-        sinceDay: UsageDay.make("2026-11-06"),
-        untilDay: UsageDay.make("2026-11-12"),
-        timeZone: "UTC",
-      },
+      overrides,
+      window: week,
       environment: "AnvilToad",
     });
-    expect(result.turns).toBe(2);
-    expect(result.turnsWithoutCacheSplit).toBe(1);
+    expect(result.count).toBe(2);
+    expect(result.withoutCacheSplit).toBe(1);
     expect(result.otherTokens).toEqual({ input: 5_000, output: 100 });
     const grouped = groupRows(result.rows, normalizeGroupBy(["account", "model"]), 10);
     expect(grouped.rows).toEqual([
@@ -322,6 +316,63 @@ describe("thread-turn attribution", () => {
         },
       },
     ]);
+  });
+
+  it("ranks threads by one model's cost and charts hours whole and in time order", () => {
+    const turns = [
+      turn("thread:a", "2026-11-12T09:30:00.000Z", { inputTokens: 100_000, outputTokens: 0 }),
+      turn("thread:b", "2026-11-12T10:15:00.000Z", { inputTokens: 300_000, outputTokens: 0 }),
+      turn("thread:a", "2026-11-12T10:45:00.000Z", { inputTokens: 100_000, outputTokens: 0 }),
+      turn(
+        "thread:b",
+        "2026-11-12T10:50:00.000Z",
+        { inputTokens: 900_000, outputTokens: 0 },
+        "claude-opus-5-5",
+      ),
+      // Before the 24-hour window.
+      turn("thread:a", "2026-11-11T09:00:00.000Z", { inputTokens: 900_000, outputTokens: 0 }),
+    ];
+    const day = resolveWindow(
+      { period: "day" },
+      DateTime.toDate(DateTime.makeUnsafe("2026-11-12T12:00:00.000Z")),
+    );
+    if (typeof day === "string") throw new Error(day);
+    const fable = turnRows({
+      turns,
+      rates: new Map(),
+      overrides,
+      window: day,
+      environment: "AnvilToad",
+      models: ["claude-fable-5-2"],
+    });
+    expect(fable.count).toBe(3);
+    const byThread = groupRows(fable.rows, normalizeGroupBy(["thread"]), 1);
+    expect(byThread.rows).toEqual([
+      expect.objectContaining({
+        thread: "thread:b",
+        threadTitle: "Perf bench",
+        projectTitle: "Reprint",
+        costUsd: 3,
+      }),
+    ]);
+    expect(byThread.omittedRows).toBe(1);
+
+    const all = turnRows({
+      turns,
+      rates: new Map(),
+      overrides,
+      window: day,
+      environment: "AnvilToad",
+    });
+    const groupBy = normalizeGroupBy(["model", "hour"]);
+    const hours = groupRows(all.rows, groupBy, defaultRowLimit(groupBy));
+    // The page's 24-hour slots start at the window's start, 12:00.
+    expect(hours.rows.map(({ hour, model, costUsd }) => ({ hour, model, costUsd }))).toEqual([
+      { hour: "2026-11-12T09:00:00.000Z", model: "claude-fable-5-2", costUsd: 1 },
+      { hour: "2026-11-12T10:00:00.000Z", model: "claude-fable-5-2", costUsd: 4 },
+      { hour: "2026-11-12T10:00:00.000Z", model: "claude-opus-5-5", costUsd: 0 },
+    ]);
+    expect(hours.rows[2]).toMatchObject({ unpricedRecords: 1 });
   });
 });
 

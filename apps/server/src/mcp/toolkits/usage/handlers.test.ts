@@ -17,6 +17,7 @@ import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
 import * as Settings from "../../../serverSettings.ts";
 import * as UsageLimitSources from "../../../usage/UsageLimitSources.ts";
 import * as UsageService from "../../../usage/UsageService.ts";
+import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { usageReport } from "./handlers.ts";
 import type { UsageReportResult } from "./tools.ts";
@@ -106,8 +107,57 @@ it.effect("merges linked environments and reports the ones that did not answer",
   }),
 );
 
-const layer = (forwarded: Ref.Ref<ReadonlyArray<unknown>>) =>
+it.effect("ranks threads across the fleet with each environment's rows kept apart", () =>
+  Effect.gen(function* () {
+    const forwarded = yield* Ref.make<ReadonlyArray<unknown>>([]);
+    const thread = (id: string, title: string, costUsd: number) => ({
+      environment: "AnvilToad",
+      thread: id,
+      threadTitle: title,
+      projectTitle: "Reprint",
+      tokens,
+      costUsd,
+      records: 1,
+      unpricedRecords: 0,
+    });
+    const turns = { count: 2, withoutCacheSplit: 0, otherTokens: { input: 0, output: 0 } };
+    const result: UsageReportResult = yield* usageReport({
+      scope: "fleet",
+      groupBy: ["thread"],
+      model: ["claude-opus-5-5"],
+      include: ["usage"],
+      limit: 1,
+    }).pipe(
+      Effect.provide(
+        layer(forwarded, {
+          ...peerReport,
+          attribution: "thread-turns",
+          groupBy: ["environment", "thread", "source"],
+          rows: [thread("thread:a", "Coil dressing", 2), thread("thread:b", "Perf bench", 3)],
+          turns,
+        }),
+      ),
+    );
+
+    expect(result).toMatchObject({
+      attribution: "thread-turns",
+      groupBy: ["environment", "thread"],
+    });
+    // This machine's empty ledger adds nothing; the peer's rows keep its name and titles.
+    expect(result.rows).toEqual([thread("thread:b", "Perf bench", 3)]);
+    expect(result.omittedRows).toBe(1);
+    expect(result.turns).toEqual(turns);
+    expect((yield* Ref.get(forwarded))[0]).toMatchObject({
+      groupBy: ["environment", "thread", "source"],
+      model: ["claude-opus-5-5"],
+      limit: 0,
+    });
+  }),
+);
+
+const layer = (forwarded: Ref.Ref<ReadonlyArray<unknown>>, answer = peerReport) =>
   Layer.mergeAll(
+    SqlitePersistence.layerMemory,
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
       environmentId: here,
       requestNamespace: "client:usage",
@@ -206,7 +256,7 @@ const layer = (forwarded: Ref.Ref<ReadonlyArray<unknown>>) =>
         Ref.update(forwarded, (all) => [...all, params]).pipe(
           Effect.andThen(
             environmentId === anvil
-              ? Effect.succeed(peerReport as never)
+              ? Effect.succeed(answer as never)
               : Effect.fail(
                   new OrchestratorMcpFailure({
                     code: "invalid_request",

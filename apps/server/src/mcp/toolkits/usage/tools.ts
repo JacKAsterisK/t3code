@@ -8,6 +8,7 @@ import {
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import { Tool, Toolkit } from "effect/ai";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
@@ -18,14 +19,20 @@ import * as UsageService from "../../../usage/UsageService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
-/** `source` is a history directory's host, path and volume; fleet merges use it to count a shared directory once. */
+/**
+ * `source` is a history directory's host, path and volume; fleet merges use it to count a shared
+ * directory once. `project` and `thread` exist only in T3's turn records.
+ */
 export const UsageReportGroupKey = Schema.Literals([
   "environment",
+  "project",
+  "thread",
   "account",
   "provider",
   "model",
   "host",
   "day",
+  "hour",
   "source",
 ]);
 export type UsageReportGroupKey = typeof UsageReportGroupKey.Type;
@@ -47,11 +54,17 @@ const Amounts = {
 
 export const UsageReportRow = Schema.Struct({
   environment: Schema.optionalKey(Schema.String),
+  project: Schema.optionalKey(Schema.String),
+  projectTitle: Schema.optionalKey(Schema.String),
+  thread: Schema.optionalKey(Schema.String),
+  threadTitle: Schema.optionalKey(Schema.String),
   account: Schema.optionalKey(Schema.String),
   provider: Schema.optionalKey(Schema.String),
   model: Schema.optionalKey(Schema.String),
   host: Schema.optionalKey(Schema.String),
   day: Schema.optionalKey(Schema.String),
+  /** UTC start of the hour slot: whole hours from a 24-hour window's start, else the clock hour. */
+  hour: Schema.optionalKey(Schema.String),
   source: Schema.optionalKey(Schema.String),
   ...Amounts,
 });
@@ -61,7 +74,8 @@ export const UsageReportLimitWindow = Schema.Struct({
   id: Schema.String,
   label: Schema.String,
   kind: Schema.String,
-  usedPercent: Schema.Number,
+  /** 100 is the whole allowance left, 0 is none. */
+  remainingPercent: Schema.Number,
   resetsAt: Schema.optionalKey(Schema.String),
   /** The latest time this reading could have been taken; a probe reading may be older. */
   checkedAt: Schema.String,
@@ -122,12 +136,12 @@ export const UsageReportResult = Schema.Struct({
       }),
     ),
   ),
-  thread: Schema.optionalKey(
+  turns: Schema.optionalKey(
     Schema.Struct({
-      threadId: Schema.String,
-      turns: NonNegativeInt,
+      threadId: Schema.optionalKey(Schema.String),
+      count: NonNegativeInt,
       /** Turns whose provider reported no cache split; their input is priced as uncached. */
-      turnsWithoutCacheSplit: NonNegativeInt,
+      withoutCacheSplit: NonNegativeInt,
       /** Subagent and compaction tokens the provider reported apart from the main agent; not priced. */
       otherTokens: Schema.Struct({ input: NonNegativeInt, output: NonNegativeInt }),
     }),
@@ -152,19 +166,18 @@ export const UsageReportParameters = Schema.Struct({
   until: Schema.optionalKey(UsageDay),
   groupBy: Schema.optionalKey(
     Schema.Array(UsageReportGroupKey).annotate({
-      description: "Default account, provider, model. account is a provider's history directory.",
+      description:
+        "Default account, provider, model. account is a provider's history directory. hour or day returns every row in time order, ready to chart.",
     }),
+  ),
+  model: Schema.optionalKey(
+    Schema.Array(Schema.String).annotate({ description: "Only these exact model ids." }),
   ),
   include: Schema.optionalKey(Schema.Array(Schema.Literals(["usage", "limits"]))),
-  threadId: Schema.optionalKey(
-    ThreadId.annotate({
-      description:
-        "Attribute one thread from its own turn records instead of transcripts (partial cache split).",
-    }),
-  ),
+  threadId: Schema.optionalKey(ThreadId.annotate({ description: "Only this thread." })),
   limit: Schema.optionalKey(
     Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 500 })).annotate({
-      description: "Rows to return, by cost. Default 10; 0 returns all.",
+      description: "Rows to return, by cost. Default 10, or all with hour or day; 0 returns all.",
     }),
   ),
 });
@@ -184,9 +197,10 @@ export const UsageReportTool = Tool.make("usage_report", {
     ServerEnvironment.ServerEnvironment,
     FileSystem.FileSystem,
     Path.Path,
+    SqlClient.SqlClient,
   ],
   description:
-    "Token use, API-rate cost and subscription limits from T3's Usage page: per account, provider, model and host, plus limit windows (percent used, reset, checkedAt, live-event or probe). Reads cached scans and stored limits; never refreshes.",
+    "Token use, API-rate cost and subscription limits from T3's Usage page. Rows come from provider transcripts; grouping by thread or project, or a threadId, uses T3's own turn records (attribution thread-turns) instead. Present limit windows as remaining: remainingPercent 100 is full, 0 is empty. Reads cached scans and stored limits; never refreshes.",
   parameters: UsageReportParameters,
   success: UsageReportResult,
 })

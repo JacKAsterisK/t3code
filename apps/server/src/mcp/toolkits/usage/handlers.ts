@@ -24,14 +24,16 @@ import { readCaller, readThread, unavailable } from "../../threadAccess.ts";
 import {
   claimSources,
   dedupeLimitAccounts,
-  DEFAULT_ROW_LIMIT,
+  defaultRowLimit,
   groupRows,
   limitAccounts,
+  modelFilter,
   normalizeGroupBy,
   resolveWindow,
   sourceProblems,
   summaryRows,
-  threadTurnRows,
+  turnRows,
+  usesTurnLedger,
   type UsageWindow,
 } from "./report.ts";
 import {
@@ -39,8 +41,10 @@ import {
   UsageToolkit,
   type UsageReportParameters,
   type UsageReportResult,
+  type UsageReportGroupKey,
   type UsageReportRow,
 } from "./tools.ts";
+import { readTurnLedger } from "./turnLedger.ts";
 
 type Params = Omit<UsageReportParameters, "environmentId">;
 
@@ -69,41 +73,48 @@ interface LocalReport {
   readonly limits?: UsageReportResult["limits"];
   readonly sources?: UsageReportResult["sources"];
   readonly pricing?: UsageReportResult["pricing"];
-  readonly thread?: UsageReportResult["thread"];
+  readonly turns?: UsageReportResult["turns"];
 }
 
-const localReport = Effect.fn("UsageReport.local")(function* (
-  window: UsageWindow,
-  include: ReadonlySet<"usage" | "limits">,
-  label: string,
-  threadId: ThreadId | undefined,
-) {
+const localReport = Effect.fn("UsageReport.local")(function* (input: {
+  readonly window: UsageWindow;
+  readonly include: ReadonlySet<"usage" | "limits">;
+  readonly label: string;
+  readonly groupBy: readonly UsageReportGroupKey[];
+  readonly threadId: ThreadId | undefined;
+  readonly models: readonly string[] | undefined;
+}) {
+  const { window, include, label, threadId } = input;
   let report: LocalReport = { attribution: "transcripts", rows: [] };
-  if (threadId !== undefined) {
-    const { projection } = yield* readThread(threadId, ["providerTurns", "providerThreads"]);
-    const settings = yield* (yield* Settings.ServerSettingsService).getSettings.pipe(
-      Effect.mapError(unavailable),
-    );
-    const rates = yield* savedRates;
-    const turns = threadTurnRows({
-      turns: projection.providerTurns,
-      providerThreads: projection.providerThreads,
-      rates,
-      overrides: createOverrideRateTable(settings.usagePriceOverrides),
-      window,
-      environment: label,
-    });
-    report = {
-      attribution: "thread-turns",
-      rows: turns.rows,
-      pricing: { status: rates.size > 0 ? "cached" : "unavailable", fetchedAt: null },
-      thread: {
-        threadId,
-        turns: turns.turns,
-        turnsWithoutCacheSplit: turns.turnsWithoutCacheSplit,
-        otherTokens: turns.otherTokens,
-      },
-    };
+  if (usesTurnLedger(input.groupBy, threadId)) {
+    if (threadId !== undefined) yield* readThread(threadId);
+    report = { attribution: "thread-turns", rows: [] };
+    if (threadId !== undefined || include.has("usage")) {
+      const settings = yield* (yield* Settings.ServerSettingsService).getSettings.pipe(
+        Effect.mapError(unavailable),
+      );
+      const rates = yield* savedRates;
+      const ledger = yield* readTurnLedger(window, threadId).pipe(Effect.mapError(unavailable));
+      const turns = turnRows({
+        turns: ledger,
+        rates,
+        overrides: createOverrideRateTable(settings.usagePriceOverrides),
+        window,
+        environment: label,
+        ...(input.models === undefined ? {} : { models: input.models }),
+      });
+      report = {
+        attribution: "thread-turns",
+        rows: turns.rows,
+        pricing: { status: rates.size > 0 ? "cached" : "unavailable", fetchedAt: null },
+        turns: {
+          ...(threadId === undefined ? {} : { threadId }),
+          count: turns.count,
+          withoutCacheSplit: turns.withoutCacheSplit,
+          otherTokens: turns.otherTokens,
+        },
+      };
+    }
   } else if (include.has("usage")) {
     const usage = yield* UsageService.UsageService;
     const summary = yield* usage
@@ -113,9 +124,10 @@ const localReport = Effect.fn("UsageReport.local")(function* (
           error.reason === "invalidWindow" ? invalid(error.detail) : unavailable(),
         ),
       );
+    const wanted = modelFilter(input.models);
     report = {
       attribution: "transcripts",
-      rows: summaryRows(summary, label),
+      rows: summaryRows(summary, label).filter((row) => wanted(row.model)),
       sources: sourceProblems(summary),
       pricing: { status: summary.pricing.status, fetchedAt: summary.pricing.fetchedAt },
     };
@@ -139,8 +151,21 @@ const windowOf = (window: UsageWindow): UsageReportResult["window"] => ({
   ...(window.untilTime === undefined ? {} : { untilTime: window.untilTime }),
 });
 
-const THREAD_NOTE =
-  "thread-turns: summed from this thread's own turn records and priced with the saved Usage rates; subagent and compaction tokens are in thread.otherTokens, unpriced.";
+const TURNS_NOTE =
+  "thread-turns: summed from T3's own turn records and priced with the saved Usage rates; provider use outside T3 threads is not included, and subagent and compaction tokens are in turns.otherTokens, unpriced.";
+
+type Turns = NonNullable<UsageReportResult["turns"]>;
+const addTurns = (into: Turns | undefined, from: Turns): Turns =>
+  into === undefined
+    ? from
+    : {
+        count: into.count + from.count,
+        withoutCacheSplit: into.withoutCacheSplit + from.withoutCacheSplit,
+        otherTokens: {
+          input: into.otherTokens.input + from.otherTokens.input,
+          output: into.otherTokens.output + from.otherTokens.output,
+        },
+      };
 
 export const usageReport = Effect.fn("UsageReport.report")(function* (params: Params) {
   const { scope } = yield* readCaller();
@@ -150,23 +175,37 @@ export const usageReport = Effect.fn("UsageReport.report")(function* (params: Pa
   const window = resolveWindow(params, DateTime.toDate(yield* DateTime.now));
   if (typeof window === "string") return yield* invalid(window);
   const include = new Set(params.include ?? (["usage", "limits"] as const));
-  const groupBy = normalizeGroupBy(params.groupBy);
-  const limit = params.limit ?? DEFAULT_ROW_LIMIT;
+  const asked = normalizeGroupBy(params.groupBy);
+  const turnLedger = usesTurnLedger(asked, params.threadId);
+  // Thread and project ids are local to an environment, so fleet rows keep theirs.
+  const groupBy = fleet && turnLedger ? normalizeGroupBy([...asked, "environment"]) : asked;
+  if (!turnLedger && groupBy.includes("hour") && window.resolution !== "hour")
+    return yield* invalid(
+      "Transcripts keep hourly buckets only for period day. Group by thread or project for hourly turn records over longer windows.",
+    );
+  const limit = params.limit ?? defaultRowLimit(groupBy);
   const descriptor = yield* (yield* Environment.ServerEnvironment).getDescriptor;
-  const local = yield* localReport(window, include, descriptor.label, params.threadId);
-  const notes: string[] = local.attribution === "thread-turns" ? [THREAD_NOTE] : [];
+  const local = yield* localReport({
+    window,
+    include,
+    label: descriptor.label,
+    groupBy,
+    threadId: params.threadId,
+    models: params.model,
+  });
+  const notes: string[] = local.attribution === "thread-turns" ? [TURNS_NOTE] : [];
   const base = {
     environmentId: descriptor.environmentId,
     attribution: local.attribution,
     window: windowOf(window),
     groupBy,
     ...(local.pricing === undefined ? {} : { pricing: local.pricing }),
-    ...(local.thread === undefined ? {} : { thread: local.thread }),
   };
   if (!fleet) {
     return {
       ...base,
       ...groupRows(local.rows, groupBy, limit),
+      ...(local.turns === undefined ? {} : { turns: local.turns }),
       ...(local.limits === undefined ? {} : { limits: local.limits }),
       ...(local.sources === undefined ? {} : { sources: local.sources }),
       notes,
@@ -177,6 +216,7 @@ export const usageReport = Effect.fn("UsageReport.report")(function* (params: Pa
     { environmentId: descriptor.environmentId, label: descriptor.label, status: "ok" },
   ];
   const reports: Array<{ readonly rows: readonly UsageReportRow[] }> = [local];
+  let turns = local.turns;
   const limits = [...(local.limits ?? [])];
   const problems = [...(local.sources?.problems ?? [])];
   let okSources = local.sources?.ok ?? 0;
@@ -198,6 +238,7 @@ export const usageReport = Effect.fn("UsageReport.report")(function* (params: Pa
     ...(params.since === undefined ? {} : { since: params.since }),
     ...(params.until === undefined ? {} : { until: params.until }),
     groupBy: normalizeGroupBy([...groupBy, "environment", "source"]),
+    ...(params.model === undefined ? {} : { model: params.model }),
     include: [...include],
     limit: 0,
   };
@@ -240,6 +281,7 @@ export const usageReport = Effect.fn("UsageReport.report")(function* (params: Pa
     okSources += peer.sources?.ok ?? 0;
     missingSources += peer.sources?.missing ?? 0;
     problems.push(...(peer.sources?.problems ?? []));
+    if (peer.turns !== undefined) turns = addTurns(turns, peer.turns);
   }
   const claimed = claimSources(reports);
   if (claimed.duplicateSources.length > 0)
@@ -249,6 +291,7 @@ export const usageReport = Effect.fn("UsageReport.report")(function* (params: Pa
   return {
     ...base,
     ...groupRows(claimed.rows, groupBy, limit),
+    ...(turns === undefined ? {} : { turns }),
     ...(include.has("limits") ? { limits: dedupeLimitAccounts(limits) } : {}),
     ...(include.has("usage")
       ? { sources: { ok: okSources, missing: missingSources, problems } }

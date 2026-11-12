@@ -80,8 +80,8 @@ describe("applyAppearanceFontVariables", () => {
       }
     };
     try {
-      // `0. ` in a 14px monospace font is about 25px, past the 20px default.
-      expect(gutter("monospace")).toBeGreaterThan(24);
+      // `0. ` in a 14px monospace font is 23-25px depending on the system face, past the 20px default.
+      expect(gutter("monospace")).toBeGreaterThan(20);
       expect(gutter("sans-serif")).toBe(20);
     } finally {
       if (style === null) root.removeAttribute("style");

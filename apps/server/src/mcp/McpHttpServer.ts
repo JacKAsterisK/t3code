@@ -63,6 +63,8 @@ import * as RemoteTaskTransport from "../lan/RemoteTaskTransport.ts";
 import * as RoutingStore from "../lan/RoutingStore.ts";
 import { LanToolkit } from "./toolkits/lan/tools.ts";
 import * as LanHandlers from "./toolkits/lan/handlers.ts";
+import { UsageToolkit } from "./toolkits/usage/tools.ts";
+import * as UsageHandlers from "./toolkits/usage/handlers.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
@@ -1366,7 +1368,12 @@ export const layerTools = Layer.mergeAll(
   layerHtmlToolkit,
 );
 
-export const layer = layerMcpTransport(Layer.mergeAll(layerLanToolkit, layerTools)).pipe(
+/** T3 Code LAN: `usage_report`, kept apart from upstream's tool set (docs/maintenance/usage-report-tool.md). */
+const layerUsageToolkit = toolkitRegistration(UsageToolkit, UsageHandlers.layer);
+
+export const layer = layerMcpTransport(
+  Layer.mergeAll(layerLanToolkit, layerUsageToolkit, layerTools),
+).pipe(
   Layer.provideMerge(ApprovalReceiver.layer),
   Layer.provideMerge(ApprovalForwarding.layer),
   Layer.provideMerge(

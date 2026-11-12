@@ -220,6 +220,7 @@ approval before code or runtime changes.
 | 12  | Native maintenance, home repair, retained import | `t3_thread_import` (#16731), "Continue threads after restarts" | proposed / released               | keep                                                                                         |
 | 13  | Per-machine fleet access                         | One `AuthMcpClientAccess` mode per peer link                   | nightly, Labs beta                | keep                                                                                         |
 | 14  | Task owners                                      | None                                                           | none (`cb9629e68`)                | keep                                                                                         |
+| 15  | Agent usage report (`usage_report`)              | Usage page and `/usage-limits`, no MCP tool                    | released (page only)              | keep ([design](usage-report-tool.md))                                                        |
 
 ## Rows
 
@@ -859,3 +860,16 @@ Proposed; each step needs Dan's approval.
     points agents at `threadId`.
   - **Next:** ships in the next release. Worth offering upstream; upstream
     `main` at `1854e14d0` still has the same lookup.
+
+### 15. Agent usage report
+
+- **Local:** `usage_report` in `apps/server/src/mcp/toolkits/usage`, registered
+  beside the LAN tools in `McpHttpServer.ts`. See [Usage report tool](usage-report-tool.md).
+- **Upstream:** the Usage page (`server.getUsageSummary`), Usage → Limits and
+  `/usage-limits`. No MCP tool exposes them.
+- **Must preserve:** no scanning, polling or refresh beyond what the page does,
+  and `live-event`/`probe` freshness per limit window.
+- **Tests:** `apps/server/src/mcp/toolkits/usage/{report,handlers}.test.ts`.
+- **Owner:** Dan. **Rollback:** remove the registration and the toolkit folder.
+- **Revisit:** when upstream adds a usage tool for agents, or stores a reading
+  time per limit window.

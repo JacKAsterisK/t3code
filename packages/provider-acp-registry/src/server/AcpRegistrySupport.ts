@@ -1560,12 +1560,8 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
         yield* fileSystem.makeDirectory(path.dirname(targetPath), { recursive: true });
         yield* fileSystem.rename(archivePath, targetPath);
       } else {
-        const tarCommand =
-          platformTarget === "windows-aarch64" &&
-          paths.platformTarget === "windows-x86_64" &&
-          kind === "zip"
-            ? cliArchiveTarCommand(platform, hostEnvironment)
-            : "tar";
+        // Bare `tar` on Windows can resolve to Git's MSYS tar, which reads `C:\...` as a remote host.
+        const tarCommand = cliArchiveTarCommand(platform, hostEnvironment);
         const listArgs =
           kind === "tar_gz"
             ? ["-tzf", archivePath]

@@ -666,7 +666,7 @@ describe("AcpRegistrySupport", () => {
     const makeBinaryAgent = (version: string) => ({
       ...makeAgent({
         binary: {
-          "linux-x86_64": {
+          [nativePlatformTarget]: {
             archive: `https://registry.test/example-agent-${version}.bin`,
             cmd: "./bin/example-agent",
           },
@@ -697,7 +697,7 @@ describe("AcpRegistrySupport", () => {
       });
       const resolved = yield* resolver.resolve(settings(), "/workspace", {});
       expect(resolved.spawn.command).toContain(
-        "/tools/example-agent/1.2.4/linux-x86_64/bin/example-agent",
+        NodePath.normalize(`/tools/example-agent/1.2.4/${nativePlatformTarget}/bin/example-agent`),
       );
       expect(yield* fileSystem.readFileString(resolved.spawn.command)).toBe(
         "#!/bin/sh\necho 1.2.4\n",
@@ -841,8 +841,11 @@ describe("AcpRegistrySupport", () => {
       );
       const archivePath = NodePath.normalize(`${cacheDir}/agent.tar.gz`);
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      // A relative archive name: GNU tar reads a drive letter in -f as a remote host.
       const tar = yield* spawner.spawn(
-        ChildProcess.make("tar", ["-czf", archivePath, "-C", source, "."]),
+        ChildProcess.make("tar", ["-czf", NodePath.basename(archivePath), "-C", source, "."], {
+          cwd: cacheDir,
+        }),
       );
       expect(yield* tar.exitCode).toBe(0);
       const archive = yield* fileSystem.readFile(archivePath);

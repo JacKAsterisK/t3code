@@ -206,6 +206,41 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
     }),
   );
 
+  it.effect("copies a fleet policy publication whose foreign key targets a unique index", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-fleet-" });
+      const destDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-fleet-dest-" });
+      const source = yield* createFixtureSource(sourceDir);
+      const digest = "a".repeat(64);
+      yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`INSERT INTO agent_approval_fleet_policy_heads
+            VALUES ('fleet', 'destination', 1, ${digest}, 'entry', 1)`;
+          yield* sql`INSERT INTO agent_approval_fleet_policy_publications
+            VALUES ('fleet', 'destination', 1, ${digest}, 1)`;
+        }),
+      );
+
+      const result = yield* runMigrateDevDb(
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 2 },
+        { sharedHome: sourceDir },
+      );
+
+      const publications = yield* withDatabase(
+        result.databasePath,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return yield* sql<{ fleet_id: string; revision: number; digest: string }>`
+            SELECT fleet_id, revision, digest FROM agent_approval_fleet_policy_publications`;
+        }),
+      );
+      assert.deepStrictEqual(publications, [{ fleet_id: "fleet", revision: 1, digest }]);
+    }),
+  );
+
   it.effect("never copies an archived thread, and new events append after the source's", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

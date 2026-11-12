@@ -133,11 +133,46 @@ export async function migrateCancellationFixtureDatabase(database: string, head:
 const now = "2026-10-25T00:00:00.000Z",
   threadId = "thread:offline-fixture",
   modelSelection = { instanceId: "codex", model: "synthetic-no-model" };
+// Today's projection writes search_text, which fork migration 095 adds; older fixture schemas have
+// none. The seed adds it and drops it again, so the fixture keeps its genuine schema.
 export async function seedCancellationFixture(
   file: string,
   secondThread = false,
   unfinished = true,
 ) {
+  const missing = withDatabase(
+    file,
+    (db) =>
+      db
+        .prepare(
+          "SELECT 1 FROM pragma_table_info('orchestration_v2_projection_messages') WHERE name = 'search_text'",
+        )
+        .get() === undefined,
+  );
+  if (missing)
+    withDatabase(file, (db) =>
+      db.exec("ALTER TABLE orchestration_v2_projection_messages ADD COLUMN search_text TEXT"),
+    );
+  try {
+    await seedCancellationEvents(file, secondThread, unfinished);
+  } finally {
+    if (missing)
+      withDatabase(file, (db) =>
+        db.exec("ALTER TABLE orchestration_v2_projection_messages DROP COLUMN search_text"),
+      );
+  }
+}
+
+function withDatabase<A>(file: string, use: (db: NodeSqlite.DatabaseSync) => A): A {
+  const db = new NodeSqlite.DatabaseSync(file);
+  try {
+    return use(db);
+  } finally {
+    db.close();
+  }
+}
+
+async function seedCancellationEvents(file: string, secondThread: boolean, unfinished: boolean) {
   const database = NodeSqliteClient.layer({ filename: file });
   const stores = Layer.mergeAll(
     EventStore.layer,

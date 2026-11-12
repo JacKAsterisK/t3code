@@ -5,6 +5,7 @@ import * as Logger from "effect/Logger";
 import * as PlatformError from "effect/PlatformError";
 import { assert, expect, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 
@@ -113,6 +114,7 @@ it.effect.each([3, SERVICE_LAUNCHER_PROTOCOL])(
       expect(yield* restartedClient.prepareTrial({ baseDir })).toEqual(committed);
       assert.equal(yield* fs.readLink(installed), exe("1.0.0"));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  { skip: !symlinksSupported },
 );
 
 it.effect("returns the launcher-generated ID only after update acceptance", () =>
@@ -208,7 +210,7 @@ it.effect("ignores launcher context inherited without an IPC channel", () =>
 );
 
 it.layer(NodeServices.layer)("self-update launchers", (it) => {
-  it.effect(
+  it.effect.skipIf(!symlinksSupported)(
     "updates custom install and PATH launchers, including versions older than fromVersion",
     () =>
       Effect.gen(function* () {
@@ -241,86 +243,90 @@ it.layer(NodeServices.layer)("self-update launchers", (it) => {
       }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 
-  it.effect("still moves the PATH launcher when the install bin one cannot be rewritten", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
-      const baseDir = path.join(root, ".t3");
-      const exe = (version: string) => path.join(baseDir, "runtime/versions", version, "t3");
-      const installed = path.join(root, ".local/bin/t3");
-      const onPath = path.join(root, "bin/t3");
-      for (const file of [exe("1.0.0"), exe("2.0.0")]) {
-        yield* fs.makeDirectory(path.dirname(file), { recursive: true });
-        yield* fs.writeFileString(file, "");
-      }
-      for (const link of [installed, onPath]) {
-        yield* fs.makeDirectory(path.dirname(link), { recursive: true });
-        yield* fs.symlink(exe("1.0.0"), link);
-      }
-      const warnings: unknown[] = [];
-      const logger = Logger.make(({ logLevel, message }) => {
-        if (logLevel === "Warn") warnings.push(message);
-      });
-      const failingFs = FileSystem.FileSystem.of({
-        ...fs,
-        rename: (source, destination) =>
-          destination === installed
-            ? Effect.fail(
-                new PlatformError.PlatformError(
-                  new PlatformError.SystemError({
-                    _tag: "PermissionDenied",
-                    module: "FileSystem",
-                    method: "rename",
-                    pathOrDescriptor: destination,
-                  }),
-                ),
-              )
-            : fs.rename(source, destination),
-      });
+  it.effect.skipIf(!symlinksSupported)(
+    "still moves the PATH launcher when the install bin one cannot be rewritten",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
+        const baseDir = path.join(root, ".t3");
+        const exe = (version: string) => path.join(baseDir, "runtime/versions", version, "t3");
+        const installed = path.join(root, ".local/bin/t3");
+        const onPath = path.join(root, "bin/t3");
+        for (const file of [exe("1.0.0"), exe("2.0.0")]) {
+          yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+          yield* fs.writeFileString(file, "");
+        }
+        for (const link of [installed, onPath]) {
+          yield* fs.makeDirectory(path.dirname(link), { recursive: true });
+          yield* fs.symlink(exe("1.0.0"), link);
+        }
+        const warnings: unknown[] = [];
+        const logger = Logger.make(({ logLevel, message }) => {
+          if (logLevel === "Warn") warnings.push(message);
+        });
+        const failingFs = FileSystem.FileSystem.of({
+          ...fs,
+          rename: (source, destination) =>
+            destination === installed
+              ? Effect.fail(
+                  new PlatformError.PlatformError(
+                    new PlatformError.SystemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "rename",
+                      pathOrDescriptor: destination,
+                    }),
+                  ),
+                )
+              : fs.rename(source, destination),
+        });
 
-      yield* ServiceLauncherClient.repointLaunchers({ baseDir, targetVersion: "2.0.0" }).pipe(
-        Effect.provideService(HostProcess.Environment, {
-          HOME: root,
-          PATH: path.dirname(onPath),
-        }),
-        Effect.provideService(FileSystem.FileSystem, failingFs),
-        Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
-      );
+        yield* ServiceLauncherClient.repointLaunchers({ baseDir, targetVersion: "2.0.0" }).pipe(
+          Effect.provideService(HostProcess.Environment, {
+            HOME: root,
+            PATH: path.dirname(onPath),
+          }),
+          Effect.provideService(FileSystem.FileSystem, failingFs),
+          Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+        );
 
-      assert.lengthOf(warnings, 1);
-      assert.include(JSON.stringify(warnings), installed);
-      assert.equal(yield* fs.readLink(installed), exe("1.0.0"));
-      assert.equal(yield* fs.readLink(onPath), exe("2.0.0"));
-    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+        assert.lengthOf(warnings, 1);
+        assert.include(JSON.stringify(warnings), installed);
+        assert.equal(yield* fs.readLink(installed), exe("1.0.0"));
+        assert.equal(yield* fs.readLink(onPath), exe("2.0.0"));
+      }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 
-  it.effect("leaves unowned install files and PATH symlinks untouched after self-update", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
-      const baseDir = path.join(root, ".t3");
-      const installed = path.join(root, ".local/bin/t3");
-      const onPath = path.join(root, "bin/t3");
-      const foreign = path.join(root, "other-home/runtime/versions/1.0.0/t3");
-      const target = path.join(baseDir, "runtime/versions/2.0.0/t3");
-      for (const file of [installed, foreign, target]) {
-        yield* fs.makeDirectory(path.dirname(file), { recursive: true });
-        yield* fs.writeFileString(file, "user-owned file");
-      }
-      yield* fs.makeDirectory(path.dirname(onPath), { recursive: true });
-      yield* fs.symlink(foreign, onPath);
+  it.effect.skipIf(!symlinksSupported)(
+    "leaves unowned install files and PATH symlinks untouched after self-update",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
+        const baseDir = path.join(root, ".t3");
+        const installed = path.join(root, ".local/bin/t3");
+        const onPath = path.join(root, "bin/t3");
+        const foreign = path.join(root, "other-home/runtime/versions/1.0.0/t3");
+        const target = path.join(baseDir, "runtime/versions/2.0.0/t3");
+        for (const file of [installed, foreign, target]) {
+          yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+          yield* fs.writeFileString(file, "user-owned file");
+        }
+        yield* fs.makeDirectory(path.dirname(onPath), { recursive: true });
+        yield* fs.symlink(foreign, onPath);
 
-      yield* ServiceLauncherClient.repointLaunchers({ baseDir, targetVersion: "2.0.0" }).pipe(
-        Effect.provideService(HostProcess.Environment, {
-          HOME: root,
-          PATH: path.dirname(onPath),
-        }),
-      );
+        yield* ServiceLauncherClient.repointLaunchers({ baseDir, targetVersion: "2.0.0" }).pipe(
+          Effect.provideService(HostProcess.Environment, {
+            HOME: root,
+            PATH: path.dirname(onPath),
+          }),
+        );
 
-      assert.equal(yield* fs.readFileString(installed), "user-owned file");
-      assert.equal(yield* fs.readLink(onPath), foreign);
-    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+        assert.equal(yield* fs.readFileString(installed), "user-owned file");
+        assert.equal(yield* fs.readLink(onPath), foreign);
+      }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 });

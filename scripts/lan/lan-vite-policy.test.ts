@@ -8,6 +8,10 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeVM from "node:vm";
+import {
+  GET_PRIMARY_PASTE_ENABLED_CHANNEL,
+  SYNC_HTML_FULLSCREEN_CHANNEL,
+} from "../../apps/desktop/src/ipc/channels.ts";
 
 const fixture = vi.hoisted(() => ({
   appId: "com.example.lanfixture",
@@ -111,7 +115,10 @@ it.each([
       modules.set(filename, module);
       new NodeVM.Script(
         `(function(require,module,exports,process,__filename,__dirname){\n${code}\n})`,
-      ).runInNewContext({})(
+        // A renderer document: the preload reports its fullscreen state once when it starts.
+      ).runInNewContext({
+        document: { fullscreenElement: null, addEventListener: () => undefined },
+      })(
         (id: string) => {
           if (id === "./main.cjs" && entry === "src/boot.ts") {
             events.push("main");
@@ -142,8 +149,17 @@ it.each([
                 },
               },
               ipcRenderer: {
-                sendSync: refuse("legacy-storage IPC"),
-                invoke: refuse("IPC invoke"),
+                // LAN builds skip the legacy-storage take; only the paste setting is read at start.
+                sendSync: (channel: string) => {
+                  if (channel !== GET_PRIMARY_PASTE_ENABLED_CHANNEL) return refuse("sync IPC")();
+                  events.push("primaryPaste");
+                  return true;
+                },
+                invoke: (channel: string) => {
+                  if (channel !== SYNC_HTML_FULLSCREEN_CHANNEL) return refuse("IPC invoke")();
+                  events.push("fullscreen");
+                  return Promise.resolve();
+                },
                 on: refuse("IPC subscribe"),
               },
               webFrame: {},
@@ -166,7 +182,7 @@ it.each([
       NodeAssert.deepEqual(cachePaths, [NodePath.join(root, "temp", "T3CodeLAN", "compile-cache")]);
       NodeAssert.deepEqual(events, ["cache", "main"]);
     } else {
-      NodeAssert.deepEqual(events, ["desktopBridge"]);
+      NodeAssert.deepEqual(events, ["fullscreen", "primaryPaste", "desktopBridge"]);
       NodeAssert.ok(desktopPlatform);
       NodeAssert.equal(desktopPlatform(), "win32");
     }

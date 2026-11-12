@@ -914,7 +914,8 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       }),
   );
 
-  it.effect(
+  // Windows refuses to rename a directory onto an existing one (EPERM), so the lock is POSIX-only.
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     "serializes a local install with another process reconciling an older unit snapshot",
     () =>
       Effect.gen(function* () {

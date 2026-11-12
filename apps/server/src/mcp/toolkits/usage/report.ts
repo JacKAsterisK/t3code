@@ -1,7 +1,5 @@
 import {
   UsageDay,
-  type OrchestrationV2ProviderThread,
-  type OrchestrationV2ProviderTurn,
   type ServerProvider,
   type ServerProviderUsageLimits,
   type UsageLimitSourceSnapshots,
@@ -24,19 +22,46 @@ import type {
   UsageReportResult,
   UsageReportRow,
 } from "./tools.ts";
+import type { LedgerTurn } from "./turnLedger.ts";
 
 const DEFAULT_GROUP_BY: readonly UsageReportGroupKey[] = ["account", "provider", "model"];
-export const DEFAULT_ROW_LIMIT = 10;
+const DEFAULT_ROW_LIMIT = 10;
+const HOUR_MS = 3_600_000;
 const PERIOD_DAYS = { day: 1, week: 7, month: 30, quarter: 90 } as const;
 const GROUP_KEYS: readonly UsageReportGroupKey[] = [
   "environment",
+  "project",
+  "thread",
   "account",
   "provider",
   "model",
   "host",
   "day",
+  "hour",
   "source",
 ];
+const TURN_ONLY_KEYS: ReadonlySet<UsageReportGroupKey> = new Set(["project", "thread"]);
+const LABELS: Partial<Record<UsageReportGroupKey, ReadonlyArray<"threadTitle" | "projectTitle">>> =
+  { thread: ["threadTitle", "projectTitle"], project: ["projectTitle"] };
+
+/** Only T3's turn records know threads and projects, so grouping by either reads them. */
+export const usesTurnLedger = (
+  groupBy: readonly UsageReportGroupKey[],
+  threadId: string | undefined,
+) => threadId !== undefined || groupBy.some((key) => TURN_ONLY_KEYS.has(key));
+
+const isTimeSeries = (groupBy: readonly UsageReportGroupKey[]) =>
+  groupBy.includes("hour") || groupBy.includes("day");
+
+/** A time series comes back whole so a chart has no gaps; anything else keeps the top 10. */
+export const defaultRowLimit = (groupBy: readonly UsageReportGroupKey[]) =>
+  isTimeSeries(groupBy) ? 0 : DEFAULT_ROW_LIMIT;
+
+export function modelFilter(models: readonly string[] | undefined) {
+  if (models === undefined || models.length === 0) return () => true;
+  const wanted = new Set(models);
+  return (model: string | undefined) => model !== undefined && wanted.has(model);
+}
 
 type Amounts = Pick<UsageReportRow, "tokens" | "costUsd" | "records" | "unpricedRecords">;
 
@@ -126,6 +151,7 @@ export function summaryRows(summary: UsageSummary, environment: string): UsageRe
       model: bucket.model,
       host: fingerprint?.hostId ?? "unknown",
       day: bucket.day,
+      ...(bucket.hourStart === undefined ? {} : { hour: bucket.hourStart }),
       source: fingerprint === undefined ? `unknown|${bucket.provider}` : sourceKey(fingerprint),
       tokens: tokensOf(bucket.totals),
       costUsd: bucket.costUsd,
@@ -148,7 +174,10 @@ export function sourceProblems(summary: UsageSummary): NonNullable<UsageReportRe
   return { ok: count("ok"), missing: count("missing"), problems };
 }
 
-/** Folds rows to `groupBy`, most expensive first, and keeps `limit` of them (0 keeps all). */
+/**
+ * Folds rows to `groupBy` and keeps `limit` of them (0 keeps all). A time series sorts by time,
+ * anything else most expensive first. Thread and project rows keep their titles.
+ */
 export function groupRows(
   rows: readonly UsageReportRow[],
   groupBy: readonly UsageReportGroupKey[],
@@ -164,15 +193,26 @@ export function groupRows(
       groups.set(key, { ...existing, ...addAmounts(existing, row) });
       continue;
     }
-    const keys: Partial<Record<UsageReportGroupKey, string>> = {};
+    const keys: Partial<Record<UsageReportGroupKey | "threadTitle" | "projectTitle", string>> = {};
     for (const name of groupBy) {
       const value = row[name];
       if (value !== undefined) keys[name] = value;
+      for (const label of LABELS[name] ?? []) {
+        const title = row[label];
+        if (title !== undefined) keys[label] = title;
+      }
     }
     groups.set(key, { ...keys, ...addAmounts(emptyAmounts(), row) });
   }
+  const byCost = (a: UsageReportRow, b: UsageReportRow) =>
+    b.costUsd - a.costUsd || totalTokens(b) - totalTokens(a);
   const sorted = [...groups.values()].sort(
-    (a, b) => b.costUsd - a.costUsd || totalTokens(b) - totalTokens(a),
+    isTimeSeries(groupBy)
+      ? (a, b) =>
+          (a.day ?? "").localeCompare(b.day ?? "") ||
+          (a.hour ?? "").localeCompare(b.hour ?? "") ||
+          byCost(a, b)
+      : byCost,
   );
   const kept = limit === 0 ? sorted : sorted.slice(0, limit);
   return {
@@ -244,7 +284,7 @@ function limitWindows(
       id: window.id,
       label: window.label,
       kind: window.kind,
-      usedPercent: window.usedPercent,
+      remainingPercent: Math.round(Math.min(100, Math.max(0, 100 - window.usedPercent)) * 10) / 10,
       ...(window.resetsAt === undefined ? {} : { resetsAt: window.resetsAt }),
       checkedAt:
         live || provider === undefined
@@ -309,54 +349,54 @@ export function dedupeLimitAccounts(
   return [...byKey.values(), ...unkeyed];
 }
 
-const dayIn = (ms: number, timeZone: string) =>
-  new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(ms);
+const dayFormat = (timeZone: string) =>
+  new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
 
-function inWindow(ms: number, window: UsageWindow): boolean {
-  if (window.sinceTime !== undefined && window.untilTime !== undefined) {
-    return ms >= Date.parse(window.sinceTime) && ms < Date.parse(window.untilTime);
-  }
-  const day = dayIn(ms, window.timeZone);
-  return day >= window.sinceDay && day <= window.untilDay;
+/** Whole hours from a 24-hour window's start, as the transcript buckets slot them, else the clock hour. */
+function hourSlot(ms: number, window: UsageWindow): string {
+  const origin = window.sinceTime === undefined ? 0 : Date.parse(window.sinceTime);
+  return DateTime.formatIso(
+    DateTime.makeUnsafe(origin + Math.floor((ms - origin) / HOUR_MS) * HOUR_MS),
+  );
 }
 
 /**
- * Prices a thread's own turn records with the Usage rate table. Turns report input including
- * cache reads and writes; when a provider omits the split, all input is priced as uncached.
+ * Prices T3's turn records with the Usage rate table. Turns report input including cache reads
+ * and writes; when a provider omits the split, all input is priced as uncached.
  */
-export function threadTurnRows(input: {
-  readonly turns: ReadonlyArray<
-    Pick<
-      OrchestrationV2ProviderTurn,
-      "providerThreadId" | "startedAt" | "completedAt" | "turnTokenUsage" | "model"
-    >
-  >;
-  readonly providerThreads: ReadonlyArray<
-    Pick<OrchestrationV2ProviderThread, "id" | "driver" | "providerInstanceId">
-  >;
+export function turnRows(input: {
+  readonly turns: readonly LedgerTurn[];
   readonly rates: RateTable;
   readonly overrides: RateTable;
   readonly window: UsageWindow;
   readonly environment: string;
+  readonly models?: readonly string[];
 }) {
-  const threads = new Map(input.providerThreads.map((thread) => [thread.id, thread] as const));
+  const wanted = modelFilter(input.models);
+  const days = dayFormat(input.window.timeZone);
+  const { sinceTime, untilTime, sinceDay, untilDay } = input.window;
+  const range =
+    sinceTime === undefined || untilTime === undefined
+      ? undefined
+      : { since: Date.parse(sinceTime), until: Date.parse(untilTime) };
   const rows: UsageReportRow[] = [];
-  let turns = 0;
-  let turnsWithoutCacheSplit = 0;
+  let count = 0;
+  let withoutCacheSplit = 0;
   const otherTokens = { input: 0, output: 0 };
   for (const turn of input.turns) {
-    const usage = turn.turnTokenUsage;
-    const at = turn.completedAt ?? turn.startedAt;
-    if (usage === undefined || usage.localCommand === true || at === null) continue;
-    const ms = DateTime.toEpochMillis(at);
-    if (!inWindow(ms, input.window)) continue;
-    turns += 1;
-    if (usage.cachedInputTokens === undefined) turnsWithoutCacheSplit += 1;
+    const usage = turn.usage;
+    if (usage.localCommand === true) continue;
+    const ms = Date.parse(turn.at);
+    if (Number.isNaN(ms)) continue;
+    const day = days.format(ms);
+    if (
+      range === undefined ? day < sinceDay || day > untilDay : ms < range.since || ms >= range.until
+    )
+      continue;
+    const model = turn.model ?? usage.models?.[0] ?? "unknown";
+    if (!wanted(model)) continue;
+    count += 1;
+    if (usage.cachedInputTokens === undefined) withoutCacheSplit += 1;
     otherTokens.input += usage.otherUsage?.inputTokens ?? 0;
     otherTokens.output += usage.otherUsage?.outputTokens ?? 0;
     const inputTokens = usage.inputTokens ?? 0;
@@ -369,24 +409,27 @@ export function threadTurnRows(input: {
       outputTokens: usage.outputTokens ?? 0,
       reasoningTokens: usage.reasoningTokens ?? 0,
     };
-    const model = turn.model ?? usage.models?.[0] ?? "unknown";
     const priced = priceUsage(
       input.rates,
       { model, totals, speed: "standard", reportedCostUsd: null },
       input.overrides,
     );
-    const thread = threads.get(turn.providerThreadId);
     rows.push({
       environment: input.environment,
-      account: thread?.providerInstanceId ?? "unknown",
-      provider: thread?.driver ?? "unknown",
+      ...(turn.projectId === null ? {} : { project: turn.projectId }),
+      ...(turn.projectTitle === null ? {} : { projectTitle: turn.projectTitle }),
+      thread: turn.threadId,
+      ...(turn.threadTitle === null ? {} : { threadTitle: turn.threadTitle }),
+      account: turn.providerInstanceId ?? "unknown",
+      provider: turn.driver ?? "unknown",
       model,
-      day: dayIn(ms, input.window.timeZone),
+      day,
+      hour: hourSlot(ms, input.window),
       tokens: tokensOf(totals),
       costUsd: priced.costUsd,
       records: 1,
       unpricedRecords: priced.costSource === "unpriced" ? 1 : 0,
     });
   }
-  return { rows, turns, turnsWithoutCacheSplit, otherTokens };
+  return { rows, count, withoutCacheSplit, otherTokens };
 }

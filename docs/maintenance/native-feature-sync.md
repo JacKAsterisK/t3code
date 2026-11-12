@@ -8,7 +8,7 @@ approval before code or runtime changes.
 
 ## Baseline
 
-- Upstream sync 2026-11-12: upstream `ee90bdc940` (680 commits after `12f3244e0593`), on `lan/upstream-sync-20261112`. Not yet released. Upstream migrations 081 and 082 become fork 095 (ProjectionMessageSearchText) and 096 (TurnItemConversationIndex); schema 96.
+- Upstream sync 2026-11-12: upstream `ee90bdc940` (680 commits after `12f3244e0593`), published as LAN 1.0.38 from `d83b739562` (application 0.1.9, toolchain generation 138); previous published LAN 1.0.37 is `68a7fb629f`. Upstream migrations 081 and 082 become fork 095 (ProjectionMessageSearchText) and 096 (TurnItemConversationIndex); schema 96.
 
 - LAN 1.0.37 preparation: upstream `12f3244e0593` (2026-11-09, Claude Fable 5.2), on `lan/upstream-sync-20261107`. Previous published LAN 1.0.36 is `6660ea19b3133a1293260bd941007c07a20b7b13`. Application version 0.1.7 and schema 94 are unchanged; upstream added no migrations.
 

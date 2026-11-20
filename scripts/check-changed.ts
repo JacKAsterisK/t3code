@@ -43,6 +43,24 @@ import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
 import { parseDeferredTests, selectChangedTests } from "./lib/changed-tests.ts";
 import { generatedCheckInputs } from "./lib/check-inputs.ts";
 import { batchFileArguments, vitePlusCommand } from "./check-changed-command.ts";
+import {
+  beginBatchTrace,
+  digest,
+  encodeReleaseBatch,
+  explicitBatchInputs,
+  installedInputDigest,
+  trackedInputDigest,
+  invalidateBatchAttempt,
+  releaseBatchEnvironment,
+  releaseEnvName,
+  releaseNodePath,
+  serializeReleaseEnvironment,
+  readBatchReceipt,
+  releaseBatchRequest,
+  releaseBatchTask,
+  releaseRuntime,
+  writeBatchReceipt,
+} from "./lib/release-batches.ts";
 
 const GiB = 1024 ** 3;
 
@@ -263,6 +281,8 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   readonly concurrency: Option.Option<number>;
   readonly timeout: Option.Option<number>;
   readonly deferTest: ReadonlyArray<string>;
+  readonly batchReceipts: Option.Option<string>;
+  readonly batchRuntime: Option.Option<string>;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -273,6 +293,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   // macOS counts its file cache as used, so available memory there would
   // starve a large Mac. Elsewhere availableMemory() honors a cgroup limit.
   const platform = yield* HostProcess.Platform;
+  const arch = yield* HostProcess.Architecture;
   const concurrency = Option.getOrElse(
     yield* override("concurrency", input.concurrency, "CHECK_CHANGED_CONCURRENCY"),
     () =>
@@ -291,6 +312,65 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
     try: () => parseDeferredTests(input.deferTest),
     catch: (error) => `check:changed: ${error instanceof Error ? error.message : String(error)}`,
   });
+
+  const receiptDirectory = Option.map(input.batchReceipts, (directory) => path.resolve(directory));
+  const inventory = Option.getOrUndefined(input.batchRuntime);
+  if (inventory && Option.isNone(receiptDirectory))
+    return yield* Effect.fail("--batch-runtime requires --batch-receipts.");
+  if (Option.isSome(receiptDirectory) && deferred.length > 0)
+    return yield* Effect.fail("Release batch evidence requires every selected test.");
+  if (Option.isSome(receiptDirectory)) {
+    const relative = path.relative(root, receiptDirectory.value);
+    if (
+      relative === "" ||
+      (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))
+    )
+      return yield* Effect.fail("The batch receipt directory must be outside the checkout.");
+  }
+  const cleanSource = Effect.gen(function* () {
+    if (
+      (yield* git(root, [
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+      ])).length > 0
+    )
+      return yield* Effect.fail("Release batch evidence requires a clean checkout.");
+    const index = (yield* git(root, ["ls-files", "-v", "-z"])).toString();
+    if (index.split("\0").some((entry) => /^[a-zS] /u.test(entry)))
+      return yield* Effect.fail(
+        "Release batch evidence refuses assume-unchanged and skip-worktree entries.",
+      );
+    return (yield* git(root, ["rev-parse", "HEAD"])).toString().trim();
+  });
+  const sourceCommit = Option.isSome(receiptDirectory) ? yield* cleanSource : undefined;
+  const releaseEnv = sourceCommit ? releaseBatchEnvironment(process.env) : undefined;
+  const gateAttempt = NodeCrypto.randomUUID();
+  const releaseWorkspaces = sourceCommit ? readWorkspace() : [];
+  const readRuntime = Effect.tryPromise({
+    try: async () =>
+      digest([
+        releaseRuntime(root, { platform, arch }, releaseEnv!, inventory),
+        await installedInputDigest(
+          root,
+          releaseWorkspaces.map((pkg) => pkg.dir),
+        ),
+      ]),
+    catch: (error) => `Cannot prove release runtime inputs: ${String(error)}`,
+  });
+  const runtime = sourceCommit ? yield* readRuntime : undefined;
+  const readTracked = Effect.gen(function* () {
+    const index = (yield* git(root, ["ls-files", "--stage", "-z"])).toString();
+    return yield* Effect.tryPromise({
+      try: () => trackedInputDigest(root, index),
+      catch: (error) => `Cannot prove working source bytes: ${String(error)}`,
+    });
+  });
+  const trackedInputs = sourceCommit ? yield* readTracked : undefined;
 
   const { ref, base } = yield* comparisonBase(root, input.ref);
   // --no-renames lists a rename as its old and new path, as CI does.
@@ -350,7 +430,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   const cached = yield* fs
     .readFileString(cachePath)
     .pipe(Effect.flatMap(decodeCacheEntry), Effect.option);
-  if (Option.isSome(cached) && cached.value.key === key) {
+  if (Option.isNone(receiptDirectory) && Option.isSome(cached) && cached.value.key === key) {
     yield* Console.log("Nothing changed since the last passing run.\n");
     for (const line of cached.value.summary) yield* Console.log(line);
     return true;
@@ -358,7 +438,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
 
   const present = yield* Effect.filter(files, (file) => fs.exists(inRoot(file)));
   const code = present.filter((file) => CODE.test(file));
-  const packages = readWorkspace();
+  const packages = sourceCommit ? releaseWorkspaces : readWorkspace();
   const { affected, outputs } = decide(files, packages, false);
 
   // Changed test files, and the test files beside a changed source file
@@ -454,15 +534,15 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
 
   // Output is piped, so keep the colors a terminal would get.
   const env = process.stdout.isTTY ? { FORCE_COLOR: "1" } : {};
-  const vp = (args: ReadonlyArray<string>, cwd = root) =>
+  const vp = (args: ReadonlyArray<string>, cwd = root, extraEnv: Record<string, string> = {}) =>
     Effect.scoped(
       Effect.gen(function* () {
         const [command, commandArgs] = vitePlusCommand(args, platform);
         const handle = yield* spawner.spawn(
           ChildProcess.make(command, commandArgs, {
             cwd,
-            env,
-            extendEnv: true,
+            env: { ...(releaseEnv ?? env), ...extraEnv },
+            extendEnv: !releaseEnv,
             forceKillAfter: "5 seconds",
           }),
         );
@@ -498,7 +578,10 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
       for (const extra of ["apps/mobile/deps", "patches", ".pnpmfile.cjs"]) {
         if (yield* fs.exists(inRoot(extra))) yield* copy(extra);
       }
-      const result = yield* vp(["install", "--lockfile-only", "--ignore-scripts"], temp);
+      const result = yield* vp(
+        ["install", "--lockfile-only", "--ignore-scripts", ...(releaseEnv ? ["--offline"] : [])],
+        temp,
+      );
       if (result.ok || !result.output.includes("ERR_PNPM_UNUSED_PATCH")) return result;
       return {
         ok: false,
@@ -519,20 +602,113 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   ].filter((dir) => files.some((file) => file.startsWith(`${dir}/`)));
   const filters = (names: ReadonlyArray<string>) => names.flatMap((name) => ["--filter", name]);
   const typecheckWorkers = Math.min(concurrency, affected.length);
-  const command = (name: string, args: ReadonlyArray<string>) => ({ name, run: vp(args) });
+  const environmentJson = releaseEnv ? serializeReleaseEnvironment(releaseEnv) : "";
+  const resumable = (
+    name: string,
+    run: Step<never>["run"],
+    args?: ReadonlyArray<string>,
+    inputs: ReadonlyArray<string> = [],
+  ) => {
+    if (Option.isNone(receiptDirectory) || !sourceCommit || !runtime) return { name, run };
+    const directory = receiptDirectory.value;
+    const batchKey = digest([runtime, sourceCommit, trackedInputs, key, name, args]);
+    // Native tracking does not cover arbitrary paths outside the workspace. The
+    // release inventory is required before relying on a match across commits.
+    const explicit = inventory && args ? explicitBatchInputs(root, inputs) : undefined;
+    const context = digest([runtime, base, name, args, explicit]);
+    const trackedRequest =
+      explicit && args
+        ? encodeReleaseBatch({
+            context,
+            arguments: args,
+            node: releaseNodePath(),
+            environmentKey: digest(releaseEnv),
+          })
+        : undefined;
+    return {
+      name,
+      run: Effect.gen(function* () {
+        const receipt = readBatchReceipt(directory, batchKey, sourceCommit);
+        if (receipt)
+          return {
+            ok: true,
+            output: `Reused batch receipt ${batchKey} from ${receipt.completedUtc}.`,
+          };
+        const trace =
+          trackedRequest && trackedRequest.length < 24_000 && environmentJson.length < 24_000
+            ? yield* Effect.try({
+                try: () => beginBatchTrace(directory, context),
+                catch: (error) => `Cannot prepare batch trace: ${String(error)}`,
+              }).pipe(Effect.option)
+            : Option.none<ReturnType<typeof beginBatchTrace>>();
+        let result = yield* Option.match(trace, {
+          onNone: () => run,
+          onSome: (scope) =>
+            vp(["run", releaseBatchTask], root, {
+              [releaseBatchRequest]: trackedRequest!,
+              [releaseEnvName]: environmentJson,
+              VITE_CACHE_PATH: scope.path,
+            }),
+        });
+        const scope = Option.getOrUndefined(trace);
+        const tracked = result.ok ? scope?.outcome() : undefined;
+        if (result.ok && scope && !tracked) {
+          result = yield* run;
+          result = {
+            ...result,
+            output: `Unverified trace. Ran the original check.\n${result.output}`,
+          };
+        }
+        if (tracked === "reused") {
+          result = {
+            ...result,
+            output: `Reused matching traced inputs from ${scope?.priorCommit}.\n${result.output}`,
+          };
+        }
+        if (result.ok) {
+          const stable = yield* cleanSource.pipe(Effect.option);
+          if (Option.getOrUndefined(stable) !== sourceCommit)
+            return {
+              ok: false,
+              output: "Release checkout changed before batch evidence could be saved.",
+            };
+          const saved = yield* Effect.try({
+            try: () => {
+              if (tracked === "tracked" || tracked === "reused")
+                scope?.seal(sourceCommit, gateAttempt);
+              writeBatchReceipt(
+                directory,
+                batchKey,
+                sourceCommit,
+                name,
+                result.output,
+                gateAttempt,
+              );
+            },
+            catch: (error) => `Cannot save release batch receipt: ${String(error)}`,
+          }).pipe(Effect.option);
+          if (Option.isNone(saved))
+            return { ok: false, output: `Cannot save evidence for ${name}.\n${result.output}` };
+        }
+        return result;
+      }),
+    };
+  };
+  const command = (name: string, args: ReadonlyArray<string>, inputs?: ReadonlyArray<string>) =>
+    resumable(name, vp(args), args, inputs);
 
-  const steps: Array<Step<never>> = [
+  const steps: Array<Step<ChildProcessSpawner.ChildProcessSpawner>> = [
+    // The resolver also reads mutable registry metadata outside this checkout.
     ...(runPatchCheck ? [{ name: "unused patches", run: checkPatches }] : []),
     ...batchFileArguments(present).map((batch, index) =>
-      command(`format ${index + 1}`, [
-        "fmt",
-        "--check",
-        "--no-error-on-unmatched-pattern",
-        ...batch,
-      ]),
+      command(
+        `format ${index + 1}`,
+        ["fmt", "--check", "--no-error-on-unmatched-pattern", ...batch],
+        batch,
+      ),
     ),
     ...batchFileArguments(code).map((batch, index) =>
-      command(`lint ${index + 1}`, ["lint", "--no-error-on-unmatched-pattern", ...batch]),
+      command(`lint ${index + 1}`, ["lint", "--no-error-on-unmatched-pattern", ...batch], batch),
     ),
     ...(runKnip
       ? knipPasses.map((args, index) => command(`knip ${index + 1}/${knipPasses.length}`, args))
@@ -547,7 +723,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
             // only made dependents wait: --parallel cut a contracts change from 13 s to 9 s.
             ...command(`typecheck (${affected.length} packages)`, [
               "run",
-              "--cache",
+              releaseEnv ? "--no-cache" : "--cache",
               "--parallel",
               "--concurrency-limit",
               String(typecheckWorkers),
@@ -560,32 +736,28 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
       : []),
     // From the repo root, the root vite.config.ts hands each file to its package's config.
     ...batchFileArguments(vitestTests).map((batch, index) => ({
-      ...command(`test ${index + 1} (${batch.length} files)`, [
-        "test",
-        "run",
-        "--passWithNoTests",
-        ...batch,
-      ]),
+      ...command(
+        `test ${index + 1} (${batch.length} files)`,
+        ["test", "run", "--passWithNoTests", ...batch],
+        batch,
+      ),
       serial: true,
     })),
     ...(nodeTests.length > 0
       ? [
-          command(`node --test (${nodeTests.length} files)`, [
-            "exec",
-            "node",
-            "--test",
-            ...nodeTests,
-          ]),
+          command(
+            `node --test (${nodeTests.length} files)`,
+            ["exec", "node", "--test", ...nodeTests],
+            nodeTests,
+          ),
         ]
       : []),
     ...compilerBatches.map(({ test, patterns }, index) => ({
-      ...command(`react compiler ${index + 1} (${patterns.length} patterns)`, [
-        "test",
-        "run",
-        test,
-        "-t",
-        patterns.join("|"),
-      ]),
+      ...command(
+        `react compiler ${index + 1} (${patterns.length} patterns)`,
+        ["test", "run", test, "-t", patterns.join("|")],
+        [test],
+      ),
       serial: true,
     })),
   ];
@@ -619,6 +791,24 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   if (!runKnip) summary.push("  knip skipped: no code or manifest changed");
   yield* Console.log(`\n${summary.join("\n")}`);
 
+  if (Option.isSome(receiptDirectory) && sourceCommit) {
+    const stable = yield* Effect.gen(function* () {
+      return (
+        (yield* cleanSource) === sourceCommit &&
+        (yield* inputKey) === key &&
+        (yield* readRuntime) === runtime &&
+        (yield* readTracked) === trackedInputs
+      );
+    }).pipe(Effect.option);
+    if (Option.getOrUndefined(stable) !== true) {
+      yield* Effect.try({
+        try: () => invalidateBatchAttempt(receiptDirectory.value, gateAttempt),
+        catch: (error) => `Cannot invalidate changed release inputs: ${String(error)}`,
+      });
+      return yield* Effect.fail("Release batch inputs changed during the run.");
+    }
+    return results.every((result) => result.outcome === "pass");
+  }
   if (results.some((result) => result.outcome !== "pass")) return false;
   if ((yield* inputKey) !== key) {
     yield* Console.log("  pass not cached: files changed during the run");
@@ -650,6 +840,16 @@ export const checkChangedCommand = Command.make(
     timeout: Flag.Int("timeout").pipe(
       Flag.withDescription(
         "Seconds before a step is killed; also CHECK_CHANGED_TIMEOUT. Defaults to 900.",
+      ),
+      Flag.optional,
+    ),
+    batchReceipts: Flag.String("batch-receipts").pipe(
+      Flag.withDescription("Keep local release batch evidence in this directory."),
+      Flag.optional,
+    ),
+    batchRuntime: Flag.String("batch-runtime").pipe(
+      Flag.withDescription(
+        "Approved inventory of persistent inputs outside the workspace for cross-commit reuse.",
       ),
       Flag.optional,
     ),

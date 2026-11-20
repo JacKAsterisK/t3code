@@ -3,6 +3,7 @@ import { defineConfig } from "vite-plus";
 import * as NodeURL from "node:url";
 import { remoteCacheUrl } from "./infra/task-cache/src/remoteCache.ts";
 import { cachedTestTasks } from "./scripts/lib/cached-tests.ts";
+import { releaseBatchConfig, releaseBatchRequest } from "./scripts/lib/release-batches.ts";
 
 const TEST_EXCLUDE = [
   "**/.repos/**",
@@ -102,6 +103,7 @@ export default defineConfig({
     cache: taskCacheConfig,
     tasks: {
       ...cachedTestTasks(process.env.T3_CACHED_TESTS),
+      ...releaseBatchConfig(process.env[releaseBatchRequest]),
       // The two knip passes read the same files and write nothing, so they run side by side.
       // The `knip:check` script runs this task, so `vp run knip:check` and `pnpm run knip:check` both use it.
       "knip:check:all": {

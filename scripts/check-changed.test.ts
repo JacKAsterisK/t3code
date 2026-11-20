@@ -381,12 +381,16 @@ function launcherFixture() {
     "scripts/check-changed-command.ts",
     "scripts/lib/changed-tests.ts",
     "scripts/lib/check-inputs.ts",
+    "scripts/lib/release-batches.ts",
     ".github/scripts/ci-changes.cjs",
   ]) {
     write(file, NodeFS.readFileSync(NodePath.join(import.meta.dirname, "..", file), "utf8"));
   }
   write(".gitignore", "node_modules/\nrecords/\n");
   write("pnpm-workspace.yaml", "packages:\n  - packages/*\n");
+  write("pnpm-lock.yaml", "lockfileVersion: 9.0\n");
+  write("node_modules/.modules.yaml", "{}");
+  write("node_modules/.pnpm/lock.yaml", "{}");
   write(
     "package.json",
     JSON.stringify({
@@ -409,11 +413,39 @@ function launcherFixture() {
     `
     import fs from 'node:fs';
     import path from 'node:path';
+    if (process.env.FAIL_ONCE === "1" &&
+        (process.env.VP_REMOTE_CACHE !== "off" || process.env.VP_REMOTE_CACHE_URL !== "" ||
+         process.env.T3_TASK_CACHE_TELEMETRY !== "off" || process.env.npm_config_offline !== "true")) {
+      throw new Error("release batch inherited remote settings");
+    }
     const args = process.argv.slice(2);
     fs.writeFileSync(path.join(process.env.RECORDS, process.pid + '.json'), JSON.stringify({ args, cwd: process.cwd() }));
     console.log('fixture stdout: ' + args[0]);
     console.error('fixture stderr: ' + args[0]);
-    process.exit(args[0] === process.env.FAIL_STEP ? 23 : 0);
+    if (args[0] === "install" && process.env.REQUIRE_OFFLINE_METADATA === "1" &&
+        !fs.existsSync(path.join(process.env.RECORDS, ".offline-metadata"))) {
+      console.error("ERR_PNPM_NO_OFFLINE_META");
+      process.exit(24);
+    }
+    if (args[0] === process.env.FAIL_STEP) {
+      if (process.env.FAIL_ONCE !== "1") process.exit(23);
+      const marker = path.join(process.env.RECORDS, ".failed-once");
+      if (!fs.existsSync(marker)) {
+        fs.writeFileSync(marker, "");
+        if (process.env.PAUSE_FIXTURE === "1") {
+          const release = path.join(process.env.RECORDS, ".release-pause");
+          if (!fs.existsSync(release))
+            await new Promise((resolve) => {
+              const watcher = fs.watch(path.dirname(release), () => {
+                if (fs.existsSync(release)) { watcher.close(); resolve(); }
+              });
+              if (fs.existsSync(release)) { watcher.close(); resolve(); }
+            });
+        }
+        process.exit(23);
+      }
+    }
+    process.exit(0);
   `,
   );
   // Select the Windows launcher without changing the Effect runtime's host platform.
@@ -452,21 +484,68 @@ function launcherFixture() {
   );
   const records = NodePath.join(root, "records");
   NodeFS.mkdirSync(records);
+  interface Retry {
+    base: string;
+    receipts: string;
+    thread?: string;
+    timeout?: number;
+    changedEnv?: string;
+    pause?: boolean;
+    requireOfflineMetadata?: boolean;
+  }
+  function invocation(failStep: string, retry?: Retry) {
+    const args = ["scripts/check-changed.ts", retry?.base ?? "HEAD"];
+    if (retry) args.push("--batch-receipts", retry.receipts);
+    if (retry?.timeout) args.push("--timeout", String(retry.timeout));
+    return {
+      args,
+      env: {
+        ...env,
+        TEMP: NodeOS.tmpdir(),
+        RECORDS: records,
+        FAIL_STEP: failStep,
+        FAIL_ONCE: retry ? "1" : "0",
+        T3CODE_THREAD_ID: retry?.thread,
+        RELEASE_FIXTURE_INPUT: retry?.changedEnv,
+        PAUSE_FIXTURE: retry?.pause ? "1" : "0",
+        REQUIRE_OFFLINE_METADATA: retry?.requireOfflineMetadata ? "1" : "0",
+        VP_REMOTE_CACHE: "read-write",
+        VP_REMOTE_CACHE_URL: "http://127.0.0.1:1/test-cache",
+        T3_TASK_CACHE_TELEMETRY: "on",
+      },
+    };
+  }
   return {
     root,
     source,
     write,
-    run(failStep = "") {
-      return NodeChildProcess.spawnSync(process.execPath, ["scripts/check-changed.ts", "HEAD"], {
+    commitChange() {
+      const base = git("rev-parse", "HEAD").toString().trim();
+      git("add", ".");
+      git("-c", "commit.gpgsign=false", "-c", "core.hooksPath=", "commit", "-m", "candidate");
+      return base;
+    },
+    run(failStep = "", retry?: Retry) {
+      const { args, env } = invocation(failStep, retry);
+      return NodeChildProcess.spawnSync(process.execPath, args, {
         cwd: root,
         encoding: "utf8",
-        env: { ...env, TEMP: NodeOS.tmpdir(), RECORDS: records, FAIL_STEP: failStep },
+        env,
       });
     },
+    start(failStep: string, retry: Retry) {
+      const { args, env } = invocation(failStep, retry);
+      return NodeChildProcess.spawn(process.execPath, args, {
+        cwd: root,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    },
+    git,
     calls: (): Array<{ args: Array<string>; cwd: string }> =>
-      NodeFS.readdirSync(records).map((file) =>
-        JSON.parse(NodeFS.readFileSync(NodePath.join(records, file), "utf8")),
-      ),
+      NodeFS.readdirSync(records)
+        .filter((file) => file.endsWith(".json"))
+        .map((file) => JSON.parse(NodeFS.readFileSync(NodePath.join(records, file), "utf8"))),
     [Symbol.dispose]() {
       NodeFS.rmSync(root, { recursive: true, force: true });
     },
@@ -530,4 +609,101 @@ it.each(["install", "lint"])("reports a failing %s step with its output", (step)
   expect(
     NodeFS.existsSync(NodePath.join(project.root, "node_modules/.cache/check-changed.json")),
   ).toBe(false);
+});
+
+it("retries only the failed command on the same commit", () => {
+  using project = launcherFixture();
+  const receipts = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lan-release-test-receipts-"));
+  try {
+    project.write(project.source, "export const value = 2;\n");
+    const base = project.commitChange();
+    const first = project.run("lint", { base, receipts });
+    expect(first.status, first.stdout + first.stderr).toBe(1);
+    expect(first.stdout).toContain("FAIL  lint");
+    const typecheck = project.calls().find(({ args }) => args.includes("typecheck"));
+    expect(typecheck?.args).toContain("--no-cache");
+    expect(typecheck?.args).not.toContain("--cache");
+    const calls = project.calls().length;
+    const second = project.run("lint", { base, receipts, thread: "new-session", timeout: 300 });
+    expect(second.status, second.stdout + second.stderr).toBe(0);
+    expect(second.stdout).toContain("Reused batch receipt");
+    expect(project.calls()).toHaveLength(calls + 1);
+    const changedEnv = project.run("lint", { base, receipts, changedEnv: "real-input" });
+    expect(changedEnv.status, changedEnv.stdout + changedEnv.stderr).toBe(0);
+    expect(changedEnv.stdout).not.toContain("Reused batch receipt");
+    project.write("node_modules/vite-plus/extra.js", "export const installed = 'changed';");
+    const changedInstall = project.run("lint", { base, receipts, changedEnv: "real-input" });
+    expect(changedInstall.status, changedInstall.stdout + changedInstall.stderr).toBe(0);
+    expect(changedInstall.stdout).not.toContain("Reused batch receipt");
+    project.git("update-index", "--skip-worktree", project.source);
+    const hiddenSource = project.run("lint", { base, receipts, changedEnv: "real-input" });
+    expect(hiddenSource.status).toBe(1);
+    expect(hiddenSource.stdout + hiddenSource.stderr).toContain("skip-worktree");
+  } finally {
+    NodeFS.rmSync(receipts, { recursive: true, force: true });
+  }
+});
+
+it("preserves completed batches when the gate process is interrupted", async () => {
+  using project = launcherFixture();
+  const receipts = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lan-release-interrupted-"));
+  const releasePause = () => project.write("records/.release-pause", "");
+  try {
+    project.write(project.source, "export const value = 2;\n");
+    const base = project.commitChange();
+    const retry = { base, receipts, pause: true };
+    const first = project.start("lint", retry);
+    let stdout = "";
+    let stderr = "";
+    first.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    first.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+      if ((stdout.match(/^> vp .*  pass  /gm) ?? []).length === 4) {
+        first.kill();
+        releasePause();
+      }
+    });
+    await new Promise<void>((resolve, reject) => {
+      first.once("close", () => resolve());
+      first.once("error", reject);
+    });
+    expect(stdout, stdout + stderr).not.toContain("check:changed summary");
+    expect(NodeFS.readdirSync(receipts).filter((name) => name.endsWith(".json"))).toHaveLength(4);
+    const calls = project.calls().length;
+    const second = project.run("lint", retry);
+    expect(second.status, second.stdout + second.stderr).toBe(0);
+    expect(project.calls()).toHaveLength(calls + 1);
+  } finally {
+    releasePause();
+    NodeFS.rmSync(receipts, { recursive: true, force: true });
+  }
+});
+
+it("requires fresh offline patch resolution even when the other batches have receipts", () => {
+  using project = launcherFixture();
+  const receipts = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "lan-release-patch-retry-"));
+  const metadata = "records/.offline-metadata";
+  try {
+    project.write(
+      "packages/example/package.json",
+      JSON.stringify({ name: "example", version: "1.0.1" }),
+    );
+    project.write(metadata, "fixture registry metadata");
+    const base = project.commitChange();
+    const retry = { base, receipts, requireOfflineMetadata: true };
+    const first = project.run("", retry);
+    expect(first.status, first.stdout + first.stderr).toBe(0);
+    const calls = project.calls().length;
+    expect(project.calls().find(({ args }) => args[0] === "install")?.args).toContain("--offline");
+    NodeFS.unlinkSync(NodePath.join(project.root, metadata));
+    const second = project.run("", retry);
+    expect(second.status).toBe(1);
+    expect(second.stdout + second.stderr).toContain("ERR_PNPM_NO_OFFLINE_META");
+    expect(second.stdout).toContain("Reused batch receipt");
+    expect(project.calls()).toHaveLength(calls + 1);
+  } finally {
+    NodeFS.rmSync(receipts, { recursive: true, force: true });
+  }
 });

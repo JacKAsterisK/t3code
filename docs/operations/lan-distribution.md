@@ -78,6 +78,39 @@ The LAN profile supports native Windows x64 portable ZIPs with no WSL runtime.
 The resource monitor, Electron-hosted `server.asar`, native maintenance bundle
 and native addons belong to the verified payload. Preserve third-party notices.
 
+## Resume the local changed-file gate
+
+Keep the comparison commit from the previous published release and the same
+evidence directory through retries. From a clean candidate checkout with the
+qualified Node and frozen pnpm install:
+
+```powershell
+node scripts/check-changed.ts <previous-source-sha> --concurrency 4 --timeout 7200 --batch-receipts C:\ReleaseEvidence\source-batches *> C:\ReleaseEvidence\check-changed-01.log
+```
+
+The direct Node command runs the batch toolchain offline with remote task caching
+and telemetry disabled. Eligible passing batches write their own receipts. Repeat with
+the same evidence directory and a new log filename after a failure or interruption.
+The gate verifies the installed dependency bytes and refuses hidden Git index
+entries. Keep this checkout and install dedicated to the gate while it runs.
+Package typechecks execute fresh when their release receipt is missing. The offline
+unused-patch check runs on each attempt after dependency changes because it reads
+mutable pnpm registry metadata. The focused LAN tests and packaged audits remain
+separate release requirements.
+
+Cross-commit reuse is opt-in with `--batch-runtime <approved-input-inventory.json>`.
+Use it only when the release recipe can attest to the entire external input
+closure. The JSON inventory lists absolute paths with a `kind` of `file`,
+`directory`, or `absent`. Files and directories need a `sha256` pin. Directory
+pins hash the UTF-8 JSON array of entries sorted by name with Node's localeCompare.
+Each entry is
+`[name, "file", byteSha256]` or `[name, "directory", entries]`. An absent path must
+have an existing parent. Links inside a pinned directory are refused. Use the
+same verified inventory after a source-only correction. Workspace reads,
+missing-file probes, and directory listings are checked by the local Vite+
+tracer. Leave cross-commit reuse off when the external closure cannot be shown.
+Keep the evidence directory local and scoped to one release campaign.
+
 ## Select and build the LAN profile
 
 The public identity JSON contains exactly `appId`, `productName`,

@@ -555,6 +555,8 @@ const layerTestNodeServices = Layer.mergeAll(
   ProviderLatestVersions.layer,
   NodeServices.layer,
   NodeCrypto.layer,
+  Layer.succeed(HostProcess.Environment, {}),
+  Layer.succeed(WindowsShellEnvironment, () => Effect.succeed({})),
   Layer.mock(CodexManagedTokenBroker.CodexManagedTokenBroker)({
     endpoint: Effect.succeed("unused-private-pipe"),
   }),
@@ -1781,7 +1783,6 @@ it.layer(
               );
             }
           }).pipe(
-            Effect.provideService(WindowsShellEnvironment, () => Effect.succeed({})),
             Effect.provide(
               ServerConfig.layerTest(process.cwd(), {
                 prefix: "t3-pi-model-cache-",

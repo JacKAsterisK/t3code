@@ -133,33 +133,34 @@ export async function migrateCancellationFixtureDatabase(database: string, head:
 const now = "2026-10-25T00:00:00.000Z",
   threadId = "thread:offline-fixture",
   modelSelection = { instanceId: "codex", model: "synthetic-no-model" };
-// Today's projection writes search_text, which fork migration 095 adds; older fixture schemas have
-// none. The seed adds it and drops it again, so the fixture keeps its genuine schema.
+// Use the current projection writer to seed legacy fixtures, then restore their old table shapes.
+const seedingColumns = [
+  ["orchestration_v2_projection_messages", "search_text", "TEXT"],
+  ["orchestration_v2_projection_turn_items", "inline_work_output", "INTEGER NOT NULL DEFAULT 0"],
+] as const;
+
 export async function seedCancellationFixture(
   file: string,
   secondThread = false,
   unfinished = true,
 ) {
-  const missing = withDatabase(
-    file,
-    (db) =>
-      db
-        .prepare(
-          "SELECT 1 FROM pragma_table_info('orchestration_v2_projection_messages') WHERE name = 'search_text'",
-        )
-        .get() === undefined,
+  const missing = withDatabase(file, (db) =>
+    seedingColumns.filter(
+      ([table, column]) =>
+        db.prepare("SELECT 1 FROM pragma_table_info(?) WHERE name = ?").get(table, column) ===
+        undefined,
+    ),
   );
-  if (missing)
-    withDatabase(file, (db) =>
-      db.exec("ALTER TABLE orchestration_v2_projection_messages ADD COLUMN search_text TEXT"),
-    );
   try {
+    withDatabase(file, (db) => {
+      for (const [table, column, type] of missing)
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    });
     await seedCancellationEvents(file, secondThread, unfinished);
   } finally {
-    if (missing)
-      withDatabase(file, (db) =>
-        db.exec("ALTER TABLE orchestration_v2_projection_messages DROP COLUMN search_text"),
-      );
+    withDatabase(file, (db) => {
+      for (const [table, column] of missing) db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+    });
   }
 }
 

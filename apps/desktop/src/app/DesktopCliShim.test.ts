@@ -157,12 +157,15 @@ describe("renderCliShim", () => {
   );
 
   // The server skips its compile cache only under APPIMAGE; each mount path is new.
-  it("tells the CLI it runs from the mounted AppImage", () => {
-    const { appImage, shim } = fakeAppImage();
-    const result = run(shim, ["--version"]);
-    expect(result.status).toBe(3);
-    expect(result.stdout).toContain(`appimage=${appImage}`);
-  });
+  it.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "tells the CLI it runs from the mounted AppImage",
+    () => {
+      const { appImage, shim } = fakeAppImage();
+      const result = run(shim, ["--version"]);
+      expect(result.status).toBe(3);
+      expect(result.stdout).toContain(`appimage=${appImage}`);
+    },
+  );
 
   it.skipIf(HostProcess.Platform.defaultValue() === "win32")(
     "keeps the install's T3 home under sudo, unless one is set",

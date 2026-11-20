@@ -8762,6 +8762,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           entry.label === "account/rateLimits/updated/late"
             ? Deferred.await(terminalReceipt)
             : Effect.void,
+        undefined,
         () => Deferred.succeed(snapshotReceipt, undefined),
       );
       yield* harness.runtime.startTurn(

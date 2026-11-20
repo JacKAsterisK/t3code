@@ -192,12 +192,21 @@ describe("Cursor skills", () => {
         yield* fileSystem.writeFileString(path.join(root, "a-large", "SKILL.md"), "---\n---\n");
         yield* fileSystem.makeDirectory(path.join(root, "b-small"), { recursive: true });
         yield* fileSystem.writeFileString(path.join(root, "b-small", "SKILL.md"), "---\n---\n");
-        // More ordinary files than the whole-scan entry budget of 10,000.
-        yield* Effect.forEach(
-          Array.from({ length: 11_000 }, (_, index) => path.join(artifacts, `file-${index}.txt`)),
-          (file) => fileSystem.writeFileString(file, ""),
-          { concurrency: 64, discard: true },
-        );
+        // Represent more files than the directory budget without creating thousands of test files.
+        const names = Array.from({ length: 11_000 }, (_, index) => `file-${index}.txt`);
+        const fileNames = new Set(names);
+        const sample = path.join(artifacts, names[0]!);
+        yield* fileSystem.writeFileString(sample, "");
+        const fileInfo = yield* fileSystem.stat(sample);
+        const fixtureFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          readDirectory: (directory) =>
+            directory === artifacts ? Effect.succeed(names) : fileSystem.readDirectory(directory),
+          stat: (file) =>
+            path.dirname(file) === artifacts && fileNames.has(path.basename(file))
+              ? Effect.succeed(fileInfo)
+              : fileSystem.stat(file),
+        });
 
         const expected = [
           {
@@ -213,8 +222,16 @@ describe("Cursor skills", () => {
             enabled: true,
           },
         ];
-        expect(yield* discoverCursorSkills(workspace, { HOME: userHome })).toEqual(expected);
-        expect(yield* probeCursorSkills(workspace, { HOME: userHome })).toEqual(expected);
+        expect(
+          yield* discoverCursorSkills(workspace, { HOME: userHome }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fixtureFileSystem),
+          ),
+        ).toEqual(expected);
+        expect(
+          yield* probeCursorSkills(workspace, { HOME: userHome }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fixtureFileSystem),
+          ),
+        ).toEqual(expected);
       }),
     ));
 

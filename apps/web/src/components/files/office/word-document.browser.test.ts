@@ -39,8 +39,10 @@ function document_() {
     .generateAsync({ type: "uint8array" });
 }
 
+// Prepare the document and its bundled fonts before the paint assertions.
+const opened = await openWordDocument(await document_(), document.fonts);
+
 it("draws list numbers with the document's faces, and text no bundled face covers with the system's", async () => {
-  const opened = await openWordDocument(await document_(), document.fonts);
   const drawn: { text: string; font: string }[] = [];
   using _fillText = vi
     .spyOn(OffscreenCanvasRenderingContext2D.prototype, "fillText")

@@ -8,7 +8,7 @@ approval before code or runtime changes.
 
 ## Baseline
 
-- Upstream sync in preparation for LAN 1.0.39: upstream `e6d521012d` (2,111 commits after `ee90bdc940`), application 0.1.11 and toolchain generation 139. Upstream migrations 083?102 append as fork 097?116. Home repair recognizes schema 116.
+- Upstream sync in preparation for LAN 1.0.39: upstream `e6d521012d` (2,111 commits after `ee90bdc940`), application 0.1.11 and toolchain generation 139. Upstream migrations 083 through 102 append as fork 097 through 116. Home repair recognizes schema 116.
 
 - Upstream sync 2026-11-12: upstream `ee90bdc940` (680 commits after `12f3244e0593`), published as LAN 1.0.38 from `d83b739562` (application 0.1.9, toolchain generation 138); previous published LAN 1.0.37 is `68a7fb629f`. Upstream migrations 081 and 082 become fork 095 (ProjectionMessageSearchText) and 096 (TurnItemConversationIndex); schema 96.
 

@@ -16,6 +16,7 @@ export const proxyConfig = () => {
   const file = process.env.T3_EVAL_PROXY_CONFIG;
   if (file !== undefined) {
     const config = decodeProxyConfig(JSON.parse(NodeFS.readFileSync(file, "utf8")));
+    if ("error" in config) throw new Error(config.error);
     return { ...config, url: config.url.replace(/\/+$/u, "") };
   }
   const config = decodeProxyConfig(

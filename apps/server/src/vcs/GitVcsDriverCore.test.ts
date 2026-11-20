@@ -6412,7 +6412,10 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           yield* git(cwd, ["worktree", "add", "--", path, "contested"]);
           yield* writeTextFile(path, "owned-by-B.txt", "keep this work\n");
           yield* Fiber.interrupt(creator);
-          assert.include(yield* git(cwd, ["worktree", "list", "--porcelain"]), path);
+          assert.include(
+            yield* git(cwd, ["worktree", "list", "--porcelain"]),
+            path.replaceAll("\\", "/"),
+          );
           assert.equal(yield* git(path, ["branch", "--show-current"]), "contested");
           assert.equal(
             yield* (yield* FileSystem.FileSystem).readFileString(
@@ -6456,6 +6459,10 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             Effect.sync(() =>
               NodeNet.createServer((socket) => {
                 sockets.add(socket);
+                // Killing the hook can reset its TCP connection before teardown.
+                socket.on("error", (error: NodeJS.ErrnoException) => {
+                  if (error.code !== "ECONNRESET") throw error;
+                });
                 connected.resolve();
               }),
             ),
@@ -6495,6 +6502,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             newRefName: "t3/cancel",
           };
           const worktrees = git(cwd, ["worktree", "list", "--porcelain"]);
+          const porcelainPath = worktreePath.replaceAll("\\", "/");
 
           const cancelled = yield* driver
             .createWorktree(input, {
@@ -6507,11 +6515,11 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             .pipe(Effect.forkChild);
           yield* Deferred.await(hookStarted);
           yield* Effect.promise(() => connected.promise);
-          assert.include(yield* worktrees, worktreePath);
+          assert.include(yield* worktrees, porcelainPath);
           yield* Fiber.interrupt(cancelled);
 
           assert.equal(claims, 0);
-          assert.notInclude(yield* worktrees, worktreePath);
+          assert.notInclude(yield* worktrees, porcelainPath);
           assert.equal(yield* git(cwd, ["branch", "--list", "t3/cancel"]), "");
           assert.isFalse(yield* fs.exists(worktreePath));
 
@@ -6525,7 +6533,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             .pipe(Effect.forkChild);
           yield* Deferred.await(claimed);
           yield* Fiber.interrupt(retry);
-          assert.include(yield* worktrees, worktreePath);
+          assert.include(yield* worktrees, porcelainPath);
           assert.notInclude(yield* worktrees, "locked");
           assert.equal(yield* git(worktreePath, ["branch", "--show-current"]), "t3/cancel");
         }),

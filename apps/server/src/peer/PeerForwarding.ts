@@ -32,7 +32,7 @@ import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
 
 // Match local waits: return before MCP client timeouts and T3 Connect's ~100 s idle drop.
-export const FORWARDED_WAIT_CHUNK_MS = 45_000;
+const FORWARDED_WAIT_CHUNK_MS = 45_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const MAX_WAIT_TIMEOUT_MS = 45_000;
 

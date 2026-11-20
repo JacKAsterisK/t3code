@@ -420,6 +420,7 @@ export const ThreadListV2MachineHeader = memo(function ThreadListV2MachineHeader
   /** Present while this device keeps its own machine order. */
   readonly onResetOrder?: () => void;
 }) {
+  const gt = useGT();
   const { onMove, onNewTask, onResetOrder } = props;
   const sidebarPane = props.pane === "sidebar";
   const mutedText = sidebarPane ? "text-drawer-foreground-muted" : "text-foreground-tertiary";

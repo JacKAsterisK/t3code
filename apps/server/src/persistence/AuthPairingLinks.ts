@@ -21,7 +21,6 @@ import {
  * Keep peer-link subjects under the same prefix so older servers refuse them too.
  */
 export const MCP_APPROVAL_SUBJECT_PREFIX = "mcp-approval:";
-export const PEER_LINK_PAIRING_SUBJECT_PREFIX = `${MCP_APPROVAL_SUBJECT_PREFIX}peer-link:`;
 
 const SqliteFlag = Schema.Literals([0, 1]);
 

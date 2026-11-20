@@ -5702,9 +5702,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 )
               ORDER BY attempt.run_id ASC, attempt.attempt_ordinal ASC
             `,
+            // Settled plan nodes can also qualify, so the partial live-node index is inapplicable.
             nodes: sql<PayloadRow>`
               SELECT node.payload_json FROM orchestration_v2_projection_nodes AS node
-                ${LIVE_NODES_INDEX}
               WHERE node.thread_id = ${threadId}
                 AND (
                   node.status IN ('pending', 'starting', 'running', 'waiting')

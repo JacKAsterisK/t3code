@@ -384,10 +384,10 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   const { vitestTests, nodeTests } = splitTests(tests);
 
   // React Compiler coverage compiles every client source file, so run only the
-  // changed files' cases, in one extra step: a -t filter in the main test step
+  // changed files' cases in separate steps: a -t filter in the main test step
   // would drop every other test. An app is skipped when the main step already
   // runs its coverage file unfiltered. File filters mirror each coverage test.
-  const compilerApps = [
+  const compilerBatches = [
     {
       test: "apps/web/src/reactCompilerCoverage.test.ts",
       root: "apps/web/src/",
@@ -412,8 +412,9 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
     const names = changed
       .filter((file) => present.includes(file))
       .map((file) => `compiles ${escapeRegExp(name(file))}$`);
-    const pattern = [...names, ...always];
-    return pattern.length > 0 ? [{ test, names, pattern }] : [];
+    // Each alternative is separated by one pipe, the same size as the separator
+    // accounted for when batching separate file arguments.
+    return batchFileArguments([...names, ...always]).map((patterns) => ({ test, patterns }));
   });
 
   // knip:check cannot be scoped to a package. Any code change can leave a file,
@@ -519,7 +520,6 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   const filters = (names: ReadonlyArray<string>) => names.flatMap((name) => ["--filter", name]);
   const typecheckWorkers = Math.min(concurrency, affected.length);
   const command = (name: string, args: ReadonlyArray<string>) => ({ name, run: vp(args) });
-  const compilerFiles = compilerApps.reduce((count, app) => count + app.names.length, 0);
 
   const steps: Array<Step<never>> = [
     ...(runPatchCheck ? [{ name: "unused patches", run: checkPatches }] : []),
@@ -578,20 +578,16 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
           ]),
         ]
       : []),
-    ...(compilerApps.length > 0
-      ? [
-          {
-            ...command(`react compiler (${compilerFiles} files)`, [
-              "test",
-              "run",
-              ...compilerApps.map((app) => app.test),
-              "-t",
-              compilerApps.flatMap((app) => app.pattern).join("|"),
-            ]),
-            serial: true,
-          },
-        ]
-      : []),
+    ...compilerBatches.map(({ test, patterns }, index) => ({
+      ...command(`react compiler ${index + 1} (${patterns.length} patterns)`, [
+        "test",
+        "run",
+        test,
+        "-t",
+        patterns.join("|"),
+      ]),
+      serial: true,
+    })),
   ];
 
   const results = yield* runSteps(steps, { concurrency, timeoutSeconds });

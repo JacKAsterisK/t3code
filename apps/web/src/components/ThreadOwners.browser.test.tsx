@@ -1,4 +1,4 @@
-import * as Effect from "effect/Effect";
+import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 // Mounts the whole app on a fleet whose threads have owners, as ReadOnlyMachine.browser.test.tsx
 // does: owner badges, the sidebar's owner filter, and reassigning, read-only machines included.
 import { createMemoryHistory } from "@tanstack/react-router";
@@ -127,15 +127,17 @@ it("lets a read-only machine's thread be reassigned from the thread header", asy
   // Pairing saves the machine in this browser's storage, which other test files share.
   await using _paired = new AsyncDisposableStack();
   _paired.defer(async () => {
-    await Effect.runPromise(environmentCatalog.remove.run(appAtomRegistry, REMOTE_ENVIRONMENT_ID));
+    expect(
+      (await runAtomCommand(appAtomRegistry, environmentCatalog.remove, REMOTE_ENVIRONMENT_ID))
+        ._tag,
+    ).toBe("Success");
   });
-  await Effect.runPromise(
-    connectPairing.run(appAtomRegistry, {
-      host: REMOTE_ORIGIN,
-      pairingCode: "remote-pairing-code",
-      expectedEnvironmentId: REMOTE_ENVIRONMENT_ID,
-    }),
-  );
+  const paired = await runAtomCommand(appAtomRegistry, connectPairing, {
+    host: REMOTE_ORIGIN,
+    pairingCode: "remote-pairing-code",
+    expectedEnvironmentId: REMOTE_ENVIRONMENT_ID,
+  });
+  expect(paired._tag).toBe("Success");
 
   await act(() =>
     router.navigate({

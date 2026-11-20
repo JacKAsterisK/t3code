@@ -213,9 +213,11 @@ function SegmentPopover({
           <Row label={gt("Even pace")}>{gt("{timeLeft}% left by now", { timeLeft })}</Row>
         ) : null}
         {checkedAgo !== null ? (
-          <Row label="Checked">
-            {checkedAgo < 60_000 ? "just now" : `${formatDuration(checkedAgo)} ago`}
-            {stale ? " · may be out of date" : ""}
+          <Row label={gt("Checked")}>
+            {checkedAgo < 60_000
+              ? gt("just now")
+              : gt("{duration} ago", { duration: formatDuration(checkedAgo) })}
+            {stale ? gt(" · may be out of date") : ""}
           </Row>
         ) : null}
         {reset && reset.restoresPercent > 0 ? (

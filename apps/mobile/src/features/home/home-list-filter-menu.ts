@@ -91,7 +91,7 @@ export function buildHomeListFilterMenuItems(
   if (props.environments.length >= 2) {
     items.push({
       id: "group-by-machine",
-      title: "Group by machine",
+      title: resolve(msg("Group by machine")),
       selected: props.threadGrouping === "machine",
       onPress: () =>
         props.onThreadGroupingChange(props.threadGrouping === "machine" ? "none" : "machine"),

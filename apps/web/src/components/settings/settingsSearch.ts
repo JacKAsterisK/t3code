@@ -491,13 +491,13 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "thread-grouping",
-    title: "Group threads by machine",
+    title: msg("Group threads by machine"),
     to: "/settings/general",
     searchTerms: ["machine environment server computer remote sidebar group"],
   },
   {
     id: "task-owner-self",
-    title: "I am",
+    title: msg("I am"),
     to: "/settings/general",
     searchTerms: ["task owner who me mine user person fleet assign managed by"],
     fleetUsersOnly: true,

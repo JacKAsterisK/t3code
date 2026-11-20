@@ -1,4 +1,4 @@
-import * as Effect from "effect/Effect";
+import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 // Mounts the whole app, as test/appScenarios.renders.tsx does, then pairs a second machine
 // whose session may only read, such as a fleet machine set to read-only access.
 import { createMemoryHistory } from "@tanstack/react-router";
@@ -85,15 +85,17 @@ it.each([
   // Pairing saves the machine in this browser's storage, which other test files share.
   await using _paired = new AsyncDisposableStack();
   _paired.defer(async () => {
-    await Effect.runPromise(environmentCatalog.remove.run(appAtomRegistry, REMOTE_ENVIRONMENT_ID));
+    expect(
+      (await runAtomCommand(appAtomRegistry, environmentCatalog.remove, REMOTE_ENVIRONMENT_ID))
+        ._tag,
+    ).toBe("Success");
   });
-  await Effect.runPromise(
-    connectPairing.run(appAtomRegistry, {
-      host: REMOTE_ORIGIN,
-      pairingCode: "remote-pairing-code",
-      expectedEnvironmentId: REMOTE_ENVIRONMENT_ID,
-    }),
-  );
+  const paired = await runAtomCommand(appAtomRegistry, connectPairing, {
+    host: REMOTE_ORIGIN,
+    pairingCode: "remote-pairing-code",
+    expectedEnvironmentId: REMOTE_ENVIRONMENT_ID,
+  });
+  expect(paired._tag).toBe("Success");
 
   // The sidebar marks the machine and offers a new thread there only if it can take one.
   const newThreadThere = page.getByRole("button", { name: "New thread on Remote machine" });

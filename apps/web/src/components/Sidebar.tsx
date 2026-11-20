@@ -1563,14 +1563,30 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           api.contextMenu.show(
             [
               ...(machineThreadProjects(environmentId).length > 0 && !folder.machine.readOnly
-                ? [{ id: "new-thread" as const, label: `New thread on ${folder.machine.label}` }]
+                ? [
+                    {
+                      id: "new-thread" as const,
+                      label: gt("New thread on {machine}", { machine: folder.machine.label }),
+                    },
+                  ]
                 : []),
-              { id: "top" as const, label: "Move to top", disabled: first, separatorBefore: true },
-              { id: "up" as const, label: "Move up", disabled: first },
-              { id: "down" as const, label: "Move down", disabled: last },
-              { id: "bottom" as const, label: "Move to bottom", disabled: last },
+              {
+                id: "top" as const,
+                label: gt("Move to top"),
+                disabled: first,
+                separatorBefore: true,
+              },
+              { id: "up" as const, label: gt("Move up"), disabled: first },
+              { id: "down" as const, label: gt("Move down"), disabled: last },
+              { id: "bottom" as const, label: gt("Move to bottom"), disabled: last },
               ...(hasSavedMachineOrder
-                ? [{ id: "reset" as const, label: "Reset machine order", separatorBefore: true }]
+                ? [
+                    {
+                      id: "reset" as const,
+                      label: gt("Reset machine order"),
+                      separatorBefore: true,
+                    },
+                  ]
                 : []),
             ],
             position,
@@ -3388,10 +3404,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                     {canGroupByMachine ? (
                       <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1.5">
                         <span className="text-xs font-medium text-muted-foreground">
-                          Group threads
+                          <T>Group threads</T>
                         </span>
                         <ToggleGroup
-                          aria-label="Group threads"
+                          aria-label={gt("Group threads")}
                           value={[threadGrouping]}
                           onValueChange={(next) => {
                             const value = next[0];
@@ -3400,16 +3416,22 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             }
                           }}
                         >
-                          <Toggle value="none">None</Toggle>
-                          <Toggle value="machine">Machine</Toggle>
+                          <Toggle value="none">
+                            <T>None</T>
+                          </Toggle>
+                          <Toggle value="machine">
+                            <T>Machine</T>
+                          </Toggle>
                         </ToggleGroup>
                       </div>
                     ) : null}
                     {ownerFilterOptions.length > 0 ? (
                       <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1.5">
-                        <span className="text-xs font-medium text-muted-foreground">Owner</span>
+                        <span className="text-xs font-medium text-muted-foreground">
+                          <T>Owner</T>
+                        </span>
                         <ToggleGroup
-                          aria-label="Show threads managed by"
+                          aria-label={gt("Show threads managed by")}
                           value={[selectedOwnerFilterOption(ownerFilterId, selfOwnerId)]}
                           onValueChange={(next) => {
                             const value = next[0];
@@ -4057,22 +4079,24 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             <div className="flex flex-col items-center gap-2 px-2 py-6 text-center text-xs text-muted-foreground/60">
               {projects.length === 0 ? (
                 <>
-                  <span>No projects yet</span>
+                  <span>
+                    <T>No projects yet</T>
+                  </span>
                   <button
                     type="button"
                     onClick={openAddProjectCommandPalette}
                     className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-sidebar-border px-2.5 py-1 text-2xs font-medium text-sidebar-muted-foreground transition-colors hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
                   >
                     <PlusIcon className="-mx-0.5 size-3" />
-                    Add project
+                    <T>Add project</T>
                   </button>
                 </>
               ) : scopedProjectGroups.length > 1 ? (
-                "No threads in these projects yet"
+                gt("No threads in these projects yet")
               ) : scopedProjectGroups[0] ? (
-                `No threads in ${scopedProjectGroups[0].displayName} yet`
+                gt("No threads in {project} yet", { project: scopedProjectGroups[0].displayName })
               ) : (
-                "No threads yet"
+                gt("No threads yet")
               )}
             </div>
           ) : null}

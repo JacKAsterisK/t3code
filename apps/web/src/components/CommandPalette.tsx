@@ -1625,14 +1625,14 @@ function OpenCommandPaletteDialog(props: {
       kind: "submenu",
       value: "action:assign-thread-owner",
       searchTerms: ["assign", "owner", "manage", "reassign", "hand off", "user"],
-      title: "Assign to…",
-      searchTitle: "Assign to",
+      title: gt("Assign to…"),
+      searchTitle: gt("Assign to"),
       icon: <UserIcon className={ITEM_ICON_CLASS} />,
       addonIcon: <UserIcon className={ADDON_ICON_CLASS} />,
       groups: [
         {
           value: "thread-owners",
-          label: "Assign to",
+          label: gt("Assign to"),
           items: fleetUsersDirectory.users.map((user) => {
             const owner = presentTaskOwner(fleetUsersDirectory, user.id);
             return {
@@ -1651,7 +1651,9 @@ function OpenCommandPaletteDialog(props: {
               ...(user.id === currentOwnerId
                 ? {
                     titleTrailingContent: (
-                      <span className="text-xs text-muted-foreground/70">Current</span>
+                      <span className="text-xs text-muted-foreground/70">
+                        <T>Current</T>
+                      </span>
                     ),
                   }
                 : {}),
@@ -1901,7 +1903,7 @@ function OpenCommandPaletteDialog(props: {
       kind: "action",
       value: "action:toggle-thread-grouping",
       searchTerms: ["group", "machine", "environment", "server", "sidebar", "threads", "computer"],
-      title: grouped ? "Stop grouping threads by machine" : "Group threads by machine",
+      title: grouped ? gt("Stop grouping threads by machine") : gt("Group threads by machine"),
       icon: <ServerIcon className={ITEM_ICON_CLASS} />,
       run: () => updateClientSettings({ sidebarThreadGrouping: grouped ? "none" : "machine" }),
     });
@@ -2027,10 +2029,11 @@ function OpenCommandPaletteDialog(props: {
             ? [
                 {
                   value: NEW_THREAD_ON_MACHINE_GROUP,
-                  label: `Projects on ${
-                    (newThreadMachineId && environmentLabelById.get(newThreadMachineId)) ||
-                    "this machine"
-                  }`,
+                  label: gt("Projects on {machine}", {
+                    machine:
+                      (newThreadMachineId && environmentLabelById.get(newThreadMachineId)) ||
+                      gt("this machine"),
+                  }),
                   items: machineProjectThreadItems,
                 },
               ]

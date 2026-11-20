@@ -164,23 +164,23 @@ function LinkedEnvironmentsRow() {
       settingKeys={["linkedEnvironmentsEnabled"]}
       description={
         settings.fleetLinkedEnvironmentsActive ? (
-          <>
+          <T>
             Let agents here work on your other machines, and theirs here. Your LAN fleet keeps this
             on and links its machines for you, at the access set in{" "}
             <Link to="/settings/connections" className="underline underline-offset-2">
               Connections
             </Link>
             .
-          </>
+          </T>
         ) : (
-          <>
+          <T>
             Let agents here work on your other machines, and theirs here. Turn it on for each
             machine, then link them in{" "}
             <Link to="/settings/connections" className="underline underline-offset-2">
               Connections
             </Link>
             . While it is off, nothing new starts over a link; tasks already running finish.
-          </>
+          </T>
         )
       }
       control={

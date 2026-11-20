@@ -8592,16 +8592,6 @@
     },
     " でこのマシンをリンクしてください。オフにするとすべてのゲストリンクが停止します。"
   ],
-  "bff0033ea41eb38e": [
-    "ここのエージェントがあなたの他のマシンで作業し、他のマシンのエージェントがここで作業できるようにします。各マシンでオンにしてから、",
-    " ",
-    {
-      "t": "Link",
-      "i": 1,
-      "c": "接続"
-    },
-    " でリンクしてください。オフの間はリンク経由で新しい処理は開始されませんが、実行中のタスクは完了します。"
-  ],
   "ce6a3933a976ac7e": [
     "デバイスパネルが、",
     " ",
@@ -11644,7 +11634,6 @@
   "9c73aa0c2e2b4e7d": "ショートカットを選択",
   "300a948f90c4d75c": "戻る",
   "2a50e229df85d553": "進む",
-  "8aa6404c8018ea67": "T3 Code ホーム",
   "8e9626aa27cb188a": "Issue",
   "9d2fc1003e82feb1": "使用量",
   "20283eb1dd6119f9": "{count, plural, other {{count} 個の添付ファイル}}",
@@ -12144,5 +12133,98 @@
   "27d76249d09eb69f": "レビューガイドの準備ができました",
   "faa3bb26abb39c93": "レビューガイドの作成に失敗しました",
   "b7df38b7d8792d78": "ガイドを開く",
-  "9e91e9a77b664e4e": "レビューガイドを開始できませんでした"
+  "9e91e9a77b664e4e": "レビューガイドを開始できませんでした",
+  "25f21838b71400ef": "Use the Hub update workflow for T3 Code LAN.",
+  "636eb8375f495ec0": "Assign to…",
+  "e71034a402300cf2": "Assign to",
+  "e6c8790253434661": "Stop grouping threads by machine",
+  "c59e8c2c44c87344": "Group threads by machine",
+  "50c7bd6ca13e822c": "Projects on {machine}",
+  "9dc24b3101a84fa3": "this machine",
+  "b9ff86a91ad1a4d1": "Check fork updates",
+  "67f851987eb51f33": "Open T3 Code LAN on the approved computer and create a pairing link in Connections.",
+  "3552a0bd2b4fa0fd": "Install T3 Code LAN through the Hub.",
+  "1d8d174f13bca023": "New thread on {machine}",
+  "dd64a5b68af3b7a4": "Move to top",
+  "035b0115bf807d00": "Move up",
+  "2b6c4d8b81e325b5": "Move down",
+  "985cd6b4895152c5": "Move to bottom",
+  "bc0b0a685cc57d4c": "Reset machine order",
+  "2ce6051d931d19d1": "Group threads",
+  "e2919e07d8fb05eb": "Show threads managed by",
+  "c09dc9664af6b4c8": "No threads yet",
+  "30cfa9974d18be37": "Group threads",
+  "a87212dee280b4c9": "None",
+  "5e0c0354a6c8b204": "Owner",
+  "c1c29c2651d07fb8": [
+    "This agent wants task access allowed by this environment's machine and project policy on",
+    " ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
+    "."
+  ],
+  "d0982932ca10ab80": "Approval lets this agent renew task access for up to 90 days. You can revoke it in Connections. Other environment tools are blocked, and a new approval is required after 90 days.",
+  "34c735fdfb57b674": "Also let this agent answer permission requests. Each approval must name the permission and its duration. Broader permissions require my explicit consent for that request.",
+  "868ee1e422e9ec9e": "Signing in without this permission removes earlier approval permission for this application under your consenting authority. Other access stays available.",
+  "92c53a557fb7c268": "Read only: you can view this thread but not send to it.",
+  "5db00de3b3e5cd84": "Request approval permission with an approval-capable pairing code. The destination owner must separately bind the new sign-in.",
+  "4503e968d95e5f51": [
+    "Permission lasts for this provider turn.",
+    " ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    "."
+  ],
+  "a4af7a00a45bc9c5": "This provider request can be answered in the app only.",
+  "d95261826c04b43c": "The previous response was withheld before handoff. This is a fresh request.",
+  "8c59ff3ebad7c41e": "Create an approval-capable agent code. The agent sign-in must separately opt in, and each request still needs consent for its exact permission and duration.",
+  "ae005b04821fce18": [
+    "Let agents here work on your other machines, and theirs here. Your LAN fleet keeps this on and links its machines for you, at the access set in",
+    " ",
+    {
+      "t": "Link",
+      "i": 1,
+      "c": "Connections"
+    },
+    "."
+  ],
+  "ce678e12c1936278": [
+    "Let agents here work on your other machines, and theirs here. Turn it on for each machine, then link them in",
+    " ",
+    {
+      "t": "Link",
+      "i": 1,
+      "c": "Connections"
+    },
+    ". While it is off, nothing new starts over a link; tasks already running finish."
+  ],
+  "fa46618904c83452": "Request approval permission using a deliberately approval-capable pairing code. The destination owner must separately bind this new sign-in and enable its policy.",
+  "79b354b998f39d05": "Check Fork Updates",
+  "a79278b6a691f225": "Fork release",
+  "4e9658de4ee77446": "Review the release, then use the Hub update workflow.",
+  "505c7f120afaaf2c": "Who this device belongs to. Threads you start here are yours, and the sidebar's Mine filter shows them.",
+  "a8d2e39cd4eaaf2b": "Reset task owner",
+  "718eb599fb6df4fa": "I am",
+  "7f7a63a158602ae8": "With multiple machines connected, group active threads by machine. Pinned threads stay at the top, and drag reordering is off while grouped. Unavailable in the boring sidebar.",
+  "d61bd5d7c98bcdbf": "Reset thread grouping",
+  "e12cdd8347c2574b": "Release Notes",
+  "0aa437db8b35ac6d": "Go to threads (client fork build {version})",
+  "b4d41374522dea06": "Checked",
+  "57bef5ebb6e70d46": "{duration} ago",
+  "678f6c6fc8673fc4": " · may be out of date"
 }

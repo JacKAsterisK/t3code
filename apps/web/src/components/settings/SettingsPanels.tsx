@@ -369,8 +369,8 @@ function AboutVersionSection() {
       />
       {isLanDistribution && updateState?.forkRelease ? (
         <SettingsRow
-          title="Fork release"
-          description="Review the release, then use the Hub update workflow."
+          title={gt("Fork release")}
+          description={gt("Review the release, then use the Hub update workflow.")}
           control={
             <Button
               size="sm"
@@ -380,7 +380,7 @@ function AboutVersionSection() {
                 if (url) void window.desktopBridge?.openExternal(url);
               }}
             >
-              Release Notes
+              <T>Release Notes</T>
             </Button>
           }
         />
@@ -866,6 +866,7 @@ function AutoSettleDaysInput({
 const MACHINE_DEFAULT_OWNER = "machine-default";
 
 function TaskOwnerSelfRow() {
+  const gt = useGT();
   const searchableSetting = useSearchableSetting();
   const taskOwnerSelf = useScopedSettings((settings) => settings.taskOwnerSelf);
   const updateSettings = useUpdateScopedSettings();
@@ -879,11 +880,13 @@ function TaskOwnerSelfRow() {
   return (
     <SettingsRow
       {...searchableSetting("task-owner-self")}
-      description="Who this device belongs to. Threads you start here are yours, and the sidebar's Mine filter shows them."
+      description={gt(
+        "Who this device belongs to. Threads you start here are yours, and the sidebar's Mine filter shows them.",
+      )}
       resetAction={
         taskOwnerSelf !== DEFAULT_UNIFIED_SETTINGS.taskOwnerSelf ? (
           <SettingResetButton
-            ariaLabel="Reset task owner"
+            ariaLabel={gt("Reset task owner")}
             onClick={() =>
               updateSettings({ taskOwnerSelf: DEFAULT_UNIFIED_SETTINGS.taskOwnerSelf })
             }
@@ -898,7 +901,7 @@ function TaskOwnerSelfRow() {
             updateSettings({ taskOwnerSelf: next === MACHINE_DEFAULT_OWNER ? "" : next });
           }}
         >
-          <SelectTrigger size="sm" className="w-full sm:w-44" aria-label="I am">
+          <SelectTrigger size="sm" className="w-full sm:w-44" aria-label={gt("I am")}>
             <SelectValue>{taskOwnerSelf ? nameOf(taskOwnerSelf) : defaultLabel}</SelectValue>
           </SelectTrigger>
           <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -1061,11 +1064,13 @@ export function GeneralSettingsPanel() {
         />
         <SettingsRow
           {...setting("thread-grouping")}
-          description="With multiple machines connected, group active threads by machine. Pinned threads stay at the top, and drag reordering is off while grouped. Unavailable in the boring sidebar."
+          description={gt(
+            "With multiple machines connected, group active threads by machine. Pinned threads stay at the top, and drag reordering is off while grouped. Unavailable in the boring sidebar.",
+          )}
           resetAction={
             settings.sidebarThreadGrouping !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadGrouping ? (
               <SettingResetButton
-                ariaLabel="Reset thread grouping"
+                ariaLabel={gt("Reset thread grouping")}
                 onClick={() =>
                   updateSettings({
                     sidebarThreadGrouping: DEFAULT_UNIFIED_SETTINGS.sidebarThreadGrouping,
@@ -1080,7 +1085,7 @@ export function GeneralSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ sidebarThreadGrouping: checked ? "machine" : "none" })
               }
-              aria-label="Group threads by machine"
+              aria-label={gt("Group threads by machine")}
             />
           }
         />

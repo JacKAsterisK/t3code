@@ -441,11 +441,13 @@ function LinkRequestSheet(props: {
             )}
             <View className="gap-2">
               <Text className="text-sm text-foreground">
-                Request approval permission with an approval-capable pairing code. The destination
-                owner must separately bind the new sign-in.
+                <T>
+                  Request approval permission with an approval-capable pairing code. The destination
+                  owner must separately bind the new sign-in.
+                </T>
               </Text>
               <Switch
-                accessibilityLabel="Request approval permission"
+                accessibilityLabel={gt("Request approval permission")}
                 value={approvals && access !== "read-only"}
                 disabled={busy || access === "read-only"}
                 onValueChange={setApprovals}

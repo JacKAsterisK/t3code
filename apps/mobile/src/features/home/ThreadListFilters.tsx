@@ -91,14 +91,18 @@ export function ThreadListFilters(props: {
       />
       {props.environments.length >= 2 ? (
         <ListFilterMenu
-          label={threadGrouping === "machine" ? "By machine" : "No grouping"}
-          accessibilityLabel="Group threads"
+          label={threadGrouping === "machine" ? gt("By machine") : gt("No grouping")}
+          accessibilityLabel={gt("Group threads")}
           active={threadGrouping === "machine"}
           actions={[
-            { id: "none", title: "No grouping", state: threadGrouping === "none" ? "on" : "off" },
+            {
+              id: "none",
+              title: gt("No grouping"),
+              state: threadGrouping === "none" ? "on" : "off",
+            },
             {
               id: "machine",
-              title: "Group by machine",
+              title: gt("Group by machine"),
               state: threadGrouping === "machine" ? "on" : "off",
             },
           ]}

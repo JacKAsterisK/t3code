@@ -233,8 +233,8 @@ export function WorkingSectionSettings() {
         {environments.length > 1 || groupedByMachine ? (
           <SettingsSwitchRow
             icon="desktopcomputer"
-            label="Group by machine"
-            subtitle="List active threads under the machine they run on."
+            label={gt("Group by machine")}
+            subtitle={gt("List active threads under the machine they run on.")}
             value={groupedByMachine}
             onValueChange={(value) =>
               savePreferences({ threadListGrouping: value ? "machine" : "none" })

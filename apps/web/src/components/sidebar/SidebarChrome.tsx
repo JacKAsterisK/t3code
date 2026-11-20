@@ -172,7 +172,9 @@ function SidebarBrand({ onBackdrop }: { onBackdrop: boolean }) {
   const gt = useGT();
   return (
     <Link
-      aria-label={`Go to threads (client fork build ${CLIENT_FORK_BUILD_VERSION})`}
+      aria-label={gt("Go to threads (client fork build {version})", {
+        version: CLIENT_FORK_BUILD_VERSION,
+      })}
       className={cn(
         "relative z-10 ml-[var(--workspace-titlebar-content-left)] hidden h-7 w-fit min-w-0 shrink-0 items-center overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2 focus-visible:ring-inset md:flex",
         onBackdrop ? "text-white" : "text-foreground",

@@ -842,8 +842,10 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
                   onCheckedChange={(checked) => setApprovalGrant(checked === true)}
                 />
                 <span>
-                  Create an approval-capable agent code. The agent sign-in must separately opt in,
-                  and each request still needs consent for its exact permission and duration.
+                  <T>
+                    Create an approval-capable agent code. The agent sign-in must separately opt in,
+                    and each request still needs consent for its exact permission and duration.
+                  </T>
                 </span>
               </label>
               {selectedScopes.length === 0 ? (

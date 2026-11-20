@@ -235,7 +235,7 @@ export function buildThreadActionMenuItems(
       ? [
           {
             id: "owner" as const,
-            label: "Assign to…",
+            label: resolve(msg("Assign to…")),
             icon: "user",
             children: state.owner.users.map((user) => ({
               id: `owner:${user.id}` as const,

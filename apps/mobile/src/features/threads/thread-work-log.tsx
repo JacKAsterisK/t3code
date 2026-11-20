@@ -987,19 +987,28 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
         </Text>
         {failureItem.approval ? (
           <Text selectable className="font-mono text-xs text-foreground-secondary">
-            Permission lasts for this provider turn. {failureItem.approval.grant.expiresWhen}.{" "}
+            {gt("Permission lasts for this provider turn. {expiresWhen}.", {
+              expiresWhen: failureItem.approval.grant.expiresWhen,
+            })}{" "}
             {JSON.stringify(failureItem.approval.grant.permission, null, 2)}
           </Text>
         ) : null}
         {failureItem.resolvedBy ? (
           <Text className="font-sans text-xs text-foreground-secondary">
-            Submitted by {failureItem.resolvedBy.label}, an authenticated{" "}
-            {failureItem.resolvedBy.kind === "mcp_client" ? "agent" : "user"} session.
+            {failureItem.resolvedBy.kind === "mcp_client"
+              ? gt("Submitted by {label}, an authenticated agent session.", {
+                  label: failureItem.resolvedBy.label,
+                })
+              : gt("Submitted by {label}, an authenticated user session.", {
+                  label: failureItem.resolvedBy.label,
+                })}
           </Text>
         ) : null}
         {failureItem.resolvedBy?.assertion ? (
           <Text className="font-sans text-xs text-foreground-secondary">
-            Agent assertion: for {failureItem.resolvedBy.assertion.onBehalfOf}.{" "}
+            {gt("Agent assertion: for {name}.", {
+              name: failureItem.resolvedBy.assertion.onBehalfOf,
+            })}{" "}
             {failureItem.resolvedBy.assertion.authorization}
           </Text>
         ) : null}

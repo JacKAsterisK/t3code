@@ -108,7 +108,7 @@ export function manualServerUpdateCommand(
   targetVersion: string,
   installation?: ServerInstallation,
 ): string {
-  if (!nativeUpdatesEnabled) return "Use the Hub update workflow for T3 Code LAN.";
+  if (!nativeUpdatesEnabled) return m(msg("Use the Hub update workflow for T3 Code LAN."));
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   if (installation?.kind === "npm-global") {
     return `npm install --global --prefix ${quote(installation.prefix)} t3@${targetVersion}`;

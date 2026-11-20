@@ -135,7 +135,11 @@ function PairingSteps() {
     <>
       <SetupStep number={1}>
         {isLanDistribution ? (
-          <p>Open T3 Code LAN on the approved computer and create a pairing link in Connections.</p>
+          <p>
+            <T>
+              Open T3 Code LAN on the approved computer and create a pairing link in Connections.
+            </T>
+          </p>
         ) : (
           <RunOnComputer command="t3 pair" />
         )}
@@ -186,7 +190,9 @@ function RunOnComputer({ command }: { readonly command: string }) {
           <T>Or download the desktop app</T>
         </a>
       ) : (
-        <p>Install T3 Code LAN through the Hub.</p>
+        <p>
+          <T>Install T3 Code LAN through the Hub.</T>
+        </p>
       )}
     </>
   );

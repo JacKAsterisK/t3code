@@ -449,8 +449,10 @@ function LinkRequestDialog(props: {
                         onCheckedChange={(checked) => setApprovals(checked === true)}
                       />
                       <span>
-                        Request approval permission with an approval-capable pairing code. The
-                        destination owner must separately bind the new sign-in.
+                        <T>
+                          Request approval permission with an approval-capable pairing code. The
+                          destination owner must separately bind the new sign-in.
+                        </T>
                       </span>
                     </label>
                   </>

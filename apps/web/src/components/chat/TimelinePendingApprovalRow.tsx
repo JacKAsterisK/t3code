@@ -2,7 +2,7 @@ import {
   FULL_ACCESS_OVERRIDE_QUESTION,
   fullAccessOverrideExplanation,
 } from "@t3tools/client-runtime/state/thread-requests";
-import { msg, T, useMessages } from "gt-react";
+import { msg, T, useMessages, Var } from "gt-react";
 import { ShieldIcon } from "lucide-react";
 import { memo, use } from "react";
 import { type PendingApproval } from "../../session-logic";
@@ -81,7 +81,10 @@ export const TimelinePendingApprovalRow = memo(function TimelinePendingApprovalR
         {approval.approval ? (
           <div className="space-y-1">
             <span>
-              Permission lasts for this provider turn. {approval.approval.grant.expiresWhen}.
+              <T>
+                Permission lasts for this provider turn.{" "}
+                <Var>{approval.approval.grant.expiresWhen}</Var>.
+              </T>
             </span>
             <pre className="max-h-64 overflow-auto whitespace-pre-wrap select-text">
               {JSON.stringify(approval.approval.grant.permission, null, 2)}
@@ -89,12 +92,12 @@ export const TimelinePendingApprovalRow = memo(function TimelinePendingApprovalR
           </div>
         ) : (
           <span className="text-muted-foreground">
-            This provider request can be answered in the app only.
+            <T>This provider request can be answered in the app only.</T>
           </span>
         )}
         {approval.approvalDelivery === "delivery_withheld" ? (
           <span className="text-warning">
-            The previous response was withheld before handoff. This is a fresh request.
+            <T>The previous response was withheld before handoff. This is a fresh request.</T>
           </span>
         ) : null}
         {approval.reason ? (

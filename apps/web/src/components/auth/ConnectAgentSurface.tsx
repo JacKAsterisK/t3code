@@ -282,14 +282,14 @@ export function McpConsent({
         title={gt("Connect {app}", { app: details.clientName })}
         description={
           details.taskOnly ? (
-            <>
+            <T>
               This agent wants task access allowed by this environment's machine and project policy
               on{" "}
               <span className="font-medium text-foreground">
-                {environmentLabel ?? details.environmentHost}
+                <Var>{environmentLabel ?? details.environmentHost}</Var>
               </span>
-              {environmentLabel ? ` (${details.environmentHost})` : null}.
-            </>
+              <Var>{environmentLabel ? ` (${details.environmentHost})` : ""}</Var>.
+            </T>
           ) : environmentLabel ? (
             <T>
               This agent wants to use the threads in every project on{" "}
@@ -311,9 +311,11 @@ export function McpConsent({
       />
       {details.renewable ? (
         <p className="mt-2 text-sm text-muted-foreground">
-          Approval lets this agent renew task access for up to 90 days. You can revoke it in
-          Connections. Other environment tools are blocked, and a new approval is required after 90
-          days.
+          <T>
+            Approval lets this agent renew task access for up to 90 days. You can revoke it in
+            Connections. Other environment tools are blocked, and a new approval is required after
+            90 days.
+          </T>
         </p>
       ) : null}
       <dl className="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-sm">
@@ -433,14 +435,19 @@ export function McpConsent({
               disabled={pending !== null}
             />
             <span>
-              Also let this agent answer permission requests. Each approval must name the permission
-              and its duration. Broader permissions require my explicit consent for that request.
+              <T>
+                Also let this agent answer permission requests. Each approval must name the
+                permission and its duration. Broader permissions require my explicit consent for
+                that request.
+              </T>
             </span>
           </label>
         ) : null}
         <p className="text-xs text-muted-foreground">
-          Signing in without this permission removes earlier approval permission for this
-          application under your consenting authority. Other access stays available.
+          <T>
+            Signing in without this permission removes earlier approval permission for this
+            application under your consenting authority. Other access stays available.
+          </T>
         </p>
 
         {errorMessage ? (

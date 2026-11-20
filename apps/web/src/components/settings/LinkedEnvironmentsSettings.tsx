@@ -437,8 +437,10 @@ function LinkEnvironmentAction({ environmentId }: { readonly environmentId: Envi
                 onCheckedChange={(checked) => setApprovals(checked === true)}
               />
               <span>
-                Request approval permission using a deliberately approval-capable pairing code. The
-                destination owner must separately bind this new sign-in and enable its policy.
+                <T>
+                  Request approval permission using a deliberately approval-capable pairing code.
+                  The destination owner must separately bind this new sign-in and enable its policy.
+                </T>
               </span>
             </label>
           </form>

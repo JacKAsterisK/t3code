@@ -3784,7 +3784,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onPaste={onComposerPasteStable}
                     placeholder={
                       !canOperateThread
-                        ? "Read only: you can view this thread but not send to it."
+                        ? gt("Read only: you can view this thread but not send to it.")
                         : isComposerApprovalState
                           ? activePendingApproval?.supportsFeedback
                             ? gt("Send feedback to decline this request")

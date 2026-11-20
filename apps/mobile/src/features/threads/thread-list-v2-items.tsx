@@ -444,33 +444,33 @@ export const ThreadListV2MachineHeader = memo(function ThreadListV2MachineHeader
     <View className={cn("mb-1.5 mt-4 flex-row items-center gap-2", sidebarPane ? "px-3" : "px-5")}>
       <Menu
         actions={[
-          ...(onNewTask ? [{ id: "new-task", title: "New task", image: "plus" }] : []),
+          ...(onNewTask ? [{ id: "new-task", title: gt("New task"), image: "plus" }] : []),
           {
             id: "top",
-            title: "Move to top",
+            title: gt("Move to top"),
             image: "arrow.up.circle",
             attributes: { disabled: !props.canMoveUp },
           },
           {
             id: "up",
-            title: "Move up",
+            title: gt("Move up"),
             image: "arrow.up",
             attributes: { disabled: !props.canMoveUp },
           },
           {
             id: "down",
-            title: "Move down",
+            title: gt("Move down"),
             image: "arrow.down",
             attributes: { disabled: !props.canMoveDown },
           },
           {
             id: "bottom",
-            title: "Move to bottom",
+            title: gt("Move to bottom"),
             image: "arrow.down.circle",
             attributes: { disabled: !props.canMoveDown },
           },
           ...(onResetOrder
-            ? [{ id: "reset-order", title: "Reset machine order", image: "arrow.clockwise" }]
+            ? [{ id: "reset-order", title: gt("Reset machine order"), image: "arrow.clockwise" }]
             : []),
         ]}
         onPressAction={handleMenuAction}
@@ -490,7 +490,11 @@ export const ThreadListV2MachineHeader = memo(function ThreadListV2MachineHeader
           ]
             .filter(Boolean)
             .join(", ")}
-          accessibilityHint={`${props.collapsed ? "Expands" : "Collapses"} this machine's threads. Long press to reorder machines.`}
+          accessibilityHint={
+            props.collapsed
+              ? gt("Expands this machine's threads. Long press to reorder machines.")
+              : gt("Collapses this machine's threads. Long press to reorder machines.")
+          }
           accessibilityState={{ disabled: props.disabled, expanded: !props.collapsed }}
           className="min-h-[32px] flex-row items-center gap-2"
           disabled={props.disabled}
@@ -537,7 +541,7 @@ export const ThreadListV2MachineHeader = memo(function ThreadListV2MachineHeader
           // Padding cancelled by negative margin grows the touch target without moving the icon.
           className="-m-2 p-2"
           accessibilityRole="button"
-          accessibilityLabel={`New task on ${props.label}`}
+          accessibilityLabel={gt("New task on {machine}", { machine: props.label })}
           onPress={props.onNewTask}
           style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}
         >
@@ -1663,7 +1667,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           <Pressable
             className="-m-2.5 flex-row items-center gap-1 p-2.5"
             accessibilityRole="button"
-            accessibilityLabel="Dismiss Woke notification"
+            accessibilityLabel={gt("Dismiss Woke notification")}
             onPress={handleAcknowledgeWoke}
             onLongPress={() => undefined}
             style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}
@@ -1683,7 +1687,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                 selected ? selectedThreadRowColors.foregroundClassName : "text-warning-foreground",
               )}
             >
-              Woke
+              <T>Woke</T>
             </Text>
           </Pressable>
         ) : statusLabel ? (

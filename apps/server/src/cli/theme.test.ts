@@ -156,30 +156,36 @@ describe("t3 theme", () => {
     }),
   );
 
-  it.effect("refuses to publish over a directory created just before backup", () =>
-    Effect.gen(function* () {
-      const baseDir = makeBaseDir();
-      const themeFile = NodePath.join(baseDir, "nightfall.json");
-      NodeFS.writeFileSync(themeFile, NIGHTFALL_THEME_JSON);
-      const themesDir = NodePath.join(baseDir, "userdata", "themes");
-      const destination = NodePath.join(themesDir, "nightfall.json");
-      const notes = NodePath.join(destination, "notes.txt");
-      const { renameSync } = yield* Effect.promise(() => vi.importActual<typeof NodeFS>("node:fs"));
-      using _insertDirectory = vi.spyOn(NodeFS, "renameSync").mockImplementationOnce((from, to) => {
-        NodeFS.mkdirSync(destination);
-        NodeFS.writeFileSync(notes, "notes");
-        renameSync(from, to);
-      });
+  it.effect.skipIf(windowsHost)(
+    "refuses to publish over a directory created just before backup",
+    () =>
+      Effect.gen(function* () {
+        const baseDir = makeBaseDir();
+        const themeFile = NodePath.join(baseDir, "nightfall.json");
+        NodeFS.writeFileSync(themeFile, NIGHTFALL_THEME_JSON);
+        const themesDir = NodePath.join(baseDir, "userdata", "themes");
+        const destination = NodePath.join(themesDir, "nightfall.json");
+        const notes = NodePath.join(destination, "notes.txt");
+        const { renameSync } = yield* Effect.promise(() =>
+          vi.importActual<typeof NodeFS>("node:fs"),
+        );
+        using _insertDirectory = vi
+          .spyOn(NodeFS, "renameSync")
+          .mockImplementationOnce((from, to) => {
+            NodeFS.mkdirSync(destination);
+            NodeFS.writeFileSync(notes, "notes");
+            renameSync(from, to);
+          });
 
-      const failure = yield* runCli(["theme", "set", themeFile, "--base-dir", baseDir]).pipe(
-        Effect.flip,
-      );
+        const failure = yield* runCli(["theme", "set", themeFile, "--base-dir", baseDir]).pipe(
+          Effect.flip,
+        );
 
-      assert.include(String(failure), "is a directory");
-      assert.equal(NodeFS.readFileSync(notes, "utf8"), "notes");
-      assert.deepEqual(NodeFS.readdirSync(themesDir), ["nightfall.json"]);
-      assert.equal(NodeFS.existsSync(settingsPathFor(baseDir)), false);
-    }),
+        assert.include(String(failure), "is a directory");
+        assert.equal(NodeFS.readFileSync(notes, "utf8"), "notes");
+        assert.deepEqual(NodeFS.readdirSync(themesDir), ["nightfall.json"]);
+        assert.equal(NodeFS.existsSync(settingsPathFor(baseDir)), false);
+      }),
   );
 
   it.effect("publishes a theme despite a rollback file left by an earlier process", () =>

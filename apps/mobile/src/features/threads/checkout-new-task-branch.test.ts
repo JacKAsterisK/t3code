@@ -1,3 +1,4 @@
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -23,6 +24,9 @@ beforeEach(async () => {
   );
   cwd = NodePath.join(directory, "project");
   await exec("git", ["init", "-b", "main", cwd]);
+  await git("config", "core.autocrlf", "false");
+  if (HostProcess.Platform.defaultValue() === "win32")
+    await git("config", "core.longpaths", "true");
   await git("config", "user.name", "Branch test");
   await git("config", "user.email", "branch-test@example.com");
   await NodeFSP.writeFile(NodePath.join(cwd, "file.txt"), "main\n");
@@ -69,7 +73,7 @@ const readRefs: CheckoutInput["readRefs"] = (request) =>
     ]);
     const refs = stdout
       .trimEnd()
-      .split("\n")
+      .split(/\r?\n/u)
       .map((line) => {
         const [name = "", path, upstreamRef] = line.split("\t");
         return {
@@ -77,14 +81,15 @@ const readRefs: CheckoutInput["readRefs"] = (request) =>
           current: head.trim() === `refs/heads/${name}`,
           isDefault: name === "main",
           isRemote: false,
-          worktreePath: path || null,
+          worktreePath: path ? NodePath.normalize(path) : null,
           ...(upstreamRef ? { upstreamRef } : {}),
         };
       })
       .filter((ref) => ref.name.includes(input.query ?? ""));
     const cursor = input.cursor ?? 0;
     return {
-      isAtRepositoryRoot: (await NodeFSP.realpath(input.cwd)) === rootPath.trim(),
+      isAtRepositoryRoot:
+        (await NodeFSP.realpath(input.cwd)) === NodePath.normalize(rootPath.trim()),
       refs: refs.slice(cursor, cursor + REF_PAGE_SIZE),
       isRepo: true,
       hasPrimaryRemote: false,

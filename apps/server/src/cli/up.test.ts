@@ -409,7 +409,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer))
           : `--base-dir ${baseDir}`;
       for (const line of input.prints ?? []) {
         expect(lines.join("\n")).toContain(
-          line.replace("--base-dir <baseDir>", baseDirArgs).replace("<baseDir>", baseDir),
+          line
+            .replace("--base-dir <baseDir>", baseDirArgs)
+            .replace("<baseDir>", baseDir)
+            .replace(
+              " --no-lan",
+              HostProcess.Platform.defaultValue() === "win32" ? ' "--no-lan"' : " --no-lan",
+            ),
         );
       }
       if (input.omits !== undefined) {

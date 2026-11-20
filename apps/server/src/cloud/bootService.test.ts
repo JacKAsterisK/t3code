@@ -409,7 +409,10 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
 });
 
 it.layer(NodeServices.layer)("boot service install", (it) => {
-  it.effect(
+  const windowsHost = HostProcess.Platform.defaultValue() === "win32";
+  // The systemd fixtures write POSIX service paths on the real test filesystem.
+  const linuxEffect = it.effect.skipIf(windowsHost);
+  linuxEffect(
     "fails before installing files or validating a runtime when lingering needs an administrator",
     () =>
       Effect.gen(function* () {
@@ -439,7 +442,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       }),
   );
 
-  it.effect(
+  linuxEffect(
     "detects a partial install and preserves the running service when repair lacks permission",
     () =>
       Effect.gen(function* () {
@@ -464,7 +467,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       }),
   );
 
-  it.effect("enables lingering before installing and repairs stopped or disabled services", () =>
+  linuxEffect("enables lingering before installing and repairs stopped or disabled services", () =>
     Effect.gen(function* () {
       const { service, commands, control } = yield* makeHarness();
       control.linger = "no";
@@ -486,25 +489,26 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
   );
 
   // regression: #29881
-  it.effect.each([
-    { logind: "has lingering disabled", linger: "no" },
-    { logind: "does not know the user", linger: undefined },
-  ])(
-    "enables lingering to bring up an unreachable user manager when logind $logind",
-    ({ linger }) =>
-      Effect.gen(function* () {
-        const { service, commands, control } = yield* makeHarness();
-        control.linger = linger;
-        control.managerReachable = false;
+  if (!windowsHost)
+    it.effect.each([
+      { logind: "has lingering disabled", linger: "no" },
+      { logind: "does not know the user", linger: undefined },
+    ])(
+      "enables lingering to bring up an unreachable user manager when logind $logind",
+      ({ linger }) =>
+        Effect.gen(function* () {
+          const { service, commands, control } = yield* makeHarness();
+          control.linger = linger;
+          control.managerReachable = false;
 
-        yield* service.install();
+          yield* service.install();
 
-        expect(commands).toContain("loginctl enable-linger --no-ask-password 501");
-        expect((yield* service.status).current).toBe(true);
-      }),
-  );
+          expect(commands).toContain("loginctl enable-linger --no-ask-password 501");
+          expect((yield* service.status).current).toBe(true);
+        }),
+    );
 
-  it.effect("does not reach a running root user manager under sudo", () =>
+  linuxEffect("does not reach a running root user manager under sudo", () =>
     Effect.gen(function* () {
       const { makeService, commands, control } = yield* makeHarness();
       control.busNeedsRuntimeDir = true;
@@ -518,7 +522,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
     }),
   );
 
-  it.effect("does not enable lingering for root under sudo", () =>
+  linuxEffect("does not enable lingering for root under sudo", () =>
     Effect.gen(function* () {
       const { makeService, commands, control } = yield* makeHarness();
       control.linger = undefined;
@@ -534,7 +538,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
   );
 
   // regression: #29881
-  it.effect("installs into the unit directory of the user manager that lingering starts", () =>
+  linuxEffect("installs into the unit directory of the user manager that lingering starts", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
       const fs = yield* FileSystem.FileSystem;
@@ -558,49 +562,53 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
   );
 
   // regression: #29881
-  it.effect.each([
-    { manager: "starts after three probes", upAfterPauses: 3, pauses: 3 },
-    { manager: "never starts", upAfterPauses: undefined, pauses: 10 },
-  ])(
-    "waits a bounded time for the user manager lingering starts when it $manager",
-    ({ upAfterPauses, pauses }) =>
-      Effect.gen(function* () {
-        const { service, fs, control } = yield* makeHarness();
-        const { unitPath } = yield* service.status;
-        control.linger = "no";
-        control.managerReachable = false;
-        control.lingerStartsManager = false;
-        const clock = yield* Clock.Clock;
-        const waited: number[] = [];
+  if (!windowsHost)
+    it.effect.each([
+      { manager: "starts after three probes", upAfterPauses: 3, pauses: 3 },
+      { manager: "never starts", upAfterPauses: undefined, pauses: 10 },
+    ])(
+      "waits a bounded time for the user manager lingering starts when it $manager",
+      ({ upAfterPauses, pauses }) =>
+        Effect.gen(function* () {
+          const { service, fs, control } = yield* makeHarness();
+          const { unitPath } = yield* service.status;
+          control.linger = "no";
+          control.managerReachable = false;
+          control.lingerStartsManager = false;
+          const clock = yield* Clock.Clock;
+          const waited: number[] = [];
 
-        const result = yield* service.install().pipe(
-          Effect.provideService(Clock.Clock, {
-            ...clock,
-            sleep: (duration) =>
-              Effect.sync(() => {
-                if (waited.push(Duration.toMillis(duration)) === upAfterPauses) {
-                  control.managerReachable = true;
-                }
-              }),
-          }),
-          Effect.result,
-        );
+          const result = yield* service.install().pipe(
+            Effect.provideService(Clock.Clock, {
+              ...clock,
+              sleep: (duration) =>
+                Effect.sync(() => {
+                  if (waited.push(Duration.toMillis(duration)) === upAfterPauses) {
+                    control.managerReachable = true;
+                  }
+                }),
+            }),
+            Effect.result,
+          );
 
-        expect(waited).toEqual(Array.from({ length: pauses }, () => 500));
-        if (upAfterPauses === undefined) {
-          expect(result).toMatchObject({
-            failure: { _tag: "BootServicePrerequisiteError", problem: "user-manager-unavailable" },
-          });
-          expect(yield* fs.exists(unitPath)).toBe(false);
-        } else {
-          expect(result._tag).toBe("Success");
-          expect((yield* service.status).current).toBe(true);
-        }
-      }),
-  );
+          expect(waited).toEqual(Array.from({ length: pauses }, () => 500));
+          if (upAfterPauses === undefined) {
+            expect(result).toMatchObject({
+              failure: {
+                _tag: "BootServicePrerequisiteError",
+                problem: "user-manager-unavailable",
+              },
+            });
+            expect(yield* fs.exists(unitPath)).toBe(false);
+          } else {
+            expect(result._tag).toBe("Success");
+            expect((yield* service.status).current).toBe(true);
+          }
+        }),
+    );
 
   // regression: #29881
-  it.effect("points systemd user commands at the user's runtime directory when none is set", () =>
+  linuxEffect("points systemd user commands at the user's runtime directory when none is set", () =>
     Effect.gen(function* () {
       const { service, invocations, makeService } = yield* makeHarness();
       yield* service.install();
@@ -619,200 +627,193 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
     }),
   );
 
-  it.effect.each([
-    { command: "systemctl --user show-environment", problem: "user-manager-unavailable" },
-    { command: "loginctl show-user 501 --property=Linger --value", problem: "linger-unavailable" },
-  ])("reports failed prerequisite probes without installing: $command", ({ command, problem }) =>
-    Effect.gen(function* () {
-      const { service, fs, statePath, control } = yield* makeHarness();
-      control.failCommand = command;
-      expect(yield* service.install().pipe(Effect.flip)).toMatchObject({
-        _tag: "BootServicePrerequisiteError",
-        problem,
-      });
-      expect(yield* fs.exists(statePath)).toBe(false);
-    }),
-  );
-
-  it.effect.each(["linux", "darwin"] as const)(
-    "preserves the custom install bin directory in the installed service on %s",
-    (platform) =>
+  if (!windowsHost)
+    it.effect.each([
+      { command: "systemctl --user show-environment", problem: "user-manager-unavailable" },
+      {
+        command: "loginctl show-user 501 --property=Linger --value",
+        problem: "linger-unavailable",
+      },
+    ])("reports failed prerequisite probes without installing: $command", ({ command, problem }) =>
       Effect.gen(function* () {
-        const installBinDir = '/custom/T3\t& <100%>/"quoted"\\bin';
-        const { service, makeService, fs } = yield* makeHarness(
-          platform,
-          "",
-          undefined,
-          undefined,
-          installBinDir,
-        );
-        const plan = yield* service.install();
-        const unit = yield* fs.readFileString(plan.unitPath);
-        expect(unit).toContain(
-          platform === "linux"
-            ? 'Environment=T3CODE_INSTALL_BIN_DIR="/custom/T3\t& <100%%>/\\"quoted\\"\\\\bin"'
-            : '<key>T3CODE_INSTALL_BIN_DIR</key>\n    <string>/custom/T3\t&amp; &lt;100%&gt;/"quoted"\\bin</string>',
-        );
-        expect((yield* service.status).current).toBe(true);
-
-        const ordinaryCli = yield* makeService(
-          "",
-          "1.2.3",
-          undefined,
-          false,
-          undefined,
-          false,
-          null,
-        );
-        expect((yield* ordinaryCli.status).current).toBe(true);
-        expect((yield* ordinaryCli.install()).installBinDir).toBe(installBinDir);
-        expect(yield* fs.readFileString(plan.unitPath)).toBe(unit);
-
-        const updatedCli = yield* makeService(
-          "",
-          "1.2.4",
-          undefined,
-          false,
-          undefined,
-          false,
-          null,
-        );
-        expect((yield* updatedCli.install({ start: false })).installBinDir).toBe(installBinDir);
-        expect(yield* fs.readFileString(plan.unitPath)).toBe(unit.replaceAll("1.2.3", "1.2.4"));
-
-        const replacementCli = yield* makeService(
-          "",
-          "1.2.4",
-          undefined,
-          false,
-          undefined,
-          false,
-          "/replacement/bin",
-        );
-        expect((yield* replacementCli.status).current).toBe(false);
-        expect((yield* replacementCli.install()).installBinDir).toBe("/replacement/bin");
-        const laterCli = yield* makeService("", "1.2.4", undefined, false, undefined, false, "");
-        expect((yield* laterCli.status).current).toBe(true);
-        expect((yield* laterCli.install()).installBinDir).toBe("/replacement/bin");
+        const { service, fs, statePath, control } = yield* makeHarness();
+        control.failCommand = command;
+        expect(yield* service.install().pipe(Effect.flip)).toMatchObject({
+          _tag: "BootServicePrerequisiteError",
+          problem,
+        });
+        expect(yield* fs.exists(statePath)).toBe(false);
       }),
-  );
+    );
 
-  it.effect.each([
-    "unset",
-    "empty",
-    "relative",
-    "relocated",
-    "shell-only",
-    "manager-only",
-    "manager-unavailable",
-  ] as const)("installs, discovers, restarts, and uninstalls with $XDG_CONFIG_HOME %s", (setting) =>
+  it.effect.each(
+    (["linux", "darwin"] as const).filter((platform) => !windowsHost || platform !== "linux"),
+  )("preserves the custom install bin directory in the installed service on %s", (platform) =>
     Effect.gen(function* () {
-      const path = yield* Path.Path;
-      const fs = yield* FileSystem.FileSystem;
-      const configRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-xdg-config-" });
-      const xdgConfigHome = {
-        unset: undefined,
-        empty: "",
-        relative: "relative-config",
-        relocated: path.join(configRoot, "config root"),
-        "shell-only": path.join(configRoot, "config root"),
-        "manager-only": undefined,
-        "manager-unavailable": path.join(configRoot, "config root"),
-      }[setting];
-      const managerXdgConfigHome =
-        setting === "shell-only"
-          ? ""
-          : setting === "manager-only"
-            ? path.join(configRoot, "config root")
-            : undefined;
-      const { service, makeService, home, statePath, timeouts, runtime, control } =
-        yield* makeHarness("linux", undefined, xdgConfigHome, managerXdgConfigHome);
-      const unitPath = path.join(
-        setting === "relocated" || setting === "manager-only" || setting === "manager-unavailable"
-          ? path.join(configRoot, "config root")
-          : path.join(home, ".config"),
-        "systemd",
-        "user",
-        "t3code.service",
+      const installBinDir = '/custom/T3\t& <100%>/"quoted"\\bin';
+      const { service, makeService, fs } = yield* makeHarness(
+        platform,
+        "",
+        undefined,
+        undefined,
+        installBinDir,
       );
-      expect(yield* service.status).toMatchObject({ installed: false, unitPath });
       const plan = yield* service.install();
-      expect(plan.unitPath).toBe(unitPath);
-      if (setting === "manager-unavailable") {
-        control.failCommand =
-          "busctl --user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager UnitPath";
-      }
-      const discoveredService = yield* makeService();
+      const unit = yield* fs.readFileString(plan.unitPath);
+      expect(unit).toContain(
+        platform === "linux"
+          ? 'Environment=T3CODE_INSTALL_BIN_DIR="/custom/T3\t& <100%%>/\\"quoted\\"\\\\bin"'
+          : '<key>T3CODE_INSTALL_BIN_DIR</key>\n    <string>/custom/T3\t&amp; &lt;100%&gt;/"quoted"\\bin</string>',
+      );
+      expect((yield* service.status).current).toBe(true);
 
-      expect(parseServiceState(yield* fs.readFileString(statePath))).toEqual({
-        protocol: SERVICE_LAUNCHER_PROTOCOL,
-        activeVersion: "1.2.3",
-      });
-      expect(plan.program).toEqual([runtime.entryPath, "__service-launcher"]);
-      expect(yield* fs.readFileString(plan.unitPath)).not.toContain("T3CODE_INSTALL_BIN_DIR");
-      expect(BootService.bootServiceProgramOf(yield* fs.readFileString(plan.unitPath))).toBe(
-        runtime.entryPath,
+      const ordinaryCli = yield* makeService("", "1.2.3", undefined, false, undefined, false, null);
+      expect((yield* ordinaryCli.status).current).toBe(true);
+      expect((yield* ordinaryCli.install()).installBinDir).toBe(installBinDir);
+      expect(yield* fs.readFileString(plan.unitPath)).toBe(unit);
+
+      const updatedCli = yield* makeService("", "1.2.4", undefined, false, undefined, false, null);
+      expect((yield* updatedCli.install({ start: false })).installBinDir).toBe(installBinDir);
+      expect(yield* fs.readFileString(plan.unitPath)).toBe(unit.replaceAll("1.2.3", "1.2.4"));
+
+      const replacementCli = yield* makeService(
+        "",
+        "1.2.4",
+        undefined,
+        false,
+        undefined,
+        false,
+        "/replacement/bin",
       );
-      expect(yield* service.status).toMatchObject({
-        current: true,
-        installedVersion: "1.2.3",
-      });
-      expect(yield* discoveredService.status).toMatchObject({
-        installed: true,
-        current: true,
-        unitPath,
-      });
-      expect(yield* discoveredService.restart).toBe("restarted");
-      const pendingState = JSON.stringify({
-        protocol: SERVICE_LAUNCHER_PROTOCOL,
-        activeVersion: "1.2.3",
-        update: {
-          id: "u",
-          fromVersion: "1.2.3",
-          targetVersion: "1.2.4",
-          dbPath: "/tmp/state.sqlite",
-          status: "pending",
-        },
-      });
-      yield* fs.writeFileString(statePath, pendingState);
-      expect((yield* service.status).current).toBe(false);
-      expect(yield* discoveredService.uninstall).toBe(true);
-      expect(yield* fs.exists(unitPath)).toBe(false);
-      expect((yield* discoveredService.status).installed).toBe(false);
-      // systemd can take 90s to stop, exceeding the runner's 60s default.
-      expect(timeouts.get("systemctl --user disable --now t3code.service")).toEqual(
-        Duration.seconds(120),
-      );
+      expect((yield* replacementCli.status).current).toBe(false);
+      expect((yield* replacementCli.install()).installBinDir).toBe("/replacement/bin");
+      const laterCli = yield* makeService("", "1.2.4", undefined, false, undefined, false, "");
+      expect((yield* laterCli.status).current).toBe(true);
+      expect((yield* laterCli.install()).installBinDir).toBe("/replacement/bin");
     }),
   );
 
-  it.effect.each(["linux", "darwin"] as const)(
-    "reports the installed version across launcher protocols on %s",
-    (platform) =>
-      Effect.gen(function* () {
-        const { service, fs, statePath } = yield* makeHarness(platform);
-        yield* service.install();
-
-        for (const protocol of [SERVICE_LAUNCHER_PROTOCOL - 1, SERVICE_LAUNCHER_PROTOCOL + 1]) {
-          yield* fs.writeFileString(
-            statePath,
-            `{"protocol":${protocol},"activeVersion":"1.2.4-nightly.1","update":{"status":"unknown"}}`,
+  if (!windowsHost)
+    it.effect.each([
+      "unset",
+      "empty",
+      "relative",
+      "relocated",
+      "shell-only",
+      "manager-only",
+      "manager-unavailable",
+    ] as const)(
+      "installs, discovers, restarts, and uninstalls with $XDG_CONFIG_HOME %s",
+      (setting) =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fs = yield* FileSystem.FileSystem;
+          const configRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-xdg-config-" });
+          const xdgConfigHome = {
+            unset: undefined,
+            empty: "",
+            relative: "relative-config",
+            relocated: path.join(configRoot, "config root"),
+            "shell-only": path.join(configRoot, "config root"),
+            "manager-only": undefined,
+            "manager-unavailable": path.join(configRoot, "config root"),
+          }[setting];
+          const managerXdgConfigHome =
+            setting === "shell-only"
+              ? ""
+              : setting === "manager-only"
+                ? path.join(configRoot, "config root")
+                : undefined;
+          const { service, makeService, home, statePath, timeouts, runtime, control } =
+            yield* makeHarness("linux", undefined, xdgConfigHome, managerXdgConfigHome);
+          const unitPath = path.join(
+            setting === "relocated" ||
+              setting === "manager-only" ||
+              setting === "manager-unavailable"
+              ? path.join(configRoot, "config root")
+              : path.join(home, ".config"),
+            "systemd",
+            "user",
+            "t3code.service",
           );
-          expect(yield* service.status).toMatchObject({
-            current: false,
-            installedVersion: "1.2.4-nightly.1",
-          });
-          yield* service.install({ allowDowngrade: true });
+          expect(yield* service.status).toMatchObject({ installed: false, unitPath });
+          const plan = yield* service.install();
+          expect(plan.unitPath).toBe(unitPath);
+          if (setting === "manager-unavailable") {
+            control.failCommand =
+              "busctl --user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager UnitPath";
+          }
+          const discoveredService = yield* makeService();
+
           expect(parseServiceState(yield* fs.readFileString(statePath))).toEqual({
             protocol: SERVICE_LAUNCHER_PROTOCOL,
             activeVersion: "1.2.3",
           });
-        }
-      }),
+          expect(plan.program).toEqual([runtime.entryPath, "__service-launcher"]);
+          expect(yield* fs.readFileString(plan.unitPath)).not.toContain("T3CODE_INSTALL_BIN_DIR");
+          expect(BootService.bootServiceProgramOf(yield* fs.readFileString(plan.unitPath))).toBe(
+            runtime.entryPath,
+          );
+          expect(yield* service.status).toMatchObject({
+            current: true,
+            installedVersion: "1.2.3",
+          });
+          expect(yield* discoveredService.status).toMatchObject({
+            installed: true,
+            current: true,
+            unitPath,
+          });
+          expect(yield* discoveredService.restart).toBe("restarted");
+          const pendingState = JSON.stringify({
+            protocol: SERVICE_LAUNCHER_PROTOCOL,
+            activeVersion: "1.2.3",
+            update: {
+              id: "u",
+              fromVersion: "1.2.3",
+              targetVersion: "1.2.4",
+              dbPath: "/tmp/state.sqlite",
+              status: "pending",
+            },
+          });
+          yield* fs.writeFileString(statePath, pendingState);
+          expect((yield* service.status).current).toBe(false);
+          expect(yield* discoveredService.uninstall).toBe(true);
+          expect(yield* fs.exists(unitPath)).toBe(false);
+          expect((yield* discoveredService.status).installed).toBe(false);
+          // systemd can take 90s to stop, exceeding the runner's 60s default.
+          expect(timeouts.get("systemctl --user disable --now t3code.service")).toEqual(
+            Duration.seconds(120),
+          );
+        }),
+    );
+
+  it.effect.each(
+    (["linux", "darwin"] as const).filter((platform) => !windowsHost || platform !== "linux"),
+  )("reports the installed version across launcher protocols on %s", (platform) =>
+    Effect.gen(function* () {
+      const { service, fs, statePath } = yield* makeHarness(platform);
+      yield* service.install();
+
+      for (const protocol of [SERVICE_LAUNCHER_PROTOCOL - 1, SERVICE_LAUNCHER_PROTOCOL + 1]) {
+        yield* fs.writeFileString(
+          statePath,
+          `{"protocol":${protocol},"activeVersion":"1.2.4-nightly.1","update":{"status":"unknown"}}`,
+        );
+        expect(yield* service.status).toMatchObject({
+          current: false,
+          installedVersion: "1.2.4-nightly.1",
+        });
+        yield* service.install({ allowDowngrade: true });
+        expect(parseServiceState(yield* fs.readFileString(statePath))).toEqual({
+          protocol: SERVICE_LAUNCHER_PROTOCOL,
+          activeVersion: "1.2.3",
+        });
+      }
+    }),
   );
 
   // regression: #5302 prevent accidental service downgrades
-  it.effect("reports an unknown version for invalid service state", () =>
+  linuxEffect("reports an unknown version for invalid service state", () =>
     Effect.gen(function* () {
       const { service, fs, statePath } = yield* makeHarness();
       yield* service.install();
@@ -831,48 +832,48 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
     }),
   );
 
-  it.effect.each(["linux", "darwin"] as const)(
-    "preserves a newer version that finishes updating during stop on %s",
-    (platform) =>
-      Effect.gen(function* () {
-        const { service, fs, statePath, commands, control } = yield* makeHarness(platform);
-        const plan = yield* service.install();
-        const unit = yield* fs.readFileString(plan.unitPath);
-        control.stateAfterStop = `{"protocol":${SERVICE_LAUNCHER_PROTOCOL + 1},"activeVersion":"1.2.4"}`;
-        commands.length = 0;
+  it.effect.each(
+    (["linux", "darwin"] as const).filter((platform) => !windowsHost || platform !== "linux"),
+  )("preserves a newer version that finishes updating during stop on %s", (platform) =>
+    Effect.gen(function* () {
+      const { service, fs, statePath, commands, control } = yield* makeHarness(platform);
+      const plan = yield* service.install();
+      const unit = yield* fs.readFileString(plan.unitPath);
+      control.stateAfterStop = `{"protocol":${SERVICE_LAUNCHER_PROTOCOL + 1},"activeVersion":"1.2.4"}`;
+      commands.length = 0;
 
-        const error = yield* service.install().pipe(Effect.flip);
+      const error = yield* service.install().pipe(Effect.flip);
 
-        expect(error).toMatchObject({
-          _tag: "BootServiceDowngradeRefusedError",
-          installedVersion: "1.2.4",
-          targetVersion: "1.2.3",
-        });
-        expect(yield* fs.readFileString(statePath)).toBe(control.stateAfterStop);
-        expect(yield* fs.readFileString(plan.unitPath)).toBe(unit);
-        expect(
-          commands.filter(
-            (command) =>
-              command.startsWith(platform === "linux" ? "systemctl " : "launchctl ") &&
-              !command.includes("show-environment"),
-          ),
-        ).toEqual(
-          platform === "linux"
-            ? [
-                "systemctl --user stop t3code.service",
-                "systemctl --user reset-failed t3code.service",
-                "systemctl --user restart t3code.service",
-              ]
-            : [
-                "launchctl bootout --wait gui/501/com.t3tools.t3code.service",
-                `launchctl bootstrap gui/501 ${plan.unitPath}`,
-              ],
-        );
-      }),
+      expect(error).toMatchObject({
+        _tag: "BootServiceDowngradeRefusedError",
+        installedVersion: "1.2.4",
+        targetVersion: "1.2.3",
+      });
+      expect(yield* fs.readFileString(statePath)).toBe(control.stateAfterStop);
+      expect(yield* fs.readFileString(plan.unitPath)).toBe(unit);
+      expect(
+        commands.filter(
+          (command) =>
+            command.startsWith(platform === "linux" ? "systemctl " : "launchctl ") &&
+            !command.includes("show-environment"),
+        ),
+      ).toEqual(
+        platform === "linux"
+          ? [
+              "systemctl --user stop t3code.service",
+              "systemctl --user reset-failed t3code.service",
+              "systemctl --user restart t3code.service",
+            ]
+          : [
+              "launchctl bootout --wait gui/501/com.t3tools.t3code.service",
+              `launchctl bootstrap gui/501 ${plan.unitPath}`,
+            ],
+      );
+    }),
   );
 
   // regression: #5302 prevent accidental service downgrades
-  it.effect("allows an explicit downgrade", () =>
+  linuxEffect("allows an explicit downgrade", () =>
     Effect.gen(function* () {
       const { service, fs, statePath } = yield* makeHarness();
       yield* service.install();
@@ -888,7 +889,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
     }),
   );
 
-  it.effect("repairs versions with equal SemVer precedence without an override", () =>
+  linuxEffect("repairs versions with equal SemVer precedence without an override", () =>
     Effect.gen(function* () {
       const { service, fs, statePath } = yield* makeHarness();
       yield* service.install();
@@ -903,7 +904,9 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
     }),
   );
 
-  it.effect.each(["linux", "darwin"] as const)(
+  it.effect.each(
+    (["linux", "darwin"] as const).filter((platform) => !windowsHost || platform !== "linux"),
+  )(
     "install with start=false rewrites files, preserves service.env, and marks a restart pending on %s",
     (platform) =>
       Effect.gen(function* () {
@@ -1114,7 +1117,7 @@ process.disconnect();
       }),
   );
 
-  it.effect("install with start=false keeps the marker when a later write fails", () =>
+  linuxEffect("install with start=false keeps the marker when a later write fails", () =>
     Effect.gen(function* () {
       const { service, fs, statePath, makeService } = yield* makeHarness();
       const path = yield* Path.Path;
@@ -1133,7 +1136,7 @@ process.disconnect();
     }),
   );
 
-  it.effect("install with start=false refuses while a remote update is pending", () =>
+  linuxEffect("install with start=false refuses while a remote update is pending", () =>
     Effect.gen(function* () {
       const { service, fs, statePath } = yield* makeHarness();
       yield* service.install();
@@ -1161,7 +1164,7 @@ process.disconnect();
     }),
   );
 
-  it.effect("pauses only this home's running service for maintenance, even when it fails", () =>
+  linuxEffect("pauses only this home's running service for maintenance, even when it fails", () =>
     Effect.gen(function* () {
       const { service, commands, control, makeService } = yield* makeHarness();
       yield* service.install();
@@ -1222,7 +1225,7 @@ process.disconnect();
     }),
   );
 
-  it.effect("restart and install leave a service that serves another T3 home alone", () =>
+  linuxEffect("restart and install leave a service that serves another T3 home alone", () =>
     Effect.gen(function* () {
       const { service, fs, baseDir, commands, makeService } = yield* makeHarness();
       const plan = yield* service.install();
@@ -1251,7 +1254,7 @@ process.disconnect();
     }),
   );
 
-  it.effect("hands the whole install to systemd without changing the running service", () =>
+  linuxEffect("hands the whole install to systemd without changing the running service", () =>
     Effect.gen(function* () {
       const { fs, commands, invocations, control, makeService } = yield* makeHarness();
       const path = yield* Path.Path;
@@ -1300,7 +1303,7 @@ process.disconnect();
     }),
   );
 
-  it.effect(
+  linuxEffect(
     "queues an in-service restart without stopping the caller, even on handoff failure",
     () =>
       Effect.gen(function* () {
@@ -1334,7 +1337,7 @@ process.disconnect();
   );
 
   // regression: #36319
-  it.effect("starts a service whose systemd start limit tripped after repairing it", () =>
+  linuxEffect("starts a service whose systemd start limit tripped after repairing it", () =>
     Effect.gen(function* () {
       const { service, control, makeService } = yield* makeHarness();
       yield* service.install();
@@ -1352,7 +1355,7 @@ process.disconnect();
     }),
   );
 
-  it.effect("restarts an installed service when repair fails", () =>
+  linuxEffect("restarts an installed service when repair fails", () =>
     Effect.gen(function* () {
       const { service, commands, control } = yield* makeHarness();
       yield* service.install();
@@ -1374,7 +1377,7 @@ process.disconnect();
     }),
   );
 
-  it.effect("restarts without overwriting a pending remote update", () =>
+  linuxEffect("restarts without overwriting a pending remote update", () =>
     Effect.gen(function* () {
       const { service, fs, statePath, commands } = yield* makeHarness();
       yield* service.install();

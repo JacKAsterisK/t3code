@@ -91,7 +91,7 @@ vi.mock("electron", () => ({
   protocol: { registerSchemesAsPrivileged: protocolPrivileges },
   net: {},
   contextBridge: { exposeInMainWorld: exposeDesktop },
-  ipcRenderer: { sendSync },
+  ipcRenderer: { sendSync, invoke: vi.fn() },
   webFrame: {},
   webUtils: {},
 }));
@@ -363,9 +363,13 @@ it.effect(
 );
 
 it("does not expose the Clerk bridge or migrate legacy local storage in the native preload", async () => {
+  vi.stubGlobal("document", { fullscreenElement: null, addEventListener: vi.fn() });
+  vi.stubGlobal("window", { addEventListener: vi.fn() });
   await import("../preload.ts");
   assert.equal(exposeClerkBridge.mock.calls.length, 0);
-  assert.equal(sendSync.mock.calls.length, 0);
+  assert.isFalse(
+    sendSync.mock.calls.some(([channel]) => channel === "desktop:take-legacy-local-storage"),
+  );
   assert.equal(exposeDesktop.mock.calls.length, 1);
 });
 

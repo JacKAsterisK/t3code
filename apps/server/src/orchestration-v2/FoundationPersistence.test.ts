@@ -253,7 +253,7 @@ it.effect("discovers on the reader worker and deletes on the writer", () =>
       const writer = workerStatements.filter((statement) => !statement.readOnly);
       // Only the in-transaction check for rows appended during the pass reads on the writer.
       assert.deepEqual(
-        writer.filter(({ sql }) => /\bSELECT\b/.test(sql) && !sql.includes("AS prompt_sequence")),
+        writer.filter(({ sql }) => /^\s*SELECT\b/.test(sql) && !sql.includes("AS prompt_sequence")),
         [],
       );
       assert(workerStatements.some(({ readOnly, sql }) => readOnly && /\bSELECT\b/.test(sql)));

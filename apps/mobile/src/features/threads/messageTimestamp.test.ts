@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, onTestFinished, vi } from "vite-plus/test";
 
 import { createMessageTimeFormatter, formatMessageTimestamp } from "./messageTimestamp";
 
@@ -52,13 +52,20 @@ describe("formatMessageTimestamp", () => {
 });
 
 describe("createMessageTimeFormatter", () => {
-  const now = new Date(2026, 0, 1, 20, 0).getTime();
-
   it("follows the system clock preference over the locale's hour cycle", () => {
+    const previousZone = process.env.TZ;
+    process.env.TZ = "UTC";
+    const now = Date.parse("2026-01-01T20:00:00.000Z");
+    vi.useFakeTimers({ now });
+    onTestFinished(() => {
+      vi.useRealTimers();
+      if (previousZone === undefined) delete process.env.TZ;
+      else process.env.TZ = previousZone;
+    });
     const format24 = createMessageTimeFormatter(true, "en-US");
-    expect(format24(new Date(2026, 0, 1, 15, 7).toISOString(), now)).toBe("15:07");
-    expect(format24(new Date(2026, 0, 1, 0, 7).toISOString(), now)).toBe("00:07");
+    expect(format24("2026-01-01T15:07:00.000Z", now)).toBe("15:07");
+    expect(format24("2026-01-01T00:07:00.000Z", now)).toBe("00:07");
     const format12 = createMessageTimeFormatter(false, "en-GB");
-    expect(format12(new Date(2026, 0, 1, 15, 7).toISOString(), now)).toMatch(/^3:07\spm$/i);
+    expect(format12("2026-01-01T15:07:00.000Z", now)).toMatch(/^3:07\spm$/i);
   });
 });

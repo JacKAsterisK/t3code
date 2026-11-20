@@ -235,14 +235,24 @@ it.effect.each(["localhost", "localhost."])(
     }),
 );
 
-it.effect.each([
-  { case: "a non-loopback destination", host: "192.168.1.20", tunnel: "endpoint" },
-  { case: "no tunnel URL", host: "127.0.0.1", tunnel: "none" },
-  { case: "an unreachable tunnel endpoint", host: "localhost", tunnel: "unreachable" },
-  { case: "another OS user's client", host: "localhost", tunnel: "other-user" },
-  { case: "a TCP row whose client address differs", host: "localhost", tunnel: "moved-client" },
-  { case: "a TCP row whose listener address differs", host: "localhost", tunnel: "moved-listener" },
-] as const)("fails the SOCKS request for $case without dialling locally", ({ host, tunnel }) =>
+it.effect.each(
+  [
+    { case: "a non-loopback destination", host: "192.168.1.20", tunnel: "endpoint" },
+    { case: "no tunnel URL", host: "127.0.0.1", tunnel: "none" },
+    { case: "an unreachable tunnel endpoint", host: "localhost", tunnel: "unreachable" },
+    { case: "another OS user's client", host: "localhost", tunnel: "other-user" },
+    { case: "a TCP row whose client address differs", host: "localhost", tunnel: "moved-client" },
+    {
+      case: "a TCP row whose listener address differs",
+      host: "localhost",
+      tunnel: "moved-listener",
+    },
+  ].filter(
+    (scenario) =>
+      HostProcess.Platform.defaultValue() !== "win32" ||
+      (scenario.tunnel !== "moved-client" && scenario.tunnel !== "moved-listener"),
+  ),
+)("fails the SOCKS request for $case without dialling locally", ({ host, tunnel }) =>
   Effect.gen(function* () {
     const decoy = yield* listenDecoy;
     const endpoint = yield* listenEndpoint;

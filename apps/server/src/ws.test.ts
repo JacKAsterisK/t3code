@@ -976,7 +976,9 @@ it.live.each([
         Layer.mock(ExternalLauncher.ExternalLauncher)({}),
         Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
         Layer.mock(DirectEndpoints.DirectEndpoints)({}),
-        Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+        Layer.mock(ServerEnvironment.ServerEnvironment)({
+          getEnvironmentId: Effect.succeed(EnvironmentId.make("compression-test")),
+        }),
         Layer.mock(VcsProcess.VcsProcess)({
           run: (input) =>
             Effect.fail(
@@ -1005,7 +1007,7 @@ it.live.each([
           Layer.provide(
             Layer.mergeAll(
               ManagedPolicy.layerTest(),
-              Layer.mock(FleetAccessPolicy.FleetAccess)({}),
+              Layer.mock(FleetAccessPolicy.FleetAccess)({ leave: Effect.void }),
             ),
           ),
         ),

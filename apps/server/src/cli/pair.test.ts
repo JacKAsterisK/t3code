@@ -37,7 +37,7 @@ import {
   persistServerRuntimeState,
   type PersistedServerRuntimeState,
 } from "../serverRuntimeState.ts";
-import { resolveHostCliCommand } from "./invocation.ts";
+import { hostShellWord, resolveHostCliCommand } from "./invocation.ts";
 import {
   DevServerNotProxiableError,
   resolveTailscaleLocalTarget,
@@ -500,7 +500,7 @@ describe("t3 pair", () => {
           if (Exit.isFailure(exit)) {
             assert.include(
               String(Cause.squash(exit.cause)),
-              `t3@0.0.45 pair --base-dir ${baseDir}`,
+              `t3@0.0.45 pair --base-dir ${hostShellWord(HostProcess.Platform.defaultValue(), baseDir)}`,
             );
           }
         }),

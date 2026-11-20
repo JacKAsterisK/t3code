@@ -1,3 +1,4 @@
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -20,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 const state = vi.hoisted(() => ({
   scopes: new Set<string>(),
   baseDirectory: "",
+  environmentOs: "linux",
   projects: [] as string[],
   existingProjects: [] as {
     environmentId: string;
@@ -118,7 +120,7 @@ vi.mock("../../state/entities", () => ({
       [
         "environment",
         {
-          environment: { platform: { os: "linux" }, capabilities: {} },
+          environment: { platform: { os: state.environmentOs }, capabilities: {} },
           newProjectsRoot: state.newProjectsRoot,
           settings: { addProjectBaseDirectory: state.baseDirectory },
         },
@@ -261,12 +263,15 @@ describe("clone project permissions", () => {
     state.baseDirectory = await NodeFSP.mkdtemp(
       NodePath.join(NodeOS.tmpdir(), "t3-clone-permissions-"),
     );
+    const host = HostProcess.Platform.defaultValue();
+    state.environmentOs = host === "win32" ? "windows" : host;
     state.scopes = new Set([AuthSourceControlWriteScope]);
     state.projects = [];
     state.createResult = null;
   });
 
   afterEach(async () => {
+    state.environmentOs = "linux";
     await NodeFSP.rm(state.baseDirectory, { recursive: true, force: true });
   });
 

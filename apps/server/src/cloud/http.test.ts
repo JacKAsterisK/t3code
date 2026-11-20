@@ -182,7 +182,7 @@ describe("link proof over a non-loopback transport", () => {
         const admin = yield* exchange(DESKTOP_BOOTSTRAP_TOKEN);
         const paired = yield* post(
           "/api/auth/pairing-token",
-          { scopes: ["relay:read", "relay:configure"] },
+          { scopes: ["relay:read", "relay:write", "relay:configure"] },
           { authorization: `Bearer ${admin}` },
         );
         expect(paired.status).toBe(200);

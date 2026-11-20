@@ -57,6 +57,7 @@ import * as FleetAccessPolicy from "../lan/FleetAccessPolicy.ts";
 import * as ServerHttp from "../http.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { advertisedJsonSchema } from "./advertisedJsonSchema.ts";
+import * as McpEventsEndpoint from "./events/McpEventsEndpoint.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
 import * as McpToolAccessTestkit from "./McpToolAccess.testkit.ts";
@@ -1136,7 +1137,13 @@ it.effect("answers 2026-07-28 discovery and keeps 2025-06-18 as the initialize f
           }),
         ),
       ).pipe(
-        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(ServerSettings.layerTest({ agentEventsEnabled: true })),
+        Layer.provide(
+          Layer.mock(McpEventsEndpoint.McpEventsEndpoint)({
+            statelessEnabled: true,
+            handle: (_request, _scope, inner) => inner,
+          }),
+        ),
         Layer.provide(
           Layer.mock(McpSessionRegistry.McpSessionRegistry)({
             resolve: (presented) =>

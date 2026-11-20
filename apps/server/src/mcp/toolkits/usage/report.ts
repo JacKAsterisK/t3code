@@ -1,3 +1,4 @@
+import { limitsNotice } from "@t3tools/shared/usageLimitsCopy";
 import {
   UsageDay,
   type ServerProvider,
@@ -8,11 +9,7 @@ import {
   type UsageTokenTotals,
 } from "@t3tools/contracts";
 import { makeWindow } from "@t3tools/shared/usageFormat";
-import {
-  collectProviderUsageLimits,
-  hasProviderUsageLimits,
-  limitsNotice,
-} from "@t3tools/shared/usageLimits";
+import { collectProviderUsageLimits, hasProviderUsageLimits } from "@t3tools/shared/usageLimits";
 import * as DateTime from "effect/DateTime";
 import { priceUsage, type RateTable } from "../../../usage/usagePricing.ts";
 import type {

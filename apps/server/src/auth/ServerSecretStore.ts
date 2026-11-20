@@ -9,6 +9,7 @@ import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import * as ServerConfig from "../config.ts";
 
@@ -25,6 +26,17 @@ export class SecretStoreSecureError extends Schema.TaggedError<SecretStoreSecure
 ) {
   override get message(): string {
     return `Failed to secure ${this.resource}.`;
+  }
+}
+
+export class SecretStoreNameError extends Schema.TaggedError<SecretStoreNameError>()(
+  "SecretStoreNameError",
+  {
+    resource: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Refused ${this.resource}: a secret name cannot contain a path separator.`;
   }
 }
 
@@ -118,6 +130,7 @@ export class SecretStoreEncodeError extends Schema.TaggedError<SecretStoreEncode
 
 export const SecretStoreError = Schema.Union([
   SecretStoreSecureError,
+  SecretStoreNameError,
   SecretStoreReadError,
   SecretStoreTemporaryPathError,
   SecretStorePersistError,
@@ -170,27 +183,43 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  const resolveSecretPath = (name: string) => path.join(serverConfig.secretsDir, `${name}.bin`);
+  // Some names carry text from outside the server; one with a separator would leave the directory.
+  const resolveSecretPath = (name: string): Effect.Effect<string, SecretStoreNameError> =>
+    /[/\\\0]/.test(name)
+      ? Effect.fail(new SecretStoreNameError({ resource: `secret ${JSON.stringify(name)}` }))
+      : Effect.succeed(path.join(serverConfig.secretsDir, `${name}.bin`));
+  const emptySecretRepair = yield* Semaphore.make(1);
+  const isMissingOrNonEmpty = (secret: Option.Option<Uint8Array>) =>
+    Option.isNone(secret) || secret.value.byteLength > 0;
 
   const get: ServerSecretStore["Service"]["get"] = (name) =>
-    fileSystem.readFile(resolveSecretPath(name)).pipe(
-      Effect.map((bytes) => Option.some(Uint8Array.from(bytes))),
-      Effect.catch((cause) =>
-        cause.reason._tag === "NotFound"
-          ? Effect.succeedNone
-          : Effect.fail(
-              new SecretStoreReadError({
-                resource: `secret ${name}`,
-                cause,
-              }),
-            ),
+    resolveSecretPath(name).pipe(
+      Effect.flatMap((secretPath) =>
+        fileSystem.readFile(secretPath).pipe(
+          Effect.map((bytes) => Option.some(Uint8Array.from(bytes))),
+          Effect.catch((cause) =>
+            cause.reason._tag === "NotFound"
+              ? Effect.succeedNone
+              : Effect.fail(
+                  new SecretStoreReadError({
+                    resource: `secret ${name}`,
+                    cause,
+                  }),
+                ),
+          ),
+        ),
       ),
       Effect.withSpan("ServerSecretStore.get"),
     );
 
-  const set: ServerSecretStore["Service"]["set"] = (name, value) => {
-    const secretPath = resolveSecretPath(name);
-    return crypto.uuidV4().pipe(
+  const set: ServerSecretStore["Service"]["set"] = (name, value) =>
+    resolveSecretPath(name).pipe(
+      Effect.flatMap((secretPath) => setAt(name, secretPath, value)),
+      Effect.withSpan("ServerSecretStore.set"),
+    );
+
+  const setAt = (name: string, secretPath: string, value: Uint8Array) =>
+    crypto.uuidV4().pipe(
       Effect.mapError(
         (cause) =>
           new SecretStoreTemporaryPathError({
@@ -221,15 +250,15 @@ export const make = Effect.gen(function* () {
           ),
         );
       }),
-      Effect.withSpan("ServerSecretStore.set"),
     );
-  };
 
   // `link` publishes the fully written temp file under the final name, or fails with
   // AlreadyExists, so a concurrent reader never observes a partially written secret.
-  const create: ServerSecretStore["Service"]["create"] = (name, value) => {
-    const secretPath = resolveSecretPath(name);
-    return crypto.uuidV4().pipe(
+  const create: ServerSecretStore["Service"]["create"] = (name, value) =>
+    resolveSecretPath(name).pipe(Effect.flatMap((secretPath) => createAt(name, secretPath, value)));
+
+  const createAt = (name: string, secretPath: string, value: Uint8Array) =>
+    crypto.uuidV4().pipe(
       Effect.mapError(
         (cause) =>
           new SecretStoreTemporaryPathError({
@@ -261,10 +290,22 @@ export const make = Effect.gen(function* () {
         );
       }),
     );
-  };
 
   const getOrCreateRandom: ServerSecretStore["Service"]["getOrCreateRandom"] = (name, bytes) =>
     get(name).pipe(
+      // Older builds could persist a 0-byte secret, which is never a usable key. Re-read under
+      // the permit, and keep it until an interrupted removal settles, so a caller that saw the
+      // empty file cannot remove a key another caller created.
+      Effect.filterOrElse(isMissingOrNonEmpty, () =>
+        emptySecretRepair.withPermits(1)(
+          get(name).pipe(
+            Effect.filterOrElse(isMissingOrNonEmpty, () =>
+              remove(name).pipe(Effect.as(Option.none<Uint8Array>())),
+            ),
+            Effect.uninterruptible,
+          ),
+        ),
+      ),
       Effect.flatMap(
         Option.match({
           onSome: Effect.succeed,
@@ -306,16 +347,20 @@ export const make = Effect.gen(function* () {
     );
 
   const remove: ServerSecretStore["Service"]["remove"] = (name) =>
-    fileSystem.remove(resolveSecretPath(name)).pipe(
-      Effect.catch((cause) =>
-        cause.reason._tag === "NotFound"
-          ? Effect.void
-          : Effect.fail(
-              new SecretStoreRemoveError({
-                resource: `secret ${name}`,
-                cause,
-              }),
-            ),
+    resolveSecretPath(name).pipe(
+      Effect.flatMap((secretPath) =>
+        fileSystem.remove(secretPath).pipe(
+          Effect.catch((cause) =>
+            cause.reason._tag === "NotFound"
+              ? Effect.void
+              : Effect.fail(
+                  new SecretStoreRemoveError({
+                    resource: `secret ${name}`,
+                    cause,
+                  }),
+                ),
+          ),
+        ),
       ),
       Effect.withSpan("ServerSecretStore.remove"),
     );

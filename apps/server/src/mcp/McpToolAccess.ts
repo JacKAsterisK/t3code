@@ -4,10 +4,12 @@ import {
   type OrchestrationV2LinkOrigin,
   OrchestratorMcpEnvironmentTarget,
   OrchestratorMcpFailure,
+  type OrchestratorMcpThreadSendInput,
   type ProviderInteractionMode,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
@@ -15,6 +17,7 @@ import * as Ref from "effect/Ref";
 import * as Struct from "effect/Struct";
 import type * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
+import { McpSchema } from "effect/ai";
 import type { Tool, Toolkit } from "effect/ai";
 import { THREAD_ID_INPUT_FORMS, parseThreadIdInput } from "@t3tools/shared/threadLinks";
 
@@ -24,7 +27,12 @@ import {
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
-import { assertNotLinked, assertSameLink, callerLinkOrigin } from "./linkOrigin.ts";
+import {
+  assertFullAccessNamingLink,
+  assertNotLinked,
+  assertSameLink,
+  callerLinkOrigin,
+} from "./linkOrigin.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import {
@@ -34,6 +42,7 @@ import {
   type Caller,
   loadCaller,
   readCaller,
+  threadMessageLimits,
   unavailable,
 } from "./threadAccess.ts";
 
@@ -286,25 +295,27 @@ export const approves = <P extends { readonly environmentId?: EnvironmentId }, A
 export const writesThreads = <P, A, E, R>(
   threads: (params: P) => ReadonlyArray<ThreadId | undefined>,
   handle: (params: P) => Effect.Effect<A, E, R>,
+  targetLimits: (caller: Caller, params: P) => Caller["limits"] = (caller) => caller.limits,
 ) =>
   declare(
     (params: P) =>
       Effect.gen(function* () {
         const caller = yield* writingCaller;
+        const limits = targetLimits(caller, params);
         for (const threadId of threads(params)) {
           if (threadId === undefined || threadId === caller.scope.thread?.threadId) continue;
           const target = yield* caller.threads
             .getThreadShell(threadId)
             .pipe(Effect.mapError(unavailable));
           if (target !== null && target.deletedAt === null) {
-            yield* assertTargetWithinLimits(caller.limits, target);
+            yield* assertTargetWithinLimits(limits, target);
             yield* assertSameLink(caller, target);
           }
         }
         // Modes can rise after this check; the orchestrator rechecks under lock and records refusal before handlers wrap errors.
         const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
         return yield* handle(params).pipe(
-          Effect.provideService(DispatchModeLimit, { ...caller.limits, refused }),
+          Effect.provideService(DispatchModeLimit, { ...limits, refused }),
           Effect.catch((error) =>
             Effect.flatMap(Ref.get(refused), (refusal) =>
               Effect.fail<E | OrchestratorMcpFailure>(
@@ -316,6 +327,15 @@ export const writesThreads = <P, A, E, R>(
       }),
     () => writingCaller,
     always,
+  );
+
+export const writesThreadMessage = <P extends OrchestratorMcpThreadSendInput, A, E, R>(
+  handle: (params: P) => Effect.Effect<A, E, R>,
+) =>
+  writesThreads(
+    (params: P) => [params.threadId],
+    handle,
+    (caller, params) => threadMessageLimits(caller.scope, caller.limits, params, caller.caller),
   );
 
 const escalationDenied = (refusal: DispatchModeRefusal) =>
@@ -415,6 +435,7 @@ export const afterForwarding = <P, A, E, R, E2, R2>(
 
 const fullAccessRequired =
   "Changing projects or environment settings needs a live full-access/default calling thread or a full-access client.";
+const changesEnvironment = "change projects or environment settings";
 
 /** Recheck after waits before writing; caller modes may have changed. */
 export const writesEnvironment = <P, A, E, R>(
@@ -434,9 +455,11 @@ export const writesEnvironment = <P, A, E, R>(
     Effect.tap((caller) =>
       options?.linkedCallers === "allowed"
         ? Effect.void
-        : assertNotLinked(caller, "change projects or environment settings"),
+        : assertNotLinked(caller, changesEnvironment),
     ),
-    Effect.tap((caller) => assertFullAccess(caller, fullAccessRequired)),
+    Effect.tap((caller) =>
+      assertFullAccessNamingLink(caller, fullAccessRequired, changesEnvironment),
+    ),
   );
   return declare(
     (params: P) => check.pipe(Effect.flatMap(() => handle(params, check))),
@@ -544,6 +567,11 @@ const linksUnavailable = new OrchestratorMcpFailure({
   message: "This environment cannot reach linked environments.",
 });
 
+const THREAD_ONLY = new Set<unknown>([
+  McpInvocationContext.hiddenFromOutsideClients,
+  McpInvocationContext.hiddenWithoutBackgroundWait,
+]);
+
 /**
  * Every tool that takes a linked environment runs there the same way: its
  * declaration checks the caller here, and the same call goes to the other
@@ -560,8 +588,16 @@ const routed = Effect.fn("McpToolAccess.routed")(function* <Tools extends Record
   const handlers: Record<string, unknown> = { ...checked };
   for (const [name, declaration] of Object.entries<Declaration<unknown>>(declarations)) {
     const tool = toolkit.tools[name];
-    if (tool === undefined || !takesLinkedEnvironment(tool)) continue;
+    if (tool === undefined) continue;
     const remote = remoteCheckOf(declaration);
+    if (
+      remote === undefined &&
+      !THREAD_ONLY.has(Context.getOrUndefined(tool.annotations, McpSchema.EnabledWhen))
+    )
+      return yield* Effect.die(
+        `${name} acts as its calling thread, so outside clients must not be offered it.`,
+      );
+    if (!takesLinkedEnvironment(tool)) continue;
     const forwarded = forwardedOf(declaration) as
       | Forwarded<object, unknown, Tool.Failure<Tools[keyof Tools]>, never>
       | undefined;

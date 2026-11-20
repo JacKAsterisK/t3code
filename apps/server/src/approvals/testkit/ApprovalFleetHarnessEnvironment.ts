@@ -1,3 +1,4 @@
+import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import * as ManagedPolicy from "../../policy/ManagedPolicy.ts";
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
 // @effect-diagnostics nodeBuiltinImport:off -- The fixture owns a captured loopback listener and closes it with its scope.
@@ -121,6 +122,7 @@ export const makeEnvironment = Effect.fn("ApprovalFleetHarness.makeEnvironment")
   const services = Service.layer.pipe(
     Layer.provideMerge(ThreadCommands.layer),
     Layer.provideMerge(native),
+    Layer.provideMerge(Layer.mock(CheckpointStore.CheckpointStore)({})),
     Layer.provideMerge(Projections.layer.pipe(Layer.provide(database))),
     Layer.provideMerge(Commands.layer.pipe(Layer.provide(database))),
     Layer.provideMerge(Outbox.layer.pipe(Layer.provide(database))),

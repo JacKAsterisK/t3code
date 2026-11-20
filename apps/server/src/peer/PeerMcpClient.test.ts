@@ -6,20 +6,23 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Fiber from "effect/Fiber";
-import * as Queue from "effect/Queue";
 import * as Network from "./PeerNetworkDispatch.ts";
 import * as NetworkTest from "./PeerNetworkDispatch.testkit.ts";
 import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
@@ -254,6 +257,51 @@ const toolkit = Toolkit.make(
   }),
 );
 
+/** One `probe` call to a linked peer at a remote address, answered by `http`. */
+const probeThrough = Effect.fn(function* (http: HttpClient.HttpClient) {
+  const box = descriptorOf("environment-box", "Box");
+  const context = yield* Layer.build(
+    PeerMcpClient.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.succeed(HttpClient.HttpClient, http),
+          Layer.succeed(PeerMcpClient.PeerWriteCeiling, { writable: () => Effect.succeed(true) }),
+          Layer.mock(PeerLinks.PeerLinks)({
+            resolve: () =>
+              Effect.succeed({
+                link: {
+                  environmentId: box.environmentId,
+                  label: box.label,
+                  urls: ["https://peer.example"],
+                  access: "auto",
+                  linkedAt: DateTime.makeUnsafe(0),
+                  expiresAt: DateTime.makeUnsafe(1),
+                  lastReachedAt: null,
+                  lastError: null,
+                },
+                url: "https://peer.example",
+                token: "fixture",
+              }),
+            recordOutcome: () => Effect.void,
+          }),
+        ),
+      ),
+    ),
+  );
+  return Context.get(context, PeerMcpClient.PeerMcpClient).call({
+    environmentId: box.environmentId,
+    tool: "probe",
+    writes: false,
+    arguments: {},
+    limits: { runtimeMode: "approval-required", interactionMode: "plan" },
+    success: Result,
+  });
+});
+
+const probeResult = JSON.stringify({
+  result: { content: [{ type: "text", text: '{"modes":"approval-required/plan"}' }] },
+});
+
 const refusal = new OrchestratorMcpFailure({
   code: "thread_not_found",
   message: "Thread thread-gone was not found.",
@@ -410,11 +458,61 @@ it.effect("keeps a link healthy when the peer refuses a call", () =>
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("keeps the LAN credential expiry fixed across tool calls", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const handlers = McpToolAccess.toLayer(toolkit, {
+        probe: McpToolAccess.reads(() => Effect.succeed({ modes: "" })),
+        hold: McpToolAccess.reads(() => Effect.succeed({ modes: "" })),
+        refuse: McpToolAccess.reads(() => Effect.fail(refusal)),
+      });
+      const box = descriptorOf("environment-box", "Box");
+      const b = yield* servePeer(box, McpHttpServer.toolkitRegistration(toolkit, handlers));
+      const context = yield* Layer.build(
+        layerLinkingEnvironment(descriptorOf("environment-a", "A")),
+      );
+      const links = Context.get(context, PeerLinks.PeerLinks);
+      const client = Context.get(context, PeerMcpClient.PeerMcpClient);
+      const linked = yield* linkTo(links, b);
+      const day = 24 * 60 * 60 * 1000;
+      const call = client.call({
+        environmentId: box.environmentId,
+        tool: "probe",
+        writes: false,
+        arguments: {},
+        limits: { runtimeMode: "full-access", interactionMode: "default" },
+        success: Result,
+      });
+      const storedExpiry = links
+        .get(box.environmentId)
+        .pipe(
+          Effect.map((link) => (Option.isSome(link) ? link.value.expiresAt.epochMilliseconds : 0)),
+        );
+      const expiryThere = b.linkedSessions.pipe(
+        Effect.map((sessions) => sessions[0]?.expiresAt.epochMilliseconds),
+      );
+      const linkedAt = linked.linkedAt.epochMilliseconds;
+      expect(yield* storedExpiry).toBe(linkedAt + 30 * day);
+
+      yield* TestClock.adjust("20 days");
+      expect(yield* call).toEqual({ modes: "" });
+      expect(yield* expiryThere).toBe(linkedAt + 30 * day);
+      expect(yield* storedExpiry).toBe(linkedAt + 30 * day);
+
+      yield* TestClock.adjust("10 days");
+      expect((yield* call.pipe(Effect.flip)).code).toBe("capability_denied");
+      expect((yield* links.list)[0]?.status).toBe("expired");
+      expect(yield* b.linkedSessions).toEqual([]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("renews a missing peer session once and reuses its replacement", () =>
   Effect.gen(function* () {
     const sessionHeaders: Array<string | undefined> = [];
     const statuses = [200, 202, 404, 200, 202, 200, 200, 200];
     const outcomes: Array<string | null> = [];
+    const expiries: Array<string> = [];
     const http = HttpClient.make((request) =>
       Effect.sync(() => {
         const index = sessionHeaders.length;
@@ -437,7 +535,10 @@ it.effect("renews a missing peer session once and reuses its replacement", () =>
               status,
               headers:
                 index === 0
-                  ? { "mcp-session-id": "old" }
+                  ? {
+                      "mcp-session-id": "old",
+                      [McpInvocationContext.LINK_EXPIRES_AT_HEADER]: "1970-01-02T00:00:00.000Z",
+                    }
                   : index === 3
                     ? { "mcp-session-id": "renewed" }
                     : {},
@@ -470,6 +571,8 @@ it.effect("renews a missing peer session once and reuses its replacement", () =>
                   token: "fixture",
                 }),
               recordOutcome: (_, outcome) => Effect.sync(() => outcomes.push(outcome.error)),
+              recordExpiry: (_, expiresAt) =>
+                Effect.sync(() => expiries.push(DateTime.formatIso(expiresAt))),
             }),
           ),
         ),
@@ -500,6 +603,8 @@ it.effect("renews a missing peer session once and reuses its replacement", () =>
       })
       .pipe(Effect.flip);
     expect(outcomes).toEqual([null, null, empty.message]);
+    // Only the handshake answered with an expiry, and it is kept.
+    expect(expiries).toEqual(["1970-01-02T00:00:00.000Z"]);
     expect(sessionHeaders).toEqual([
       undefined,
       "old",
@@ -510,5 +615,47 @@ it.effect("renews a missing peer session once and reuses its replacement", () =>
       "renewed",
       "renewed",
     ]);
-  }).pipe(Effect.scoped),
+  }),
+);
+
+it.effect("bounds the session handshake, not a tool call that waits longer", () =>
+  Effect.gen(function* () {
+    const arrived = yield* Queue.unbounded<number>();
+    const answer = yield* Deferred.make<void>();
+    let requests = 0;
+    const http = HttpClient.make((request) =>
+      Effect.gen(function* () {
+        const index = requests++;
+        yield* Queue.offer(arrived, index);
+        // The first initialize, then the next initialized notification, never answer;
+        // the third session's tool call answers late.
+        if (index === 0 || index === 2) return yield* Effect.never;
+        if (index === 5) yield* Deferred.await(answer);
+        return HttpClientResponse.fromWeb(
+          request,
+          new Response(index === 5 ? probeResult : "", {
+            status: index === 4 ? 202 : 200,
+            headers: { "mcp-session-id": "session" },
+          }),
+        );
+      }),
+    );
+    const probe = yield* probeThrough(http);
+
+    for (const requestsBeforeStall of [1, 2]) {
+      const stalled = yield* probe.pipe(Effect.flip, Effect.forkScoped);
+      yield* Queue.takeN(arrived, requestsBeforeStall);
+      yield* TestClock.adjust(Duration.seconds(10));
+      expect(yield* Fiber.join(stalled)).toMatchObject({
+        code: "orchestration_error",
+        message: expect.stringContaining("Linked environment"),
+      });
+    }
+
+    const waiting = yield* Effect.forkScoped(probe);
+    yield* Queue.takeN(arrived, 3);
+    yield* TestClock.adjust(Duration.minutes(1));
+    yield* Deferred.succeed(answer, undefined);
+    expect(yield* Fiber.join(waiting)).toEqual({ modes: "approval-required/plan" });
+  }),
 );

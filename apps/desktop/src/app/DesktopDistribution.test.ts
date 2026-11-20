@@ -124,6 +124,7 @@ it.effect(
         Effect.provideService(SshTunnel.SshEnvironmentManager, {
           ensureEnvironment: () => Effect.die("LAN reached an upstream SSH installer"),
           disconnectEnvironment: () => Effect.void,
+          closeAllTunnels: Effect.void,
         }),
         Effect.provideService(DesktopSshPasswordPrompts.DesktopSshPasswordPrompts, {
           request: () => Effect.die("LAN requested new SSH credentials"),

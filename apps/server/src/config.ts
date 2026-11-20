@@ -11,6 +11,7 @@ import { acquireNativeAdmissionScoped } from "@t3tools/shared/nativeAdmission";
 
 import type { OtlpEndpointSource } from "@t3tools/contracts";
 import { sweepStalePendingAttachments } from "./attachmentStore.ts";
+import { markNoCopyOnWrite } from "./noCopyOnWrite.ts";
 import {
   DEFAULT_SIGNAL_EXPORT,
   nodeProcessRuntimeAttributes,
@@ -182,9 +183,14 @@ export const ensureServerDirectories = Effect.fn(function* (derivedPaths: Server
   const path = yield* Path.Path;
   yield* acquireNativeAdmissionScoped(path.dirname(derivedPaths.stateDir)).pipe(Effect.orDie);
 
+  yield* fs.makeDirectory(derivedPaths.stateDir, { recursive: true });
+  // Only before the database exists: a No_COW WAL beside an existing copy-on-write database
+  // could not be reflinked into one backup folder with it. When unsure, leave the folder as is.
+  if (!(yield* fs.exists(derivedPaths.dbPath).pipe(Effect.orElseSucceed(() => true)))) {
+    yield* Effect.promise(() => markNoCopyOnWrite(derivedPaths.stateDir));
+  }
   yield* Effect.all(
     [
-      fs.makeDirectory(derivedPaths.stateDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.logsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.providerLogsDir, { recursive: true }),
       fs.makeDirectory(derivedPaths.terminalLogsDir, { recursive: true }),

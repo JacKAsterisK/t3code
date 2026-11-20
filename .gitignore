@@ -55,3 +55,4 @@ lan-fleet-private.json
 lan-fleet-state.json
 fleet-roster.json
 fleet-deliveries/
+/packages/ssh/.ssh-launcher-test-*/

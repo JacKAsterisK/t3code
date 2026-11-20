@@ -8,6 +8,8 @@ approval before code or runtime changes.
 
 ## Baseline
 
+- Upstream sync in preparation for LAN 1.0.39: upstream `e6d521012d` (2,111 commits after `ee90bdc940`), application 0.1.11 and toolchain generation 139. Upstream migrations 083?102 append as fork 097?116. Home repair recognizes schema 116.
+
 - Upstream sync 2026-11-12: upstream `ee90bdc940` (680 commits after `12f3244e0593`), published as LAN 1.0.38 from `d83b739562` (application 0.1.9, toolchain generation 138); previous published LAN 1.0.37 is `68a7fb629f`. Upstream migrations 081 and 082 become fork 095 (ProjectionMessageSearchText) and 096 (TurnItemConversationIndex); schema 96.
 
 - LAN 1.0.37 preparation: upstream `12f3244e0593` (2026-11-09, Claude Fable 5.2), on `lan/upstream-sync-20261107`. Previous published LAN 1.0.36 is `6660ea19b3133a1293260bd941007c07a20b7b13`. Application version 0.1.7 and schema 94 are unchanged; upstream added no migrations.
@@ -31,6 +33,25 @@ approval before code or runtime changes.
   (off); no `userdata\lan-routing.json`, so every `t3_lan_*` call is denied; no
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
+
+## 2026-11-20 sync decisions
+
+- Keep the LAN OAuth approval bindings, fleet access caps, and fixed peer
+  credential expiry. The upstream peer transport still forwards the sender and
+  interaction limit, and the destination checks those against the approved link.
+- Keep direct LAN thread links, Hub-owned updates, machine grouping, task owners,
+  and the `usage_report` registration. Usage notices use upstream's shared
+  presentation copy.
+
+- Thread messaging allows an Auto thread to send, queue or steer a message to a
+  Full access thread. A forwarded call requires a Full access link and retains
+  the sender's interaction-mode ceiling. This rule is fixed so both the MCP
+  admission check and commit-time dispatch check use the same policy without a
+  new settings surface. Lower modes, ordinary OAuth clients, restarts and fresh
+  context use the existing ceiling.
+- Antigravity offers upstream Auto when the ACP session advertises native
+  `auto`. Requests the provider still sends go through the permission UI.
+  Managed runtimes that lack native Auto keep their existing modes.
 
 ## 2026-11-12 sync decisions
 

@@ -203,7 +203,7 @@ function layer(
       NodeSqliteClient.layer({
         filename: options.filename ?? ":memory:",
         readerWorker: false,
-        checkpointWorker: false,
+        writerWorker: false,
       }),
     ),
   );

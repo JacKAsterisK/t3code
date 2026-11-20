@@ -61,7 +61,7 @@ it.effect(
         NodeSqliteClient.layer({
           filename: ":memory:",
           readerWorker: false,
-          checkpointWorker: false,
+          writerWorker: false,
         }),
       ),
     ),

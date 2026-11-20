@@ -43,7 +43,7 @@ const withDatabase = <A, E, R>(
     Effect.provide(
       Gateway.layer.pipe(
         Layer.provideMerge(
-          NodeSqliteClient.layer({ filename, readerWorker: false, checkpointWorker: false }),
+          NodeSqliteClient.layer({ filename, readerWorker: false, writerWorker: false }),
         ),
       ),
     ),

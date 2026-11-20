@@ -9,6 +9,7 @@ import {
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
@@ -20,6 +21,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as ProviderCommitBatch from "./ProviderCommitBatch.ts";
+import * as ThreadViewers from "./ThreadViewers.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -77,12 +79,22 @@ export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
 interface ProviderBatchPublication {
   readonly publish: Array<Effect.Effect<void>>;
+  readonly projection: ProjectionStore.ProviderBatchProjection;
+  /** The projection high-water mark, recorded once before the batch commits. */
+  projectedSequence: number | undefined;
   eventCount: number;
 }
 const CurrentProviderBatch = Context.Reference<ProviderBatchPublication | undefined>(
   "t3/orchestration-v2/EventSink/CurrentProviderBatch",
   { defaultValue: () => undefined },
 );
+// Projecting `provider-thread.updated` also rewrites its app thread's row.
+const projectedThreadIds = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
+  events.flatMap((event) =>
+    event.type === "provider-thread.updated" && event.payload.appThreadId !== null
+      ? [event.threadId, event.payload.appThreadId]
+      : [event.threadId],
+  );
 
 export interface EventSinkV2Shape {
   /** Items that are not provider snapshots, such as a consumer's own control items, never batch. */
@@ -91,6 +103,7 @@ export interface EventSinkV2Shape {
     process: (event: A) => Effect.Effect<void, E2, R2>,
     after: Effect.Effect<boolean, E2, R2>,
     canBatch: Effect.Effect<boolean, never, R2>,
+    priority?: ProviderCommitBatch.StreamPriority,
   ) => Effect.Effect<
     void,
     E | E2 | ProviderCommitBatch.CommitBatchError | Schema.SchemaError,
@@ -167,6 +180,28 @@ export interface EventSinkV2Shape {
   /** Commits only if the full provider row equals expected; some writers do not advance updatedAt. */
   readonly writeIfProviderThreadUnchanged: (input: {
     readonly expected: OrchestrationV2ProviderThread;
+    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+  }) => Effect.Effect<
+    {
+      readonly committed: boolean;
+      readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
+    },
+    EventSinkV2Error
+  >;
+  /** Commits only if the stored turn item still equals expected. */
+  readonly writeIfTurnItemUnchanged: (input: {
+    readonly expected: OrchestrationV2TurnItem;
+    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+  }) => Effect.Effect<
+    {
+      readonly committed: boolean;
+      readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
+    },
+    EventSinkV2Error
+  >;
+  /** Commits only if the stored subagent still equals expected. */
+  readonly writeIfSubagentUnchanged: (input: {
+    readonly expected: OrchestrationV2Subagent;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<
     {
@@ -253,11 +288,13 @@ const layerBase: Layer.Layer<
   | ProjectStore.ProjectStoreV2
   | SqlClient.SqlClient
   | TurnItemPositionStore.TurnItemPositionStoreV2
+  | ThreadViewers.ThreadViewers
 > = Layer.effect(
   EventSinkV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const fleetUsers = yield* Effect.serviceOption(FleetUsers.FleetUsers);
+    const threadViewers = yield* ThreadViewers.ThreadViewers;
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
     const eventStore = yield* EventStore.EventStoreV2;
@@ -409,6 +446,30 @@ const layerBase: Layer.Layer<
       );
     };
 
+    // The enclosing write or commit span already traces this projection bookkeeping.
+    const recordProjectedSequence = Effect.fnUntraced(function* (sequence: number) {
+      const now = DateTime.formatIso(yield* DateTime.now);
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_metadata (
+          projection_name,
+          schema_version,
+          last_sequence,
+          updated_at
+        )
+        VALUES (
+          'thread-projections',
+          ${ProjectionStore.ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION},
+          ${sequence},
+          ${now}
+        )
+        ON CONFLICT(projection_name)
+        DO UPDATE SET
+          schema_version = excluded.schema_version,
+          last_sequence = excluded.last_sequence,
+          updated_at = excluded.updated_at
+      `;
+    });
+
     const applyStoredEvents =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(function* (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) {
@@ -434,26 +495,9 @@ const layerBase: Layer.Layer<
         });
         const sequence = storedEvents.at(-1)?.sequence;
         if (sequence !== undefined) {
-          const now = DateTime.formatIso(yield* DateTime.now);
-          yield* sql`
-            INSERT INTO orchestration_v2_projection_metadata (
-              projection_name,
-              schema_version,
-              last_sequence,
-              updated_at
-            )
-            VALUES (
-              'thread-projections',
-              ${ProjectionStore.ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION},
-              ${sequence},
-              ${now}
-            )
-            ON CONFLICT(projection_name)
-            DO UPDATE SET
-              schema_version = excluded.schema_version,
-              last_sequence = excluded.last_sequence,
-              updated_at = excluded.updated_at
-          `;
+          const batch = yield* CurrentProviderBatch;
+          if (batch !== undefined) batch.projectedSequence = sequence;
+          else yield* recordProjectedSequence(sequence);
         }
         // Read lineage here, on the connection this transaction holds; see makeRunOutcomeRecorder.
         return yield* runOutcomes.prepare(storedEvents);
@@ -493,6 +537,7 @@ const layerBase: Layer.Layer<
       const batch = yield* CurrentProviderBatch;
       if (batch !== undefined) batch.eventCount += input.events.length;
       const { committed } = yield* commitThenPublish(
+        projectedThreadIds(input.events),
         Effect.gen(function* () {
           // Check ownership in the same transaction that claims the native session.
           const imported = input.unlessNativeThreadOwned;
@@ -547,6 +592,7 @@ const layerBase: Layer.Layer<
         });
 
         return yield* commitThenPublish(
+          [input.threadId, ...projectedThreadIds(input.events)],
           Effect.gen(function* () {
             const rows = yield* sql<{
               readonly status: string;
@@ -628,6 +674,7 @@ const layerBase: Layer.Layer<
       });
 
       return yield* commitThenPublish(
+        projectedThreadIds(input.events),
         Effect.gen(function* () {
           const rows = yield* sql<{
             readonly active_attempt_id: string | null;
@@ -674,23 +721,16 @@ const layerBase: Layer.Layer<
       );
     });
 
-    const writeIfProviderThreadUnchangedEffect = Effect.fn(
-      "orchestrationV2.EventSink.writeIfProviderThreadUnchanged",
-    )(function* (input: Parameters<EventSinkV2Shape["writeIfProviderThreadUnchanged"]>[0]) {
-      yield* Effect.annotateCurrentSpan({
-        "orchestration_v2.event_count": input.events.length,
-        "orchestration_v2.provider_thread_id": input.expected.id,
-      });
-      const expectedJson = yield* ProjectionStore.encodeProviderThreadPayload(input.expected);
-
-      return yield* commitThenPublish(
+    // Appends the events only if the stored payload still matches, in one transaction.
+    const writeIfStoredPayloadMatches = <E>(
+      readStoredPayload: Effect.Effect<ReadonlyArray<{ readonly payload_json: string }>, E>,
+      expectedJson: string,
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+    ) =>
+      commitThenPublish(
+        projectedThreadIds(events),
         Effect.gen(function* () {
-          const rows = yield* sql<{ readonly payload_json: string }>`
-            SELECT payload_json
-            FROM orchestration_v2_projection_provider_threads
-            WHERE provider_thread_id = ${input.expected.id}
-            LIMIT 1
-          `;
+          const rows = yield* readStoredPayload;
           if (rows[0]?.payload_json !== expectedJson) {
             return {
               committed: false as const,
@@ -698,7 +738,7 @@ const layerBase: Layer.Layer<
             };
           }
 
-          const normalized = yield* normalizeEvents(input.events);
+          const normalized = yield* normalizeEvents(events);
           const storedEvents = yield* eventStore.append({ events: normalized });
           const outcomes = yield* applyStoredEvents(storedEvents);
           return { committed: true as const, storedEvents, outcomes };
@@ -707,6 +747,65 @@ const layerBase: Layer.Layer<
           result.committed
             ? publishStoredEvents(result.storedEvents, result.outcomes)
             : Effect.void,
+      );
+
+    const writeIfProviderThreadUnchangedEffect = Effect.fn(
+      "orchestrationV2.EventSink.writeIfProviderThreadUnchanged",
+    )(function* (input: Parameters<EventSinkV2Shape["writeIfProviderThreadUnchanged"]>[0]) {
+      yield* Effect.annotateCurrentSpan({
+        "orchestration_v2.event_count": input.events.length,
+        "orchestration_v2.provider_thread_id": input.expected.id,
+      });
+      const expectedJson = yield* ProjectionStore.encodeProviderThreadPayload(input.expected);
+      return yield* writeIfStoredPayloadMatches(
+        sql<{ readonly payload_json: string }>`
+          SELECT payload_json
+          FROM orchestration_v2_projection_provider_threads
+          WHERE provider_thread_id = ${input.expected.id}
+          LIMIT 1
+        `,
+        expectedJson,
+        input.events,
+      );
+    });
+
+    const writeIfTurnItemUnchangedEffect = Effect.fn(
+      "orchestrationV2.EventSink.writeIfTurnItemUnchanged",
+    )(function* (input: Parameters<EventSinkV2Shape["writeIfTurnItemUnchanged"]>[0]) {
+      yield* Effect.annotateCurrentSpan({
+        "orchestration_v2.event_count": input.events.length,
+        "orchestration_v2.turn_item_id": input.expected.id,
+      });
+      const expectedJson = yield* ProjectionStore.encodeTurnItemPayload(input.expected);
+      return yield* writeIfStoredPayloadMatches(
+        sql<{ readonly payload_json: string }>`
+          SELECT payload_json
+          FROM orchestration_v2_projection_turn_items
+          WHERE turn_item_id = ${input.expected.id}
+          LIMIT 1
+        `,
+        expectedJson,
+        input.events,
+      );
+    });
+
+    const writeIfSubagentUnchangedEffect = Effect.fn(
+      "orchestrationV2.EventSink.writeIfSubagentUnchanged",
+    )(function* (input: Parameters<EventSinkV2Shape["writeIfSubagentUnchanged"]>[0]) {
+      yield* Effect.annotateCurrentSpan({
+        "orchestration_v2.event_count": input.events.length,
+        "orchestration_v2.subagent_id": input.expected.id,
+      });
+      const expectedJson = yield* ProjectionStore.encodeSubagentPayload(input.expected);
+      return yield* writeIfStoredPayloadMatches(
+        sql<{ readonly payload_json: string }>`
+          SELECT payload_json
+          FROM orchestration_v2_projection_subagents
+          WHERE subagent_id = ${input.expected.id}
+          LIMIT 1
+        `,
+        expectedJson,
+        input.events,
       );
     });
 
@@ -729,6 +828,7 @@ const layerBase: Layer.Layer<
     const commitCommandEffect = Effect.fn("orchestrationV2.EventSink.commitCommand")(
       function* (input: Parameters<EventSinkV2Shape["commitCommand"]>[0]) {
         const result = yield* commitThenPublish(
+          [input.threadId, ...projectedThreadIds(input.events)],
           Effect.gen(function* () {
             const reserved = yield* commandReceipts.insertIfAbsent({
               commandId: input.commandId,
@@ -873,6 +973,7 @@ const layerBase: Layer.Layer<
     const commitProjectCommandEffect = Effect.fn("orchestrationV2.EventSink.commitProjectCommand")(
       function* (input: Parameters<EventSinkV2Shape["commitProjectCommand"]>[0]) {
         const result = yield* commitThenPublish(
+          [],
           Effect.gen(function* () {
             const reserved: CommandReceiptStore.ProjectCommandReceiptV2 = {
               commandId: input.commandId,
@@ -1001,7 +1102,9 @@ const layerBase: Layer.Layer<
       );
     };
 
+    // Waits only for queued provider snapshots of `threadIds`, the threads this write touches.
     const commitThenPublish = <A, E, R>(
+      threadIds: ReadonlyArray<ThreadId>,
       transaction: Effect.Effect<A, E, R>,
       publish: (committed: A) => Effect.Effect<void>,
     ): Effect.Effect<
@@ -1014,7 +1117,7 @@ const layerBase: Layer.Layer<
           ? Effect.flatMap(Effect.serviceOption(sql.transactionService), (existing) =>
               Option.isSome(existing)
                 ? commitThenPublishNow(transaction, publish)
-                : coordinator.barrier(commitThenPublishNow(transaction, publish)),
+                : coordinator.barrier(commitThenPublishNow(transaction, publish), threadIds),
             )
           : transaction.pipe(
               Effect.provideService(SqlClient.SqlClient, sql),
@@ -1030,12 +1133,33 @@ const layerBase: Layer.Layer<
       "orchestrationV2.EventSink.providerBatch",
     )(function* <A, E, R>(effect: Effect.Effect<A, E, R>) {
       if ((yield* CurrentProviderBatch) !== undefined) return yield* effect;
-      const batch: ProviderBatchPublication = { publish: [], eventCount: 0 };
+      const batch: ProviderBatchPublication = {
+        publish: [],
+        eventCount: 0,
+        projection: { nodeReads: new Map(), threadTouches: new Map() },
+        projectedSequence: undefined,
+      };
       let started = false;
       const result = yield* commitThenPublishNow(
         Effect.sync(() => {
           started = true;
-        }).pipe(Effect.andThen(Effect.provideService(effect, CurrentProviderBatch, batch))),
+        }).pipe(
+          Effect.andThen(
+            effect.pipe(
+              Effect.provideService(CurrentProviderBatch, batch),
+              Effect.provideService(ProjectionStore.ProviderBatchProjectionState, batch.projection),
+              Effect.tap(() =>
+                ProjectionStore.writeThreadTouches(sql, batch.projection.threadTouches).pipe(
+                  Effect.andThen(
+                    batch.projectedSequence === undefined
+                      ? Effect.void
+                      : recordProjectedSequence(batch.projectedSequence),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
         () => Effect.forEach(batch.publish, (publish) => publish, { discard: true }),
       ).pipe(
         // Normalization mutates run-local state, so only retry before its transaction body starts.
@@ -1075,12 +1199,19 @@ const layerBase: Layer.Layer<
           const batch = yield* CurrentProviderBatch;
           const publicationCount = batch?.publish.length ?? 0;
           const eventCount = batch?.eventCount ?? 0;
+          const projectedSequence = batch?.projectedSequence;
+          const threadTouches = new Map(batch?.projection.threadTouches);
           return yield* sql.withTransaction(work).pipe(
             Effect.onError(() =>
               Effect.sync(() => {
                 if (batch !== undefined) {
                   batch.publish.length = publicationCount;
                   batch.eventCount = eventCount;
+                  batch.projectedSequence = projectedSequence;
+                  batch.projection.nodeReads.clear();
+                  batch.projection.threadTouches.clear();
+                  for (const [threadId, updatedAt] of threadTouches)
+                    batch.projection.threadTouches.set(threadId, updatedAt);
                 }
               }),
             ),
@@ -1091,6 +1222,7 @@ const layerBase: Layer.Layer<
             ),
           );
         }),
+        threadViewers.isViewed,
       );
 
     return EventSinkV2.of({
@@ -1142,6 +1274,18 @@ const layerBase: Layer.Layer<
         ),
       writeIfProviderThreadUnchanged: (input) =>
         writeIfProviderThreadUnchangedEffect(input).pipe(
+          Effect.mapError(
+            (cause) => new EventSinkWriteError({ eventCount: input.events.length, cause }),
+          ),
+        ),
+      writeIfTurnItemUnchanged: (input) =>
+        writeIfTurnItemUnchangedEffect(input).pipe(
+          Effect.mapError(
+            (cause) => new EventSinkWriteError({ eventCount: input.events.length, cause }),
+          ),
+        ),
+      writeIfSubagentUnchanged: (input) =>
+        writeIfSubagentUnchangedEffect(input).pipe(
           Effect.mapError(
             (cause) => new EventSinkWriteError({ eventCount: input.events.length, cause }),
           ),
@@ -1232,6 +1376,7 @@ export const layer: Layer.Layer<
       EffectOutbox.layer,
       ProjectStore.layer,
       TurnItemPositionStore.layer,
+      ThreadViewers.layer,
     ),
   ),
 );

@@ -2,23 +2,23 @@
   "schemaVersion": 1,
   "mode": "exact-root-lock-projection",
   "sourceInputs": {
-    "apps/desktop/package.json": "b86b0aee0540313d76bd9bd217680c8a452953f7c57ddee338a12de7f9c29629",
-    "apps/server/package.json": "885ba2f80b4ffbdfe826303f3697250862b264e00d3d777ac1f398826c7c9824",
-    "package.json": "dfdf6aa9ef61e80702fad72ef8f6b2e29e9129692ee9aefa722d3a2388ffecad",
-    "patches/@cursor__sdk@1.2.0.patch": "57f502128bf6accd976963b126e227c86a45d815a53a8dc450461beae3bed4a4",
-    "patches/@ff-labs__fff-node@0.11.0.patch": "cc71fcec015f4d39bc96ae2e2bf6b0ca678124c722c66a7841efce9d34b5983c",
-    "patches/node-pty@1.2.0-beta.15.patch": "f1e680afec85f650699ea756f91f469844ec4c976f4f168492a45c6b3f67d651",
-    "pnpm-lock.yaml": "da919c06fa6f175c0b74a2341984eaf6e89d45d52ee9a5899263476304c70d15",
-    "pnpm-workspace.yaml": "6190b32666e6cbf76ca8403ea93744ab3ebcae3a758ae5875e2ae413c38821fe"
+    "apps/desktop/package.json": "bd3c8a625097ddddd3c54265f0f645c55ad34e7acc589f4864a78138871abaff",
+    "apps/server/package.json": "bca589b82c9e7ded7d8eb1e780b00384ed5cc331af35fcfc041d66d0290306a5",
+    "package.json": "d42b4dc2ef0d80e6b067c51dce7979695ee4b2d3db067818369edfd5b7654112",
+    "patches/@cursor__sdk@1.4.1.patch": "eca524470dd47bd4b1429d36f3f7ed282e804517f572303e12fc18b4f863e8ad",
+    "patches/@ff-labs__fff-node@0.11.0.patch": "93f62a76399b435a76588b2bef237db0a1e85880c1ac0d0759c416e9cc579252",
+    "patches/node-pty@1.2.0-beta.15.patch": "ff8117509663fe1d5a07ef2648c324e80a9349b7d90401a00a591702615b8b30",
+    "pnpm-lock.yaml": "7e94cf6e4aedf858fcb1a8e67f79c9a467ed33ea40bdbb1e668833b96f169a3e",
+    "pnpm-workspace.yaml": "99af0057688126b579c9cba171f0c70e21985a649b607f3505b01f8c83cc4403"
   },
   "stages": {
     "desktop": {
-      "sha256": "3dc7474e70c5923eda27d333f220b72f65fc29076d3dfc71ce6f15d0101382a0",
+      "sha256": "a99e2dd65ce2c8112fd5449c45731c01a9ecf0f06ca145cedae9ba54b9e70448",
       "snapshots": 66,
       "packageManagerVerificationRequired": "pnpm@12.14.0"
     },
     "server": {
-      "sha256": "494995b998784f950a55a77493a3d6aede3272fffa7f8831bd026e49148a7bb7",
+      "sha256": "d69107cb50b9a99e261fee359628ec8a92e2867c86778325e7a2a50e918fdaa1",
       "snapshots": 78,
       "packageManagerVerificationRequired": "pnpm@12.14.0"
     }

@@ -377,7 +377,7 @@ async function readProjections(home: string, ids: readonly string[]) {
     filename: databasePath(home),
     readonly: true,
     readerWorker: false,
-    checkpointWorker: false,
+    writerWorker: false,
   });
   return Effect.runPromise(
     Effect.gen(function* () {
@@ -1362,7 +1362,7 @@ export async function importHistory(input: {
   const database = NodeSqliteClient.layer({
     filename: databasePath(target),
     readerWorker: false,
-    checkpointWorker: false,
+    writerWorker: false,
   });
   const stores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
     Layer.provideMerge(database),

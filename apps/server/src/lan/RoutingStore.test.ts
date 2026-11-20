@@ -122,7 +122,7 @@ const layer = (filename = ":memory:") =>
     Layer.provideMerge(
       Layer.effectDiscard(setup).pipe(
         Layer.provideMerge(
-          NodeSqliteClient.layer({ filename, readerWorker: false, checkpointWorker: false }),
+          NodeSqliteClient.layer({ filename, readerWorker: false, writerWorker: false }),
         ),
       ),
     ),

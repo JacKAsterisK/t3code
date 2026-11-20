@@ -458,7 +458,9 @@ it.effect("resolves a link at its answering address without waiting out a sleepi
         Effect.provide(FetchHttpClient.layer),
       );
       const elsewhere = yield* serveRaw(() =>
-        Effect.succeed(HttpServerResponse.text(described, { contentType: "application/json" })),
+        Queue.take(b.unanswered).pipe(
+          Effect.as(HttpServerResponse.text(described, { contentType: "application/json" })),
+        ),
       );
       const a = yield* makeA(laptop);
       const pairing = yield* b.auth.issuePairingCredential();
@@ -470,12 +472,8 @@ it.effect("resolves a link at its answering address without waiting out a sleepi
       });
 
       yield* Ref.set(b.asleep, true);
-      const first = yield* a.links.resolve(box.environmentId).pipe(Effect.forkScoped);
-      yield* Queue.take(b.unanswered);
-      yield* TestClock.adjust(Duration.seconds(3));
-      expect((yield* Fiber.join(first)).url).toBe(elsewhere);
-
-      // The clock no longer moves: a resolve that probes the sleeping address first never returns.
+      // The alternate answers only after the primary takes the request. The clock
+      // stays frozen, so waiting for the primary to time out cannot pass.
       expect((yield* a.links.resolve(box.environmentId)).url).toBe(elsewhere);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),

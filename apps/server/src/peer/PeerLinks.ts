@@ -728,64 +728,60 @@ const make = Effect.gen(function* () {
           message: `The link to ${link.label} lost its credential. Link it again.`,
         });
       }
-      // The token goes only to an address that still answers as this peer,
-      // so one that now answers as another machine never receives it.
-      let fenced = true;
-      const failures: string[] = [];
+      // Race the addresses without a credential, then use only one that still answers as this peer.
+      const failures = new Map<string, string>();
       const fleet = yield* Effect.serviceOption(Fleet.FleetPeerTrust);
       const trusted = Option.isSome(fleet) ? yield* fleet.value.current : [];
-      let label = link.label;
-      const url = yield* Effect.findFirst(link.urls, (candidate) =>
-        probe(candidate).pipe(
-          Effect.match({
-            onFailure: (cause) => {
-              const route = trusted.find((peer) => peer.origin === candidate)?.connectHost;
-              failures.push(
-                candidate +
-                  (route === undefined
-                    ? ""
-                    : " via hostname " + route + " (signed IP available on DNS failure)") +
-                  ": " +
-                  peerConnectionFailure(cause),
-              );
-              return Option.none();
-            },
-            onSuccess: Option.some,
-          }),
-          Effect.map((found) => {
-            if (Option.isNone(found)) return false;
-            if (found.value.environmentId !== environmentId) {
-              failures.push(
-                candidate +
-                  ": answered as a different environment (" +
-                  found.value.environmentId +
-                  ")",
-              );
-              return false;
-            }
-            fenced = linkLimitsHold(found.value);
-            label = found.value.label;
-            return true;
-          }),
-        ),
-      );
-      if (Option.isNone(url)) {
+      const answered =
+        link.urls.length === 0
+          ? Option.none()
+          : yield* Effect.raceAll(
+              link.urls.map((url) =>
+                probe(url).pipe(
+                  Effect.map((peer) => {
+                    if (peer.environmentId === environmentId) return Option.some({ url, peer });
+                    failures.set(
+                      url,
+                      `${url}: answered as a different environment (${peer.environmentId})`,
+                    );
+                    return Option.none();
+                  }),
+                  Effect.catch((cause) => {
+                    const route = trusted.find(
+                      (candidate) => candidate.origin === url,
+                    )?.connectHost;
+                    const via =
+                      route === undefined
+                        ? ""
+                        : ` via hostname ${route} (signed IP available on DNS failure)`;
+                    failures.set(url, `${url}${via}: ${peerConnectionFailure(cause)}`);
+                    return Effect.succeedNone;
+                  }),
+                  Effect.flatMap(Effect.fromOption),
+                ),
+              ),
+            ).pipe(Effect.option);
+      if (Option.isNone(answered)) {
+        const details = link.urls
+          .map((url) => failures.get(url))
+          .filter((detail) => detail !== undefined);
         return yield* new PeerLinkError({
           reason: "unreachable",
-          message: `${link.label} could not be reached. ${failures.join("; ")}`,
+          message: `${link.label} could not be reached. ${details.join("; ")}`,
         });
       }
+      const { url, peer } = answered.value;
       // A link made before the peer had to fence linked work, or a peer moved
       // back to such a version, would carry work past those limits.
-      if (!fenced) {
+      if (!linkLimitsHold(peer)) {
         return yield* new PeerLinkError({
           reason: "incompatible",
           message: `${link.label} runs a T3 Code version that cannot keep a linked agent's limits. Update it, then link again.`,
         });
       }
       return {
-        link: yield* withLabel(link, label),
-        url: url.value,
+        link: yield* withLabel(link, peer.label),
+        url,
         token: new TextDecoder().decode(stored.value),
       };
     },

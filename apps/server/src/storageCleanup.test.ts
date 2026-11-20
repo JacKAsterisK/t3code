@@ -847,18 +847,16 @@ describe("checkpoint ref cleanup", () => {
   it.live("cleans more checkpoint refs than default git output holds", () =>
     runCleanupTest(
       Effect.gen(function* () {
-        const { service, repo, addThread, listRefs } = yield* checkpointCleanupFixture();
-        const git = yield* GitVcsDriver.GitVcsDriver;
+        const { service, fs, repo, command, addThread, listRefs } =
+          yield* checkpointCleanupFixture();
         const prefix = (yield* addThread("many-checkpoints", { deleted: true }))[0]!.slice(0, -1);
-        yield* git.execute({
-          operation: "cleanup-test.seed-checkpoints",
-          cwd: repo,
-          args: ["update-ref", "--stdin"],
-          stdin: Array.from(
-            { length: 12_283 },
-            (_, ordinal) => `update ${prefix}${ordinal} HEAD\n`,
-          ).join(""),
-        });
+        const head = (yield* command(repo, ["rev-parse", "HEAD"])).stdout.trim();
+        const refs = Array.from({ length: 12_283 }, (_, ordinal) => `${prefix}${ordinal}`).sort();
+        // Seed the same refs in packed form without creating thousands of test-only loose files.
+        yield* fs.writeFileString(
+          NodePath.join(repo, ".git", "packed-refs"),
+          `# pack-refs with: sorted\n${refs.map((ref) => `${head} ${ref}\n`).join("")}`,
+        );
         yield* service.runNow;
         expect(yield* listRefs()).toEqual([]);
       }).pipe(Effect.provide(Sqlite.layerMemory)),

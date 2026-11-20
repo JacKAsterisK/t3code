@@ -56,10 +56,19 @@ const fixture = Effect.fn("ClaudeMaintenance.test.fixture")(function* (
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const directory = yield* fs.makeTempDirectoryScoped();
+  const windowsNpm = install === "npm" && platform === "win32";
   const binaryPath =
     install === "npm"
-      ? path.join(directory, "lib/node_modules/@anthropic-ai/claude-code/cli.js")
+      ? path.join(
+          directory,
+          windowsNpm ? "claude.cmd" : "lib/node_modules/@anthropic-ai/claude-code/cli.js",
+        )
       : path.join(directory, ".local/bin", platform === "win32" ? "claude.exe" : "claude");
+  if (windowsNpm) {
+    const packageDir = path.join(directory, "node_modules/@anthropic-ai/claude-code");
+    yield* fs.makeDirectory(packageDir, { recursive: true });
+    yield* fs.writeFileString(path.join(packageDir, "package.json"), "{}");
+  }
   // Unix native installs link the launcher to a versioned binary; Windows places a real .exe.
   const realBinaryPath =
     install === "native" && platform !== "win32"
@@ -84,7 +93,7 @@ const fixture = Effect.fn("ClaudeMaintenance.test.fixture")(function* (
       : platform === "darwin"
         ? "/Library/Application Support/ClaudeCode"
         : "/etc/claude-code";
-  const npmPath = path.join(directory, "bin/npm");
+  const npmPath = path.join(directory, windowsNpm ? "bin/npm.exe" : "bin/npm");
   if (install === "npm") {
     yield* fs.makeDirectory(path.dirname(npmPath), { recursive: true });
     yield* fs.writeFileString(npmPath, "#!/bin/sh\n");
@@ -128,7 +137,9 @@ const fixture = Effect.fn("ClaudeMaintenance.test.fixture")(function* (
       Effect.provideService(
         ChildProcessSpawner.ChildProcessSpawner,
         ChildProcessSpawner.make((command) => {
-          if (!ChildProcess.isStandardCommand(command) || command.command !== npmPath) {
+          const matchesNpm = (candidate: string) =>
+            windowsNpm ? candidate.toLowerCase() === npmPath.toLowerCase() : candidate === npmPath;
+          if (!ChildProcess.isStandardCommand(command) || !matchesNpm(command.command)) {
             return Effect.die("version checks may only ask npm");
           }
           npmProbes.push(command.args.map(String));
@@ -247,7 +258,10 @@ it.layer(NodeServices.layer)("ClaudeMaintenance", (it) => {
   ])("advertises the installable version for $name", (row, ctx) =>
     Effect.gen(function* () {
       if (needsSymlink(row.npm ? "npm" : "native")) return ctx.skip();
-      const f = yield* fixture(row.npm ? "npm" : "native");
+      const f = yield* fixture(
+        row.npm ? "npm" : "native",
+        row.npm ? HostProcess.Platform.defaultValue() : "linux",
+      );
       if (row.settings) yield* f.fs.writeFileString(f.settingsPath, row.settings);
       const requests: string[] = [];
       const client = HttpClient.make((request) => {

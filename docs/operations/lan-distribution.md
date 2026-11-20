@@ -80,9 +80,11 @@ and native addons belong to the verified payload. Preserve third-party notices.
 
 ## Resume the local changed-file gate
 
-Keep the comparison commit from the previous published release and the same
-evidence directory through retries. From a clean candidate checkout with the
-qualified Node and frozen pnpm install:
+Run this gate on the final pushed candidate before starting the native build for
+each LAN release. Use the previous published release's source commit as the
+comparison base. Keep the same evidence directory across attempts for this
+release. Use the command below from a clean candidate checkout with the
+qualified Node and frozen pnpm install.
 
 ```powershell
 node scripts/check-changed.ts <previous-source-sha> --concurrency 4 --timeout 7200 --batch-receipts C:\ReleaseEvidence\source-batches *> C:\ReleaseEvidence\check-changed-01.log

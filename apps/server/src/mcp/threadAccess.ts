@@ -182,25 +182,45 @@ export const loadCaller = Effect.fn("mcp.loadCaller")(function* () {
   } satisfies Caller;
 });
 
+/** Runtime ceiling for the specific LAN thread tools that let Auto act on Full access. */
+export function autoThreadFullAccessLimit(
+  scope: McpInvocationContext.McpInvocationScope,
+  runtimeMode: RuntimeMode,
+  caller?: Pick<OrchestrationV2ThreadShell, "linkOrigin">,
+): RuntimeMode {
+  if (runtimeMode !== "auto") return runtimeMode;
+  if (scope.client?.linked === true) {
+    return scope.client.access === "full-access" && scope.client.senderThread !== undefined
+      ? "full-access"
+      : runtimeMode;
+  }
+  return scope.thread !== undefined &&
+    (caller?.linkOrigin === undefined || !linkOriginIsFenced(caller.linkOrigin))
+    ? "full-access"
+    : runtimeMode;
+}
+
 export function threadMessageLimits(
   scope: McpInvocationContext.McpInvocationScope,
   limits: CallerLimits,
   input: Pick<OrchestratorMcpThreadSendInput, "mode" | "freshContext">,
   caller?: Pick<OrchestrationV2ThreadShell, "linkOrigin">,
 ): CallerLimits {
-  if (
-    limits.runtimeMode === "auto" &&
-    input.mode !== "restart" &&
-    input.freshContext !== true &&
-    ((scope.thread !== undefined &&
-      (caller?.linkOrigin === undefined || !linkOriginIsFenced(caller.linkOrigin))) ||
-      (scope.client?.linked === true &&
-        scope.client.access === "full-access" &&
-        scope.client.senderThread !== undefined))
-  ) {
-    return { ...limits, runtimeMode: "full-access" };
-  }
-  return limits;
+  return input.mode === "restart" || input.freshContext === true
+    ? limits
+    : { ...limits, runtimeMode: autoThreadFullAccessLimit(scope, limits.runtimeMode, caller) };
+}
+
+/** An explicit request may opt up. An omitted or inherited mode keeps the caller's actual mode. */
+export function threadCreationRuntimeLimit(
+  scope: McpInvocationContext.McpInvocationScope,
+  runtimeMode: RuntimeMode,
+  requested: RuntimeMode | "inherit" | undefined,
+  caller?: Pick<OrchestrationV2ThreadShell, "linkOrigin">,
+): RuntimeMode {
+  return requested === "full-access"
+    ? autoThreadFullAccessLimit(scope, runtimeMode, caller)
+    : runtimeMode;
 }
 
 export const assertTargetWithinLimits = (

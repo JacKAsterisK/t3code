@@ -140,6 +140,7 @@ import {
 import {
   assertTargetWithinLimits,
   isLiveCallerShell,
+  threadCreationRuntimeLimit,
   threadMessageLimits,
   threadNotFound,
 } from "./threadAccess.ts";
@@ -2866,7 +2867,12 @@ const make = Effect.gen(function* () {
         skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
       });
       const runtimeMode = yield* resolveRuntimeMode(
-        parent.thread.runtimeMode,
+        threadCreationRuntimeLimit(
+          scope,
+          parent.thread.runtimeMode,
+          input.runtimeMode,
+          parent.thread,
+        ),
         input.runtimeMode,
         target,
       );

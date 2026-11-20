@@ -230,7 +230,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         };
       }),
     ),
-    writesThread((input) =>
+    McpToolAccess.writesThreadFromAuto((input) =>
       Effect.gen(function* () {
         const modelSelection = yield* required(input.modelSelection, "modelSelection");
         const {
@@ -374,7 +374,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       }),
     ),
   ),
-  t3_thread_organize: writesThread((input) =>
+  t3_thread_organize: McpToolAccess.writesThreadFromAuto((input) =>
     Effect.gen(function* () {
       const { threads, projection, caller } = yield* readThread(input.threadId);
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };

@@ -601,6 +601,52 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect(
+  "Auto can explicitly launch Full access and manage a Full access thread through a Full access link",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const seen = yield* Ref.make<Seen>(nothingSeen);
+        const linkSession = yield* Ref.make("");
+        const b = yield* serveBox(seen, linkSession, "full-access");
+        const a = yield* makeLaptop;
+        yield* linkTo(a.links, b, "full-access");
+        yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
+
+        const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
+        const launch = {
+          environmentId: box.environmentId,
+          projectId: boxProject,
+          title: "Run the suite there",
+          modelSelection,
+        };
+        const requested = { ...launch, runtimeMode: "full-access" };
+        const autoCaller = "thread:laptop-auto";
+        expect(failureOf(yield* a.call(autoCaller, "t3_thread_launch", requested))).toBeUndefined();
+        expect(failureOf(yield* a.call(autoCaller, "t3_thread_launch", launch))).toBeUndefined();
+        const lower = yield* a.call("thread:laptop-edits", "t3_thread_launch", requested);
+        expect(failureOf(lower)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+        expect((yield* Ref.get(seen)).launches.map((input) => input.runtimeMode)).toEqual([
+          "full-access",
+          "auto",
+        ]);
+
+        const target = { environmentId: box.environmentId, threadId: boxThread };
+        const configured = yield* a.call(autoCaller, "t3_thread_configure", {
+          ...target,
+          modelSelection,
+        });
+        const organized = yield* a.call(autoCaller, "t3_thread_organize", {
+          ...target,
+          action: "archive",
+        });
+        expect(failureOf(configured)).toBeUndefined();
+        expect(failureOf(organized)).toBeUndefined();
+        expect((yield* Ref.get(seen)).stops).toHaveLength(2);
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("a launch in a linked environment keeps the calling thread's owner", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -813,8 +859,8 @@ it.effect("refuses a launch there above the link's access, naming the link", () 
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
-      // A full-access agent here asks for more than the link allows there.
-      const launchAboveLink = a.call("thread:laptop-full", "t3_thread_launch", {
+      // An Auto agent here can request Full access, subject to the destination's approval.
+      const launchAboveLink = a.call("thread:laptop-auto", "t3_thread_launch", {
         environmentId: box.environmentId,
         projectId: boxProject,
         title: "Run the suite there",

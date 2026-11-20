@@ -796,6 +796,7 @@ const parentScope: McpInvocationContext.McpInvocationScope = {
 const seedParent = (
   laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>,
   parentModelSelection: ModelSelection = modelSelection,
+  runtimeMode: "auto" | "full-access" = "full-access",
 ) =>
   Effect.gen(function* () {
     const now = yield* DateTime.now;
@@ -809,7 +810,7 @@ const seedParent = (
       projectId: ProjectId.make("project:laptop"),
       title: "Laptop parent",
       modelSelection: parentModelSelection,
-      runtimeMode: "full-access",
+      runtimeMode,
       interactionMode: "default",
       branch: null,
       worktreePath: null,
@@ -1260,6 +1261,38 @@ it.effect(
           status: "completed",
           result: "All 412 tests pass on the box.",
         });
+      }),
+    ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect.each(["full-access", "auto"] as const)(
+  "Auto delegation requesting Full access over a %s link",
+  (access) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const thread = yield* makeBoxThread;
+        const b = yield* serveBox(thread);
+        const offers = yield* SubscriptionRef.make<
+          ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+        >([]);
+        const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+        const a = yield* makeLaptop(database, offers);
+        yield* linkTo(a.links, b, access);
+        yield* seedParent(a, modelSelection, "auto");
+
+        const result = yield* a.call("delegate_task", {
+          task: "Run the suite on the box.",
+          target: { environmentId: box.environmentId },
+          runtimeMode: "full-access",
+        });
+        if (access === "full-access") {
+          expect(result.isError, JSON.stringify(result.content)).toBe(false);
+          expect(yield* Ref.get(thread.launchedWith)).toMatchObject({ runtimeMode: "full-access" });
+        } else {
+          expect(result.isError).toBe(true);
+          expect(JSON.stringify(result.content)).toContain("was linked with auto access");
+          expect(yield* Ref.get(thread.launchedWith)).toBeNull();
+        }
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

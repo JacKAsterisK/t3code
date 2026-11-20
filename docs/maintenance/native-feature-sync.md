@@ -43,12 +43,15 @@ approval before code or runtime changes.
   and the `usage_report` registration. Usage notices use upstream's shared
   presentation copy.
 
-- Thread messaging allows an Auto thread to send, queue or steer a message to a
-  Full access thread. A forwarded call requires a Full access link and retains
-  the sender's interaction-mode ceiling. This rule is fixed so both the MCP
-  admission check and commit-time dispatch check use the same policy without a
-  new settings surface. Lower modes, ordinary OAuth clients, restarts and fresh
-  context use the existing ceiling.
+- Auto threads can send, queue or steer messages to Full access threads.
+  Restart and fresh-context sends keep the existing ceiling.
+- Auto threads can explicitly launch or delegate Full access threads. An omitted
+  or inherited runtime mode keeps its existing behavior. Auto threads can also
+  configure the model and organize existing Full access threads.
+- Linked calls require Full access approval for the destination. Both changes
+  retain the sender's interaction-mode ceiling and managed runtime caps. Lower
+  modes and ordinary OAuth clients use their existing limits. The tool
+  authorization and dispatch checks share the fixed rule.
 - Antigravity offers upstream Auto when the ACP session advertises native
   `auto`. Requests the provider still sends go through the permission UI.
   Managed runtimes that lack native Auto keep their existing modes.

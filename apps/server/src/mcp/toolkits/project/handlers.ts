@@ -467,6 +467,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       }),
     // The launched thread carries the caller's link, if it has one.
     "stamped",
+    true,
   ),
   t3_project_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {

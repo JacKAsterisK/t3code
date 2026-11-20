@@ -40,6 +40,7 @@ import {
   resolveRuntimeMode,
   taskPrompt,
 } from "../mcp/delegatedTaskModes.ts";
+import { threadCreationRuntimeLimit } from "../mcp/threadAccess.ts";
 import { followUpOwnerRun } from "../orchestration-v2/CommandPolicy.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -339,7 +340,15 @@ const make = Effect.gen(function* () {
       const runtimeMode =
         input.runtimeMode === undefined || input.runtimeMode === "inherit"
           ? undefined
-          : yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);
+          : yield* resolveRuntimeMode(
+              threadCreationRuntimeLimit(
+                scope,
+                parent.thread.runtimeMode,
+                input.runtimeMode,
+                parent.thread,
+              ),
+              input.runtimeMode,
+            );
       const interactionMode =
         input.interactionMode === undefined || input.interactionMode === "inherit"
           ? undefined

@@ -42,6 +42,8 @@ import {
   type Caller,
   loadCaller,
   readCaller,
+  autoThreadFullAccessLimit,
+  threadCreationRuntimeLimit,
   threadMessageLimits,
   unavailable,
 } from "./threadAccess.ts";
@@ -338,6 +340,23 @@ export const writesThreadMessage = <P extends OrchestratorMcpThreadSendInput, A,
     (caller, params) => threadMessageLimits(caller.scope, caller.limits, params, caller.caller),
   );
 
+export const writesThreadFromAuto = <
+  P extends { readonly threadId?: ThreadId | undefined },
+  A,
+  E,
+  R,
+>(
+  handle: (params: P) => Effect.Effect<A, E, R>,
+) =>
+  writesThreads(
+    (params: P) => [params.threadId],
+    handle,
+    ({ scope, limits, caller }) => ({
+      ...limits,
+      runtimeMode: autoThreadFullAccessLimit(scope, limits.runtimeMode, caller),
+    }),
+  );
+
 const escalationDenied = (refusal: DispatchModeRefusal) =>
   new OrchestratorMcpFailure({
     code:
@@ -355,8 +374,9 @@ export interface StartedModes {
 }
 
 /**
- * Starts threads with the modes `modes` requests, which may not be broader
- * than the caller's. `linked` says what a linked caller gets: threads stamped
+ * Starts threads with the requested modes up to the caller's limits. The tool
+ * may opt in to explicit Auto-to-Full access launches. `linked` says what a
+ * linked caller gets: threads stamped
  * with its `linkOrigin`, or a refusal where the tool cannot carry one.
  */
 export const startsThreads = <P, A, E, R>(
@@ -366,11 +386,20 @@ export const startsThreads = <P, A, E, R>(
   },
   handle: (params: P, modes: StartedModes) => Effect.Effect<A, E, R>,
   linked: "stamped" | { readonly refused: string },
+  allowAutoFullAccess = false,
 ) => {
   const started = Effect.fn("McpToolAccess.started")(function* (caller: Caller, params: P) {
     const requested = modes(params);
+    const runtimeLimit = allowAutoFullAccess
+      ? threadCreationRuntimeLimit(
+          caller.scope,
+          caller.limits.runtimeMode,
+          requested.runtimeMode,
+          caller.caller,
+        )
+      : caller.limits.runtimeMode;
     return {
-      runtimeMode: yield* resolveRuntimeMode(caller.limits.runtimeMode, requested.runtimeMode),
+      runtimeMode: yield* resolveRuntimeMode(runtimeLimit, requested.runtimeMode),
       interactionMode: yield* resolveInteractionMode(
         caller.limits.interactionMode,
         requested.interactionMode,

@@ -695,7 +695,12 @@ it.effect.each([
 
     assert.deepEqual(
       spawned.map((command) => command.command),
-      ["C:\\Windows\\System32\\reg.exe"],
+      [
+        "C:\\Windows\\System32\\reg.exe",
+        ...(!native && windowsHost
+          ? ["C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"]
+          : []),
+      ],
     );
     if (native) {
       assert.isTrue(Exit.isSuccess(exit));
@@ -704,8 +709,8 @@ it.effect.each([
       ]);
     } else {
       assert.deepEqual(verbatim, []);
-      // The PowerShell launch is reached; this host has no powershell.exe to run it.
-      assert.isTrue(Exit.isFailure(exit));
+      // The PowerShell fallback can spawn only when it exists on the test host.
+      assert.equal(Exit.isSuccess(exit), windowsHost);
       if (Exit.isFailure(exit)) {
         const error = Cause.squash(exit.cause);
         assert.instanceOf(error, ExternalLauncher.ExternalLauncherCommandNotFoundError);

@@ -231,6 +231,7 @@ const orchestratorServer = McpHttpServer.layerOrchestratorToolkit.pipe(
   Layer.provide(
     Layer.mock(ThreadManagement.ThreadManagementService)({
       ...fixtureThreads,
+      getRunCount: () => Effect.succeed(0),
       getProjectThreadRecords: ({ threadId }) =>
         Effect.succeed(idleThreadProjection(fixtureShells.get(threadId)!) as never),
       getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false } as never),
@@ -275,7 +276,9 @@ it.effect("t3_thread_read tells an unknown id from a deleted thread", () =>
       outcome(yield* callTool("t3_thread_read", { threadId: `thread_${unknownUuid}` })),
     ).toEqual({
       code: "thread_not_found",
-      message: `No thread ${unknownUuid} exists here. ${THREAD_ID_INPUT_FORMS}`,
+      message: expect.stringContaining(
+        `No thread ${unknownUuid} exists here. ${THREAD_ID_INPUT_FORMS}`,
+      ),
     });
     expect(outcome(yield* callTool("t3_thread_read", { threadId: "deleted" }))).toEqual({
       code: "thread_not_found",
@@ -304,6 +307,7 @@ const threadServer = McpHttpServer.layerThreadToolkit.pipe(
       ...fixtureThreads,
       getProjectThreadRecords: ({ threadId }) =>
         Effect.succeed(idleThreadProjection(fixtureShells.get(threadId)!)),
+      listActiveShellIndex: () => Effect.succeed([]),
       dispatch: (command) =>
         Effect.sync(() => {
           dispatched.push("threadId" in command ? command.threadId : "");

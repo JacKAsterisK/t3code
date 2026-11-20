@@ -75,7 +75,7 @@ const makePiSpawner = Effect.fnUntraced(function* (
               ? {
                   commands: [
                     personalSkill,
-                    ...(cwd?.endsWith("/pi-status-probe")
+                    ...(cwd?.replaceAll("\\", "/").endsWith("/pi-status-probe")
                       ? []
                       : [
                           {
@@ -173,7 +173,8 @@ it.layer(layerTest)("PiDriver workspace discovery", (it) => {
       // network refresh at launch.
       assert.isFalse(launches.some((launch) => launch.options.cwd === "/machine"));
       for (const isLaunch of [
-        (cwd: string | undefined) => cwd?.endsWith("/pi-status-probe") === true,
+        (cwd: string | undefined) =>
+          cwd?.replaceAll("\\", "/").endsWith("/pi-status-probe") === true,
         (cwd: string | undefined) => cwd === "/first",
       ]) {
         const discovery = launches.find(

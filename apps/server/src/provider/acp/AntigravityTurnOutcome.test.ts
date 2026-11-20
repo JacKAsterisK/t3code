@@ -1,5 +1,6 @@
 import * as NodeSqlite from "node:sqlite";
 
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -183,54 +184,56 @@ describe("watchAntigravityPromptOutcome", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("reads only this session's own unlinked log, and keeps a typed refusal", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const profileDirectory = yield* fs.makeTempDirectoryScoped();
-      const conversations = path.join(profileDirectory, "antigravity-acp", "conversations");
-      yield* fs.makeDirectory(conversations, { recursive: true });
-      const own = "e6aba774-5472-4277-b6ee-27b2e05570a7";
-      const peer = "0d9c2b4e-1111-4222-8333-944455556666";
-      const append = (sessionId: string, type: number, payload: Uint8Array) => {
-        const database = new NodeSqlite.DatabaseSync(path.join(conversations, `${sessionId}.db`));
-        try {
-          database.exec(
-            "CREATE TABLE IF NOT EXISTS steps (idx INTEGER PRIMARY KEY, step_type INTEGER, step_payload BLOB)",
-          );
-          database
-            .prepare("INSERT INTO steps (step_type, step_payload) VALUES (?, ?)")
-            .run(type, payload);
-        } finally {
-          database.close();
-        }
-      };
+  it.effect.skipIf(!symlinksSupported)(
+    "reads only this session's own unlinked log, and keeps a typed refusal",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const profileDirectory = yield* fs.makeTempDirectoryScoped();
+        const conversations = path.join(profileDirectory, "antigravity-acp", "conversations");
+        yield* fs.makeDirectory(conversations, { recursive: true });
+        const own = "e6aba774-5472-4277-b6ee-27b2e05570a7";
+        const peer = "0d9c2b4e-1111-4222-8333-944455556666";
+        const append = (sessionId: string, type: number, payload: Uint8Array) => {
+          const database = new NodeSqlite.DatabaseSync(path.join(conversations, `${sessionId}.db`));
+          try {
+            database.exec(
+              "CREATE TABLE IF NOT EXISTS steps (idx INTEGER PRIMARY KEY, step_type INTEGER, step_payload BLOB)",
+            );
+            database
+              .prepare("INSERT INTO steps (step_type, step_payload) VALUES (?, ?)")
+              .run(type, payload);
+          } finally {
+            database.close();
+          }
+        };
 
-      // own.db links to a peer session; the peer's new error step is not this turn's.
-      append(peer, USER_INPUT, Buffer.from("peer"));
-      yield* fs.symlink(
-        path.join(conversations, `${peer}.db`),
-        path.join(conversations, `${own}.db`),
-      );
-      const linked = yield* watchAntigravityPromptOutcome(profileDirectory, own);
-      append(peer, ERROR_MESSAGE, QUOTA_ERROR);
-      assert.isUndefined(yield* linked({ stopReason: "end_turn" }));
-      assert.equal((yield* linked({ stopReason: "refusal" }))?.failure.class, "usage_limit");
+        // own.db links to a peer session; the peer's new error step is not this turn's.
+        append(peer, USER_INPUT, Buffer.from("peer"));
+        yield* fs.symlink(
+          path.join(conversations, `${peer}.db`),
+          path.join(conversations, `${own}.db`),
+        );
+        const linked = yield* watchAntigravityPromptOutcome(profileDirectory, own);
+        append(peer, ERROR_MESSAGE, QUOTA_ERROR);
+        assert.isUndefined(yield* linked({ stopReason: "end_turn" }));
+        assert.equal((yield* linked({ stopReason: "refusal" }))?.failure.class, "usage_limit");
 
-      // An unreadable log gives no evidence, but the agent's typed refusal still fails the turn.
-      yield* fs.remove(path.join(conversations, `${own}.db`));
-      yield* fs.writeFileString(path.join(conversations, `${own}.db`), "not a database");
-      const corrupt = yield* watchAntigravityPromptOutcome(profileDirectory, own);
-      assert.isUndefined(yield* corrupt({ stopReason: "end_turn" }));
-      assert.deepEqual(
-        yield* corrupt({ stopReason: "refusal" }),
-        reusable({
-          class: "usage_limit",
-          message: "You have reached your Antigravity quota for this period.",
-          code: "QUOTA_EXHAUSTED",
-          retryable: true,
-        }),
-      );
-    }).pipe(Effect.provide(NodeServices.layer)),
+        // An unreadable log gives no evidence, but the agent's typed refusal still fails the turn.
+        yield* fs.remove(path.join(conversations, `${own}.db`));
+        yield* fs.writeFileString(path.join(conversations, `${own}.db`), "not a database");
+        const corrupt = yield* watchAntigravityPromptOutcome(profileDirectory, own);
+        assert.isUndefined(yield* corrupt({ stopReason: "end_turn" }));
+        assert.deepEqual(
+          yield* corrupt({ stopReason: "refusal" }),
+          reusable({
+            class: "usage_limit",
+            message: "You have reached your Antigravity quota for this period.",
+            code: "QUOTA_EXHAUSTED",
+            retryable: true,
+          }),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

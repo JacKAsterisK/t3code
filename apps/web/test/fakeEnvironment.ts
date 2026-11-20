@@ -545,19 +545,29 @@ function sessionFor(
         return Deferred.await(reply);
       }),
     [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: () =>
-      subscribe<OrchestrationV2ShellStreamItem>([
-        {
-          kind: "snapshot",
-          snapshot: {
-            schemaVersion: 1,
-            snapshotSequence: sequence,
-            projects: live ? projects : [machineProject],
-            threads: threads.filter((thread) => !thread.olderSettled).map(shellOfHere),
-            archivedThreads: [],
+      subscribe<OrchestrationV2ShellStreamItem>(
+        [
+          {
+            kind: "snapshot",
+            snapshot: {
+              schemaVersion: 1,
+              snapshotSequence: sequence,
+              projects: live ? projects : [machineProject],
+              threads: threads.filter((thread) => !thread.olderSettled).map(shellOfHere),
+              archivedThreads: [],
+            },
           },
-        },
-        { kind: "synchronized" },
-      ]),
+          { kind: "synchronized" },
+        ],
+        live
+          ? (queue) => {
+              shellSubscriber = queue;
+              return () => {
+                if (shellSubscriber === queue) shellSubscriber = null;
+              };
+            }
+          : undefined,
+      ),
     [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input: { readonly threadId: ThreadId }) => {
       const thread = threads.find((candidate) => candidate.id === input.threadId);
       if (!thread) return Stream.never;

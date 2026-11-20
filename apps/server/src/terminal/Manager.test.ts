@@ -2133,7 +2133,7 @@ it.layer(
   it.effect("starts an existing $SHELL whose path contains spaces before a dash", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const { join } = yield* Path.Path;
+      const { join, resolve } = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-shell-path-" });
       const bin = join(root, "Jane -Doe Smith", ".local", "bin");
       yield* fs.makeDirectory(bin, { recursive: true });
@@ -2158,17 +2158,18 @@ it.layer(
       yield* manager.open(openInput());
 
       expect(ptyAdapter.spawnInputs.map((input) => input.shell)).toEqual([
-        "/shell-fixture/Jane -Doe Smith/.local/bin/fish",
+        resolve("/shell-fixture/Jane -Doe Smith/.local/bin/fish"),
       ]);
     }),
   );
 
   it.effect("keeps missing or quoted $SHELL paths that contain spaces", () =>
     Effect.gen(function* () {
+      const { resolve } = yield* Path.Path;
       for (const [shell, expected] of [
         ["/Users/Jane Doe/.local/bin/fish", "/Users/Jane Doe/.local/bin/fish"],
         ['"/opt/my -shell/fish" -l', "/opt/my -shell/fish"],
-      ]) {
+      ] as const) {
         const { manager, ptyAdapter } = yield* createManager(5, {
           env: { SHELL: shell },
         }).pipe(Effect.provide(layerWithHostPlatform("darwin")));
@@ -2178,7 +2179,7 @@ it.layer(
         expect(
           ptyAdapter.spawnInputs.map((input) => input.shell),
           shell,
-        ).toEqual([expected]);
+        ).toEqual([resolve(expected)]);
       }
     }),
   );
@@ -2249,7 +2250,8 @@ it.layer(
 
       yield* manager.open(openInput());
 
-      expect(ptyAdapter.spawnInputs[0]?.shell).toBe(shell);
+      const { resolve } = yield* Path.Path;
+      expect(ptyAdapter.spawnInputs[0]?.shell).toBe(platform === "win32" ? shell : resolve(shell));
     }),
   );
 

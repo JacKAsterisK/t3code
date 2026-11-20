@@ -553,7 +553,7 @@ describe("AcpRegistrySupport", () => {
       yield* fileSystem.remove(toolchain.executablePath);
       const userEnvironment = {
         ...toolchain.environment,
-        PATH: `${userBin}:${toolchain.environment.PATH}`,
+        PATH: `${userBin}${NodePath.delimiter}${toolchain.environment.PATH}`,
       };
       const repaired = yield* resolver.resolve(settings(), "/workspace", userEnvironment);
       expect(repaired.spawn.command).toBe(toolchain.executablePath);
@@ -639,7 +639,10 @@ describe("AcpRegistrySupport", () => {
         Effect.provideService(
           ChildProcessSpawner.ChildProcessSpawner,
           ChildProcessSpawner.make((command) => {
-            if (command._tag === "StandardCommand" && command.command === toolchain.npmPath) {
+            if (
+              command._tag === "StandardCommand" &&
+              command.command.toLowerCase().includes(toolchain.npmPath.toLowerCase())
+            ) {
               npmEnvironments.push({ ...command.options.env });
             }
             return realSpawner.spawn(command);
@@ -722,7 +725,7 @@ describe("AcpRegistrySupport", () => {
 
       const resolved = yield* resolver.resolve(settings(), "/workspace", {
         ...toolchain.environment,
-        PATH: `${userBin}:${toolchain.environment.PATH}`,
+        PATH: `${userBin}${NodePath.delimiter}${toolchain.environment.PATH}`,
       });
 
       expect(resolved.spawn.command).toBe(toolchain.executablePath);
@@ -855,7 +858,7 @@ describe("AcpRegistrySupport", () => {
 
   it.effect("gives Antigravity a T3-owned temp directory that is removed with the process", () => {
     const agent = {
-      ...makeAgent({ binary: { "linux-x86_64": { archive: archiveUrl, cmd: "./agy" } } }),
+      ...makeAgent({ binary: { [nativePlatformTarget]: { archive: archiveUrl, cmd: "./agy" } } }),
       id: "antigravity-acp",
     };
     return Effect.gen(function* () {
@@ -863,7 +866,7 @@ describe("AcpRegistrySupport", () => {
       const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3-acp-registry-runtime-temp-",
       });
-      const runtimeTempDir = `${cacheDir}/antigravity-tmp/acp-registry`;
+      const runtimeTempDir = NodePath.join(cacheDir, "antigravity-tmp", "acp-registry");
       yield* fileSystem.makeDirectory(`${runtimeTempDir}/run-killed/_MEI123`, { recursive: true });
       const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
         cacheDir,
@@ -880,8 +883,10 @@ describe("AcpRegistrySupport", () => {
             "/workspace",
             { TMPDIR: "/tmp" },
           );
-          const directory = resolved.spawn.env?.TMPDIR ?? "";
-          expect(directory.startsWith(`${runtimeTempDir}/run-`)).toBe(true);
+          const env = resolved.spawn.env;
+          const directory = (nativePlatform === "win32" ? env?.TEMP : env?.TMPDIR) ?? "";
+          if (nativePlatform === "win32") expect(env?.TMP).toBe(directory);
+          expect(directory.startsWith(NodePath.join(runtimeTempDir, "run-"))).toBe(true);
           expect(yield* fileSystem.exists(directory)).toBe(true);
           return directory;
         }),
@@ -904,7 +909,7 @@ describe("AcpRegistrySupport", () => {
 
   it.effect("installs a contained binary whose name starts with two dots", () => {
     const agent = makeAgent({
-      binary: { "linux-x86_64": { archive: archiveUrl, cmd: "..example-agent" } },
+      binary: { [nativePlatformTarget]: { archive: archiveUrl, cmd: "..example-agent" } },
     });
     return Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -919,7 +924,7 @@ describe("AcpRegistrySupport", () => {
       const resolved = yield* resolver.resolve(settings(), "/workspace");
 
       expect(resolved.spawn.command).toContain(
-        "/tools/example-agent/1.2.3/linux-x86_64/..example-agent",
+        NodePath.join("tools", "example-agent", "1.2.3", nativePlatformTarget, "..example-agent"),
       );
     }).pipe(
       Effect.scoped,

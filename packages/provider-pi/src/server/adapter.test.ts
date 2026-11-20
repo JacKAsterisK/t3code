@@ -29,6 +29,7 @@ import * as Redacted from "effect/Redacted";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Queue from "effect/Queue";
@@ -3210,9 +3211,10 @@ describe("PiAdapterV2", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const dir = yield* fs.makeTempDirectoryScoped();
-      const oldFile = `${dir}/original.jsonl`;
-      const unrelatedFile = `${dir}/unrelated.jsonl`;
-      const currentFile = `${dir}/current.jsonl`;
+      const path = yield* Path.Path;
+      const oldFile = path.join(dir, "original.jsonl");
+      const unrelatedFile = path.join(dir, "unrelated.jsonl");
+      const currentFile = path.join(dir, "current.jsonl");
       const header = { type: "session", version: 3 };
       const writeSession = (file: string, entries: ReadonlyArray<unknown>) =>
         fs.writeFileString(

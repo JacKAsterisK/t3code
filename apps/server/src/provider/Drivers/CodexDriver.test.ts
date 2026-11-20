@@ -395,6 +395,12 @@ it.layer(layerTest)("CodexDriver", (it) => {
   it.effect("points a shadow home's bundled marketplace at the shadow CODEX_HOME", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
+      const fixtureFileSystem = windowsHost
+        ? FileSystem.make({
+            ...fs,
+            symlink: (from, to) => Effect.promise(() => NodeFSP.symlink(from, to, "junction")),
+          })
+        : fs;
       const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-driver-" });
       const sharedHome = NodePath.join(tempDir, "codex home");
       const shadowHome = NodePath.join(tempDir, "codex shadow");
@@ -413,6 +419,7 @@ it.layer(layerTest)("CodexDriver", (it) => {
           launchArgs: "-c model_auto_compact_token_limit=250000",
         },
       }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fixtureFileSystem),
         Effect.provideService(
           CodexAdapterV2.CodexAppServerClientFactory,
           CodexAdapterV2.CodexAppServerClientFactory.of({

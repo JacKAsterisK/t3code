@@ -524,6 +524,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
     it.effect("expands a home-relative T3 home the way the server does", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
+        const home = path.resolve("/home/dev");
         const homeFor = (t3Home: string) =>
           createDevRunnerEnv({
             mode: "dev",
@@ -538,20 +539,20 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
             port: undefined,
             devUrl: undefined,
           }).pipe(
-            Effect.provideService(HostProcess.HomeDirectory, "/home/dev"),
+            Effect.provideService(HostProcess.HomeDirectory, home),
             Effect.map((env) => env.T3CODE_HOME),
           );
 
-        assert.equal(yield* homeFor("~/t3-dev"), path.join("/home/dev", "t3-dev"));
-        assert.equal(yield* homeFor("~"), "/home/dev");
-        assert.equal(yield* homeFor("~\\t3-dev"), path.join("/home/dev", "t3-dev"));
-        assert.equal(yield* homeFor("  ~/t3-dev  "), path.join("/home/dev", "t3-dev"));
+        assert.equal(yield* homeFor("~/t3-dev"), path.join(home, "t3-dev"));
+        assert.equal(yield* homeFor("~"), home);
+        assert.equal(yield* homeFor("~\\t3-dev"), path.join(home, "t3-dev"));
+        assert.equal(yield* homeFor("  ~/t3-dev  "), path.join(home, "t3-dev"));
         assert.equal(yield* homeFor("~someone/t3-dev"), path.resolve("~someone/t3-dev"));
         assert.equal(yield* homeFor("relative/t3-dev"), path.resolve("relative/t3-dev"));
         assert.equal(yield* homeFor("/tmp/t3-dev"), path.resolve("/tmp/t3-dev"));
         // An explicit ~/.t3 would put state in the live userdata; leaving it implicit selects ~/.t3/dev.
         assert.equal(yield* homeFor("~/.t3"), undefined);
-        assert.equal(yield* homeFor("/home/dev/.t3/"), undefined);
+        assert.equal(yield* homeFor(path.join(home, ".t3") + path.sep), undefined);
       }),
     );
 

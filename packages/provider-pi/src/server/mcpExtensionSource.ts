@@ -547,7 +547,8 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     reconcileDiscovery(ctx);
     const owner = await taskOwnerGuidance();
-    const guidance = owner === "" ? ORCHESTRATION_INSTRUCTIONS : ORCHESTRATION_INSTRUCTIONS + "\\n\\n" + owner;
+    const instructions = ORCHESTRATION_INSTRUCTIONS + "\\n\\n" + PULL_REQUEST_LINKING_INSTRUCTIONS;
+    const guidance = owner === "" ? instructions : instructions + "\\n\\n" + owner;
     const sections = event.systemPromptOptions?.sections;
     if (sections && typeof sections === "object" && event.systemPromptOptions?.forceSystemPrompt === undefined) {
       // A full prompt override bypasses Pi's later section rendering.

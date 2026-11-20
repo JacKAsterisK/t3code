@@ -215,6 +215,7 @@ export function findReplayFixture(name: string) {
 export function itRunsReplayFixtures<E>(
   driver: string,
   run: (input: ReplayFixtureCase) => Effect.Effect<unknown, E>,
+  skipFixture?: (name: string) => boolean,
 ) {
   it.effect.each(
     ORCHESTRATOR_REPLAY_FIXTURES.flatMap((fixture) =>
@@ -222,7 +223,11 @@ export function itRunsReplayFixtures<E>(
         .filter((provider) => provider.driver === driver)
         .map((provider) => [fixture.name, provider.driver, fixture, provider] as const),
     ),
-  )("runs %s/%s through OrchestratorV2 using deterministic replay", ([, , fixture, provider]) =>
-    run({ fixtureName: fixture.name, buildInput: fixture.buildInput, driver: provider }),
+  )(
+    "runs %s/%s through OrchestratorV2 using deterministic replay",
+    ([, , fixture, provider], ctx) =>
+      skipFixture?.(fixture.name)
+        ? Effect.sync(() => ctx.skip())
+        : run({ fixtureName: fixture.name, buildInput: fixture.buildInput, driver: provider }),
   );
 }

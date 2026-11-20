@@ -12,6 +12,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as NodeZlib from "node:zlib";
 
@@ -133,6 +134,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("PreviewBrowser",
       const abandoned = path.join(installRoot, ".install-abandoned");
       yield* fs.makeDirectory(active);
       yield* fs.makeDirectory(abandoned);
+      yield* TestClock.setTime(Date.UTC(2026, 0, 1));
       const twoHoursAgo = DateTime.toDate(DateTime.subtract(yield* DateTime.now, { hours: 2 }));
       yield* fs.utimes(abandoned, twoHoursAgo, twoHoursAgo);
       expect(yield* browser.installed).toEqual(Option.none());

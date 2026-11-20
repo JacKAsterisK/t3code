@@ -1,3 +1,7 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Windows directory junctions work without symlink privileges.
+import * as NodeFSP from "node:fs/promises";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -134,16 +138,18 @@ describe("discoverFxSkills", () => {
         path.join(home, ".fx/skills/accent-lower"),
         "---\nname: \u00e9t\u00e9\n---\n",
       );
-      yield* writeSkillFile(path.join(home, "library/linked"), "---\nname: linked\n---\n");
-      yield* fileSystem.symlink(
-        path.join(home, "library/linked"),
-        path.join(home, ".fx/skills/linked"),
-      );
-      yield* fileSystem.makeDirectory(path.join(home, ".fx/skills/linked-file"));
-      yield* fileSystem.symlink(
-        path.join(home, "library/linked/SKILL.md"),
-        path.join(home, ".fx/skills/linked-file/SKILL.md"),
-      );
+      if (symlinksSupported) {
+        yield* writeSkillFile(path.join(home, "library/linked"), "---\nname: linked\n---\n");
+        yield* fileSystem.symlink(
+          path.join(home, "library/linked"),
+          path.join(home, ".fx/skills/linked"),
+        );
+        yield* fileSystem.makeDirectory(path.join(home, ".fx/skills/linked-file"));
+        yield* fileSystem.symlink(
+          path.join(home, "library/linked/SKILL.md"),
+          path.join(home, ".fx/skills/linked-file/SKILL.md"),
+        );
+      }
 
       const skills = yield* discoverFxSkills({ cwd: workspace, environment: { HOME: home } });
 
@@ -180,10 +186,13 @@ describe("discoverFxSkills", () => {
         );
       }
       yield* fileSystem.makeDirectory(path.join(home, ".fx"));
-      yield* fileSystem.symlink(
-        path.join(home, "dotfiles/fx-skills"),
-        path.join(home, ".fx/skills"),
-      );
+      const source = path.join(home, "dotfiles/fx-skills");
+      const link = path.join(home, ".fx/skills");
+      if (HostProcess.Platform.defaultValue() === "win32") {
+        yield* Effect.promise(() => NodeFSP.symlink(source, link, "junction"));
+      } else {
+        yield* fileSystem.symlink(source, link);
+      }
 
       const skills = yield* discoverFxSkills({
         cwd: path.join(home, "app"),

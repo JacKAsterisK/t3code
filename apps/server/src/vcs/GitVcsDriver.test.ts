@@ -186,8 +186,10 @@ const makeCheckpointFixture = Effect.fn("makeCheckpointFixture")(function* (
 
 it.effect.each(["interrupt", "timeout", "success"] as const)(
   "checkpoint bulk staging cleans operation-owned packs after $0 and can retry",
-  (stop) =>
+  (stop, ctx) =>
     Effect.gen(function* () {
+      // This fixture pauses Git while the POSIX bulk-checkin pack is open. Git for Windows does not create it at that point.
+      if (HostProcess.Platform.defaultValue() === "win32") return ctx.skip();
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const driver = yield* GitVcsDriver.makeVcsDriverShape();

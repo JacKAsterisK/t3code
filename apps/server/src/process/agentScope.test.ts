@@ -125,6 +125,13 @@ const withFakeSystemd = <A, E>(
     if (leftovers) {
       units.set(ownedAgentSlice(stateDir), { activeState: "active", result: "success" });
     }
+    const fixturePath = (file: string) => {
+      const posix = file.replaceAll("\\", "/");
+      const prefix = "/sys/fs/cgroup";
+      return posix.startsWith(`${prefix}/`)
+        ? NodePath.join(cgroupRoot, posix.slice(prefix.length + 1))
+        : file;
+    };
     const scope = yield* make.pipe(
       Effect.provideService(ProviderProcesses.ProviderProcesses, { hasOtherLiveOwner: liveOwner }),
       Effect.provideService(ProcessRunner.ProcessRunner, runner),
@@ -135,9 +142,9 @@ const withFakeSystemd = <A, E>(
         readFileString: (path, encoding) =>
           path === "/proc/meminfo"
             ? Effect.sync(() => `MemTotal:       16384 kB\nSwapTotal:      ${memory.swapKb} kB\n`)
-            : fileSystem.readFileString(path.replace("/sys/fs/cgroup", cgroupRoot), encoding),
+            : fileSystem.readFileString(fixturePath(path), encoding),
         writeFileString: (path, data, options) =>
-          fileSystem.writeFileString(path.replace("/sys/fs/cgroup", cgroupRoot), data, options),
+          fileSystem.writeFileString(fixturePath(path), data, options),
       }),
     );
     return yield* body({ scope, units, calls, failingVerbs, stateDir, cgroupRoot }).pipe(

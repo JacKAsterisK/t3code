@@ -119,6 +119,7 @@ it("lets a read-only machine's thread be reassigned from the thread header", asy
   // What a fleet machine with read-only access is issued.
   using _environment = installFakeEnvironment([DANS, GAVINS], {
     remoteScopes: [AuthOrchestrationReadScope, AuthFilesystemReadScope, AuthDiagnosticsReadScope],
+    acceptCommands: true,
     fleetUsers: FLEET_USERS,
   });
   const router = fleetRouter();

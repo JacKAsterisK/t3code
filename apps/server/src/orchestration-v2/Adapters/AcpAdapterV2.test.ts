@@ -583,15 +583,16 @@ function makeMockRuntime(input: {
     });
 }
 
-it.effect("detaches owned ACP processes on POSIX hosts but not on Windows", () =>
+it.effect("detaches owned ACP processes except for Windows shell shims", () =>
   Effect.gen(function* () {
-    for (const [platform, expected] of [
-      ["win32", false],
-      ["linux", true],
+    for (const [platform, command, expected] of [
+      ["win32", "C:\\acp-agent.exe", true],
+      ["win32", "C:\\acp-agent.cmd", false],
+      ["linux", "/acp-agent", true],
     ] as const) {
       let detached: boolean | undefined;
       yield* AcpSessionRuntime.make({
-        spawn: { command: "acp-agent", args: [] },
+        spawn: { command, args: [] },
         cwd: process.cwd(),
         clientInfo: { name: "test", version: "1" },
         ownDetachedProcessGroup: true,

@@ -129,7 +129,7 @@ export function cachedTestTasks(
       const key = NodeCrypto.createHash("sha256").update(group.join("\0")).digest("hex");
       tasks[`test-cache:${key}`] = {
         dependsOn: [runTask],
-        command: `${command} ${group.map((file) => `'${NodePath.relative(directory, NodePath.join(root, file)).replaceAll("'", "'\"'\"'")}'`).join(" ")}`,
+        command: `${command} ${group.map((file) => `'${NodePath.relative(directory, NodePath.join(root, file)).split(NodePath.sep).join("/").replaceAll("'", "'\"'\"'")}'`).join(" ")}`,
         ...(directory === root ? {} : { cwd: NodePath.relative(root, directory) }),
         cache: uncached.includes(group[0]!)
           ? false

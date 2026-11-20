@@ -1112,8 +1112,9 @@ it.layer(
       configs: { ".local/share/vite-plus": "managed", ".config/vite-plus": "system_first" },
       vitePlus: true,
     },
-  ] as const)("updates through vp only for the install the shim runs: $name", (fixture) =>
+  ] as const)("updates through vp only for the install the shim runs: $name", (fixture, ctx) =>
     Effect.gen(function* () {
+      if (windowsHost || !symlinksSupported) return ctx.skip();
       const tempDir = yield* makeTempDir("vite-plus-system-first");
       const vpHome = NodePath.join(tempDir, fixture.vpHome);
       for (const [dir, shimMode] of Object.entries(fixture.configs)) {

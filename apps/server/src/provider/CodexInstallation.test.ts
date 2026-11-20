@@ -629,159 +629,168 @@ const upstreamResponses = (checksum: string) => ({
     new Response(upstreamArchive),
 });
 
-it.effect("updates a managed install to OpenAI's newest release and never downgrades it", () =>
-  Effect.gen(function* () {
-    const digest = yield* Digest.Digest;
-    const checksum = Hex.encode(
-      yield* digest.digest(Digest.sha256, upstreamArchive).pipe(Effect.orDie),
-    );
-    const h = yield* makeHarness({ responses: upstreamResponses(checksum) });
-    yield* h.installation.checkForUpdate;
-    // A fresh install still gets the pinned release.
-    expect((yield* h.installation.state).version).toBe("0.156.1");
-    yield* h.installation.start;
-    expect(yield* terminalState(h.installation)).toMatchObject({
-      phase: "succeeded",
-      installedVersion: "0.156.1",
-      version: upstreamVersion,
-    });
+it.effect.skipIf(windowsHost)(
+  "updates a managed install to OpenAI's newest release and never downgrades it",
+  () =>
+    Effect.gen(function* () {
+      const digest = yield* Digest.Digest;
+      const checksum = Hex.encode(
+        yield* digest.digest(Digest.sha256, upstreamArchive).pipe(Effect.orDie),
+      );
+      const h = yield* makeHarness({ responses: upstreamResponses(checksum) });
+      yield* h.installation.checkForUpdate;
+      // A fresh install still gets the pinned release.
+      expect((yield* h.installation.state).version).toBe("0.156.1");
+      yield* h.installation.start;
+      expect(yield* terminalState(h.installation)).toMatchObject({
+        phase: "succeeded",
+        installedVersion: "0.156.1",
+        version: upstreamVersion,
+      });
 
-    const sessionScope = yield* Scope.make();
-    const previous = yield* h.installation.acquire().pipe(Scope.provide(sessionScope));
-    yield* h.installation.start;
-    expect(yield* terminalState(h.installation)).toMatchObject({
-      phase: "succeeded",
-      installedVersion: upstreamVersion,
-      version: upstreamVersion,
-    });
-    expect((yield* h.installation.resolve()).version).toBe(upstreamVersion);
-    // The running session keeps its release until the next start prunes it.
-    expect(yield* h.fs.exists(previous.managedVersionDirectory!)).toBe(true);
-    yield* Scope.close(sessionScope, Exit.void);
+      const sessionScope = yield* Scope.make();
+      const previous = yield* h.installation.acquire().pipe(Scope.provide(sessionScope));
+      yield* h.installation.start;
+      expect(yield* terminalState(h.installation)).toMatchObject({
+        phase: "succeeded",
+        installedVersion: upstreamVersion,
+        version: upstreamVersion,
+      });
+      expect((yield* h.installation.resolve()).version).toBe(upstreamVersion);
+      // The running session keeps its release until the next start prunes it.
+      expect(yield* h.fs.exists(previous.managedVersionDirectory!)).toBe(true);
+      yield* Scope.close(sessionScope, Exit.void);
 
-    // Without upstream information the older pin is not offered as a reinstall.
-    const restarted = yield* makeHarness({ baseDir: h.baseDir });
-    expect(yield* h.fs.exists(previous.managedVersionDirectory!)).toBe(false);
-    expect(yield* restarted.installation.state).toMatchObject({
-      installedVersion: upstreamVersion,
-      version: upstreamVersion,
-    });
-    yield* restarted.installation.start;
-    expect(yield* terminalState(restarted.installation)).toMatchObject({
-      phase: "succeeded",
-      installedVersion: upstreamVersion,
-    });
-    expect(restarted.downloads()).toBe(0);
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      // Without upstream information the older pin is not offered as a reinstall.
+      const restarted = yield* makeHarness({ baseDir: h.baseDir });
+      expect(yield* h.fs.exists(previous.managedVersionDirectory!)).toBe(false);
+      expect(yield* restarted.installation.state).toMatchObject({
+        installedVersion: upstreamVersion,
+        version: upstreamVersion,
+      });
+      yield* restarted.installation.start;
+      expect(yield* terminalState(restarted.installation)).toMatchObject({
+        phase: "succeeded",
+        installedVersion: upstreamVersion,
+      });
+      expect(restarted.downloads()).toBe(0);
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it.effect("keeps the managed install when an update fails its published checksum", () =>
-  Effect.gen(function* () {
-    const h = yield* makeHarness({ responses: upstreamResponses("f".repeat(64)) });
-    yield* h.installation.start;
-    yield* terminalState(h.installation);
-    yield* h.installation.checkForUpdate;
-    yield* h.installation.start;
-    expect(yield* terminalState(h.installation)).toMatchObject({
-      phase: "failed",
-      installedVersion: "0.156.1",
-      message: expect.stringContaining("SHA-256"),
-    });
-    expect((yield* h.installation.resolve()).version).toBe("0.156.1");
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+it.effect.skipIf(windowsHost)(
+  "keeps the managed install when an update fails its published checksum",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ responses: upstreamResponses("f".repeat(64)) });
+      yield* h.installation.start;
+      yield* terminalState(h.installation);
+      yield* h.installation.checkForUpdate;
+      yield* h.installation.start;
+      expect(yield* terminalState(h.installation)).toMatchObject({
+        phase: "failed",
+        installedVersion: "0.156.1",
+        message: expect.stringContaining("SHA-256"),
+      });
+      expect((yield* h.installation.resolve()).version).toBe("0.156.1");
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it.effect("does not install a cached update the manifest has since withdrawn", () =>
-  Effect.gen(function* () {
-    const digest = yield* Digest.Digest;
-    const checksum = Hex.encode(
-      yield* digest.digest(Digest.sha256, upstreamArchive).pipe(Effect.orDie),
-    );
-    let manifest = ModelManifest.BUNDLED_MODEL_MANIFEST;
-    const h = yield* makeHarness({
-      responses: upstreamResponses(checksum),
-      manifestCurrent: Effect.sync(() => manifest),
-    });
-    yield* h.installation.start;
-    yield* terminalState(h.installation);
-    yield* h.installation.checkForUpdate;
-    expect((yield* h.installation.state).version).toBe(upstreamVersion);
-    manifest = {
-      ...manifest,
-      compatibility: [
-        {
-          driver: "codex",
-          t3CodeRange: ">=0.0.42",
-          ranges: [
-            { range: ">=0.160.0", status: "unsupported" },
-            { range: ">=0.156.0 <0.160.0", status: "supported" },
-          ],
-        },
-      ],
-    };
-    const downloads = h.downloads();
-    yield* h.installation.start;
-    expect(yield* terminalState(h.installation)).toMatchObject({
-      phase: "succeeded",
-      installedVersion: "0.156.1",
-      version: "0.156.1",
-    });
-    expect(h.downloads()).toBe(downloads);
-    expect((yield* h.installation.resolve()).version).toBe("0.156.1");
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+it.effect.skipIf(windowsHost)(
+  "does not install a cached update the manifest has since withdrawn",
+  () =>
+    Effect.gen(function* () {
+      const digest = yield* Digest.Digest;
+      const checksum = Hex.encode(
+        yield* digest.digest(Digest.sha256, upstreamArchive).pipe(Effect.orDie),
+      );
+      let manifest = ModelManifest.BUNDLED_MODEL_MANIFEST;
+      const h = yield* makeHarness({
+        responses: upstreamResponses(checksum),
+        manifestCurrent: Effect.sync(() => manifest),
+      });
+      yield* h.installation.start;
+      yield* terminalState(h.installation);
+      yield* h.installation.checkForUpdate;
+      expect((yield* h.installation.state).version).toBe(upstreamVersion);
+      manifest = {
+        ...manifest,
+        compatibility: [
+          {
+            driver: "codex",
+            t3CodeRange: ">=0.0.42",
+            ranges: [
+              { range: ">=0.160.0", status: "unsupported" },
+              { range: ">=0.156.0 <0.160.0", status: "supported" },
+            ],
+          },
+        ],
+      };
+      const downloads = h.downloads();
+      yield* h.installation.start;
+      expect(yield* terminalState(h.installation)).toMatchObject({
+        phase: "succeeded",
+        installedVersion: "0.156.1",
+        version: "0.156.1",
+      });
+      expect(h.downloads()).toBe(downloads);
+      expect((yield* h.installation.resolve()).version).toBe("0.156.1");
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it.effect("returns a managed install the manifest withdraws to the pinned release", () =>
-  Effect.gen(function* () {
-    const digest = yield* Digest.Digest;
-    const checksum = Hex.encode(
-      yield* digest.digest(Digest.sha256, upstreamArchive).pipe(Effect.orDie),
-    );
-    let manifest = ModelManifest.BUNDLED_MODEL_MANIFEST;
-    const h = yield* makeHarness({
-      responses: upstreamResponses(checksum),
-      manifestCurrent: Effect.sync(() => manifest),
-    });
-    yield* h.installation.checkForUpdate;
-    yield* h.installation.start;
-    yield* terminalState(h.installation);
-    yield* h.installation.start;
-    expect(yield* terminalState(h.installation)).toMatchObject({
-      installedVersion: upstreamVersion,
-    });
+it.effect.skipIf(windowsHost)(
+  "returns a managed install the manifest withdraws to the pinned release",
+  () =>
+    Effect.gen(function* () {
+      const digest = yield* Digest.Digest;
+      const checksum = Hex.encode(
+        yield* digest.digest(Digest.sha256, upstreamArchive).pipe(Effect.orDie),
+      );
+      let manifest = ModelManifest.BUNDLED_MODEL_MANIFEST;
+      const h = yield* makeHarness({
+        responses: upstreamResponses(checksum),
+        manifestCurrent: Effect.sync(() => manifest),
+      });
+      yield* h.installation.checkForUpdate;
+      yield* h.installation.start;
+      yield* terminalState(h.installation);
+      yield* h.installation.start;
+      expect(yield* terminalState(h.installation)).toMatchObject({
+        installedVersion: upstreamVersion,
+      });
 
-    manifest = {
-      ...manifest,
-      compatibility: [
-        {
-          driver: "codex",
-          t3CodeRange: ">=0.0.42",
-          ranges: [
-            { range: ">=0.160.0", status: "unsupported" },
-            { range: ">=0.156.0 <0.160.0", status: "supported" },
-          ],
-        },
-      ],
-    };
-    yield* h.installation.checkForUpdate;
-    expect(yield* h.installation.state).toMatchObject({
-      installedVersion: upstreamVersion,
-      version: "0.156.1",
-    });
-    yield* h.installation.start;
-    expect(yield* terminalState(h.installation)).toMatchObject({
-      phase: "succeeded",
-      installedVersion: "0.156.1",
-      version: "0.156.1",
-    });
-    expect((yield* h.installation.resolve()).version).toBe("0.156.1");
-  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+      manifest = {
+        ...manifest,
+        compatibility: [
+          {
+            driver: "codex",
+            t3CodeRange: ">=0.0.42",
+            ranges: [
+              { range: ">=0.160.0", status: "unsupported" },
+              { range: ">=0.156.0 <0.160.0", status: "supported" },
+            ],
+          },
+        ],
+      };
+      yield* h.installation.checkForUpdate;
+      expect(yield* h.installation.state).toMatchObject({
+        installedVersion: upstreamVersion,
+        version: "0.156.1",
+      });
+      yield* h.installation.start;
+      expect(yield* terminalState(h.installation)).toMatchObject({
+        phase: "succeeded",
+        installedVersion: "0.156.1",
+        version: "0.156.1",
+      });
+      expect((yield* h.installation.resolve()).version).toBe("0.156.1");
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
 it.effect.each(["update", "reinstall"] as const)(
   "rejects withdrawal during $0 validation",
-  (operation) =>
+  (operation, ctx) =>
     Effect.gen(function* () {
+      if (windowsHost) return ctx.skip();
       const digest = yield* Digest.Digest;
       const checksum = Hex.encode(
         yield* digest.digest(Digest.sha256, upstreamArchive).pipe(Effect.orDie),

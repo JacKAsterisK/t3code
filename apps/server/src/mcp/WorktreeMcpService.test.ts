@@ -432,7 +432,7 @@ describe("t3_worktree_handoff", () => {
         runSetupScript: false,
       });
 
-      expect(result.worktreePath).toBe(worktreePath);
+      expect(result.worktreePath?.replaceAll("\\", "/")).toBe(worktreePath.replaceAll("\\", "/"));
       expect(result.startedFromOrigin).toBe(true);
       expect(result.setupScript).toEqual({ status: "skipped" });
       expect((yield* command(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(remoteHead);

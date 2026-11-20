@@ -1,3 +1,6 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Windows junctions do not need symlink privileges.
+import * as NodeFSP from "node:fs/promises";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -57,7 +60,11 @@ it.layer(ProcessRunner.layer.pipe(Layer.provideMerge(NodeServices.layer)))(
         assert.isFalse(yield* isWorktreeContainer(path.join(container, "develop")), "its worktree");
 
         const linked = path.join(fixture, "link");
-        yield* fileSystem.symlink(container, linked);
+        if (HostProcess.Platform.defaultValue() === "win32") {
+          yield* Effect.promise(() => NodeFSP.symlink(container, linked, "junction"));
+        } else {
+          yield* fileSystem.symlink(container, linked);
+        }
         assert.isTrue(yield* isWorktreeContainer(linked), "container through a symlink");
 
         // The issue's steps leave core.bare set; Initialize Git would clear it later.

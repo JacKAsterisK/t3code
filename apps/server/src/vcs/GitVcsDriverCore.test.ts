@@ -5582,16 +5582,15 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         assert.notEqual(yield* snapshot, fetched);
 
         const head = yield* git(cwd, ["rev-parse", "HEAD"]);
-        yield* driver.execute({
-          operation: "GitVcsDriver.test.git",
-          cwd,
-          args: ["update-ref", "--stdin"],
-          stdin: Array.from(
-            { length: 16_000 },
-            (_, index) => `create refs/heads/snapshot-${String(index).padStart(5, "0")} ${head}\n`,
-          ).join(""),
-        });
-        yield* git(cwd, ["pack-refs", "--all"]);
+        const fs = yield* FileSystem.FileSystem;
+        const refs = Array.from(
+          { length: 16_000 },
+          (_, index) => `${head} refs/heads/snapshot-${String(index).padStart(5, "0")}\n`,
+        );
+        yield* fs.writeFileString(
+          NodePath.join(cwd, ".git", "packed-refs"),
+          `# pack-refs with: sorted\n${refs.join("")}`,
+        );
         const large = yield* snapshot;
         assert.isNotNull(large);
         assert.isAbove(Buffer.byteLength(large ?? "", "utf8"), 1_000_000);

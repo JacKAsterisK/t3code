@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- fixtures name transcript files by URL.
 import * as NodeURL from "node:url";
 
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -196,26 +197,28 @@ it.layer(NodeServices.layer)("readAntigravityChildWork", (it) => {
     }),
   );
 
-  it.effect("reads no transcript outside the child's own profile path", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-agy-outside-" });
-      const secret = path.join(outside, "transcript.jsonl");
-      yield* fs.writeFileString(secret, JSON.stringify(transcriptLines[3]) + "\n");
-      const named = yield* makeProfile({
-        steps: () => autoApproved(NodeURL.pathToFileURL(secret).href),
-      });
-      const [namedChild] = yield* read(named.profile, `${ROOT}:1`);
-      expect(namedChild?.role).toBe(LAUNCH.role);
-      expect(namedChild?.steps).toBeNull();
+  it.effect.skipIf(!symlinksSupported)(
+    "reads no transcript outside the child's own profile path",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-agy-outside-" });
+        const secret = path.join(outside, "transcript.jsonl");
+        yield* fs.writeFileString(secret, JSON.stringify(transcriptLines[3]) + "\n");
+        const named = yield* makeProfile({
+          steps: () => autoApproved(NodeURL.pathToFileURL(secret).href),
+        });
+        const [namedChild] = yield* read(named.profile, `${ROOT}:1`);
+        expect(namedChild?.role).toBe(LAUNCH.role);
+        expect(namedChild?.steps).toBeNull();
 
-      const linked = yield* makeProfile({ steps: autoApproved });
-      yield* fs.remove(linked.transcriptPath);
-      yield* fs.symlink(secret, linked.transcriptPath);
-      const [linkedChild] = yield* read(linked.profile, `${ROOT}:1`);
-      expect(linkedChild?.steps).toBeNull();
-    }),
+        const linked = yield* makeProfile({ steps: autoApproved });
+        yield* fs.remove(linked.transcriptPath);
+        yield* fs.symlink(secret, linked.transcriptPath);
+        const [linkedChild] = yield* read(linked.profile, `${ROOT}:1`);
+        expect(linkedChild?.steps).toBeNull();
+      }),
   );
 
   it.effect("reads only the tail of a large transcript", () =>
@@ -238,28 +241,30 @@ it.layer(NodeServices.layer)("readAntigravityChildWork", (it) => {
     }),
   );
 
-  it.effect("refuses links between children and sessions inside the same profile", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const sibling = "b468c0e1d2f34a5b6c7d8e9f0a1b2c3d";
-      // The record names this child's literal path, but the child directory links to a sibling.
-      const linked = yield* makeProfile({ steps: autoApproved });
-      const brain = path.join(linked.profile, "antigravity-acp", "brain");
-      yield* fs.rename(path.join(brain, CHILD), path.join(brain, sibling));
-      yield* fs.symlink(path.join(brain, sibling), path.join(brain, CHILD));
-      const [child] = yield* read(linked.profile, `${ROOT}:1`);
-      expect(child?.role).toBe(LAUNCH.role);
-      expect(child?.steps).toBeNull();
+  it.effect.skipIf(!symlinksSupported)(
+    "refuses links between children and sessions inside the same profile",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sibling = "b468c0e1d2f34a5b6c7d8e9f0a1b2c3d";
+        // The record names this child's literal path, but the child directory links to a sibling.
+        const linked = yield* makeProfile({ steps: autoApproved });
+        const brain = path.join(linked.profile, "antigravity-acp", "brain");
+        yield* fs.rename(path.join(brain, CHILD), path.join(brain, sibling));
+        yield* fs.symlink(path.join(brain, sibling), path.join(brain, CHILD));
+        const [child] = yield* read(linked.profile, `${ROOT}:1`);
+        expect(child?.role).toBe(LAUNCH.role);
+        expect(child?.steps).toBeNull();
 
-      // This session's database links to another session's records.
-      const other = yield* makeProfile({ steps: autoApproved });
-      const conversations = path.join(other.profile, "antigravity-acp", "conversations");
-      const peer = path.join(conversations, "00000000-0000-4000-8000-000000000000.db");
-      yield* fs.rename(path.join(conversations, `${ROOT}.db`), peer);
-      yield* fs.symlink(peer, path.join(conversations, `${ROOT}.db`));
-      expect(yield* read(other.profile, `${ROOT}:1`)).toEqual([]);
-    }),
+        // This session's database links to another session's records.
+        const other = yield* makeProfile({ steps: autoApproved });
+        const conversations = path.join(other.profile, "antigravity-acp", "conversations");
+        const peer = path.join(conversations, "00000000-0000-4000-8000-000000000000.db");
+        yield* fs.rename(path.join(conversations, `${ROOT}.db`), peer);
+        yield* fs.symlink(peer, path.join(conversations, `${ROOT}.db`));
+        expect(yield* read(other.profile, `${ROOT}:1`)).toEqual([]);
+      }),
   );
 
   it.effect("declines a launch-text match it cannot prove unique within its scan bounds", () =>

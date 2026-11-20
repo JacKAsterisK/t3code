@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - verifies native task caching in isolated subprocesses.
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { describe, expect, it } from "vite-plus/test";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
@@ -137,7 +138,7 @@ describe("cachedTestTasks", () => {
       await NodeFSP.symlink(
         NodePath.join(root, "node_modules/vite-plus"),
         NodePath.join(directory, "node_modules/vite-plus"),
-        "dir",
+        HostProcess.Platform.defaultValue() === "win32" ? "junction" : "dir",
       );
       await NodeFSP.writeFile(NodePath.join(directory, "package.json"), '{"type":"module"}');
       await NodeFSP.writeFile(

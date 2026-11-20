@@ -2784,51 +2784,54 @@ describe("CursorAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
-  it.live("opens a model added to the account after its workspace already ran an agent", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-new-model-" });
-      const backend = yield* fakeCursorBackend;
-      yield* scopedProcessEnv({
-        HOME: home,
-        USERPROFILE: home,
-        CURSOR_CONFIG_DIR: path.join(home, ".cursor"),
-      });
-      const runner = yield* CursorAgentSdk.makeCursorAgentSdkRunner(() => undefined).pipe(
-        Effect.provide(CursorSdk.layer),
-      );
-      const open = (model: string) =>
-        Effect.acquireRelease(
-          runner.open({
-            operation: "create",
-            options: makeCursorAgentOptions({
-              apiKey: "synthetic-cursor-api-key",
-              modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model },
-              runtimePolicy: {
-                runtimeMode: "full-access",
-                interactionMode: "default",
-                cwd: home,
-              },
-              threadId: ThreadId.make(`cursor-new-model-${model}`),
-              mcpSession: undefined,
-              platform: "linux",
-            }),
-            threadId: ThreadId.make(`cursor-new-model-${model}`),
-            providerSessionId: ProviderSessionId.make(`cursor-new-model-${model}`),
-          }),
-          (session) => Effect.ignore(session.close),
+  // The real SDK keeps its workspace SQLite store open until process exit on Windows.
+  it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "opens a model added to the account after its workspace already ran an agent",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-new-model-" });
+        const backend = yield* fakeCursorBackend;
+        yield* scopedProcessEnv({
+          HOME: home,
+          USERPROFILE: home,
+          CURSOR_CONFIG_DIR: path.join(home, ".cursor"),
+        });
+        const runner = yield* CursorAgentSdk.makeCursorAgentSdkRunner(() => undefined).pipe(
+          Effect.provide(CursorSdk.layer),
         );
+        const open = (model: string) =>
+          Effect.acquireRelease(
+            runner.open({
+              operation: "create",
+              options: makeCursorAgentOptions({
+                apiKey: "synthetic-cursor-api-key",
+                modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model },
+                runtimePolicy: {
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  cwd: home,
+                },
+                threadId: ThreadId.make(`cursor-new-model-${model}`),
+                mcpSession: undefined,
+                platform: "linux",
+              }),
+              threadId: ThreadId.make(`cursor-new-model-${model}`),
+              providerSessionId: ProviderSessionId.make(`cursor-new-model-${model}`),
+            }),
+            (session) => Effect.ignore(session.close),
+          );
 
-      yield* open("composer-2");
-      backend.models.push("composer-2.5");
+        yield* open("composer-2");
+        backend.models.push("composer-2.5");
 
-      const exit = yield* Effect.exit(open("composer-2.5"));
-      assert.isTrue(
-        Exit.isSuccess(exit),
-        Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "opened",
-      );
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+        const exit = yield* Effect.exit(open("composer-2.5"));
+        assert.isTrue(
+          Exit.isSuccess(exit),
+          Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "opened",
+        );
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   it("maps runtime modes to the SDK sandbox and auto-review controls", () => {

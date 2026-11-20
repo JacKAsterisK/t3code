@@ -19,10 +19,24 @@ if (manager === "npm") {
   if (args[0] === "root" && args[1] === "--global") output(modules);
   else if (args[0] === "prefix" && args[1] === "--global") output(prefix);
   else if (args[0] === "install" && args[1] === "--global") {
-    const packageRoot = NodePath.join(modules, "@example", "acp");
-    NodeFS.mkdirSync(packageRoot, { recursive: true });
-    NodeFS.writeFileSync(NodePath.join(packageRoot, "package.json"), process.env.FAKE_NPM_MANIFEST);
-    writeExecutable(windows ? prefix : NodePath.join(prefix, "bin"), "example-agent");
+    const failureLines = Number(process.env.FAKE_NPM_INSTALL_FAILURE_LINES ?? "0");
+    if (failureLines > 0) {
+      process.stderr.write(
+        "npm error old diagnostic that must fall out of the tail\n".repeat(failureLines),
+      );
+      process.stderr.write("npm error see the complete log for details\n");
+      process.exitCode = 1;
+    } else {
+      const packageRoot = NodePath.join(modules, "@example", "acp");
+      NodeFS.mkdirSync(packageRoot, { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(packageRoot, "package.json"),
+        process.env.FAKE_NPM_MANIFEST,
+      );
+      if (process.env.npm_config_bin_links !== "false") {
+        writeExecutable(windows ? prefix : NodePath.join(prefix, "bin"), "example-agent");
+      }
+    }
   } else process.exitCode = 64;
 } else if (manager === "uv") {
   NodeFS.appendFileSync(process.env.FAKE_UV_LOG, `${args.join(" ")}\n`);

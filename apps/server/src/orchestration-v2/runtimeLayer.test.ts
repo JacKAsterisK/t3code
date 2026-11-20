@@ -5440,9 +5440,12 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           yield* worker.drain();
           const wakes = (yield* texts).slice(before);
           assert.equal(wakes.length, names.length === 0 ? 0 : 1);
+          const newFailures = wakes.flatMap(
+            (text) => text.match(/^- Checks failed[^\n]*\n(?:  - [^\n]*(?:\n|$))+/gm) ?? [],
+          );
           for (const name of ["lint", "test"]) {
             assert.equal(
-              wakes.some((text) => text.includes(`  - ${name}`)),
+              newFailures.some((text) => text.includes(`  - ${name}`)),
               names.includes(name as never),
               `read ${index} told ${name}`,
             );
@@ -5804,7 +5807,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         e2e = "success";
         yield* TestClock.adjust("10 minutes");
         yield* reactor.sweep;
-        assert.deepEqual(yield* summaries, []);
+        const finishedNotice = "#17: checks finished; #18: checks finished";
+        assert.deepEqual(yield* summaries, [finishedNotice]);
         assert.isFalse(yield* checksPending);
 
         // A push clears the answer while a read with news is in flight. That read's answer is the
@@ -5833,7 +5837,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         gate = null;
         yield* Deferred.succeed(release, undefined);
         yield* Fiber.join(inFlight);
-        assert.lengthOf(yield* summaries, 1);
+        assert.lengthOf(yield* summaries, 2);
         assert.isUndefined(yield* checksPending);
 
         // The next sweep reads it again though nothing on the host changed.

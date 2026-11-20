@@ -196,6 +196,8 @@ const growthTables = new Set([
   "orchestration_v2_projection_threads",
   "orchestration_v2_projection_messages",
   "orchestration_v2_projection_turn_items",
+  "orchestration_v2_projection_thread_item_counts",
+  "orchestration_v2_projection_turn_item_counts",
   "orchestration_v2_projection_nodes",
   "orchestration_v2_projection_plans",
   "orchestration_v2_turn_item_positions",
@@ -232,7 +234,7 @@ function digestRows(
       !growthTables.has(table.name) &&
       Number(db.prepare(`SELECT COUNT(*) AS n FROM ${quoted(table.name)}`).get()!.n) !== table.count
     )
-      throw new Error("history-unexpected-operational-write");
+      throw new Error(`history-unexpected-operational-write: ${table.name}`);
   }
   return hash.digest("hex");
 }

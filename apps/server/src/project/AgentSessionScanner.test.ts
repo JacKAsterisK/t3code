@@ -3,6 +3,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodeSqlite from "node:sqlite";
 import * as NodeZlib from "node:zlib";
@@ -1096,7 +1097,13 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const links = yield* makeTempDir("t3code-workspace-links-");
         const unknown = yield* makeTempDir("t3code-workspace-unknown-");
         yield* fileSystem.makeDirectory(path.join(configBaseDir, "state-repo"));
-        yield* fileSystem.symlink(path.join(configBaseDir, "state-repo"), path.join(links, "repo"));
+        const source = path.join(configBaseDir, "state-repo");
+        const linkedRepo = path.join(links, "repo");
+        if (HostProcess.Platform.defaultValue() === "win32") {
+          yield* Effect.promise(() => NodeFSP.symlink(source, linkedRepo, "junction"));
+        } else {
+          yield* fileSystem.symlink(source, linkedRepo);
+        }
         const hiddenCheckouts: Array<string> = [];
         for (const [main, config] of [
           [unknown, null],

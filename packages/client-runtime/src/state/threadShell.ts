@@ -80,6 +80,7 @@ export function resolveListedAncestorThreadRef(
     EnvironmentThreadShell,
     "id" | "environmentId" | "lineage" | "delegatedFrom" | "archivedAt"
   >[],
+  delegatedUnderParent?: ReadonlySet<string>,
 ): ScopedThreadRef {
   const findThread = (target: ScopedThreadRef) =>
     threads.find(
@@ -93,7 +94,10 @@ export function resolveListedAncestorThreadRef(
     if (!isListedThreadLineage(thread.lineage)) {
       if (thread.lineage.parentThreadId === null) return ref;
       parent = { environmentId: thread.environmentId, threadId: thread.lineage.parentThreadId };
-    } else if (thread.delegatedFrom != null) {
+    } else if (
+      thread.delegatedFrom != null &&
+      (delegatedUnderParent === undefined || delegatedUnderParent.has(threadKey(current)))
+    ) {
       parent = {
         environmentId: thread.delegatedFrom.environmentId,
         threadId: thread.delegatedFrom.threadId,

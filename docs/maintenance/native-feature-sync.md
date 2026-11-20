@@ -47,11 +47,15 @@ approval before code or runtime changes.
   Restart and fresh-context sends keep the existing ceiling.
 - Auto threads can explicitly launch or delegate Full access threads. An omitted
   or inherited runtime mode keeps its existing behavior. Auto threads can also
-  configure the model and organize existing Full access threads.
+  configure the model and organize existing Full access threads. This includes
+  Antigravity Gemini 4 Neon via both launch and delegation.
 - Linked calls require Full access approval for the destination. Both changes
   retain the sender's interaction-mode ceiling and managed runtime caps. Lower
   modes and ordinary OAuth clients use their existing limits. The tool
   authorization and dispatch checks share the fixed rule.
+- The web and desktop sidebar lists cross-environment delegated threads on the
+  machine where they run when Group by machine is on. Local subagents and side
+  chats continue to appear under their parent.
 - Antigravity offers upstream Auto when the ACP session advertises native
   `auto`. Requests the provider still sends go through the permission UI.
   Managed runtimes that lack native Auto keep their existing modes.

@@ -202,6 +202,7 @@ import {
 import {
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
+  sidebarDelegatedUnderParent,
   groupSidebarThreadsByProject,
   sidebarFolderExpansionKeys,
   buildBulkTitleRegenerationContextMenuItem,
@@ -1027,7 +1028,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectGroupByScopeKey,
     projectScopeItems: lookupProjectScopeItems,
   } = useSidebarLookups();
-  const delegatedUnderParent = useDelegatedUnderParent();
+  const nestedDelegates = useDelegatedUnderParent();
   const fleetUsersDirectory = useFleetUsersDirectory();
   const selfOwnerId = useSelfOwnerId();
   const sidebarOwnerFilter = useClientSettings((s) => s.sidebarOwnerFilter);
@@ -1228,6 +1229,16 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           ),
         );
   const threads = useQuietThreadShells();
+  const threadGrouping = useClientSettings((s) => s.sidebarThreadGrouping);
+  const { environments: environmentPresentationList } = useEnvironments();
+  // The boring sidebar already folds threads by project, and one machine needs no headers.
+  const canGroupByMachine = !boringSidebarEnabled && environmentPresentationList.length > 1;
+  const groupByMachine = canGroupByMachine && threadGrouping === "machine";
+  const delegatedUnderParent = sidebarDelegatedUnderParent(
+    threads,
+    nestedDelegates,
+    groupByMachine,
+  );
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
   const listedThreads =
     promotingDraftThreadKeys.length === 0
@@ -1240,7 +1251,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const routeRowThreadKey =
     routeThreadRef === null
       ? null
-      : scopedThreadKey(resolveListedAncestorThreadRef(routeThreadRef, threads));
+      : scopedThreadKey(
+          resolveListedAncestorThreadRef(routeThreadRef, threads, delegatedUnderParent),
+        );
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
   // The open draft's first send names its thread in place; a finalized draft reached by
   // navigation resolves through its redirect instead, and still reveals.
@@ -1426,8 +1439,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     },
   );
 
-  const threadGrouping = useClientSettings((s) => s.sidebarThreadGrouping);
-  const { environments: environmentPresentationList } = useEnvironments();
   const readOnlyEnvironmentIds = useReadOnlyEnvironmentIds(environmentPresentationList);
   // Named projects first: a machine with one project starts there directly.
   const machineThreadProjects = (environmentId: EnvironmentId) => {
@@ -1440,32 +1451,28 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     );
     return named.length > 0 ? named : onMachine;
   };
-  // The boring sidebar already folds threads by project, and one machine needs no headers.
-  const canGroupByMachine = !boringSidebarEnabled && environmentPresentationList.length > 1;
-  const machineEntries =
-    threadGrouping !== "machine" || !canGroupByMachine
-      ? null
-      : environmentPresentationList.map((environment): SidebarMachineEntry => {
-          const phase = environment.connection.phase;
-          return {
-            environmentId: environment.environmentId,
-            label: environment.label,
-            isPrimary: environment.environmentId === primaryEnvironmentId,
-            isLocal:
-              isElectron &&
-              (environment.entry.target._tag === "PrimaryConnectionTarget" ||
-                isDesktopLocalConnectionTarget(environment.entry.target)),
-            kind: environmentMachineById.get(environment.environmentId) ?? "server",
-            connection:
-              phase === "connected"
-                ? "connected"
-                : phase === "connecting" || phase === "reconnecting"
-                  ? "connecting"
-                  : "offline",
-            readOnly:
-              phase === "connected" && readOnlyEnvironmentIds.has(environment.environmentId),
-          };
-        });
+  const machineEntries = !groupByMachine
+    ? null
+    : environmentPresentationList.map((environment): SidebarMachineEntry => {
+        const phase = environment.connection.phase;
+        return {
+          environmentId: environment.environmentId,
+          label: environment.label,
+          isPrimary: environment.environmentId === primaryEnvironmentId,
+          isLocal:
+            isElectron &&
+            (environment.entry.target._tag === "PrimaryConnectionTarget" ||
+              isDesktopLocalConnectionTarget(environment.entry.target)),
+          kind: environmentMachineById.get(environment.environmentId) ?? "server",
+          connection:
+            phase === "connected"
+              ? "connected"
+              : phase === "connecting" || phase === "reconnecting"
+                ? "connecting"
+                : "offline",
+          readOnly: phase === "connected" && readOnlyEnvironmentIds.has(environment.environmentId),
+        };
+      });
   const startThreadOnMachine = useStableCallback((environmentId: EnvironmentId) => {
     const candidates = machineThreadProjects(environmentId);
     if (isMobile) setOpenMobile(false);

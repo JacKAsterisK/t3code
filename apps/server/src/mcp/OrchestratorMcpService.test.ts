@@ -1638,74 +1638,114 @@ describe("OrchestratorMcpService provider resolution", () => {
     turnItems: [],
   } as unknown as OrchestrationV2ThreadProjection;
 
-  it.effect("an Auto parent can explicitly delegate a local Full access task", () =>
-    Effect.gen(function* () {
-      const task = {
-        id: taskId,
-        threadId: parentThreadId,
-        runId: parentRunId,
-        parentNodeId,
-        origin: "app_owned",
-        providerInstanceId: codexInstanceId,
-        driver: "codex",
-        childThreadId,
-        model: "gpt-5.4",
-        status: "running",
-        result: null,
-      };
-      const modes: string[] = [];
-      const parent = parentProjection([task]);
-      const dependencies = Layer.mergeAll(
-        NodeServices.layer,
-        NodeCrypto.layer,
-        Layer.mock(ThreadManagementService.ThreadManagementService)({
-          hasReceipt: () => Effect.succeed(false),
-          isProviderInstanceEnabledForProject: () => Effect.succeed(true),
-          getThreadRecords: (threadId) =>
-            Effect.succeed(
-              threadId === parentThreadId
-                ? { ...parent, thread: { ...parent.thread, runtimeMode: "auto" } }
-                : childProjection,
-            ),
-          dispatch: (command) =>
-            Effect.sync(() => {
-              if (command.type !== "delegated_task.request") throw new Error(command.type);
-              modes.push(command.runtimeMode);
-              return {
-                sequence: 1,
-                storedEvents: [{ event: { type: "subagent.updated", payload: task } }],
-              } as never;
-            }),
-        }),
-        ServerSettings.layerTest(),
-        providerRegistryLayer([
-          providerSnapshot({
-            instanceId: codexInstanceId,
-            driver: ProviderDriverKind.make("codex"),
-            model: "gpt-5.4",
+  it.effect.each([
+    {
+      name: "Codex",
+      provider: codexInstanceId,
+      driver: "codex",
+      model: "gpt-5.4",
+      requested: "full-access",
+      expected: "full-access",
+    },
+    {
+      name: "Antigravity Gemini 4 Neon without native Auto",
+      provider: antigravityInstanceId,
+      driver: "antigravity",
+      model: "gemini-4-neon",
+      requested: "full-access",
+      expected: "full-access",
+    },
+    {
+      name: "Codex with inherited mode",
+      provider: codexInstanceId,
+      driver: "codex",
+      model: "gpt-5.4",
+      requested: "inherit",
+      expected: "auto",
+    },
+  ] as const)(
+    "delegates from an Auto parent to $name at $expected",
+    ({ provider, driver, model, requested, expected }) =>
+      Effect.gen(function* () {
+        const task = {
+          id: taskId,
+          threadId: parentThreadId,
+          runId: parentRunId,
+          parentNodeId,
+          origin: "app_owned",
+          providerInstanceId: provider,
+          driver,
+          childThreadId,
+          model,
+          status: "running",
+          result: null,
+        };
+        const launches: Array<{ runtimeMode: string; modelSelection: unknown }> = [];
+        const parent = parentProjection([task]);
+        const dependencies = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            hasReceipt: () => Effect.succeed(false),
+            isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+            getThreadRecords: (threadId) =>
+              Effect.succeed(
+                threadId === parentThreadId
+                  ? { ...parent, thread: { ...parent.thread, runtimeMode: "auto" } }
+                  : childProjection,
+              ),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                if (command.type !== "delegated_task.request") throw new Error(command.type);
+                launches.push({
+                  runtimeMode: command.runtimeMode,
+                  modelSelection: command.modelSelection,
+                });
+                return {
+                  sequence: 1,
+                  storedEvents: [{ event: { type: "subagent.updated", payload: task } }],
+                } as never;
+              }),
           }),
-        ]),
-        adapterRegistryLayer([codexInstanceId]),
-        Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
-        Layer.mock(SecretRequests.SecretRequests)({}),
-        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
-        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-      );
-      yield* Effect.gen(function* () {
-        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-        yield* service.delegateTask(scope, {
-          task: "Review the change.",
-          mode: "async",
-          runtimeMode: "full-access",
-        });
-        yield* service.delegateTask(scope, {
-          task: "Review the change.",
-          mode: "async",
-          runtimeMode: "inherit",
-        });
-      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
-      assert.deepEqual(modes, ["full-access", "auto"]);
-    }),
+          ServerSettings.layerTest(),
+          providerRegistryLayer([
+            providerSnapshot({
+              instanceId: codexInstanceId,
+              driver: ProviderDriverKind.make("codex"),
+              model: "gpt-5.4",
+            }),
+            {
+              ...providerSnapshot({
+                instanceId: antigravityInstanceId,
+                driver: ProviderDriverKind.make("antigravity"),
+                model: "gemini-4-neon",
+              }),
+              supportedRuntimeModes: [
+                "approval-required",
+                "auto-accept-edits",
+                "full-access",
+              ] as const,
+            },
+          ]),
+          adapterRegistryLayer([codexInstanceId, antigravityInstanceId]),
+          Layer.mock(ProjectService.ProjectService)({ getById: () => Effect.succeedNone }),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        );
+        yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          yield* service.delegateTask(scope, {
+            task: "Review the change.",
+            mode: "async",
+            runtimeMode: requested,
+            target: { providerInstanceId: provider, model },
+          });
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
+        assert.deepEqual(launches, [
+          { runtimeMode: expected, modelSelection: { instanceId: provider, model } },
+        ]);
+      }),
   );
 
   it.effect.each([

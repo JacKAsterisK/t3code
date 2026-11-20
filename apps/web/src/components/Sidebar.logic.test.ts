@@ -12,6 +12,7 @@ import {
   getFallbackThreadIdAfterDelete,
   hasUnseenCompletion,
   filterSidebarV2VisibleThreads,
+  sidebarDelegatedUnderParent,
   orderItemsByPreferredIds,
   pinOrderKeyBetween,
   resolveSidebarSweepKeys,
@@ -43,6 +44,7 @@ import {
   sortActiveThreadsByOrderKey,
   sortPinnedThreadsByOrderKey,
 } from "@t3tools/client-runtime/state/thread-sort";
+import { resolveListedAncestorThreadRef } from "@t3tools/client-runtime/state/threads";
 import { resolveProjectExpanded } from "../uiStateStore";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
@@ -170,6 +172,42 @@ describe("filterSidebarV2VisibleThreads owner filter", () => {
     expect(visibleIds("dan")).toEqual([dans.id]);
     expect(visibleIds("gavin")).toEqual([gavins.id]);
   });
+});
+
+it("lists a cross-environment delegate on its own machine while keeping local children nested", () => {
+  const parent = makeThreadFixture({ id: ThreadId.make("parent") });
+  const remote = makeThreadFixture({
+    environmentId: EnvironmentId.make("remote-machine"),
+    id: ThreadId.make("remote-child"),
+    delegatedFrom: { environmentId: parent.environmentId, threadId: parent.id, title: "Parent" },
+  });
+  const subagent = makeThreadFixture({
+    id: ThreadId.make("subagent"),
+    lineage: {
+      rootThreadId: parent.id,
+      parentThreadId: parent.id,
+      relationshipToParent: "subagent",
+    },
+  });
+  const sideChat = makeThreadFixture({
+    id: ThreadId.make("side-chat"),
+    lineage: {
+      rootThreadId: parent.id,
+      parentThreadId: parent.id,
+      relationshipToParent: "fork",
+      sideChat: true,
+    },
+  });
+  const remoteRef = scopeThreadRef(remote.environmentId, remote.id);
+  const parentRef = scopeThreadRef(parent.environmentId, parent.id);
+  const nested = new Set([threadKey(remoteRef)]);
+  const threads = [parent, remote, subagent, sideChat];
+  const ordinary = sidebarDelegatedUnderParent(threads, nested, false);
+  const grouped = sidebarDelegatedUnderParent(threads, nested, true);
+  expect(filterSidebarV2VisibleThreads(threads, null, ordinary)).toEqual([parent]);
+  expect(filterSidebarV2VisibleThreads(threads, null, grouped)).toEqual([parent, remote]);
+  expect(resolveListedAncestorThreadRef(remoteRef, threads, ordinary)).toEqual(parentRef);
+  expect(resolveListedAncestorThreadRef(remoteRef, threads, grouped)).toEqual(remoteRef);
 });
 
 function makeLatestRun(overrides?: {

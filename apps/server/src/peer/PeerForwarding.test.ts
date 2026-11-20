@@ -620,16 +620,22 @@ it.effect(
           title: "Run the suite there",
           modelSelection,
         };
-        const requested = { ...launch, runtimeMode: "full-access" };
+        const requested = {
+          ...launch,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("antigravity"),
+            model: "gemini-4-neon",
+          },
+          runtimeMode: "full-access",
+        };
         const autoCaller = "thread:laptop-auto";
         expect(failureOf(yield* a.call(autoCaller, "t3_thread_launch", requested))).toBeUndefined();
         expect(failureOf(yield* a.call(autoCaller, "t3_thread_launch", launch))).toBeUndefined();
         const lower = yield* a.call("thread:laptop-edits", "t3_thread_launch", requested);
         expect(failureOf(lower)).toMatchObject({ code: "runtime_mode_escalation_denied" });
-        expect((yield* Ref.get(seen)).launches.map((input) => input.runtimeMode)).toEqual([
-          "full-access",
-          "auto",
-        ]);
+        const launches = (yield* Ref.get(seen)).launches;
+        expect(launches[0]?.modelSelection).toEqual(requested.modelSelection);
+        expect(launches.map((input) => input.runtimeMode)).toEqual(["full-access", "auto"]);
 
         const target = { environmentId: box.environmentId, threadId: boxThread };
         const configured = yield* a.call(autoCaller, "t3_thread_configure", {

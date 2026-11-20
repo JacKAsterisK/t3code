@@ -540,9 +540,12 @@ it.live.each(["pooled", "exclusive"] as const)(
           })
           .pipe(
             Stream.map((stored) => stored.event),
-            Stream.filter(
-              (event) =>
-                event.type === "provider-turn.updated" && event.payload.status === "running",
+            Stream.filter((event) =>
+              mode === "exclusive"
+                ? event.type === "turn-item.updated" &&
+                  event.payload.id === handoffToolId &&
+                  event.payload.status === "running"
+                : event.type === "provider-turn.updated" && event.payload.status === "running",
             ),
             Stream.take(1),
             Stream.runDrain,
@@ -563,7 +566,9 @@ it.live.each(["pooled", "exclusive"] as const)(
         yield* Fiber.join(running);
         yield* worker.drain();
 
-        const settled = yield* eventSink
+        const firstAttemptId = (yield* Ref.get(state)).started[0]?.attemptId;
+        assert.isDefined(firstAttemptId);
+        const continuationStarted = yield* eventSink
           .stream({
             threadId,
             afterSequence: yield* eventSink.latestSequence({ threadId }),
@@ -572,10 +577,10 @@ it.live.each(["pooled", "exclusive"] as const)(
             Stream.map((stored) => stored.event),
             Stream.filter(
               (event) =>
-                event.type === "run.updated" &&
-                event.payload.status !== "running" &&
-                event.payload.status !== "queued" &&
-                event.payload.status !== "starting",
+                event.type === "provider-turn.updated" &&
+                event.payload.status === "running" &&
+                event.payload.runAttemptId !== null &&
+                event.payload.runAttemptId !== firstAttemptId,
             ),
             Stream.take(1),
             Stream.runDrain,
@@ -600,7 +605,7 @@ it.live.each(["pooled", "exclusive"] as const)(
           ),
           ["queued"],
         );
-        yield* Fiber.join(settled);
+        yield* Fiber.join(continuationStarted);
         yield* worker.drain();
         return yield* orchestrator.getThreadProjection(threadId);
       }).pipe(

@@ -1214,10 +1214,10 @@ describe("pullCurrentBranch", () => {
             return span;
           },
         });
+        const blockedFetches = yield* Effect.forEach(blockers, (blocker) =>
+          driver.statusDetailsRemote(blocker).pipe(Effect.forkChild),
+        );
         yield* Effect.gen(function* () {
-          for (const blocker of blockers) {
-            yield* driver.statusDetailsRemote(blocker).pipe(Effect.forkChild);
-          }
           yield* Deferred.await(blockersStarted);
           const status = yield* driver
             .statusDetailsRemote(cwd)
@@ -1230,7 +1230,13 @@ describe("pullCurrentBranch", () => {
           assert.isTrue(waiterSucceeded);
           assert.equal(refreshed.behindCount, 0);
           assert.equal(targetFetches, 0);
-        }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+        }).pipe(
+          Effect.ensuring(
+            Deferred.succeed(release, undefined).pipe(
+              Effect.andThen(Fiber.awaitAll(blockedFetches)),
+            ),
+          ),
+        );
       }),
     ).pipe(Effect.provide(layerTest)),
   );

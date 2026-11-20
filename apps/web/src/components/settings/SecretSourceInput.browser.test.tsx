@@ -15,8 +15,7 @@ const sources = [
 const reference = (screen: Screen) => screen.getByRole("textbox", { name: "API key reference" });
 
 async function commitReference(screen: Screen, value: string) {
-  await userEvent.clear(reference(screen));
-  await userEvent.type(reference(screen), value);
+  await userEvent.fill(reference(screen), value);
   await userEvent.keyboard("{Enter}");
 }
 

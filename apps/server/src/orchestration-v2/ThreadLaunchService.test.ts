@@ -10,6 +10,7 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as ServerConfig from "../config.ts";
 import { createPendingAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
@@ -1325,10 +1326,11 @@ it.effect.each(["stable", "upstream/release"])(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const git = yield* GitVcsDriver.GitVcsDriver;
+      const path = yield* Path.Path;
       const directory = yield* fs.makeTempDirectoryScoped({ prefix: "launch-remote-base-" });
-      const cwd = `${directory}/repo`;
-      const remote = `${directory}/remote.git`;
-      const worktreePath = `${directory}/worktree`;
+      const cwd = path.join(directory, "repo");
+      const remote = path.join(directory, "remote.git");
+      const worktreePath = path.join(directory, "worktree");
       yield* fs.makeDirectory(cwd);
       const command = (at: string, args: string[]) =>
         git.execute({ operation: "launch-test", cwd: at, args });

@@ -5702,25 +5702,32 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 )
               ORDER BY attempt.run_id ASC, attempt.attempt_ordinal ASC
             `,
-            // Settled plan nodes can also qualify, so the partial live-node index is inapplicable.
+            // Read ordinary live nodes from their partial index. An active plan item can
+            // also retain its node after the surrounding run has settled.
             nodes: sql<PayloadRow>`
-              SELECT node.payload_json FROM orchestration_v2_projection_nodes AS node
-              WHERE node.thread_id = ${threadId}
-                AND (
-                  node.status IN ('pending', 'starting', 'running', 'waiting')
-                  OR EXISTS (
-                    SELECT 1 FROM orchestration_v2_projection_turn_items AS item
-                    JOIN orchestration_v2_projection_runs AS run
-                      ON run.run_id = item.run_id AND run.thread_id = item.thread_id
-                    WHERE item.node_id = node.node_id AND item.run_id = node.run_id
-                      AND item.thread_id = node.thread_id
-                      AND run.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
-                      AND item.type IN ('todo_list', 'proposed_plan')
-                      AND node.kind = CASE item.type WHEN 'todo_list' THEN 'todo_list' ELSE 'plan' END
-                      AND item.status IN ('pending', 'running', 'waiting')
-                  )
-                )
-                AND (
+              WITH runtime_node_ids(node_id) AS (
+                SELECT node.node_id FROM orchestration_v2_projection_nodes AS node
+                  ${LIVE_NODES_INDEX}
+                WHERE node.thread_id = ${threadId}
+                  AND node.status IN ('pending', 'starting', 'running', 'waiting')
+                UNION
+                SELECT item.node_id FROM orchestration_v2_projection_turn_items AS item
+                JOIN orchestration_v2_projection_runs AS run
+                  ON run.run_id = item.run_id AND run.thread_id = item.thread_id
+                JOIN orchestration_v2_projection_nodes AS plan_node
+                  ON plan_node.node_id = item.node_id AND plan_node.run_id = item.run_id
+                    AND plan_node.thread_id = item.thread_id
+                WHERE item.thread_id = ${threadId}
+                  AND run.status IN ('completed', 'interrupted', 'failed', 'cancelled', 'rolled_back')
+                  AND item.type IN ('todo_list', 'proposed_plan')
+                  AND plan_node.kind = CASE item.type WHEN 'todo_list' THEN 'todo_list' ELSE 'plan' END
+                  AND item.status IN ('pending', 'running', 'waiting')
+              )
+              SELECT node.payload_json FROM runtime_node_ids
+              CROSS JOIN orchestration_v2_projection_nodes AS node
+                ON node.node_id = runtime_node_ids.node_id
+              WHERE
+                (
                   (node.run_id IS NULL AND node.kind = 'root_turn')
                   OR (
                     node.kind IN ('todo_list', 'plan')

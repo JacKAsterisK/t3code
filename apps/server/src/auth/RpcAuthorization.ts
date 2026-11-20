@@ -285,6 +285,7 @@ const isThreadOwnerCommand = (payload: unknown) =>
  * ThreadMessageIntake.dispatchCommand decides that case.
  */
 const sendsProviderSignOutPrompt = (method: string, payload: unknown): boolean => {
+  if (typeof payload !== "object" || payload === null) return false;
   if (method === ORCHESTRATION_V2_WS_METHODS.launchThread) {
     const message = (payload as OrchestrationV2ThreadLaunchInput).initialMessage;
     return message !== undefined && isProviderSignOutPrompt(message);

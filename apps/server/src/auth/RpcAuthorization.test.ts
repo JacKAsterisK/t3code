@@ -789,6 +789,9 @@ describe("thread owner authorization", () => {
         type,
         commandId: "command",
         threadId,
+        attachments: [],
+        text: "Continue.",
+        task: "Continue.",
       });
       if (type === THREAD_OWNER_COMMAND_TYPE)
         expect(required, type).toEqual([AuthOrchestrationReadScope]);

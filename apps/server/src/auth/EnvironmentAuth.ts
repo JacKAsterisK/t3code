@@ -56,7 +56,10 @@ import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedLimits from "../policy/managedLimits.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
-import { MCP_APPROVAL_SUBJECT_PREFIX } from "../persistence/AuthPairingLinks.ts";
+import {
+  MCP_APPROVAL_SUBJECT_PREFIX,
+  PEER_LINK_PAIRING_SUBJECT_PREFIX,
+} from "../persistence/AuthPairingLinks.ts";
 import { requestUrl } from "../requestUrl.ts";
 
 const DEFAULT_SESSION_SUBJECT = "cli-issued-session";
@@ -670,6 +673,7 @@ export class EnvironmentAuth extends Context.Service<
       code: string,
       access: AuthMcpClientAccess,
       approvals?: boolean,
+      peerLink?: boolean,
     ) => Effect.Effect<
       { readonly subject: string; readonly access: AuthMcpClientAccess },
       ServerAuthMcpApprovalCodeError | ServerAuthInternalError
@@ -1033,7 +1037,6 @@ export const make = Effect.gen(function* () {
       readonly requestedScopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly requiredScopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly allowedSubject?: string;
-      readonly mcpApproval?: AuthMcpClientAccess;
       /** Shown to approvers when the credential waits on T3 Connect device approval. */
       readonly requestMetadata?: AuthClientMetadata;
     },
@@ -1445,9 +1448,11 @@ export const make = Effect.gen(function* () {
             ]
           : scopes,
       subject:
-        (principal === undefined
-          ? undefined
-          : CredentialAttribution.derivedSubject(principal.subject)) ?? "one-time-token",
+        input?.purpose === "peer-link" && input.access !== undefined
+          ? PEER_LINK_PAIRING_SUBJECT_PREFIX + input.access
+          : ((principal === undefined
+              ? undefined
+              : CredentialAttribution.derivedSubject(principal.subject)) ?? "one-time-token"),
       ...(input?.label ? { label: input.label } : {}),
       ...(input?.access && input.purpose !== "peer-link" ? { mcpApproval: input.access } : {}),
     }).pipe(
@@ -1758,10 +1763,12 @@ export const make = Effect.gen(function* () {
     code,
     access,
     approvals = false,
+    peerLink = false,
   ) =>
     resolveBootstrapGrant(code.trim(), {
       requiredScopes: mcpClientScopes(access, { approvals }),
-      mcpApproval: access,
+      allowedSubject:
+        (peerLink ? PEER_LINK_PAIRING_SUBJECT_PREFIX : MCP_APPROVAL_SUBJECT_PREFIX) + access,
     }).pipe(
       Effect.catchTags({
         ServerAuthInvalidCredentialError: () =>

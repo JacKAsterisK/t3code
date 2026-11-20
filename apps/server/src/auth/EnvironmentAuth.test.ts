@@ -532,7 +532,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
       }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web", host: "192.168.1.50" }))),
     );
 
-    it.effect("renews a peer link's session while it is used, and no other MCP client's", () =>
+    it.effect("keeps a fixed expiry for peer and other MCP sessions even while used", () =>
       Effect.gen(function* () {
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
         const day = 24 * 60 * 60 * 1000;
@@ -545,7 +545,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
           });
         const use = (session: { readonly token: string }) =>
           serverAuth.authenticateMcpClient(makeBearerRequest(session.token)).pipe(
-            Effect.map((client) => client.linkExpiresAt?.epochMilliseconds ?? null),
+            Effect.as("accepted" as const),
             Effect.catchTags({
               ServerAuthInvalidCredentialError: () => Effect.succeed("refused" as const),
             }),
@@ -566,31 +566,27 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
         const revoked = yield* issue(true);
         const outside = yield* issue(false);
 
-        // Within a day of its full lifetime, a call leaves the session row alone.
+        // Activity never extends the session lifetime.
         yield* TestClock.adjust("12 hours");
-        expect(yield* use(used)).toBe(issuedAt + 30 * day);
+        expect(yield* use(used)).toBe("accepted");
         expect(yield* listedExpiry(used)).toBe(issuedAt + 30 * day);
 
         yield* TestClock.adjust("468 hours");
-        expect(yield* use(used)).toBe(issuedAt + 50 * day);
-        expect(yield* listedExpiry(used)).toBe(issuedAt + 50 * day);
-        expect(yield* use(outside)).toBeNull();
+        expect(yield* use(used)).toBe("accepted");
+        expect(yield* listedExpiry(used)).toBe(issuedAt + 30 * day);
+        expect(yield* use(outside)).toBe("accepted");
         expect(yield* listedExpiry(outside)).toBe(issuedAt + 30 * day);
         expect(yield* serverAuth.revokeSession(revoked.sessionId)).toBe(true);
         expect(yield* use(revoked)).toBe("refused");
 
-        // Day 40: past the token's own 30 days, so only the renewal keeps the used link.
+        // Day 40: both used and idle links have expired.
         yield* TestClock.adjust("20 days");
-        expect(yield* use(used)).toBe(issuedAt + 70 * day);
+        expect(yield* use(used)).toBe("refused");
         expect(yield* use(idle)).toBe("refused");
         expect(yield* use(outside)).toBe("refused");
         expect(yield* use(revoked)).toBe("refused");
         expect(yield* listedExpiry(idle)).toBeUndefined();
         expect(yield* listedExpiry(revoked)).toBeUndefined();
-
-        // Renewed links still end 30 days after their last use.
-        yield* TestClock.adjust("30 days");
-        expect(yield* use(used)).toBe("refused");
       }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web", host: "192.168.1.50" }))),
     );
 
@@ -711,14 +707,19 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
           { access: "auto", peerLink: true },
         ] as const) {
           const rejected = yield* serverAuth
-            .consumeMcpApprovalCode(pairing.credential, input.access, input.peerLink)
+            .consumeMcpApprovalCode(pairing.credential, input.access, false, input.peerLink)
             .pipe(Effect.flip);
           expect(rejected._tag).toBe("ServerAuthMcpApprovalCodeError");
         }
 
         expect(
-          yield* serverAuth.consumeMcpApprovalCode(pairing.credential, "approval-required", true),
-        ).toBe("approval-required");
+          yield* serverAuth.consumeMcpApprovalCode(
+            pairing.credential,
+            "approval-required",
+            false,
+            true,
+          ),
+        ).toMatchObject({ access: "approval-required" });
       }).pipe(Effect.provide(layerEnvironmentAuth())),
     );
 

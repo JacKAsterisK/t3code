@@ -168,7 +168,17 @@ const writeFakeRuntime = (
     const entryPath = path.join(versionDir, nativeWindows ? "t3.exe" : "t3");
     yield* fs.makeDirectory(versionDir, { recursive: true });
     yield* fs.writeFileString(entryPath, `#!${process.execPath}\n${childSource}`);
-    if (nativeWindows) yield* fs.writeFileString(entryPath + ".js", childSource);
+    if (nativeWindows) {
+      yield* fs.writeFileString(
+        entryPath + ".js",
+        `${childSource}
+process.on("message", (message) => {
+  if (message?.type === "stop") process.exit(0);
+});
+process.on("disconnect", () => process.exit(0));
+`,
+      );
+    }
     fixtureExecutables.add(entryPath);
     yield* fs.chmod(entryPath, 0o755);
     yield* fs.writeFileString(
@@ -187,12 +197,19 @@ const runLauncher = async (root: string) => {
   }
 };
 
+const renderFixtureTask = (plan: Parameters<typeof renderBootServiceTask>[0]) =>
+  renderBootServiceTask(
+    { ...plan, program: [`${plan.program[0]}.exe`, "__service-launcher"] },
+    { userId: "PC\\theo", homeDir: "C:\\Users\\theo", conhostPath: "conhost.exe" },
+  );
+
+const renderFixtureUnit = nativeWindows ? renderFixtureTask : renderBootServiceUnit;
 const fakeServiceUnit = (
   fs: FileSystem.FileSystem,
   path: Path.Path,
   root: string,
   version: string,
-  render = renderBootServiceUnit,
+  render = renderFixtureUnit,
 ) =>
   Effect.gen(function* () {
     const plan = unitPlan(root, version);
@@ -537,7 +554,7 @@ setInterval(() => {}, 1_000);
     }),
   );
 
-  it.effect(
+  it.effect.skipIf(HostProcess.Platform.defaultValue() !== "linux")(
     "repoints the systemd unit the manager loads when environment.d moves XDG_CONFIG_HOME",
     () =>
       Effect.gen(function* () {
@@ -675,34 +692,36 @@ process.exit(0);
     }),
   );
 
-  it.effect("starts the runtime in a T3 home whose name ends in a space", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-space-" });
-      const root = path.join(parent, "T3 data ");
-      const versionDir = path.join(root, "runtime", "versions", "1.0.0");
-      yield* writeFakeRuntime(
-        fs,
-        path,
-        versionDir,
-        `
+  it.effect.skipIf(nativeWindows)(
+    "starts the runtime in a T3 home whose name ends in a space",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-space-" });
+        const root = path.join(parent, "T3 data ");
+        const versionDir = path.join(root, "runtime", "versions", "1.0.0");
+        yield* writeFakeRuntime(
+          fs,
+          path,
+          versionDir,
+          `
 import { writeFileSync } from "node:fs";
 writeFileSync(new URL("./started", import.meta.url), "");
 process.exit(0);
 `,
-      );
-      yield* fs.writeFileString(
-        path.join(root, "runtime", "service-state.json"),
-        JSON.stringify({ protocol: 4, activeVersion: "1.0.0" }),
-      );
+        );
+        yield* fs.writeFileString(
+          path.join(root, "runtime", "service-state.json"),
+          JSON.stringify({ protocol: 4, activeVersion: "1.0.0" }),
+        );
 
-      yield* Effect.promise(() =>
-        expect(runLauncher(root)).rejects.toThrow("Active child exited unexpectedly (0)."),
-      );
+        yield* Effect.promise(() =>
+          expect(runLauncher(root)).rejects.toThrow("Active child exited unexpectedly (0)."),
+        );
 
-      assert.isTrue(yield* fs.exists(path.join(versionDir, "started")));
-    }),
+        assert.isTrue(yield* fs.exists(path.join(versionDir, "started")));
+      }),
   );
 
   it.effect("refuses non-install legacy documents without rewriting or spawning", () =>
@@ -838,7 +857,7 @@ process.exit(0);
           }),
         );
         const unit = yield* fakeServiceUnit(fs, path, root, unitVersion);
-        const expected = renderBootServiceUnit(
+        const expected = renderFixtureUnit(
           unitPlan(root, unitVersion === "1.0.0" ? "1.1.0" : unitVersion),
         );
         const createLauncher = Effect.gen(function* () {
@@ -890,7 +909,7 @@ process.exit(0);
             activeVersion: "1.0.0",
           }),
         );
-        const selectedUnit = renderBootServiceUnit({
+        const selectedUnit = renderFixtureUnit({
           ...unitPlan(selectedRoot, "1.0.0"),
           unitPath: unit.path,
         });
@@ -1164,11 +1183,7 @@ process.exit(0);
     }),
   );
 
-  const commitUpdate = (
-    render = renderBootServiceUnit,
-    missingUnit = false,
-    legacyInstall = false,
-  ) =>
+  const commitUpdate = (render = renderFixtureUnit, missingUnit = false, legacyInstall = false) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -1265,31 +1280,29 @@ if (context.update?.status === "pending") {
       return { fs, root, unit, recover };
     });
 
-  it.effect.each([
-    {
-      name: "systemd after a protocol-3 local upgrade",
-      render: renderBootServiceUnit,
-      legacyInstall: true,
-    },
-    {
-      name: "launchd",
-      legacyInstall: false,
-      render: (plan: Parameters<typeof renderBootServicePlist>[0]) =>
-        renderBootServicePlist(plan, {
-          homeDir: "/Users/test & <user>",
-          environmentPath: "/usr/bin:/custom/runtime/versions/1.0.0",
-        }),
-    },
-    {
-      name: "Task Scheduler",
-      legacyInstall: false,
-      render: (plan: Parameters<typeof renderBootServiceTask>[0]) =>
-        renderBootServiceTask(
-          { ...plan, program: [`${plan.program[0]}.exe`, "__service-launcher"] },
-          { userId: "PC\\theo", homeDir: "C:\\Users\\theo", conhostPath: "conhost.exe" },
-        ),
-    },
-  ])(
+  it.effect.each(
+    [
+      {
+        name: "systemd after a protocol-3 local upgrade",
+        render: renderBootServiceUnit,
+        legacyInstall: true,
+      },
+      {
+        name: "launchd",
+        legacyInstall: false,
+        render: (plan: Parameters<typeof renderBootServicePlist>[0]) =>
+          renderBootServicePlist(plan, {
+            homeDir: "/Users/test & <user>",
+            environmentPath: "/usr/bin:/custom/runtime/versions/1.0.0",
+          }),
+      },
+      {
+        name: "Task Scheduler",
+        legacyInstall: false,
+        render: renderFixtureTask,
+      },
+    ].filter(({ render }) => !nativeWindows || render !== renderBootServiceUnit),
+  )(
     "commits and repoints $name only after the trial reports prepared",
     ({ render, legacyInstall }) =>
       Effect.gen(function* () {
@@ -1305,10 +1318,10 @@ if (context.update?.status === "pending") {
     "keeps a durable commit through unit failure and retries a failed reload on restart",
     () =>
       Effect.gen(function* () {
-        const { fs, root, unit, recover } = yield* commitUpdate(renderBootServiceUnit, true);
+        const { fs, root, unit, recover } = yield* commitUpdate(renderFixtureUnit, true);
         assert.equal(unit.reloads, 0);
-        const original = renderBootServiceUnit(unitPlan(root, "1.0.0"));
-        const expected = renderBootServiceUnit(unitPlan(root, "1.1.0"));
+        const original = renderFixtureUnit(unitPlan(root, "1.0.0"));
+        const expected = renderFixtureUnit(unitPlan(root, "1.1.0"));
         assert.equal(unit.loadedContents, original);
         yield* fs.writeFileString(unit.path, original);
         unit.failReload = true;
@@ -1392,10 +1405,7 @@ if (context.update?.status === "pending") {
       const state = yield* Effect.promise(() => readServiceState(statePath));
       assert.equal(state.activeVersion, "1.0.0");
       assert.equal(state.update?.status, "rolled-back");
-      assert.equal(
-        yield* fs.readFileString(unit.path),
-        renderBootServiceUnit(unitPlan(root, "1.0.0")),
-      );
+      assert.equal(yield* fs.readFileString(unit.path), renderFixtureUnit(unitPlan(root, "1.0.0")));
       assert.equal(unit.reloads, 1);
       assert.equal(
         state.update?.status === "rolled-back" ? state.update.reason : undefined,
@@ -1539,7 +1549,7 @@ if (context.update?.status === "pending") {
   db.exec("PRAGMA journal_mode = " + paths.journalMode + ";");
   const insert = db.prepare("INSERT INTO events (payload) VALUES (?)");
   const writer = setInterval(() => insert.run("written while serving"), 1);
-  process.once("SIGTERM", () => {
+  const stop = () => {
     clearInterval(writer);
     insert.run("last write before stopping");
     const backupRoot = paths.root + "/runtime/db-backup";
@@ -1549,6 +1559,10 @@ if (context.update?.status === "pending") {
     }));
     db.close();
     process.exit(0);
+  };
+  process.once("SIGTERM", stop);
+  process.on("message", (message) => {
+    if (message?.type === "stop") stop();
   });
   process.send({ type: "request-update", targetVersion: "1.1.0", dbPath: paths.databasePath });
 } else {

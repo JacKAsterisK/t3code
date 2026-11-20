@@ -137,7 +137,10 @@ const isTransientDownloadFailure = (
 
 const CONTENT_RANGE = /^bytes (\d+)-\d+\/(\d+|\*)$/;
 
-const concatChunks = (chunks: ReadonlyArray<Uint8Array>, length: number): Uint8Array => {
+const concatChunks = (
+  chunks: ReadonlyArray<Uint8Array>,
+  length: number,
+): Uint8Array<ArrayBuffer> => {
   const bytes = new Uint8Array(length);
   let offset = 0;
   for (const chunk of chunks) {

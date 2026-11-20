@@ -171,40 +171,104 @@ const localRemoteShellLayer = (home: string) =>
     }),
   );
 
+const windowsHost = HostProcess.Platform.defaultValue() === "win32";
+
 describe("ssh tunnel scripts", () => {
-  it.live("distinguishes an incompatible remote Node from a missing executable", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-node-" });
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      for (const missing of [false, true]) {
-        const nodeFixture = missing
-          ? "command() { return 1; }; "
-          : 'node() { cat >/dev/null; printf "Remote node 18.20.8 does not satisfy required range >=999.0.0.\\n" >&2; return 1; }; ';
+  it.live.skipIf(windowsHost)(
+    "distinguishes an incompatible remote Node from a missing executable",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-node-" });
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        for (const missing of [false, true]) {
+          const nodeFixture = missing
+            ? "command() { return 1; }; "
+            : 'node() { cat >/dev/null; printf "Remote node 18.20.8 does not satisfy required range >=999.0.0.\\n" >&2; return 1; }; ';
+          const remoteShell = ChildProcessSpawner.make((command) => {
+            if (command._tag !== "StandardCommand") return spawner.spawn(command);
+            return spawner.spawn(
+              ChildProcess.make(
+                "sh",
+                ["-c", `${nodeFixture}eval "$(cat)"`, "sh", ...commandArgs(command).slice(-1)],
+                {
+                  ...command.options,
+                  env: {
+                    ...command.options.env,
+                    HOME: home,
+                    NVM_DIR: NodePath.join(home, ".nvm"),
+                    FNM_DIR: NodePath.join(home, ".fnm"),
+                    VOLTA_HOME: NodePath.join(home, ".volta"),
+                  },
+                },
+              ),
+            );
+          });
+          const result = yield* SshTunnel.launchOrReuseRemoteServer(
+            { alias: "devbox", hostname: "devbox", username: null, port: null },
+            undefined,
+            { nodeScriptPath: "/unused/server.ts", nodeEngineRange: ">=999.0.0" },
+          ).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, remoteShell),
+            Effect.result,
+          );
+          assert.isTrue(Result.isFailure(result));
+          if (!Result.isFailure(result)) return;
+          assert.isTrue(isSshCommandError(result.failure));
+          if (!isSshCommandError(result.failure)) return;
+          assert.equal(result.failure.exitCode, 1);
+          assert.equal(result.failure.stderr.includes("missing node on PATH"), missing);
+          assert.equal(
+            result.failure.stderr.includes("does not satisfy required range >=999.0.0"),
+            !missing,
+          );
+        }
+      }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.live.skipIf(windowsHost)(
+    "reports only the failed launch's own output, not an earlier launch's log",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-launch-log-" });
+        const target = { alias: "devbox", hostname: "devbox", username: null, port: null };
+        const stateDir = NodePath.join(home, ".t3", "ssh-launch", yield* remoteStateKey(target));
+        const bin = NodePath.join(home, "bin");
+        yield* fs.makeDirectory(stateDir, { recursive: true });
+        yield* fs.makeDirectory(bin);
+        yield* fs.writeFileString(NodePath.join(stateDir, "server.log"), "EARLIER_LAUNCH\n");
+        // The new server exits without output. Readiness then fails after a process from the
+        // earlier launch writes through the log descriptor it still holds (fd 3).
+        yield* fs.writeFileString(
+          NodePath.join(bin, "node"),
+          '#!/bin/sh\n[ "$1" = - ] || exit 0\ncat >/dev/null\ncase "$2" in\n  */port) echo 37731 ;;\n  37731) { printf "EARLIER_PROCESS\\n" >&3; } 2>/dev/null; exit 1 ;;\n  *) exit 1 ;;\nesac\n',
+          { mode: 0o755 },
+        );
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         const remoteShell = ChildProcessSpawner.make((command) => {
           if (command._tag !== "StandardCommand") return spawner.spawn(command);
           return spawner.spawn(
             ChildProcess.make(
               "sh",
-              ["-c", `${nodeFixture}eval "$(cat)"`, "sh", ...commandArgs(command).slice(-1)],
+              [
+                "-c",
+                'exec 3>>"$1/server.log"; exec sh -s -- "$2"',
+                "sh",
+                stateDir,
+                launchStateKey(command) ?? "",
+              ],
               {
                 ...command.options,
-                env: {
-                  ...command.options.env,
-                  HOME: home,
-                  NVM_DIR: NodePath.join(home, ".nvm"),
-                  FNM_DIR: NodePath.join(home, ".fnm"),
-                  VOLTA_HOME: NodePath.join(home, ".volta"),
-                },
+                env: { HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}` },
+                extendEnv: false,
               },
             ),
           );
         });
-        const result = yield* SshTunnel.launchOrReuseRemoteServer(
-          { alias: "devbox", hostname: "devbox", username: null, port: null },
-          undefined,
-          { nodeScriptPath: "/unused/server.ts", nodeEngineRange: ">=999.0.0" },
-        ).pipe(
+        const result = yield* SshTunnel.launchOrReuseRemoteServer(target, undefined, {
+          nodeScriptPath: "/unused/server.ts",
+        }).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, remoteShell),
           Effect.result,
         );
@@ -212,68 +276,10 @@ describe("ssh tunnel scripts", () => {
         if (!Result.isFailure(result)) return;
         assert.isTrue(isSshCommandError(result.failure));
         if (!isSshCommandError(result.failure)) return;
-        assert.equal(result.failure.exitCode, 1);
-        assert.equal(result.failure.stderr.includes("missing node on PATH"), missing);
-        assert.equal(
-          result.failure.stderr.includes("does not satisfy required range >=999.0.0"),
-          !missing,
-        );
-      }
-    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
-  );
-
-  it.live("reports only the failed launch's own output, not an earlier launch's log", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-launch-log-" });
-      const target = { alias: "devbox", hostname: "devbox", username: null, port: null };
-      const stateDir = NodePath.join(home, ".t3", "ssh-launch", yield* remoteStateKey(target));
-      const bin = NodePath.join(home, "bin");
-      yield* fs.makeDirectory(stateDir, { recursive: true });
-      yield* fs.makeDirectory(bin);
-      yield* fs.writeFileString(NodePath.join(stateDir, "server.log"), "EARLIER_LAUNCH\n");
-      // The new server exits without output. Readiness then fails after a process from the
-      // earlier launch writes through the log descriptor it still holds (fd 3).
-      yield* fs.writeFileString(
-        NodePath.join(bin, "node"),
-        '#!/bin/sh\n[ "$1" = - ] || exit 0\ncat >/dev/null\ncase "$2" in\n  */port) echo 37731 ;;\n  37731) { printf "EARLIER_PROCESS\\n" >&3; } 2>/dev/null; exit 1 ;;\n  *) exit 1 ;;\nesac\n',
-        { mode: 0o755 },
-      );
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const remoteShell = ChildProcessSpawner.make((command) => {
-        if (command._tag !== "StandardCommand") return spawner.spawn(command);
-        return spawner.spawn(
-          ChildProcess.make(
-            "sh",
-            [
-              "-c",
-              'exec 3>>"$1/server.log"; exec sh -s -- "$2"',
-              "sh",
-              stateDir,
-              launchStateKey(command) ?? "",
-            ],
-            {
-              ...command.options,
-              env: { HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}` },
-              extendEnv: false,
-            },
-          ),
-        );
-      });
-      const result = yield* SshTunnel.launchOrReuseRemoteServer(target, undefined, {
-        nodeScriptPath: "/unused/server.ts",
-      }).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, remoteShell),
-        Effect.result,
-      );
-      assert.isTrue(Result.isFailure(result));
-      if (!Result.isFailure(result)) return;
-      assert.isTrue(isSshCommandError(result.failure));
-      if (!isSshCommandError(result.failure)) return;
-      assert.include(result.failure.stderr, "It wrote nothing to");
-      assert.notInclude(result.failure.stderr, "EARLIER_LAUNCH");
-      assert.notInclude(result.failure.stderr, "EARLIER_PROCESS");
-    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+        assert.include(result.failure.stderr, "It wrote nothing to");
+        assert.notInclude(result.failure.stderr, "EARLIER_LAUNCH");
+        assert.notInclude(result.failure.stderr, "EARLIER_PROCESS");
+      }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
   it("rejects archive versions that are not a single exact version segment", () => {
@@ -298,7 +304,7 @@ describe("ssh tunnel scripts", () => {
     );
   });
 
-  it.each([
+  it.skipIf(windowsHost).each([
     { host: "Darwin x86_64", system: "Darwin", machine: "x86_64", downloads: false },
     { host: "Darwin arm64", system: "Darwin", machine: "arm64", downloads: true },
   ])(
@@ -341,7 +347,7 @@ describe("ssh tunnel scripts", () => {
     },
   );
 
-  it.each([
+  it.skipIf(windowsHost).each([
     { installed: ARCHIVE.archiveVersion, status: 0, reuses: true },
     { installed: ARCHIVE.archiveVersion, status: 1, reuses: false },
     { installed: "9.9.9", status: 0, reuses: false },
@@ -388,67 +394,70 @@ describe("ssh tunnel scripts", () => {
     NodeChildProcess.spawnSync("sh", ["-c", 'command -v "$1"', "sh", "shasum"]).status === 0
       ? ["sha256sum", "shasum"]
       : ["sha256sum"];
-  it.each(checksumTools)("names missing gzip after verifying with %s", (checksum) => {
-    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-ssh-runner-"));
-    try {
-      const bin = NodePath.join(root, "bin");
-      const release = NodePath.join(root, "release");
-      const home = NodePath.join(root, "home\ncache");
-      const archive = `t3-${ARCHIVE.archiveVersion}-linux-x64.tar.gz`;
-      NodeFS.mkdirSync(bin);
-      NodeFS.mkdirSync(home);
-      NodeFS.mkdirSync(NodePath.join(release, "t3"), { recursive: true });
-      NodeFS.writeFileSync(NodePath.join(release, "t3", "t3"), "#!/bin/sh\necho ok\n", {
-        mode: 0o755,
-      });
-      NodeChildProcess.execFileSync("tar", ["-czf", archive, "t3"], { cwd: release });
-      NodeChildProcess.execFileSync("sh", ["-c", `sha256sum ${archive} > SHA256SUMS`], {
-        cwd: release,
-      });
-      for (const tool of [
-        "sh",
-        "mkdir",
-        "mktemp",
-        "cat",
-        "rm",
-        "grep",
-        "cut",
-        checksum,
-        "tar",
-        "mv",
-      ]) {
-        NodeFS.symlinkSync(
-          NodeChildProcess.execFileSync("sh", ["-c", `command -v ${tool}`], {
-            encoding: "utf8",
-          }).trim(),
-          NodePath.join(bin, tool),
+  it.skipIf(windowsHost).each(checksumTools)(
+    "names missing gzip after verifying with %s",
+    (checksum) => {
+      const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-ssh-runner-"));
+      try {
+        const bin = NodePath.join(root, "bin");
+        const release = NodePath.join(root, "release");
+        const home = NodePath.join(root, "home\ncache");
+        const archive = `t3-${ARCHIVE.archiveVersion}-linux-x64.tar.gz`;
+        NodeFS.mkdirSync(bin);
+        NodeFS.mkdirSync(home);
+        NodeFS.mkdirSync(NodePath.join(release, "t3"), { recursive: true });
+        NodeFS.writeFileSync(NodePath.join(release, "t3", "t3"), "#!/bin/sh\necho ok\n", {
+          mode: 0o755,
+        });
+        NodeChildProcess.execFileSync("tar", ["-czf", archive, "t3"], { cwd: release });
+        NodeChildProcess.execFileSync("sh", ["-c", `sha256sum ${archive} > SHA256SUMS`], {
+          cwd: release,
+        });
+        for (const tool of [
+          "sh",
+          "mkdir",
+          "mktemp",
+          "cat",
+          "rm",
+          "grep",
+          "cut",
+          checksum,
+          "tar",
+          "mv",
+        ]) {
+          NodeFS.symlinkSync(
+            NodeChildProcess.execFileSync("sh", ["-c", `command -v ${tool}`], {
+              encoding: "utf8",
+            }).trim(),
+            NodePath.join(bin, tool),
+          );
+        }
+        NodeFS.writeFileSync(
+          NodePath.join(bin, "uname"),
+          '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac\n',
+          { mode: 0o755 },
         );
+        NodeFS.writeFileSync(
+          NodePath.join(bin, "curl"),
+          `#!/bin/sh\nfor last; do :; done\nfor a; do case "$a" in http*) src="${release}/\${a##*/}" ;; esac; done\nexec cat "$src" > "$last"\n`,
+          { mode: 0o755 },
+        );
+        const runner = NodePath.join(root, "run-t3.sh");
+        NodeFS.writeFileSync(runner, SshTunnel.buildRemoteT3RunnerScript(ARCHIVE));
+        const result = NodeChildProcess.spawnSync(NodePath.join(bin, "sh"), [runner, "--version"], {
+          encoding: "utf8",
+          env: { HOME: home, PATH: bin },
+        });
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /(missing|needs) gzip/);
+        assert.notInclude(result.stderr, "Cannot exec");
+      } finally {
+        NodeFS.rmSync(root, { recursive: true, force: true });
       }
-      NodeFS.writeFileSync(
-        NodePath.join(bin, "uname"),
-        '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac\n',
-        { mode: 0o755 },
-      );
-      NodeFS.writeFileSync(
-        NodePath.join(bin, "curl"),
-        `#!/bin/sh\nfor last; do :; done\nfor a; do case "$a" in http*) src="${release}/\${a##*/}" ;; esac; done\nexec cat "$src" > "$last"\n`,
-        { mode: 0o755 },
-      );
-      const runner = NodePath.join(root, "run-t3.sh");
-      NodeFS.writeFileSync(runner, SshTunnel.buildRemoteT3RunnerScript(ARCHIVE));
-      const result = NodeChildProcess.spawnSync(NodePath.join(bin, "sh"), [runner, "--version"], {
-        encoding: "utf8",
-        env: { HOME: home, PATH: bin },
-      });
-      assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /(missing|needs) gzip/);
-      assert.notInclude(result.stderr, "Cannot exec");
-    } finally {
-      NodeFS.rmSync(root, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
-  it("names missing tar before downloading the release archive", () => {
+  it.skipIf(windowsHost)("names missing tar before downloading the release archive", () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-ssh-runner-"));
     try {
       const bin = NodePath.join(root, "bin");
@@ -1587,7 +1596,6 @@ server.listen(Number(flag("--port") ?? 0), "127.0.0.1", () => {
 // a temporary HOME. Each archive version gets a pre-installed fake runtime
 // whose server writes the default runtime file the way `t3 serve` does.
 describe("archive launch script", () => {
-  const windowsHost = HostProcess.Platform.defaultValue() === "win32";
   const FAKE_T3 = `const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
@@ -1801,7 +1809,8 @@ const canBind = (port) =>
   );
 });
 
-describe("SSH launch during desktop update", () => {
+// These fixtures run the remote launcher through /bin/sh and fake POSIX host tools.
+describe.skipIf(windowsHost)("SSH launch during desktop update", () => {
   it.effect("archive launcher reuses the replacement without host Node", () =>
     Effect.gen(function* () {
       const script = yield* captureLauncherFor({ archiveVersion: "1.2.3" });

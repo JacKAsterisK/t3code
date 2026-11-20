@@ -1781,6 +1781,7 @@ it.layer(
               );
             }
           }).pipe(
+            Effect.provideService(WindowsShellEnvironment, () => Effect.succeed({})),
             Effect.provide(
               ServerConfig.layerTest(process.cwd(), {
                 prefix: "t3-pi-model-cache-",

@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { WindowsShellEnvironment } from "@t3tools/shared/shell";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
@@ -280,6 +281,7 @@ it.effect("a remote policy refresh preserves a newer health result on the regist
       ),
     );
     const layerDependencies = Layer.mergeAll(
+      Layer.succeed(WindowsShellEnvironment, () => Effect.succeed({})),
       ProviderLatestVersions.layer,
       Layer.succeed(ModelManifest.ModelManifest, {
         current: Ref.get(manifest),

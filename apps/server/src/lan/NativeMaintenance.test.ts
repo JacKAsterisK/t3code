@@ -1809,6 +1809,49 @@ effectIt.effect.each([undefined, 2] as const)(
     }).pipe(Effect.provide(Layer.mergeAll(testLayer, NodeServices.layer)), Effect.scoped),
 );
 
+effectIt.effect.each([undefined, 2] as const)(
+  "native verify handles the orphaned title marker according to generation %s",
+  (generationVersion) =>
+    Effect.gen(function* () {
+      const { request, insert, dbPath } = yield* fixtureAtMigration(109);
+      const titleRegeneration = { requestId: "command:title", startedAt: "2026-10-25T00:00:00Z" };
+      yield* insert("orchestration_v2_projection_threads", "fixture", {
+        thread_id: "thread:orphaned-title",
+        payload_json: JSON.stringify({ title: "Retained title", titleRegeneration }),
+      });
+
+      const version = generationVersion === undefined ? {} : { generationVersion };
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const before = yield* service.inspect({ ...request, ...version });
+      assert.equal(before.restartContinuations, 0);
+      const verification = service.verify({ ...request, ...version, operation: "verify" });
+      if (generationVersion === undefined) {
+        // The legacy digest includes the full thread row and must match existing
+        // stopped-state receipts. Hub uses generation 2 for forward activation.
+        const failure = yield* verification.pipe(Effect.flip);
+        assert.equal(failure.reason, "changed");
+        return;
+      }
+
+      const verified = yield* verification;
+      assert.equal(verified.workGeneration, before.workGeneration);
+      const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+      try {
+        const thread = db
+          .prepare(
+            "SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id = ?",
+          )
+          .get("thread:orphaned-title");
+        assert.deepEqual(JSON.parse(String(thread?.payload_json)), {
+          title: "Retained title",
+          titleRegeneration: null,
+        });
+      } finally {
+        db.close();
+      }
+    }).pipe(Effect.provide(Layer.mergeAll(testLayer, NodeServices.layer)), Effect.scoped),
+);
+
 effectIt.effect("v2 inspection still refuses a concurrent durable write", () =>
   Effect.gen(function* () {
     const { request, dbPath } = yield* fixture;

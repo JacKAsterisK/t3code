@@ -299,9 +299,9 @@ effectIt.effect("live readiness refuses malformed deferred work behind a termina
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-const stalePlanDisplayFixture = (status: string) =>
+const stalePlanDisplayFixture = (status: string, toMigrationInclusive?: number) =>
   Effect.gen(function* () {
-    const base = yield* fixture;
+    const base = yield* fixtureAtMigration(toMigrationInclusive);
     const threadId = "thread:stale-plan";
     const runId = "run:stale-plan";
     const providerThreadId = "provider-thread:stale-plan";
@@ -1769,6 +1769,43 @@ effectIt.effect(
         0,
       );
       assert.isTrue(NodeFS.existsSync(dbPath));
+    }).pipe(Effect.provide(Layer.mergeAll(testLayer, NodeServices.layer)), Effect.scoped),
+);
+
+effectIt.effect.each([undefined, 2] as const)(
+  "native verify preserves the work fingerprint across the inline work output backfill (generation %s)",
+  (generationVersion) =>
+    Effect.gen(function* () {
+      const { request, dbPath, insert, readDisplays } = yield* stalePlanDisplayFixture(
+        "completed",
+        96,
+      );
+      yield* insert("orchestration_v2_projection_turn_items", "completed", {
+        turn_item_id: "item:rendered-work-output",
+        type: "dynamic_tool",
+        payload_json: '{"output":{"htmlRender":true}}',
+      });
+      const beforeRows = readDisplays();
+      const version = generationVersion === undefined ? {} : { generationVersion };
+      const service = yield* NativeMaintenance.NativeMaintenance;
+      const before = yield* service.inspect({ ...request, ...version });
+      assert.equal(before.backgroundAgents, 0);
+      const verified = yield* service.verify({ ...request, ...version, operation: "verify" });
+      assert.equal(verified.workGeneration, before.workGeneration);
+      assert.deepEqual(readDisplays(), beforeRows);
+      const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+      try {
+        assert.equal(
+          db
+            .prepare(
+              "SELECT inline_work_output FROM orchestration_v2_projection_turn_items WHERE turn_item_id=?",
+            )
+            .get("item:rendered-work-output")?.inline_work_output,
+          1,
+        );
+      } finally {
+        db.close();
+      }
     }).pipe(Effect.provide(Layer.mergeAll(testLayer, NodeServices.layer)), Effect.scoped),
 );
 

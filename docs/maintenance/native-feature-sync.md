@@ -34,6 +34,13 @@ approval before code or runtime changes.
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
 
+## LAN 1.0.40 hotfix
+
+Native activation now excludes the derived `inline_work_output` turn-item field
+from the stopped-work fingerprint. This lets Hub verify an update from schema 96
+when completed runs retain display-only plan rows. The schema-109 backfill still
+runs, and the fingerprint continues to cover the durable row payloads.
+
 ## 2026-11-20 sync decisions
 
 - Keep the LAN OAuth approval bindings, fleet access caps, and fixed peer

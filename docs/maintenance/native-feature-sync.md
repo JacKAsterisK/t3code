@@ -41,6 +41,13 @@ from the stopped-work fingerprint. This lets Hub verify an update from schema 96
 when completed runs retain display-only plan rows. The schema-109 backfill still
 runs, and the fingerprint continues to cover the durable row payloads.
 
+The admission follow-up reports a waiting approval card as stale after 24 hours
+when its thread has no active or queued run, its linked or latest run is terminal
+and no pending request or unsettled approval receipt remains. Gen2 activation
+can carry the card without changing its durable work digest. The legacy guard
+keeps its original behavior. A running version still owns its guarded-close
+decision and may need a normal close before this update.
+
 ## 2026-11-20 sync decisions
 
 - Keep the LAN OAuth approval bindings, fleet access caps, and fixed peer

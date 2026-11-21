@@ -147,6 +147,8 @@ const fixtureAtMigration = (toMigrationInclusive?: number) =>
     return { request, mutate, insert, warm, dbPath, appendEvent };
   });
 const fixture = fixtureAtMigration();
+const hostNowMs = () => DateTime.toEpochMillis(DateTime.nowUnsafe());
+const isoAtMs = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
 const readinessWork = (databasePath: string) =>
   NativeMaintenance.inspectNativeUpdateReadinessWork(databasePath);
 
@@ -408,6 +410,99 @@ const testLayer = NativeMaintenance.layer(identity).pipe(
   Layer.provide(
     Layer.succeed(NativeMaintenance.NativeMaintenanceLease, { verify: () => Effect.void }),
   ),
+);
+
+effectIt.effect.each([
+  "orphan",
+  "terminal-parent",
+  "active",
+  "active-pending",
+  "pending",
+  "fresh",
+  "unsettled-delivery",
+  "pre-receipts-schema",
+] as const)("checks real approval work independently of a %s approval item", (fixtureCase) =>
+  Effect.gen(function* () {
+    const { dbPath, insert, request } = yield* fixtureAtMigration(
+      fixtureCase === "pre-receipts-schema" ? 81 : 96,
+    );
+    const threadId = "thread:approval";
+    const runId = "run:approval";
+    const requestId = "request:approval";
+    const itemId = "turn-item:approval";
+    const now = hostNowMs();
+    const updatedAt = isoAtMs(now - (fixtureCase === "fresh" ? 60000 : 6 * 86400000));
+    const completedAt = ["active", "active-pending"].includes(fixtureCase)
+      ? null
+      : isoAtMs(now - 30000);
+    const runStatus = completedAt === null ? "waiting" : "completed";
+    const itemRunId = ["active", "active-pending", "terminal-parent"].includes(fixtureCase)
+      ? runId
+      : null;
+    yield* insert("orchestration_v2_projection_runs", runStatus, {
+      run_id: runId,
+      thread_id: threadId,
+      ordinal: 1,
+      requested_at: updatedAt,
+      completed_at: completedAt,
+      payload_json: JSON.stringify({ id: runId, threadId, status: runStatus, completedAt }),
+    });
+    yield* insert("orchestration_v2_projection_turn_items", "waiting", {
+      turn_item_id: itemId,
+      thread_id: threadId,
+      run_id: itemRunId,
+      type: "approval_request",
+      updated_at: updatedAt,
+      payload_json: JSON.stringify({
+        id: itemId,
+        threadId,
+        runId: itemRunId,
+        type: "approval_request",
+        status: "waiting",
+        requestId,
+        updatedAt,
+      }),
+    });
+    if (fixtureCase === "pending" || fixtureCase === "active-pending") {
+      yield* insert("orchestration_v2_projection_runtime_requests", "pending", {
+        runtime_request_id: requestId,
+        thread_id: threadId,
+        node_id: "node:approval",
+        kind: "command",
+      });
+    }
+
+    if (fixtureCase === "unsettled-delivery") {
+      yield* insert("agent_approval_receipts", "fixture", {
+        receipt_id: "approval-receipt:fixture",
+        role: "local",
+        state: "committed",
+        request_id: requestId,
+        thread_id: threadId,
+      });
+    }
+
+    const service = yield* NativeMaintenance.NativeMaintenance;
+    const input = { ...request, generationVersion: 2 as const, reportStaleWork: true };
+    const observed = yield* service.inspect(input);
+    const ready = readinessWork(dbPath);
+    assert.equal(ready.backgroundAgents, observed.backgroundAgents);
+    assert.deepEqual(ready.staleWork, observed.staleWork);
+    const verify = service.verify({ ...input, operation: "verify" });
+    if (fixtureCase === "orphan" || fixtureCase === "terminal-parent") {
+      assert.equal(observed.backgroundAgents, 0);
+      assert.deepEqual(observed.staleWork, { turn_items: 1 });
+      const legacyWire = yield* service.inspect({ ...request, generationVersion: 2 });
+      assert.isUndefined(legacyWire.staleWork);
+      assert.equal(legacyWire.backgroundAgents, 0);
+      const verified = yield* verify;
+      assert.equal(verified.workGeneration, observed.workGeneration);
+    } else {
+      assert.equal(observed.backgroundAgents, 1);
+      assert.isUndefined(observed.staleWork);
+      assert.equal((yield* verify.pipe(Effect.flip)).reason, "busy");
+    }
+  }).pipe(Effect.provide(Layer.mergeAll(testLayer, NodeServices.layer)), Effect.scoped),
 );
 
 effectIt.layer(NodeServices.layer)("NativeMaintenance", (it) => {

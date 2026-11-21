@@ -22,6 +22,7 @@ import {
   OrchestrationV2ProviderGoal,
 } from "@t3tools/contracts";
 import { nativeDataGeneration, NativeDataGenerationChanged } from "./NativeDataGeneration.ts";
+import { staleApprovalClassifier } from "./nativeStaleWork.ts";
 import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
 import {
   emptyNativeWork,
@@ -459,6 +460,7 @@ const terminalDisplayClassifier = (db: NodeSqlite.DatabaseSync) => {
 
 type WorkInspection = ReturnType<typeof emptyNativeWork> & {
   readonly carriedWork?: ReturnType<typeof emptyNativeWork>;
+  readonly staleWork?: Readonly<Record<string, number>>;
 };
 const readinessFilter = (table: string): string => {
   const busy = statuses.find(([name]) => name === table)?.[2] ?? [];
@@ -778,10 +780,17 @@ function inspectWork(
       restartContinuations,
       ...updateWork,
     };
+    const admittedWork =
+      updateWork !== undefined &&
+      updateWork.backgroundAgents > 0 &&
+      recorded.some((row) => row.migration_id === 82) &&
+      (readiness || generationVersion === 2)
+        ? classifyUpdateWork(db, childResults, isTerminalDisplay, lightweight, true)
+        : work;
     // Live close admission needs current work only; stopped verification owns history integrity.
     if (readiness) {
       db.exec("COMMIT");
-      return work;
+      return admittedWork;
     }
     const hash = NodeCrypto.createHash("sha256");
     if (generationVersion === 2) {
@@ -888,7 +897,7 @@ function inspectWork(
     }
     db.exec("COMMIT");
     return {
-      ...work,
+      ...admittedWork,
       workGeneration: hash.digest("hex"),
     };
   } finally {
@@ -912,6 +921,7 @@ const classifyUpdateWork = (
   childResults: number,
   isTerminalDisplay: ReturnType<typeof terminalDisplayClassifier>,
   readiness = false,
+  checkStale = false,
 ) => {
   const blocking = emptyNativeWork();
   const carriedWork = emptyNativeWork();
@@ -923,6 +933,10 @@ const classifyUpdateWork = (
       throw new NativeMaintenanceError({ reason: "schema", cause });
     }
   };
+  let staleApprovals = 0;
+  const isStaleApproval = checkStale
+    ? staleApprovalClassifier(db, payload, DateTime.toEpochMillis(DateTime.nowUnsafe()))
+    : () => false;
   const text = (value: unknown): value is string => typeof value === "string" && value.length > 0;
   const object = (value: unknown): value is Record<string, unknown> =>
     value !== null && typeof value === "object" && !Array.isArray(value);
@@ -1063,6 +1077,8 @@ const classifyUpdateWork = (
             text(value.subagentId) &&
             delegatedNode(value.subagentId)));
       if (preserved) carriedWork.backgroundAgents++;
+      else if (table === "orchestration_v2_projection_turn_items" && isStaleApproval(row, value))
+        staleApprovals++;
       else block(row, "backgroundAgents");
     }
   }
@@ -1139,7 +1155,11 @@ const classifyUpdateWork = (
       else carriedWork.backgroundAgents++;
     }
   }
-  return { ...blocking, carriedWork };
+  return {
+    ...blocking,
+    carriedWork,
+    ...(staleApprovals > 0 ? { staleWork: { turn_items: staleApprovals } } : {}),
+  };
 };
 
 const filesGeneration = async (databasePath: string) => {
@@ -1305,7 +1325,10 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
                 ? nativeDataGeneration(dbPath, safeFile)
                 : filesGeneration(dbPath);
             const before = await generation();
-            const work = inspectNativeUpdateWork(dbPath, request.generationVersion);
+            const { staleWork, ...work } = inspectNativeUpdateWork(
+              dbPath,
+              request.generationVersion,
+            );
             const after = await generation();
             if (before !== after) throw new NativeMaintenanceError({ reason: "changed" });
             return {
@@ -1317,6 +1340,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
               dataGeneration: after,
               ...(request.generationVersion === 2 ? { generationVersion: 2 as const } : {}),
               ...work,
+              ...(request.reportStaleWork === true && staleWork !== undefined ? { staleWork } : {}),
               processStopped: true as const,
               compiledIdentity,
             };
@@ -1358,7 +1382,10 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
             }
             const runtimePath = NodePath.join(state, "server-runtime.json");
             const owner = boundedRecord(runtimePath);
-            const work = inspectNativeUpdateWork(dbPath, request.generationVersion);
+            const { staleWork, ...work } = inspectNativeUpdateWork(
+              dbPath,
+              request.generationVersion,
+            );
             const readiness = readNativeUpdateReadiness(
               home,
               request.environmentId,
@@ -1373,6 +1400,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
               environmentId: request.environmentId,
               homeDirectory: request.homeDirectory,
               ...work,
+              ...(request.reportStaleWork === true && staleWork !== undefined ? { staleWork } : {}),
               ...readiness,
               ...(request.generationVersion === 2 ? { generationVersion: 2 as const } : {}),
               compiledIdentity,
@@ -1518,6 +1546,7 @@ type Snapshot = Omit<NativeMaintenanceRequest, "journalPath"> & {
   processStopped: true;
   compiledIdentity: NativeBuildIdentity;
   carriedWork: ReturnType<typeof emptyNativeWork>;
+  staleWork?: Readonly<Record<string, number>>;
   activeRuns: number;
   queuedRuns: number;
   pendingRequests: number;

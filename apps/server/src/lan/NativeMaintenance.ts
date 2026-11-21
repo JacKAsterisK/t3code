@@ -502,7 +502,7 @@ function inspectWork(
   update: boolean,
   readiness = false,
   generationVersion?: 2,
-) {
+): WorkInspection & { readonly workGeneration?: string } {
   const lightweight = readiness || generationVersion === 2;
   const db = new NodeSqlite.DatabaseSync(databasePath, {
     readOnly: true,

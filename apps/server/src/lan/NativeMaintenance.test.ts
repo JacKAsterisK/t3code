@@ -421,6 +421,12 @@ effectIt.effect.each([
   "fresh",
   "unsettled-delivery",
   "pre-receipts-schema",
+  "foreign-node",
+  "missing-receipt",
+  "foreign-receipt",
+  "item-delivery-array",
+  "request-delivery-array",
+  "linked-terminal",
 ] as const)("checks real approval work independently of a %s approval item", (fixtureCase) =>
   Effect.gen(function* () {
     const { dbPath, insert, request } = yield* fixtureAtMigration(
@@ -436,7 +442,16 @@ effectIt.effect.each([
       ? null
       : isoAtMs(now - 30000);
     const runStatus = completedAt === null ? "waiting" : "completed";
-    const itemRunId = ["active", "active-pending", "terminal-parent"].includes(fixtureCase)
+    const linkedRequest = [
+      "missing-receipt",
+      "foreign-receipt",
+      "request-delivery-array",
+      "linked-terminal",
+    ].includes(fixtureCase);
+    const nodeId = linkedRequest || fixtureCase === "foreign-node" ? "node:approval" : null;
+    const itemRunId = ["active", "active-pending", "terminal-parent", "linked-terminal"].includes(
+      fixtureCase,
+    )
       ? runId
       : null;
     yield* insert("orchestration_v2_projection_runs", runStatus, {
@@ -451,18 +466,79 @@ effectIt.effect.each([
       turn_item_id: itemId,
       thread_id: threadId,
       run_id: itemRunId,
+      node_id: nodeId,
       type: "approval_request",
       updated_at: updatedAt,
       payload_json: JSON.stringify({
         id: itemId,
         threadId,
         runId: itemRunId,
+        nodeId,
         type: "approval_request",
         status: "waiting",
         requestId,
         updatedAt,
+        ...(fixtureCase === "item-delivery-array"
+          ? { approvalDelivery: ["provider_acknowledged"] }
+          : {}),
       }),
     });
+    if (nodeId !== null) {
+      const nodeThread = fixtureCase === "foreign-node" ? "thread:other" : threadId;
+      const nodeRun = fixtureCase === "foreign-node" ? null : runId;
+      yield* insert("orchestration_v2_projection_nodes", "completed", {
+        node_id: nodeId,
+        thread_id: nodeThread,
+        run_id: nodeRun,
+        runtime_request_id: requestId,
+        payload_json: JSON.stringify({
+          id: nodeId,
+          threadId: nodeThread,
+          runId: nodeRun,
+          runtimeRequestId: requestId,
+        }),
+      });
+    }
+    if (linkedRequest) {
+      const receiptId = "approval-receipt:linked";
+      const namedReceiptId =
+        fixtureCase === "linked-terminal" || fixtureCase === "request-delivery-array"
+          ? receiptId
+          : "approval-receipt:other";
+      yield* insert("orchestration_v2_projection_runtime_requests", "resolved", {
+        runtime_request_id: requestId,
+        thread_id: threadId,
+        node_id: nodeId,
+        kind: "command",
+        payload_json: JSON.stringify({
+          id: requestId,
+          nodeId,
+          status: "resolved",
+          approvalReceiptId: namedReceiptId,
+          ...(fixtureCase === "request-delivery-array"
+            ? { approvalDelivery: ["provider_acknowledged"] }
+            : {}),
+        }),
+      });
+      yield* insert("agent_approval_receipts", "fixture", {
+        receipt_id: receiptId,
+        role: "local",
+        state: "provider_acknowledged",
+        request_id: requestId,
+        thread_id: threadId,
+      });
+      if (fixtureCase === "foreign-receipt") {
+        yield* insert("agent_approval_receipts", "fixture", {
+          receipt_id: namedReceiptId,
+          role: "local",
+          state: "provider_acknowledged",
+          request_id: "request:other",
+          thread_id: threadId,
+          command_id: "command:other",
+          client_request_id: "client-request:other",
+        });
+      }
+    }
     if (fixtureCase === "pending" || fixtureCase === "active-pending") {
       yield* insert("orchestration_v2_projection_runtime_requests", "pending", {
         runtime_request_id: requestId,
@@ -489,7 +565,7 @@ effectIt.effect.each([
     assert.equal(ready.backgroundAgents, observed.backgroundAgents);
     assert.deepEqual(ready.staleWork, observed.staleWork);
     const verify = service.verify({ ...input, operation: "verify" });
-    if (fixtureCase === "orphan" || fixtureCase === "terminal-parent") {
+    if (["orphan", "terminal-parent", "linked-terminal"].includes(fixtureCase)) {
       assert.equal(observed.backgroundAgents, 0);
       assert.deepEqual(observed.staleWork, { turn_items: 1 });
       const legacyWire = yield* service.inspect({ ...request, generationVersion: 2 });

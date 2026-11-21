@@ -34,6 +34,19 @@ approval before code or runtime changes.
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
 
+## LAN 1.0.42 recovery build
+
+Stopped Gen2 admission now reports the historical approval card with a matching
+cancelled request and interrupted node/run even if the node's nullable
+`runtime_request_id` SQL column was left empty by the projection writer. The
+node payload, request, thread and run still have to agree. This exception leaves
+the saved work digest unchanged and requires no migration.
+
+The packaged native helper accepts `diagnose-stale-work --snapshot ABSOLUTE_T3_HOME`.
+It takes a local online SQLite backup while T3 runs and reports counts and
+approval-link checks. Treat the report as diagnostic evidence. Hub takes fresh
+stopped admission for activation and rollback.
+
 ## LAN 1.0.40 hotfix
 
 Native activation now excludes the derived `inline_work_output` turn-item field

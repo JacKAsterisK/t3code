@@ -2,6 +2,7 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- The offline native lease helper reads closed SQLite state and hashes files without loading the server runtime.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import * as NodeOS from "node:os";
 import * as NodeCrypto from "node:crypto";
 import * as NodeSqlite from "node:sqlite";
 import * as Context from "effect/Context";
@@ -22,7 +23,7 @@ import {
   OrchestrationV2ProviderGoal,
 } from "@t3tools/contracts";
 import { nativeDataGeneration, NativeDataGenerationChanged } from "./NativeDataGeneration.ts";
-import { staleApprovalClassifier } from "./nativeStaleWork.ts";
+import { describeStaleApprovalLinks, staleApprovalClassifier } from "./nativeStaleWork.ts";
 import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
 import {
   emptyNativeWork,
@@ -920,6 +921,47 @@ export const inspectNativeUpdateReadinessWork = (databasePath: string) => {
   const work = inspectWork(databasePath, true, true);
   return { ...work, carriedWork: work.carriedWork ?? emptyNativeWork() };
 };
+
+export async function diagnoseStaleWorkSnapshot(homeDirectory: string) {
+  if (!NodePath.isAbsolute(homeDirectory)) throw new NativeMaintenanceError({ reason: "identity" });
+  const state = NodePath.join(homeDirectory, "userdata");
+  const sourcePath = NodePath.join(state, "statev2.sqlite");
+  safeParents(state);
+  safeFile(sourcePath);
+  const temporaryRoot = NodeFS.realpathSync(NodeOS.tmpdir());
+  const scratch = NodeFS.mkdtempSync(NodePath.join(temporaryRoot, "t3-stale-work-"));
+  const snapshot = NodePath.join(scratch, "snapshot.sqlite");
+  try {
+    const source = new NodeSqlite.DatabaseSync(sourcePath, { readOnly: true });
+    try {
+      await NodeSqlite.backup(source, snapshot);
+    } finally {
+      source.close();
+    }
+    const { workGeneration: _, ...counts } = inspectNativeUpdateWork(snapshot, 2, true);
+    const db = new NodeSqlite.DatabaseSync(snapshot, { readOnly: true });
+    try {
+      return {
+        evidence: "online-snapshot" as const,
+        ...counts,
+        staleWork: counts.staleWork ?? {},
+        approvalLinks: describeStaleApprovalLinks(
+          db,
+          (row) => decodePayload(row.payload_json),
+          DateTime.toEpochMillis(DateTime.nowUnsafe()),
+        ),
+      };
+    } finally {
+      db.close();
+    }
+  } finally {
+    safeParents(scratch);
+    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+      NodeFS.rmSync(snapshot + suffix, { force: true });
+    }
+    NodeFS.rmdirSync(scratch);
+  }
+}
 
 type WorkRow = Record<string, NodeSqlite.SQLOutputValue>;
 const classifyUpdateWork = (

@@ -2,6 +2,49 @@ import type * as NodeSqlite from "node:sqlite";
 
 type WorkRow = Record<string, NodeSqlite.SQLOutputValue>;
 
+function nodeLinkMatches(
+  row: WorkRow,
+  node: WorkRow,
+  value: Record<string, unknown>,
+  requestId: unknown,
+  allowMissingRequestColumn = false,
+) {
+  return {
+    columnThread: node.thread_id === row.thread_id,
+    payloadId: value.id === node.node_id,
+    payloadThread: value.threadId === node.thread_id,
+    payloadRun: value.runId === node.run_id,
+    payloadRequest:
+      (value.runtimeRequestId ?? null) === node.runtime_request_id ||
+      (allowMissingRequestColumn &&
+        node.runtime_request_id === null &&
+        value.runtimeRequestId === requestId),
+    columnRequest: node.runtime_request_id === null || node.runtime_request_id === requestId,
+    columnRun: row.run_id === null || node.run_id === null || row.run_id === node.run_id,
+  };
+}
+
+export function describeStaleApprovalLinks(
+  db: NodeSqlite.DatabaseSync,
+  readPayload: (row: WorkRow) => Record<string, unknown>,
+  now: number,
+) {
+  const isStale = staleApprovalClassifier(db, readPayload, now);
+  const nodeById = db.prepare("SELECT * FROM orchestration_v2_projection_nodes WHERE node_id=?");
+  const approvals = db.prepare(`SELECT * FROM orchestration_v2_projection_turn_items
+    WHERE type='approval_request' AND status='waiting' ORDER BY updated_at LIMIT 20`);
+  return approvals.all().map((row) => {
+    const value = readPayload(row);
+    const node = typeof row.node_id === "string" ? nodeById.get(row.node_id) : undefined;
+    return {
+      classifiedStale: isStale(row, value),
+      nodePresent: node !== undefined,
+      nodeLinks:
+        node === undefined ? null : nodeLinkMatches(row, node, readPayload(node), value.requestId),
+    };
+  });
+}
+
 const freshnessMs = 24 * 60 * 60 * 1000;
 const terminalRunStatuses = ["completed", "interrupted", "failed", "cancelled", "rolled_back"];
 const terminalDeliveries = ["provider_acknowledged", "refused", "delivery_withheld"];
@@ -41,6 +84,21 @@ export function staleApprovalClassifier(
   const receiptById = db.prepare(
     "SELECT request_id, thread_id, state FROM agent_approval_receipts WHERE receipt_id=?",
   );
+  const isTerminalRun = (run: WorkRow | undefined): run is WorkRow => {
+    if (
+      run === undefined ||
+      !terminalRunStatuses.includes(String(run.status)) ||
+      !timestampBefore(run.completed_at, now + 1)
+    )
+      return false;
+    const value = readPayload(run);
+    return (
+      value.id === run.run_id &&
+      value.threadId === run.thread_id &&
+      value.status === run.status &&
+      value.completedAt === run.completed_at
+    );
+  };
 
   // The approval item is display state. Only its request or delivery can execute.
   return (row: WorkRow, value: Record<string, unknown>): boolean => {
@@ -74,6 +132,7 @@ export function staleApprovalClassifier(
     )
       return false;
 
+    let cancelledWithoutDelivery = false;
     const request = requestById.get(value.requestId);
     if (request !== undefined) {
       const requestValue = readPayload(request);
@@ -104,21 +163,34 @@ export function staleApprovalClassifier(
         (request.status === "resolved" && !isTerminalDelivery(delivery) && !linkedReceiptSettled)
       )
         return false;
+      cancelledWithoutDelivery =
+        request.status === "cancelled" &&
+        value.approvalDelivery === undefined &&
+        delivery === undefined &&
+        receiptId === undefined &&
+        receipts.length === 0;
     }
 
     const node = typeof row.node_id === "string" ? nodeById.get(row.node_id) : undefined;
     if (node !== undefined) {
       const nodeValue = readPayload(node);
-      if (
-        node.thread_id !== threadId ||
-        nodeValue.id !== node.node_id ||
-        nodeValue.threadId !== node.thread_id ||
-        nodeValue.runId !== node.run_id ||
-        (nodeValue.runtimeRequestId ?? null) !== node.runtime_request_id ||
-        (node.runtime_request_id !== null && node.runtime_request_id !== value.requestId) ||
-        (row.run_id !== null && node.run_id !== null && row.run_id !== node.run_id)
-      )
-        return false;
+      // The node projection writer stores runtimeRequestId in the payload and
+      // can leave its nullable SQL column empty. Only accept that omission with
+      // an exact cancelled request, the same run on both sides and a terminal node.
+      const allowMissingRequestColumn =
+        cancelledWithoutDelivery &&
+        typeof row.run_id === "string" &&
+        row.run_id === node.run_id &&
+        nodeValue.status === node.status &&
+        terminalRunStatuses.includes(String(node.status));
+      const links = nodeLinkMatches(
+        row,
+        node,
+        nodeValue,
+        value.requestId,
+        allowMissingRequestColumn,
+      );
+      if (!Object.values(links).every(Boolean)) return false;
     }
     const parentId = row.run_id ?? node?.run_id;
     const parent =
@@ -127,18 +199,6 @@ export function staleApprovalClassifier(
         : typeof parentId === "string"
           ? runById.get(parentId, threadId)
           : undefined;
-    if (
-      parent === undefined ||
-      !terminalRunStatuses.includes(String(parent.status)) ||
-      !timestampBefore(parent.completed_at, now + 1)
-    )
-      return false;
-    const parentValue = readPayload(parent);
-    return (
-      parentValue.id === parent.run_id &&
-      parentValue.threadId === parent.thread_id &&
-      parentValue.status === parent.status &&
-      parentValue.completedAt === parent.completed_at
-    );
+    return isTerminalRun(parent);
   };
 }

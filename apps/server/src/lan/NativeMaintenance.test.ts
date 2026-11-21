@@ -427,6 +427,11 @@ effectIt.effect.each([
   "item-delivery-array",
   "request-delivery-array",
   "linked-terminal",
+  "cancelled-null-node-column",
+  "cancelled-node-mismatch",
+  "cancelled-linked-active-run",
+  "cancelled-linked-pending-request",
+  "cancelled-linked-receipt",
 ] as const)("checks real approval work independently of a %s approval item", (fixtureCase) =>
   Effect.gen(function* () {
     const { dbPath, insert, request } = yield* fixtureAtMigration(
@@ -441,19 +446,21 @@ effectIt.effect.each([
     const completedAt = ["active", "active-pending"].includes(fixtureCase)
       ? null
       : isoAtMs(now - 30000);
-    const runStatus = completedAt === null ? "waiting" : "completed";
+    const cancelled = fixtureCase.startsWith("cancelled-");
+    const runStatus = completedAt === null ? "waiting" : cancelled ? "interrupted" : "completed";
     const linkedRequest = [
       "missing-receipt",
       "foreign-receipt",
       "request-delivery-array",
       "linked-terminal",
     ].includes(fixtureCase);
-    const nodeId = linkedRequest || fixtureCase === "foreign-node" ? "node:approval" : null;
-    const itemRunId = ["active", "active-pending", "terminal-parent", "linked-terminal"].includes(
-      fixtureCase,
-    )
-      ? runId
-      : null;
+    const nodeId =
+      cancelled || linkedRequest || fixtureCase === "foreign-node" ? "node:approval" : null;
+    const itemRunId =
+      cancelled ||
+      ["active", "active-pending", "terminal-parent", "linked-terminal"].includes(fixtureCase)
+        ? runId
+        : null;
     yield* insert("orchestration_v2_projection_runs", runStatus, {
       run_id: runId,
       thread_id: threadId,
@@ -467,6 +474,10 @@ effectIt.effect.each([
       thread_id: threadId,
       run_id: itemRunId,
       node_id: nodeId,
+      ...(cancelled && {
+        provider_thread_id: "provider-thread:codex",
+        provider_turn_id: "provider-turn:codex",
+      }),
       type: "approval_request",
       updated_at: updatedAt,
       payload_json: JSON.stringify({
@@ -478,26 +489,80 @@ effectIt.effect.each([
         status: "waiting",
         requestId,
         updatedAt,
+        ...(cancelled && {
+          providerThreadId: "provider-thread:codex",
+          providerTurnId: "provider-turn:codex",
+        }),
         ...(fixtureCase === "item-delivery-array"
           ? { approvalDelivery: ["provider_acknowledged"] }
           : {}),
       }),
     });
     if (nodeId !== null) {
-      const nodeThread = fixtureCase === "foreign-node" ? "thread:other" : threadId;
-      const nodeRun = fixtureCase === "foreign-node" ? null : runId;
-      yield* insert("orchestration_v2_projection_nodes", "completed", {
+      const conflictingRun =
+        fixtureCase === "cancelled-node-mismatch" || fixtureCase === "cancelled-linked-active-run";
+      const nodeThread =
+        conflictingRun || fixtureCase === "foreign-node" ? "thread:other" : threadId;
+      const nodeRun = conflictingRun ? "run:other" : fixtureCase === "foreign-node" ? null : runId;
+      const nodeRequest =
+        fixtureCase === "cancelled-node-mismatch" ||
+        fixtureCase === "cancelled-linked-pending-request"
+          ? "request:other"
+          : requestId;
+      if (conflictingRun) {
+        const otherStatus = fixtureCase === "cancelled-linked-active-run" ? "running" : "completed";
+        const otherCompleted = otherStatus === "running" ? null : completedAt;
+        yield* insert("orchestration_v2_projection_runs", otherStatus, {
+          run_id: nodeRun,
+          thread_id: nodeThread,
+          ordinal: 1,
+          requested_at: updatedAt,
+          completed_at: otherCompleted,
+          payload_json: JSON.stringify({
+            id: nodeRun,
+            threadId: nodeThread,
+            status: otherStatus,
+            completedAt: otherCompleted,
+          }),
+        });
+      }
+      const nodeStatus = cancelled ? "interrupted" : "completed";
+      yield* insert("orchestration_v2_projection_nodes", nodeStatus, {
         node_id: nodeId,
         thread_id: nodeThread,
         run_id: nodeRun,
-        runtime_request_id: requestId,
+        // The real node.updated projection writer does not populate runtime_request_id.
+        ...(cancelled ? {} : { runtime_request_id: requestId }),
         payload_json: JSON.stringify({
-          id: nodeId,
-          threadId: nodeThread,
-          runId: nodeRun,
-          runtimeRequestId: requestId,
+          id: fixtureCase === "cancelled-node-mismatch" ? "node:old-display-id" : nodeId,
+          threadId,
+          runId: fixtureCase === "foreign-node" ? null : runId,
+          status: nodeStatus,
+          runtimeRequestId: nodeRequest,
         }),
       });
+    }
+    if (cancelled) {
+      yield* insert("orchestration_v2_projection_runtime_requests", "cancelled", {
+        runtime_request_id: requestId,
+        thread_id: threadId,
+        node_id: nodeId,
+        kind: "command",
+        payload_json: JSON.stringify({ id: requestId, nodeId, status: "cancelled" }),
+      });
+      if (
+        fixtureCase === "cancelled-node-mismatch" ||
+        fixtureCase === "cancelled-linked-pending-request"
+      ) {
+        const status = fixtureCase === "cancelled-node-mismatch" ? "cancelled" : "pending";
+        yield* insert("orchestration_v2_projection_runtime_requests", status, {
+          runtime_request_id: "request:other",
+          thread_id: "thread:other",
+          node_id: "node:other",
+          kind: "command",
+          payload_json: JSON.stringify({ id: "request:other", nodeId: "node:other", status }),
+        });
+      }
     }
     if (linkedRequest) {
       const receiptId = "approval-receipt:linked";
@@ -548,7 +613,7 @@ effectIt.effect.each([
       });
     }
 
-    if (fixtureCase === "unsettled-delivery") {
+    if (fixtureCase === "unsettled-delivery" || fixtureCase === "cancelled-linked-receipt") {
       yield* insert("agent_approval_receipts", "fixture", {
         receipt_id: "approval-receipt:fixture",
         role: "local",
@@ -558,6 +623,47 @@ effectIt.effect.each([
       });
     }
 
+    if (fixtureCase === "cancelled-null-node-column") {
+      const snapshot = yield* Effect.promise(async () => {
+        const writer = new NodeSqlite.DatabaseSync(dbPath);
+        try {
+          writer.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;");
+          const node = writer.prepare(`UPDATE orchestration_v2_projection_nodes
+            SET runtime_request_id=? WHERE node_id=?`);
+          node.run(requestId, nodeId);
+          writer.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+          node.run(null, nodeId);
+          const report = await NativeMaintenance.diagnoseStaleWorkSnapshot(request.homeDirectory);
+          assert.equal(
+            writer.prepare("SELECT runtime_request_id FROM orchestration_v2_projection_nodes").get()
+              ?.runtime_request_id,
+            null,
+          );
+          return report;
+        } finally {
+          writer.close();
+        }
+      });
+      assert.equal(snapshot.evidence, "online-snapshot");
+      assert.equal(snapshot.backgroundAgents, 0);
+      assert.deepEqual(snapshot.staleWork, { turn_items: 1 });
+      assert.deepEqual(snapshot.approvalLinks, [
+        {
+          classifiedStale: true,
+          nodePresent: true,
+          nodeLinks: {
+            columnThread: true,
+            payloadId: true,
+            payloadThread: true,
+            payloadRun: true,
+            payloadRequest: false,
+            columnRequest: true,
+            columnRun: true,
+          },
+        },
+      ]);
+    }
+
     const service = yield* NativeMaintenance.NativeMaintenance;
     const input = { ...request, generationVersion: 2 as const, reportStaleWork: true };
     const observed = yield* service.inspect(input);
@@ -565,7 +671,11 @@ effectIt.effect.each([
     assert.equal(ready.backgroundAgents, observed.backgroundAgents);
     assert.deepEqual(ready.staleWork, observed.staleWork);
     const verify = service.verify({ ...input, operation: "verify" });
-    if (["orphan", "terminal-parent", "linked-terminal"].includes(fixtureCase)) {
+    if (
+      ["orphan", "terminal-parent", "linked-terminal", "cancelled-null-node-column"].includes(
+        fixtureCase,
+      )
+    ) {
       assert.equal(observed.backgroundAgents, 0);
       assert.deepEqual(observed.staleWork, { turn_items: 1 });
       const legacyWire = yield* service.inspect({ ...request, generationVersion: 2 });

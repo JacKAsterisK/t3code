@@ -570,7 +570,14 @@ effectIt.effect.each([
       assert.deepEqual(observed.staleWork, { turn_items: 1 });
       const legacyWire = yield* service.inspect({ ...request, generationVersion: 2 });
       assert.isUndefined(legacyWire.staleWork);
-      assert.equal(legacyWire.backgroundAgents, 0);
+      assert.equal(legacyWire.backgroundAgents, 1);
+      assert.equal(legacyWire.workGeneration, observed.workGeneration);
+      const legacyVerify = service.verify({
+        ...request,
+        generationVersion: 2,
+        operation: "verify",
+      });
+      assert.equal((yield* legacyVerify.pipe(Effect.flip)).reason, "busy");
       const verified = yield* verify;
       assert.equal(verified.workGeneration, observed.workGeneration);
     } else {

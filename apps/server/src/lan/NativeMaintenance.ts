@@ -496,12 +496,14 @@ function inspectWork(
   update: boolean,
   readiness?: false,
   generationVersion?: 2,
+  allowStaleApprovals?: boolean,
 ): WorkInspection & { readonly workGeneration: string };
 function inspectWork(
   databasePath: string,
   update: boolean,
   readiness = false,
   generationVersion?: 2,
+  allowStaleApprovals = false,
 ): WorkInspection & { readonly workGeneration?: string } {
   const lightweight = readiness || generationVersion === 2;
   const db = new NodeSqlite.DatabaseSync(databasePath, {
@@ -784,7 +786,7 @@ function inspectWork(
       updateWork !== undefined &&
       updateWork.backgroundAgents > 0 &&
       recorded.some((row) => row.migration_id === 82) &&
-      (readiness || generationVersion === 2)
+      (readiness || (generationVersion === 2 && allowStaleApprovals))
         ? classifyUpdateWork(db, childResults, isTerminalDisplay, lightweight, true)
         : work;
     // Live close admission needs current work only; stopped verification owns history integrity.
@@ -906,8 +908,12 @@ function inspectWork(
 }
 
 export const inspectStoppedRepairWork = (databasePath: string) => inspectWork(databasePath, false);
-export const inspectNativeUpdateWork = (databasePath: string, generationVersion?: 2) => {
-  const work = inspectWork(databasePath, true, false, generationVersion);
+export const inspectNativeUpdateWork = (
+  databasePath: string,
+  generationVersion?: 2,
+  allowStaleApprovals = false,
+) => {
+  const work = inspectWork(databasePath, true, false, generationVersion, allowStaleApprovals);
   return { ...work, carriedWork: work.carriedWork ?? emptyNativeWork() };
 };
 export const inspectNativeUpdateReadinessWork = (databasePath: string) => {
@@ -1328,6 +1334,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
             const { staleWork, ...work } = inspectNativeUpdateWork(
               dbPath,
               request.generationVersion,
+              request.reportStaleWork === true,
             );
             const after = await generation();
             if (before !== after) throw new NativeMaintenanceError({ reason: "changed" });
@@ -1385,6 +1392,7 @@ export const layer = (compiledIdentity: NativeBuildIdentity) =>
             const { staleWork, ...work } = inspectNativeUpdateWork(
               dbPath,
               request.generationVersion,
+              request.reportStaleWork === true,
             );
             const readiness = readNativeUpdateReadiness(
               home,

@@ -432,6 +432,7 @@ effectIt.effect.each([
   "cancelled-linked-active-run",
   "cancelled-linked-pending-request",
   "cancelled-linked-receipt",
+  "cancelled-foreign-provider-turn",
 ] as const)("checks real approval work independently of a %s approval item", (fixtureCase) =>
   Effect.gen(function* () {
     const { dbPath, insert, request } = yield* fixtureAtMigration(
@@ -531,6 +532,10 @@ effectIt.effect.each([
         node_id: nodeId,
         thread_id: nodeThread,
         run_id: nodeRun,
+        ...(cancelled && {
+          provider_thread_id: "provider-thread:codex",
+          provider_turn_id: "provider-turn:codex",
+        }),
         // The real node.updated projection writer does not populate runtime_request_id.
         ...(cancelled ? {} : { runtime_request_id: requestId }),
         payload_json: JSON.stringify({
@@ -539,16 +544,30 @@ effectIt.effect.each([
           runId: fixtureCase === "foreign-node" ? null : runId,
           status: nodeStatus,
           runtimeRequestId: nodeRequest,
+          ...(cancelled && {
+            providerThreadId: "provider-thread:codex",
+            providerTurnId: "provider-turn:codex",
+          }),
         }),
       });
     }
     if (cancelled) {
+      const providerTurnId =
+        fixtureCase === "cancelled-foreign-provider-turn"
+          ? "provider-turn:other"
+          : "provider-turn:codex";
       yield* insert("orchestration_v2_projection_runtime_requests", "cancelled", {
         runtime_request_id: requestId,
         thread_id: threadId,
         node_id: nodeId,
         kind: "command",
-        payload_json: JSON.stringify({ id: requestId, nodeId, status: "cancelled" }),
+        provider_turn_id: providerTurnId,
+        payload_json: JSON.stringify({
+          id: requestId,
+          nodeId,
+          providerTurnId,
+          status: "cancelled",
+        }),
       });
       if (
         fixtureCase === "cancelled-node-mismatch" ||

@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeCrypto from "node:crypto";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeSqlite from "node:sqlite";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -922,14 +923,71 @@ export const inspectNativeUpdateReadinessWork = (databasePath: string) => {
   return { ...work, carriedWork: work.carriedWork ?? emptyNativeWork() };
 };
 
+function createPrivateDiagnosticDirectory(): string {
+  const host = Context.empty();
+  if (Context.get(host, HostProcess.Platform) !== "win32") {
+    const temporaryRoot = NodeFS.realpathSync(NodeOS.tmpdir());
+    return NodeFS.mkdtempSync(NodePath.join(temporaryRoot, "t3-stale-work-"));
+  }
+  // mkdtemp inherits the parent ACL on Windows. Put the backup under the
+  // current profile and create its directory with a protected user-only ACL.
+  const profile = NodeFS.realpathSync(Context.get(host, HostProcess.HomeDirectory));
+  safeParents(profile);
+  const scratch = NodePath.join(profile, ".t3-stale-work-" + NodeCrypto.randomUUID());
+  const systemRoot = Context.get(host, HostProcess.Environment).SystemRoot;
+  if (!systemRoot || !NodePath.isAbsolute(systemRoot))
+    throw new NativeMaintenanceError({ reason: "identity" });
+  const powershell = NodePath.join(
+    systemRoot,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+  const createDirectory = `
+    $ErrorActionPreference = 'Stop'
+    $destination = $env:T3_SNAPSHOT_SCRATCH
+    if ([IO.Directory]::Exists($destination)) { throw 'Scratch path already exists' }
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner($sid)
+    $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+      $sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+    [IO.Directory]::CreateDirectory($destination, $security) | Out-Null
+    $actual = [IO.Directory]::GetAccessControl($destination)
+    $rules = @($actual.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    if (!$actual.AreAccessRulesProtected -or $rules.Count -ne 1 -or
+        $rules[0].IdentityReference -ne $sid -or $rules[0].AccessControlType -ne 'Allow') {
+      throw 'Scratch ACL verification failed'
+    }
+  `;
+  NodeChildProcess.execFileSync(
+    powershell,
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(createDirectory, "utf16le").toString("base64"),
+    ],
+    {
+      env: { SystemRoot: systemRoot, T3_SNAPSHOT_SCRATCH: scratch },
+      timeout: 10_000,
+      windowsHide: true,
+      stdio: "ignore",
+    },
+  );
+  safeParents(scratch);
+  return scratch;
+}
+
 export async function diagnoseStaleWorkSnapshot(homeDirectory: string) {
   if (!NodePath.isAbsolute(homeDirectory)) throw new NativeMaintenanceError({ reason: "identity" });
   const state = NodePath.join(homeDirectory, "userdata");
   const sourcePath = NodePath.join(state, "statev2.sqlite");
   safeParents(state);
   safeFile(sourcePath);
-  const temporaryRoot = NodeFS.realpathSync(NodeOS.tmpdir());
-  const scratch = NodeFS.mkdtempSync(NodePath.join(temporaryRoot, "t3-stale-work-"));
+  const scratch = createPrivateDiagnosticDirectory();
   const snapshot = NodePath.join(scratch, "snapshot.sqlite");
   try {
     const source = new NodeSqlite.DatabaseSync(sourcePath, { readOnly: true });

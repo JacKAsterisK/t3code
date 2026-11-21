@@ -165,6 +165,10 @@ export function staleApprovalClassifier(
         return false;
       cancelledWithoutDelivery =
         request.status === "cancelled" &&
+        typeof row.provider_turn_id === "string" &&
+        value.providerTurnId === row.provider_turn_id &&
+        request.provider_turn_id === row.provider_turn_id &&
+        requestValue.providerTurnId === row.provider_turn_id &&
         value.approvalDelivery === undefined &&
         delivery === undefined &&
         receiptId === undefined &&
@@ -181,6 +185,12 @@ export function staleApprovalClassifier(
         cancelledWithoutDelivery &&
         typeof row.run_id === "string" &&
         row.run_id === node.run_id &&
+        node.provider_turn_id === row.provider_turn_id &&
+        nodeValue.providerTurnId === row.provider_turn_id &&
+        typeof row.provider_thread_id === "string" &&
+        value.providerThreadId === row.provider_thread_id &&
+        node.provider_thread_id === row.provider_thread_id &&
+        nodeValue.providerThreadId === row.provider_thread_id &&
         nodeValue.status === node.status &&
         terminalRunStatuses.includes(String(node.status));
       const links = nodeLinkMatches(

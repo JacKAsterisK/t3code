@@ -202,7 +202,6 @@ import {
 import {
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
-  sidebarDelegatedUnderParent,
   groupSidebarThreadsByProject,
   sidebarFolderExpansionKeys,
   buildBulkTitleRegenerationContextMenuItem,
@@ -275,6 +274,7 @@ import {
   ComboboxTrigger,
   useComboboxFilter,
 } from "./ui/combobox";
+import { Switch } from "./ui/switch";
 import { Toggle, ToggleGroup } from "./ui/toggle-group";
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
@@ -392,6 +392,7 @@ interface SidebarThreadPartitionInput {
   readonly ownerFilterId: string | null;
   /** Tasks linked environments run for a listed thread; they show under it. */
   readonly delegatedUnderParent: ReadonlySet<string>;
+  readonly showSubagents: boolean;
   readonly serverConfigs: ReadonlyMap<EnvironmentId, EnvironmentServerConfig>;
   readonly connectedEnvironmentIds: readonly EnvironmentId[];
   readonly optimisticDrop: SidebarOptimisticDrop | null;
@@ -463,6 +464,7 @@ function useSidebarThreads(input: {
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly threads: readonly EnvironmentThreadShell[];
   readonly delegatedUnderParent: ReadonlySet<string>;
+  readonly showSubagents: boolean;
   readonly routeRowThreadKey: string | null;
   // Set in boring mode: the project groups to fold active threads into, in order.
   readonly folderGroups: readonly SidebarProjectSnapshot[] | null;
@@ -484,6 +486,7 @@ function useSidebarThreads(input: {
     optimisticDrop,
     threads,
     delegatedUnderParent,
+    showSubagents,
     routeRowThreadKey,
     folderGroups,
     keepEmptyFolders: keepEmpty,
@@ -545,6 +548,7 @@ function useSidebarThreads(input: {
     scopedProjectKeys,
     ownerFilterId,
     delegatedUnderParent,
+    showSubagents,
     serverConfigs,
     connectedEnvironmentIds,
     optimisticDrop,
@@ -727,6 +731,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     scopedProjectKeys,
     ownerFilterId,
     delegatedUnderParent,
+    showSubagents,
     serverConfigs,
     optimisticDrop,
     workingShelfEnabled,
@@ -738,6 +743,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     scopedProjectKeys,
     delegatedUnderParent,
     ownerFilterId,
+    showSubagents,
   );
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
   const pinned: EnvironmentThreadShell[] = [];
@@ -1028,7 +1034,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectGroupByScopeKey,
     projectScopeItems: lookupProjectScopeItems,
   } = useSidebarLookups();
-  const nestedDelegates = useDelegatedUnderParent();
+  const delegatedUnderParent = useDelegatedUnderParent();
+  const showSubagents = useClientSettings((s) => s.sidebarShowSubagents);
   const fleetUsersDirectory = useFleetUsersDirectory();
   const selfOwnerId = useSelfOwnerId();
   const sidebarOwnerFilter = useClientSettings((s) => s.sidebarOwnerFilter);
@@ -1234,11 +1241,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // The boring sidebar already folds threads by project, and one machine needs no headers.
   const canGroupByMachine = !boringSidebarEnabled && environmentPresentationList.length > 1;
   const groupByMachine = canGroupByMachine && threadGrouping === "machine";
-  const delegatedUnderParent = sidebarDelegatedUnderParent(
-    threads,
-    nestedDelegates,
-    groupByMachine,
-  );
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
   const listedThreads =
     promotingDraftThreadKeys.length === 0
@@ -1248,12 +1250,21 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ? asLaunchingThread(thread)
             : thread,
         );
-  const routeRowThreadKey =
-    routeThreadRef === null
-      ? null
-      : scopedThreadKey(
-          resolveListedAncestorThreadRef(routeThreadRef, threads, delegatedUnderParent),
-        );
+  const routeRowThreadKey = (() => {
+    if (routeThreadRef === null) return null;
+    const key = scopedThreadKey(routeThreadRef);
+    const thread = threads.find((candidate) => threadShellKey(candidate) === key);
+    if (
+      thread !== undefined &&
+      filterSidebarV2VisibleThreads([thread], null, delegatedUnderParent, null, showSubagents)
+        .length > 0
+    ) {
+      return key;
+    }
+    return scopedThreadKey(
+      resolveListedAncestorThreadRef(routeThreadRef, threads, delegatedUnderParent),
+    );
+  })();
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
   // The open draft's first send names its thread in place; a finalized draft reached by
   // navigation resolves through its redirect instead, and still reveals.
@@ -1270,6 +1281,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     isSearching: isSearchingThreads,
     scopedProjectKeys: chosenScopeProjectKeys,
     delegatedUnderParent,
+    showSubagents,
     findThread: (key) => threads.find((candidate) => threadShellKey(candidate) === key),
   });
   const projectScopeKeys = revealWidensScope ? [] : chosenProjectScopeKeys;
@@ -1533,6 +1545,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     optimisticDrop,
     threads: listedThreads,
     delegatedUnderParent,
+    showSubagents,
     routeRowThreadKey,
     folderGroups: boringSidebarEnabled
       ? scopedProjectGroups.length === 0
@@ -3432,6 +3445,18 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         </ToggleGroup>
                       </div>
                     ) : null}
+                    <label className="flex items-center justify-between gap-2 border-b border-border px-2 py-1.5">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        <T>Show subagents</T>
+                      </span>
+                      <Switch
+                        aria-label={gt("Show subagents")}
+                        checked={showSubagents}
+                        onCheckedChange={(checked) =>
+                          void updateClientSettings({ sidebarShowSubagents: checked })
+                        }
+                      />
+                    </label>
                     {ownerFilterOptions.length > 0 ? (
                       <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1.5">
                         <span className="text-xs font-medium text-muted-foreground">

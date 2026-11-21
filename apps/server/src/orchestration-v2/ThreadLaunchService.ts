@@ -12,6 +12,7 @@ import {
   type OrchestrationV2Actor,
   type OrchestrationV2CreationSource,
   type OrchestrationV2DelegatedFrom,
+  type OrchestrationV2RuntimeModeEscalation,
   type OrchestrationV2LinkOrigin,
   type OrchestrationV2ProviderThreadNativeMetadata,
   type OrchestrationV2ThreadProjection,
@@ -119,6 +120,7 @@ export interface ThreadLaunchInput {
   readonly ownerId?: FleetUserId | undefined;
   /** The parent there, when that environment's agent delegated this as a task. */
   readonly delegatedFrom?: OrchestrationV2DelegatedFrom;
+  readonly runtimeModeEscalation?: OrchestrationV2RuntimeModeEscalation;
 }
 
 type PreparationInput = Pick<
@@ -1395,6 +1397,9 @@ const make = Effect.gen(function* () {
                 ...(input.delegatedFrom === undefined
                   ? {}
                   : { delegatedFrom: input.delegatedFrom }),
+                ...(input.runtimeModeEscalation === undefined
+                  ? {}
+                  : { runtimeModeEscalation: input.runtimeModeEscalation }),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
                 ...(initialMessage === undefined

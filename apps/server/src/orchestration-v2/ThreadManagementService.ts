@@ -90,6 +90,7 @@ export function withCreationProvenance(
       const {
         linkOrigin: _linkOrigin,
         delegatedFrom: _delegatedFrom,
+        runtimeModeEscalation: _runtimeModeEscalation,
         initialMessage: _initialMessage,
         ...rest
       } = command;
@@ -98,8 +99,11 @@ export function withCreationProvenance(
     case "message.dispatch":
     case "thread.fork":
     case "thread.merge_back":
-    case "delegated_task.request":
       return { ...command, ...provenance };
+    case "delegated_task.request": {
+      const { runtimeModeEscalation: _runtimeModeEscalation, ...rest } = command;
+      return { ...rest, ...provenance };
+    }
     default:
       return command;
   }

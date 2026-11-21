@@ -235,8 +235,8 @@ const boxProjects: ReadonlyArray<Project> = [
   },
 ];
 
-const serveBox = (thread: BoxThread) => {
-  return servePeer(box, boxToolkitLayer(thread));
+const serveBox = (thread: BoxThread, allowAgentFullAccessLaunches = false) => {
+  return servePeer(box, boxToolkitLayer(thread, allowAgentFullAccessLaunches));
 };
 
 const boxRunId = RunId.make("run:box");
@@ -244,7 +244,7 @@ const boxLaterRunId = RunId.make("run:box-later");
 const boxQueuedRunId = RunId.make("run:box-queued");
 const continuationOf = (runId: RunId) => RunId.make(`${runId}:restarted`);
 
-const boxToolkitLayer = (thread: BoxThread) => {
+const boxToolkitLayer = (thread: BoxThread, allowAgentFullAccessLaunches: boolean) => {
   const runId = boxRunId;
   const interrupts = new Set<string>();
   const shellOf = (threadId: ThreadId) =>
@@ -620,7 +620,7 @@ const boxToolkitLayer = (thread: BoxThread) => {
     ),
     Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
     Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
-    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(ServerSettings.layerTest({ allowAgentFullAccessLaunches })),
     Layer.provide(NodeServices.layer),
   );
 };
@@ -678,6 +678,7 @@ const makeLaptop = (
   kept?: Context.Context<Layer.Success<ReturnType<typeof layerLinkingEnvironment>>>,
   /** Runs as each follow attempt here starts, on its follower's fiber. */
   beforeFollow: Effect.Effect<void, Orchestrator.OrchestratorV2Error> = Effect.void,
+  allowAgentFullAccessLaunches = false,
 ) =>
   Effect.gen(function* () {
     const linking = kept ?? (yield* layerLinkingEnvironment(laptop).pipe(Layer.build));
@@ -700,7 +701,9 @@ const makeLaptop = (
     );
     const layerThreads = ThreadManagement.layer.pipe(
       Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
-      Layer.provideMerge(Layer.merge(layerOrchestrator, ServerSettings.layerTest())),
+      Layer.provideMerge(
+        Layer.merge(layerOrchestrator, ServerSettings.layerTest({ allowAgentFullAccessLaunches })),
+      ),
     );
     const layerHere = McpHttpServer.layerOrchestratorToolkit.pipe(
       Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
@@ -1265,18 +1268,25 @@ it.effect(
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect.each(["full-access", "auto"] as const)(
-  "Auto delegation requesting Full access over a %s link",
-  (access) =>
+it.effect.each([
+  { access: "full-access", source: true, destination: true },
+  { access: "auto", source: true, destination: true },
+  { access: "full-access", source: false, destination: true },
+  { access: "full-access", source: true, destination: false },
+] as const)(
+  "Auto delegation over $access with owner policies $source and $destination",
+  ({ access, source, destination }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const thread = yield* makeBoxThread;
-        const b = yield* serveBox(thread);
+        const b = yield* serveBox(thread, destination);
         const offers = yield* SubscriptionRef.make<
           ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
         >([]);
         const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
-        const a = yield* makeLaptop(database, offers);
+        const a = yield* makeLaptop(database, offers, undefined, Effect.void, source);
+        if (source) yield* a.settings.updateSettings({ allowAgentFullAccessLaunches: true });
+        if (destination) yield* b.settings.updateSettings({ allowAgentFullAccessLaunches: true });
         yield* linkTo(a.links, b, access);
         yield* seedParent(a, modelSelection, "auto");
 
@@ -1285,12 +1295,14 @@ it.effect.each(["full-access", "auto"] as const)(
           target: { environmentId: box.environmentId },
           runtimeMode: "full-access",
         });
-        if (access === "full-access") {
+        if (access === "full-access" && source && destination) {
           expect(result.isError, JSON.stringify(result.content)).toBe(false);
           expect(yield* Ref.get(thread.launchedWith)).toMatchObject({ runtimeMode: "full-access" });
         } else {
           expect(result.isError).toBe(true);
-          expect(JSON.stringify(result.content)).toContain("was linked with auto access");
+          expect(JSON.stringify(result.content)).toContain(
+            access === "auto" ? "was linked with auto access" : "runtime_mode_escalation_denied",
+          );
           expect(yield* Ref.get(thread.launchedWith)).toBeNull();
         }
       }),

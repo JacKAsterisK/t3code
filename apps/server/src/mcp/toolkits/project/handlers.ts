@@ -35,6 +35,7 @@ import {
   resolveProjectSettings,
 } from "@t3tools/shared/projectSettings";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
+import { runtimeModeEscalationForLaunch } from "../../threadAccess.ts";
 import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -404,6 +405,12 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             )?.supportedRuntimeModes,
           });
         }
+        const runtimeModeEscalation = runtimeModeEscalationForLaunch(
+          scope,
+          context.limits.runtimeMode,
+          startedRuntimeMode,
+          caller,
+        );
         const result = yield* ThreadMessageIntake.launchThread({
           commandId,
           threadId,
@@ -426,6 +433,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           createdBy: "agent",
           creationSource: "mcp",
           ...(linkOrigin === undefined ? {} : { linkOrigin }),
+          ...(runtimeModeEscalation === undefined ? {} : { runtimeModeEscalation }),
           // Kept only alongside linkOrigin: thread.create drops it otherwise.
           ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
           // Named, else the calling thread's: a thread an agent starts stays with its owner.

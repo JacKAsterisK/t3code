@@ -2,7 +2,6 @@ import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
 import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
-import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
@@ -584,23 +583,6 @@ export async function deleteSelectedThreadEntries<
   return { deletedThreadKeys, firstFailure };
 }
 
-// Machine folders list cross-environment work where it runs as well as under its parent.
-export function sidebarDelegatedUnderParent(
-  threads: readonly Pick<SidebarThreadSummary, "id" | "environmentId" | "delegatedFrom">[],
-  delegatedUnderParent: ReadonlySet<string>,
-  groupByMachine: boolean,
-): ReadonlySet<string> {
-  if (!groupByMachine || delegatedUnderParent.size === 0) return delegatedUnderParent;
-  const nested = new Set(delegatedUnderParent);
-  for (const thread of threads) {
-    const parent = thread.delegatedFrom;
-    if (parent != null && parent.environmentId !== thread.environmentId) {
-      nested.delete(threadKey(scopeThreadRef(thread.environmentId, thread.id)));
-    }
-  }
-  return nested;
-}
-
 /**
  * `delegatedUnderParent` holds the tasks linked environments run for a thread
  * the sidebar lists, by thread key; they show under that thread, as subagents do.
@@ -610,21 +592,28 @@ export function filterSidebarV2VisibleThreads<
   T extends Pick<SidebarThreadSummary, "archivedAt" | "environmentId" | "id" | "lineage"> & {
     projectId: string;
     ownerId?: string | null;
+    pinnedAt?: string | null;
+    delegatedFrom?: SidebarThreadSummary["delegatedFrom"];
   },
 >(
   threads: readonly T[],
   scopedProjectKeys: ReadonlySet<string> | null,
   delegatedUnderParent: ReadonlySet<string>,
   ownerFilterId: string | null = null,
+  showSubagents = false,
 ): T[] {
   return threads.filter(
     (thread) =>
       thread.archivedAt === null &&
-      !isShownUnderParent(
-        { environmentId: thread.environmentId, threadId: thread.id },
-        thread.lineage,
-        delegatedUnderParent,
-      ) &&
+      thread.lineage.sideChat !== true &&
+      (thread.pinnedAt != null ||
+        showSubagents ||
+        (thread.delegatedFrom == null &&
+          !isShownUnderParent(
+            { environmentId: thread.environmentId, threadId: thread.id },
+            thread.lineage,
+            delegatedUnderParent,
+          ))) &&
       (ownerFilterId === null || thread.ownerId === ownerFilterId) &&
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),

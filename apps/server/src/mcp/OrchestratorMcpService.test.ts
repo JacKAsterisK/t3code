@@ -1680,7 +1680,11 @@ describe("OrchestratorMcpService provider resolution", () => {
           status: "running",
           result: null,
         };
-        const launches: Array<{ runtimeMode: string; modelSelection: unknown }> = [];
+        const launches: Array<{
+          runtimeMode: string;
+          modelSelection: unknown;
+          runtimeModeEscalation?: unknown;
+        }> = [];
         const parent = parentProjection([task]);
         const dependencies = Layer.mergeAll(
           NodeServices.layer,
@@ -1700,6 +1704,9 @@ describe("OrchestratorMcpService provider resolution", () => {
                 launches.push({
                   runtimeMode: command.runtimeMode,
                   modelSelection: command.modelSelection,
+                  ...(command.runtimeModeEscalation === undefined
+                    ? {}
+                    : { runtimeModeEscalation: command.runtimeModeEscalation }),
                 });
                 return {
                   sequence: 1,
@@ -1735,15 +1742,40 @@ describe("OrchestratorMcpService provider resolution", () => {
         );
         yield* Effect.gen(function* () {
           const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-          yield* service.delegateTask(scope, {
+          const request = {
             task: "Review the change.",
             mode: "async",
             runtimeMode: requested,
             target: { providerInstanceId: provider, model },
-          });
-        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
+          } as const;
+          if (requested === "full-access") {
+            const denied = yield* service.delegateTask(scope, request).pipe(Effect.flip);
+            assert.equal(denied.code, "runtime_mode_escalation_denied");
+            assert.deepEqual(launches, []);
+            const settings = yield* ServerSettings.ServerSettingsService;
+            yield* settings.updateSettings({ allowAgentFullAccessLaunches: true });
+          }
+          yield* service.delegateTask(scope, request);
+        }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provideMerge(dependencies))));
         assert.deepEqual(launches, [
-          { runtimeMode: expected, modelSelection: { instanceId: provider, model } },
+          {
+            runtimeMode: expected,
+            modelSelection: { instanceId: provider, model },
+            ...(requested !== "full-access"
+              ? {}
+              : {
+                  runtimeModeEscalation: {
+                    actor: {
+                      environmentId: scope.environmentId,
+                      threadId: parentThreadId,
+                      title: parent.thread.title,
+                    },
+                    from: "auto",
+                    to: "full-access",
+                    reason: "explicit-launch-under-owner-policy",
+                  },
+                }),
+          },
         ]);
       }),
   );

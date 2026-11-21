@@ -141,6 +141,7 @@ import {
   assertTargetWithinLimits,
   isLiveCallerShell,
   threadCreationRuntimeLimit,
+  runtimeModeEscalationForLaunch,
   threadMessageLimits,
   threadNotFound,
 } from "./threadAccess.ts";
@@ -1072,6 +1073,9 @@ function threadDetail(
     ...(projection.thread.delegatedFrom == null
       ? {}
       : { delegatedFrom: projection.thread.delegatedFrom }),
+    ...(projection.thread.runtimeModeEscalation === undefined
+      ? {}
+      : { runtimeModeEscalation: projection.thread.runtimeModeEscalation }),
     runCount,
     itemCount,
     pendingRequestCount: projection.runtimeRequests.filter(
@@ -2867,12 +2871,12 @@ const make = Effect.gen(function* () {
         skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
       });
       const runtimeMode = yield* resolveRuntimeMode(
-        threadCreationRuntimeLimit(
+        yield* threadCreationRuntimeLimit(
           scope,
           parent.thread.runtimeMode,
           input.runtimeMode,
           parent.thread,
-        ),
+        ).pipe(Effect.provideService(ServerSettings.ServerSettingsService, serverSettings)),
         input.runtimeMode,
         target,
       );
@@ -2918,9 +2922,16 @@ const make = Effect.gen(function* () {
           // ThreadManagementService.dispatch is the chokepoint for this command
           // type's own enablement check, using the same command id and its
           // receipt-replay exemption, so no separate assert runs here.
+          const runtimeModeEscalation = runtimeModeEscalationForLaunch(
+            scope,
+            parent.thread.runtimeMode,
+            runtimeMode,
+            parent.thread,
+          );
           const result = yield* threadManagement
             .dispatch({
               type: "delegated_task.request",
+              ...(runtimeModeEscalation === undefined ? {} : { runtimeModeEscalation }),
               createdBy: "agent",
               creationSource: "mcp",
               commandId,

@@ -383,7 +383,11 @@ const makeLaptop = Effect.gen(function* () {
         ),
         Effect.provideService(McpSchema.McpServerClient, mcpClient),
       );
-  return { links: Context.get(linking, PeerLinks.PeerLinks), call };
+  return {
+    links: Context.get(linking, PeerLinks.PeerLinks),
+    settings: Context.get(linking, ServerSettings.ServerSettingsService),
+    call,
+  };
 });
 
 const failureOf = (result: McpSchema.CallToolResult) => {
@@ -601,15 +605,19 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect(
-  "Auto can explicitly launch Full access and manage a Full access thread through a Full access link",
-  () =>
+it.effect.each([false, true])(
+  "Auto can launch Full access through a Full access link with owner policy %s",
+  (allowed) =>
     Effect.scoped(
       Effect.gen(function* () {
         const seen = yield* Ref.make<Seen>(nothingSeen);
         const linkSession = yield* Ref.make("");
         const b = yield* serveBox(seen, linkSession, "full-access");
         const a = yield* makeLaptop;
+        if (allowed) {
+          yield* a.settings.updateSettings({ allowAgentFullAccessLaunches: true });
+          yield* b.settings.updateSettings({ allowAgentFullAccessLaunches: true });
+        }
         yield* linkTo(a.links, b, "full-access");
         yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
@@ -629,13 +637,28 @@ it.effect(
           runtimeMode: "full-access",
         };
         const autoCaller = "thread:laptop-auto";
-        expect(failureOf(yield* a.call(autoCaller, "t3_thread_launch", requested))).toBeUndefined();
+        const explicit = yield* a.call(autoCaller, "t3_thread_launch", requested);
+        if (allowed) {
+          expect(failureOf(explicit)).toBeUndefined();
+        } else {
+          expect(failureOf(explicit)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+        }
         expect(failureOf(yield* a.call(autoCaller, "t3_thread_launch", launch))).toBeUndefined();
         const lower = yield* a.call("thread:laptop-edits", "t3_thread_launch", requested);
         expect(failureOf(lower)).toMatchObject({ code: "runtime_mode_escalation_denied" });
         const launches = (yield* Ref.get(seen)).launches;
-        expect(launches[0]?.modelSelection).toEqual(requested.modelSelection);
-        expect(launches.map((input) => input.runtimeMode)).toEqual(["full-access", "auto"]);
+        if (allowed) {
+          expect(launches[0]?.modelSelection).toEqual(requested.modelSelection);
+          expect(launches[0]?.runtimeModeEscalation).toMatchObject({
+            actor: { threadId: autoCaller },
+            from: "auto",
+            to: "full-access",
+            reason: "explicit-launch-under-owner-policy",
+          });
+        }
+        expect(launches.map((input) => input.runtimeMode)).toEqual(
+          allowed ? ["full-access", "auto"] : ["auto"],
+        );
 
         const target = { environmentId: box.environmentId, threadId: boxThread };
         const configured = yield* a.call(autoCaller, "t3_thread_configure", {

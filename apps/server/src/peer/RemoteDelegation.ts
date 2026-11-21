@@ -1,3 +1,4 @@
+import { ServerSettingsService } from "../serverSettings.ts";
 import {
   CommandId,
   type EnvironmentId,
@@ -155,6 +156,7 @@ const isFinal = (error: OrchestratorMcpFailure) =>
 
 const make = Effect.gen(function* () {
   const followRetry = yield* FollowRetrySchedule;
+  const serverSettings = yield* ServerSettingsService;
   const forwarding = yield* PeerForwarding.PeerForwarding;
   const links = yield* PeerLinks.PeerLinks;
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -341,12 +343,12 @@ const make = Effect.gen(function* () {
         input.runtimeMode === undefined || input.runtimeMode === "inherit"
           ? undefined
           : yield* resolveRuntimeMode(
-              threadCreationRuntimeLimit(
+              yield* threadCreationRuntimeLimit(
                 scope,
                 parent.thread.runtimeMode,
                 input.runtimeMode,
                 parent.thread,
-              ),
+              ).pipe(Effect.provideService(ServerSettingsService, serverSettings)),
               input.runtimeMode,
             );
       const interactionMode =

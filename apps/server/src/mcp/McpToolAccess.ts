@@ -27,6 +27,7 @@ import {
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
+import type { ServerSettingsService } from "../serverSettings.ts";
 import {
   assertFullAccessNamingLink,
   assertNotLinked,
@@ -81,7 +82,11 @@ const never = () => false;
  */
 type RemoteCheck<P> = (
   params: P,
-) => Effect.Effect<unknown, OrchestratorMcpFailure, Effect.Services<typeof writingCaller>>;
+) => Effect.Effect<
+  unknown,
+  OrchestratorMcpFailure,
+  Effect.Services<typeof writingCaller> | ServerSettingsService
+>;
 let remoteCheckOf: <Handler>(declaration: Declaration<Handler>) => RemoteCheck<never> | undefined;
 
 /** What a call answered in a linked environment does here before it returns. */
@@ -391,7 +396,7 @@ export const startsThreads = <P, A, E, R>(
   const started = Effect.fn("McpToolAccess.started")(function* (caller: Caller, params: P) {
     const requested = modes(params);
     const runtimeLimit = allowAutoFullAccess
-      ? threadCreationRuntimeLimit(
+      ? yield* threadCreationRuntimeLimit(
           caller.scope,
           caller.limits.runtimeMode,
           requested.runtimeMode,

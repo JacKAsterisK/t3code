@@ -1386,6 +1386,24 @@ function ConnectionsSettingsContent({
                 }
               />
             ) : null}
+            {accessServerConfig ? (
+              <SettingsRow
+                title={gt("Allow Auto threads to start Full access threads")}
+                description={gt(
+                  "Lets Auto threads explicitly start Full access agents on this environment. Linked launches also require this setting on the other environment and a Full access link.",
+                )}
+                control={
+                  <Switch
+                    checked={accessServerConfig.settings.allowAgentFullAccessLaunches}
+                    disabled={!canWriteAccess}
+                    aria-label={gt("Allow Auto threads to start Full access threads")}
+                    onCheckedChange={(enabled) =>
+                      void updateAccessSettings({ allowAgentFullAccessLaunches: enabled })
+                    }
+                  />
+                }
+              />
+            ) : null}
             {accessServerConfig?.environment.capabilities.previewTunnelSetting ? (
               <SettingsRow
                 title={searchableSetting("preview-tunnel").title}

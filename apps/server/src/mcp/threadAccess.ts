@@ -5,6 +5,7 @@ import type {
 import {
   CommandId,
   linkOriginIsFenced,
+  type OrchestrationV2RuntimeModeEscalation,
   type EnvironmentId,
   OrchestratorMcpFailure,
   type OrchestratorMcpThreadSendInput,
@@ -24,6 +25,8 @@ import {
 import { hasPendingBackgroundSubagent } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
+
+import { ServerSettingsService } from "../serverSettings.ts";
 import { THREAD_ID_INPUT_FORMS } from "@t3tools/shared/threadLinks";
 
 import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
@@ -211,16 +214,39 @@ export function threadMessageLimits(
     : { ...limits, runtimeMode: autoThreadFullAccessLimit(scope, limits.runtimeMode, caller) };
 }
 
-/** An explicit request may opt up. An omitted or inherited mode keeps the caller's actual mode. */
-export function threadCreationRuntimeLimit(
+/** Evaluate the owner's opt-in at the environment where this check runs. */
+export const threadCreationRuntimeLimit = Effect.fn("mcp.threadCreationRuntimeLimit")(function* (
   scope: McpInvocationContext.McpInvocationScope,
   runtimeMode: RuntimeMode,
   requested: RuntimeMode | "inherit" | undefined,
   caller?: Pick<OrchestrationV2ThreadShell, "linkOrigin">,
-): RuntimeMode {
-  return requested === "full-access"
-    ? autoThreadFullAccessLimit(scope, runtimeMode, caller)
-    : runtimeMode;
+) {
+  if (runtimeMode !== "auto" || requested !== "full-access") return runtimeMode;
+  const service = yield* ServerSettingsService;
+  const settings = yield* service.getSettings.pipe(Effect.orElseSucceed(() => undefined));
+  const ceiling = service.managedPolicy?.limits?.maxRuntimeMode;
+  if (
+    settings?.allowAgentFullAccessLaunches !== true ||
+    (ceiling !== undefined && ceiling !== "full-access")
+  ) {
+    return runtimeMode;
+  }
+  return autoThreadFullAccessLimit(scope, runtimeMode, caller);
+});
+
+export function runtimeModeEscalationForLaunch(
+  scope: McpInvocationContext.McpInvocationScope,
+  previousMode: RuntimeMode,
+  launchedMode: RuntimeMode,
+  caller?: Pick<OrchestrationV2ThreadShell, "id" | "title">,
+): OrchestrationV2RuntimeModeEscalation | undefined {
+  if (previousMode !== "auto" || launchedMode !== "full-access") return undefined;
+  const actor =
+    caller === undefined
+      ? scope.client?.senderThread
+      : { environmentId: scope.environmentId, threadId: caller.id, title: caller.title };
+  if (actor === undefined) return undefined;
+  return { actor, from: "auto", to: "full-access", reason: "explicit-launch-under-owner-policy" };
 }
 
 export const assertTargetWithinLimits = (

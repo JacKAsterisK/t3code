@@ -913,6 +913,7 @@ export default function ChatView(props: ChatViewProps) {
         );
   // A linked environment's agent may have delegated this thread from there.
   const delegatedFrom = activeThread?.delegatedFrom ?? null;
+  const runtimeModeEscalation = serverProjection?.thread.runtimeModeEscalation;
   const delegatedFromEnvironment = useEnvironment(delegatedFrom?.environmentId ?? null);
   const delegatedFromRef =
     delegatedFrom === null
@@ -3479,6 +3480,18 @@ export default function ChatView(props: ChatViewProps) {
           >
             <ThreadFind onClose={focusComposerStable} />
             {isWorkspaceFileDragActive ? <WorkspaceFileDropOverlay /> : null}
+            {runtimeModeEscalation === undefined ? null : (
+              <div className="px-4 py-2 text-sm text-muted-foreground">
+                <strong className="text-foreground">{gt("Started with Full access")}</strong>
+                {" ? "}
+                {gt(
+                  "{actor} requested a change from Auto to Full access. The environment owner allowed it.",
+                  {
+                    actor: runtimeModeEscalation.actor.title,
+                  },
+                )}
+              </div>
+            )}
             <ChatBannerLane
               environmentId={activeThread.environmentId}
               providerStatus={visibleProviderStatus}

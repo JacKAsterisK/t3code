@@ -34,6 +34,23 @@ approval before code or runtime changes.
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
 
+## LAN 1.0.43
+
+- In Settings ? Connections, the environment owner can enable **Allow Auto
+  threads to start Full access threads**. The default is off. Local agents must
+  request Full access explicitly. A linked launch or delegate requires the
+  policy on both environments and a Full access link. The administrator's
+  runtime ceiling still applies.
+- Assisted Full access launches record the requesting thread, Auto and Full
+  access modes, and the owner policy in the child creation event. The child
+  conversation displays the audit.
+- In the sidebar project filter, **Show subagents** defaults off for each user.
+  Local subagents and cross-environment delegates appear when enabled. Pinned
+  subagents remain in Pinned, and unpinning returns them to the selected filter.
+- The trial merge from upstream `e6d521012d` to `10586f9e31` brought 301 commits,
+  three migrations and 40 conflicted files. The urgent 1.0.43 changes ship from
+  the 1.0.42 upstream baseline. The new upstream integration is scoped to 1.0.44.
+
 ## LAN 1.0.42 recovery build
 
 Stopped Gen2 admission now reports the historical approval card with a matching

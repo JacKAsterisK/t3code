@@ -12,7 +12,6 @@ import {
   getFallbackThreadIdAfterDelete,
   hasUnseenCompletion,
   filterSidebarV2VisibleThreads,
-  sidebarDelegatedUnderParent,
   orderItemsByPreferredIds,
   pinOrderKeyBetween,
   resolveSidebarSweepKeys,
@@ -44,7 +43,6 @@ import {
   sortActiveThreadsByOrderKey,
   sortPinnedThreadsByOrderKey,
 } from "@t3tools/client-runtime/state/thread-sort";
-import { resolveListedAncestorThreadRef } from "@t3tools/client-runtime/state/threads";
 import { resolveProjectExpanded } from "../uiStateStore";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
@@ -174,7 +172,7 @@ describe("filterSidebarV2VisibleThreads owner filter", () => {
   });
 });
 
-it("lists a cross-environment delegate on its own machine while keeping local children nested", () => {
+it("lists local and remote subagents only when requested, even without a listed remote parent", () => {
   const parent = makeThreadFixture({ id: ThreadId.make("parent") });
   const remote = makeThreadFixture({
     environmentId: EnvironmentId.make("remote-machine"),
@@ -199,15 +197,24 @@ it("lists a cross-environment delegate on its own machine while keeping local ch
     },
   });
   const remoteRef = scopeThreadRef(remote.environmentId, remote.id);
-  const parentRef = scopeThreadRef(parent.environmentId, parent.id);
   const nested = new Set([threadKey(remoteRef)]);
   const threads = [parent, remote, subagent, sideChat];
-  const ordinary = sidebarDelegatedUnderParent(threads, nested, false);
-  const grouped = sidebarDelegatedUnderParent(threads, nested, true);
-  expect(filterSidebarV2VisibleThreads(threads, null, ordinary)).toEqual([parent]);
-  expect(filterSidebarV2VisibleThreads(threads, null, grouped)).toEqual([parent, remote]);
-  expect(resolveListedAncestorThreadRef(remoteRef, threads, ordinary)).toEqual(parentRef);
-  expect(resolveListedAncestorThreadRef(remoteRef, threads, grouped)).toEqual(remoteRef);
+  expect(filterSidebarV2VisibleThreads(threads, null, nested)).toEqual([parent]);
+  expect(filterSidebarV2VisibleThreads(threads, null, new Set())).toEqual([parent]);
+  const pinnedRemote = { ...remote, pinnedAt: "2026-11-21T00:00:00.000Z" };
+  expect(filterSidebarV2VisibleThreads([parent, pinnedRemote, subagent], null, nested)).toEqual([
+    parent,
+    pinnedRemote,
+  ]);
+  const unpinnedRemote = { ...pinnedRemote, pinnedAt: null };
+  expect(filterSidebarV2VisibleThreads([parent, unpinnedRemote, subagent], null, nested)).toEqual([
+    parent,
+  ]);
+  expect(filterSidebarV2VisibleThreads(threads, null, nested, null, true)).toEqual([
+    parent,
+    remote,
+    subagent,
+  ]);
 });
 
 function makeLatestRun(overrides?: {

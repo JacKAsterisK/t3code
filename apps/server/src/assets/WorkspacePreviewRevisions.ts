@@ -51,7 +51,7 @@ const make = Effect.gen(function* () {
   let versions = 0;
 
   const documentKey = (document: PreviewDocument) =>
-    JSON.stringify([document.workspaceRoot, document.entryRelativePath]);
+    JSON.stringify([document.workspaceRoot, path.normalize(document.entryRelativePath)]);
 
   const record = (state: DocumentState, relativePath: string, revision: string | null) => {
     if (!state.files.has(relativePath)) {
@@ -84,7 +84,8 @@ const make = Effect.gen(function* () {
     }
     return yield* state.comparing.withPermits(1)(
       Effect.gen(function* () {
-        const relativePaths = [...new Set([document.entryRelativePath, ...state.files.keys()])];
+        const entryPath = path.normalize(document.entryRelativePath);
+        const relativePaths = [...new Set([entryPath, ...state.files.keys()])];
         const revisions = yield* Effect.forEach(
           relativePaths,
           (relativePath) => readFileRevision(path.join(document.workspaceRoot, relativePath)),
@@ -105,9 +106,10 @@ const make = Effect.gen(function* () {
     // A document nobody minted here gets a new revision on its next mint, which reloads it.
     const state = documents.get(documentKey(document));
     if (state === undefined) return;
+    const observedPath = path.normalize(relativePath);
     yield* state.comparing.withPermits(1)(
-      Effect.map(readFileRevision(path.join(document.workspaceRoot, relativePath)), (revision) =>
-        record(state, relativePath, revision),
+      Effect.map(readFileRevision(path.join(document.workspaceRoot, observedPath)), (revision) =>
+        record(state, observedPath, revision),
       ),
     );
   });

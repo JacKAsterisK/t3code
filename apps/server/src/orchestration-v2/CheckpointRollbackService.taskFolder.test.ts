@@ -1,3 +1,4 @@
+import { makeTestDirectoryLink, symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -81,7 +82,7 @@ const layerFor = (state: State, options: Options) => {
       const real = path.join(base, "real");
       yield* fileSystem.makeDirectory(real);
       if (options.symlinkedWorktrees !== true) return { ...config, worktreesDir: real };
-      yield* fileSystem.symlink(real, path.join(base, "linked"));
+      yield* Effect.promise(() => makeTestDirectoryLink(real, path.join(base, "linked")));
       return { ...config, worktreesDir: path.join(base, "linked") };
     }),
   ).pipe(
@@ -485,6 +486,8 @@ const withThread = <A, E>(
   );
 };
 
+const itWithLinks = it.live.skipIf(!symlinksSupported);
+
 it.live.each([{ symlinkedWorktrees: false }, { symlinkedWorktrees: true }])(
   "rewinds the project folder and every repository a discarded turn changed, symlinked worktrees directory=$symlinkedWorktrees",
   ({ symlinkedWorktrees }) =>
@@ -538,7 +541,7 @@ it.live.each([{ symlinkedWorktrees: false }, { symlinkedWorktrees: true }])(
     ),
 );
 
-it.live("rewinds a linked project folder's repositories to how each was before the turn", () =>
+itWithLinks("rewinds a linked project folder's repositories to how each was before the turn", () =>
   withThread({ projectIsRepository: false }, (thread) =>
     Effect.gen(function* () {
       const { path, folders, write, read } = thread;
@@ -576,64 +579,69 @@ it.live("rewinds a linked project folder's repositories to how each was before t
 it.live.each([
   { label: "whose baseline is lost", runSnapshot: "ready" },
   { label: "whose baseline is lost and whose run snapshot failed", runSnapshot: "error" },
-] as const)("names the repositories a rewind could not restore: one $label", ({ runSnapshot }) =>
-  withThread({ projectIsRepository: false }, (thread) =>
-    Effect.gen(function* () {
-      const { path, folders, write, read } = thread;
-      const store = yield* ProjectionStore.ProjectionStoreV2;
-      yield* thread.turn(1, write(path.join(folders.api, "a.txt"), "1"));
-      yield* thread.turn(2, write(path.join(folders.api, "a.txt"), "2"));
-      yield* thread.turn(3, write(path.join(folders.web, "a.txt"), "3"));
-      // web's only record of how it was before turn 3 is lost.
-      const { checkpoints, checkpointScopes } = yield* thread.records;
-      const web = checkpointScopes.find((scope) => scope.label === "web")!;
-      const baseline = checkpoints.find(
-        (checkpoint) => checkpoint.scopeId === web.id && checkpoint.runId === null,
-      )!;
-      yield* thread.apply({
-        type: "checkpoint.captured",
-        nodeId: baseline.nodeId,
-        payload: { ...baseline, status: "missing" },
-      });
-      const ran = checkpoints.find(
-        (checkpoint) => checkpoint.scopeId === web.id && checkpoint.runId !== null,
-      )!;
-      yield* thread.apply({
-        type: "checkpoint.captured",
-        nodeId: ran.nodeId,
-        payload: { ...ran, status: runSnapshot },
-      });
-      const requestId = CommandId.make("command:rewind:unrestored");
+] as const)(
+  "names the repositories a rewind could not restore: one $label",
+  ({ runSnapshot }) =>
+    withThread({ projectIsRepository: false }, (thread) =>
+      Effect.gen(function* () {
+        const { path, folders, write, read } = thread;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        yield* thread.turn(1, write(path.join(folders.api, "a.txt"), "1"));
+        yield* thread.turn(2, write(path.join(folders.api, "a.txt"), "2"));
+        yield* thread.turn(3, write(path.join(folders.web, "a.txt"), "3"));
+        // web's only record of how it was before turn 3 is lost.
+        const { checkpoints, checkpointScopes } = yield* thread.records;
+        const web = checkpointScopes.find((scope) => scope.label === "web")!;
+        const baseline = checkpoints.find(
+          (checkpoint) => checkpoint.scopeId === web.id && checkpoint.runId === null,
+        )!;
+        yield* thread.apply({
+          type: "checkpoint.captured",
+          nodeId: baseline.nodeId,
+          payload: { ...baseline, status: "missing" },
+        });
+        const ran = checkpoints.find(
+          (checkpoint) => checkpoint.scopeId === web.id && checkpoint.runId !== null,
+        )!;
+        yield* thread.apply({
+          type: "checkpoint.captured",
+          nodeId: ran.nodeId,
+          payload: { ...ran, status: runSnapshot },
+        });
+        const requestId = CommandId.make("command:rewind:unrestored");
 
-      yield* thread.rewind(1, requestId);
+        yield* thread.rewind(1, requestId);
 
-      assert.deepEqual(
-        yield* Effect.all([
-          read(path.join(folders.api, "a.txt")),
-          read(path.join(folders.web, "a.txt")),
-        ]),
-        ["1", "3"],
-      );
-      assert.deepEqual((yield* store.getThread(threadId)).rollbackUnrestored, {
-        requestId,
-        repositories: ["web"],
-      });
-    }),
-  ),
+        assert.deepEqual(
+          yield* Effect.all([
+            read(path.join(folders.api, "a.txt")),
+            read(path.join(folders.web, "a.txt")),
+          ]),
+          ["1", "3"],
+        );
+        assert.deepEqual((yield* store.getThread(threadId)).rollbackUnrestored, {
+          requestId,
+          repositories: ["web"],
+        });
+      }),
+    ),
+  { skip: !symlinksSupported },
 );
 
-it.live("refuses to restore files when a linked project folder has no repository to restore", () =>
-  withThread({ projectIsRepository: false }, (thread) =>
-    Effect.gen(function* () {
-      yield* thread.turn(1, Effect.void);
-      yield* thread.turn(2, Effect.void);
+itWithLinks(
+  "refuses to restore files when a linked project folder has no repository to restore",
+  () =>
+    withThread({ projectIsRepository: false }, (thread) =>
+      Effect.gen(function* () {
+        yield* thread.turn(1, Effect.void);
+        yield* thread.turn(2, Effect.void);
 
-      const refused = yield* thread.rewind(1).pipe(Effect.flip);
+        const refused = yield* thread.rewind(1).pipe(Effect.flip);
 
-      assert.equal(refused.reason, "rollback-target-invalid");
-      assert.deepEqual((yield* thread.recorded).runs, ["completed", "completed"]);
-    }),
-  ),
+        assert.equal(refused.reason, "rollback-target-invalid");
+        assert.deepEqual((yield* thread.recorded).runs, ["completed", "completed"]);
+      }),
+    ),
 );
 
 it.live("refuses a project folder whose own snapshot is missing, before any folder changes", () =>
@@ -704,7 +712,10 @@ it.live("puts restored folders back when a later folder's restore fails", () =>
   ),
 );
 
-it.live.each([{ projectIsRepository: true }, { projectIsRepository: false }])(
+it.live.each([
+  { projectIsRepository: true },
+  ...(symlinksSupported ? [{ projectIsRepository: false }] : []),
+])(
   "restores a task folder storage cleanup removed before rewinding it, project is a repository=$projectIsRepository",
   (options) =>
     withThread(options, (thread) =>

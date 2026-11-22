@@ -1,3 +1,4 @@
+import { makeTestDirectoryLink } from "@t3tools/shared/testing/symlinks";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { ProjectId, type ProjectTrackedFolder } from "@t3tools/contracts";
@@ -75,8 +76,8 @@ it.layer(NodeServices.layer)("WorkspaceFolders", (it) => {
       ]) {
         yield* fileSystem.makeDirectory(path.join(root, folder), { recursive: true });
       }
-      yield* fileSystem.symlink(outside, path.join(root, "linked"));
-      yield* fileSystem.symlink(root, path.join(root, "self"));
+      yield* Effect.promise(() => makeTestDirectoryLink(outside, path.join(root, "linked")));
+      yield* Effect.promise(() => makeTestDirectoryLink(root, path.join(root, "self")));
       // A worktree of `api`: its history is that repository's.
       yield* fileSystem.writeFileString(
         path.join(root, "tree", ".git"),
@@ -161,7 +162,9 @@ it.layer(NodeServices.layer)("WorkspaceFolders", (it) => {
       );
       yield* fileSystem.makeDirectory(path.join(outside, ".git"), { recursive: true });
       // A link to a repository elsewhere is not inside the project.
-      yield* fileSystem.symlink(outside, path.join(workspaceRoot, "linked"));
+      yield* Effect.promise(() =>
+        makeTestDirectoryLink(outside, path.join(workspaceRoot, "linked")),
+      );
       yield* fileSystem.writeFileString(
         path.join(workspaceRoot, "t3.json"),
         JSON.stringify({ ignoreRepositories: ["vendor/big"] }),
@@ -264,11 +267,13 @@ it.layer(NodeServices.layer)("WorkspaceFolders", (it) => {
       for (const directory of [inside.path, path.join(repository.path, ".git"), shared]) {
         yield* fileSystem.makeDirectory(directory, { recursive: true });
       }
-      yield* fileSystem.symlink(shared, linked.path);
+      yield* Effect.promise(() => makeTestDirectoryLink(shared, linked.path));
       yield* fileSystem.makeDirectory(path.join(tmp, "elsewhere", "x", ".git"), {
         recursive: true,
       });
-      yield* fileSystem.symlink(path.join(tmp, "elsewhere"), path.join(workspaceRoot, "ext"));
+      yield* Effect.promise(() =>
+        makeTestDirectoryLink(path.join(tmp, "elsewhere"), path.join(workspaceRoot, "ext")),
+      );
 
       yield* Effect.gen(function* () {
         const workspaceFolders = yield* WorkspaceFolders.WorkspaceFolders;
@@ -347,7 +352,7 @@ it.layer(NodeServices.layer)("WorkspaceFolders", (it) => {
       ]) {
         yield* fileSystem.makeDirectory(directory, { recursive: true });
       }
-      yield* fileSystem.symlink(realWorktrees, worktrees);
+      yield* Effect.promise(() => makeTestDirectoryLink(realWorktrees, worktrees));
       const trackedFolders = [
         { name: "app", path: app },
         { name: "lib", path: lib },

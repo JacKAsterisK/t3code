@@ -1,8 +1,10 @@
+import { makeTestDirectoryLink } from "@t3tools/shared/testing/symlinks";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 import { ProjectId } from "@t3tools/contracts";
 
@@ -132,7 +134,9 @@ describe("ReviewService", () => {
   it.effect("allows previous custom worktree locations but never a filesystem root", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-workspace-" });
+      const root = path.parse(workspaceRoot).root;
       const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-base-" });
       const previous = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-old-worktrees-" });
       const outsideRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-outside-" });
@@ -145,7 +149,7 @@ describe("ReviewService", () => {
           layer({
             workspaceRoot,
             baseDir,
-            worktreesDirectory: "/",
+            worktreesDirectory: root,
             previousWorktreesDirectories: [previous],
           }),
         ),
@@ -153,8 +157,8 @@ describe("ReviewService", () => {
       assert.strictEqual(result.cwd, previous);
 
       const rootLink = `${baseDir}/root-link`;
-      yield* fs.symlink("/", rootLink);
-      for (const worktreesDirectory of ["/", rootLink]) {
+      yield* Effect.promise(() => makeTestDirectoryLink(root, rootLink));
+      for (const worktreesDirectory of [root, rootLink]) {
         const error = yield* Effect.gen(function* () {
           const review = yield* ReviewService.ReviewService;
           return yield* review.getDiffPreview({ cwd: outsideRoot }).pipe(Effect.flip);
@@ -212,7 +216,7 @@ describe("ReviewService", () => {
       const missing = `${outside}/gone`;
       yield* fs.makeDirectory(nested, { recursive: true });
       yield* fs.makeDirectory(untracked);
-      yield* fs.symlink(repository, linked);
+      yield* Effect.promise(() => makeTestDirectoryLink(repository, linked));
 
       const review = (
         cwd: string,
@@ -297,7 +301,7 @@ describe("ReviewService", () => {
         yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-worktrees-" }),
       );
       const checkout = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-checkout-" });
-      yield* fs.symlink(checkout, `${managed}/feature`);
+      yield* Effect.promise(() => makeTestDirectoryLink(checkout, `${managed}/feature`));
 
       const result = yield* Effect.gen(function* () {
         const review = yield* ReviewService.ReviewService;

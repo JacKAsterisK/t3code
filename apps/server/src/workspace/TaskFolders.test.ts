@@ -1,3 +1,5 @@
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -22,6 +24,8 @@ import {
 } from "./TaskFolders.testkit.ts";
 
 const threadId = ThreadId.make("thread:task-folders");
+const itWithLinks = it.live.skipIf(!symlinksSupported);
+const itWithPosixShell = it.live.skipIf(HostProcess.Platform.defaultValue() === "win32");
 
 const layerFor = (state: TaskFoldersTestState) =>
   layerTaskFoldersWithGit(state).pipe(
@@ -94,7 +98,7 @@ const withState = <A, E>(
   return test(state).pipe(Effect.provide(layerFor(state)), Effect.scoped);
 };
 
-it.live("lays a plain wrapper out as links around its repositories' worktrees", () =>
+itWithLinks("lays a plain wrapper out as links around its repositories' worktrees", () =>
   withState((state) =>
     Effect.gen(function* () {
       const { fileSystem, path, tmp, run, repository, isLink } = yield* fixture;
@@ -405,7 +409,7 @@ it.live("leaves a hook's link to an empty folder alone", () =>
   ),
 );
 
-it.live("treats a project folder inside a larger repository as plain", () =>
+itWithLinks("treats a project folder inside a larger repository as plain", () =>
   withState((state) =>
     Effect.gen(function* () {
       const { fileSystem, path, repository, worktreeCount } = yield* fixture;
@@ -432,63 +436,65 @@ it.live("treats a project folder inside a larger repository as plain", () =>
   ),
 );
 
-it.live("adopts the checkouts a project's own layout command makes, and runs its teardown", () =>
-  withState((state) =>
-    Effect.gen(function* () {
-      const { fileSystem, path, tmp, run, repository, worktreeCount } = yield* fixture;
-      const shop = path.join(tmp, "shop");
-      const api = yield* repository("shop/api");
-      const web = yield* repository("shop/web");
-      // The project checks `api` out itself, copies its build cache and leaves `web` out.
-      yield* fileSystem.writeFileString(
-        path.join(shop, "t3.json"),
-        JSON.stringify({
-          worktreeLayout: {
-            // A plain project's folder is no worktree, even when the command leaves a `.git` there.
-            create:
-              'mkdir -p "$T3_WORKTREE_PROJECT_PATH/cache" && git init -q "$T3_WORKTREE_PROJECT_PATH" && printf %s "$T3_WORKTREE_REPOSITORIES" > "$T3_WORKTREE_PROJECT_PATH/chosen" && git -C "$T3_PROJECT_ROOT/api" worktree add -q -b "$T3_WORKTREE_BRANCH" "$T3_WORKTREE_PROJECT_PATH/api" "$T3_WORKTREE_BASE"',
-            // Cleanup never deletes files that exist only here, so the teardown clears its own.
-            remove:
-              'touch "$T3_PROJECT_ROOT/torn-down" && rm -rf "$T3_WORKTREE_PROJECT_PATH/cache" "$T3_WORKTREE_PROJECT_PATH/chosen" "$T3_WORKTREE_PROJECT_PATH/.git"',
-          },
-        }),
-      );
-      state.workspaceRoot = shop;
-      state.trackedFolders = tracked(api, web);
+itWithPosixShell(
+  "adopts the checkouts a project's own layout command makes, and runs its teardown",
+  () =>
+    withState((state) =>
+      Effect.gen(function* () {
+        const { fileSystem, path, tmp, run, repository, worktreeCount } = yield* fixture;
+        const shop = path.join(tmp, "shop");
+        const api = yield* repository("shop/api");
+        const web = yield* repository("shop/web");
+        // The project checks `api` out itself, copies its build cache and leaves `web` out.
+        yield* fileSystem.writeFileString(
+          path.join(shop, "t3.json"),
+          JSON.stringify({
+            worktreeLayout: {
+              // A plain project's folder is no worktree, even when the command leaves a `.git` there.
+              create:
+                'mkdir -p "$T3_WORKTREE_PROJECT_PATH/cache" && git init -q "$T3_WORKTREE_PROJECT_PATH" && printf %s "$T3_WORKTREE_REPOSITORIES" > "$T3_WORKTREE_PROJECT_PATH/chosen" && git -C "$T3_PROJECT_ROOT/api" worktree add -q -b "$T3_WORKTREE_BRANCH" "$T3_WORKTREE_PROJECT_PATH/api" "$T3_WORKTREE_BASE"',
+              // Cleanup never deletes files that exist only here, so the teardown clears its own.
+              remove:
+                'touch "$T3_PROJECT_ROOT/torn-down" && rm -rf "$T3_WORKTREE_PROJECT_PATH/cache" "$T3_WORKTREE_PROJECT_PATH/chosen" "$T3_WORKTREE_PROJECT_PATH/.git"',
+            },
+          }),
+        );
+        state.workspaceRoot = shop;
+        state.trackedFolders = tracked(api, web);
 
-      const { taskFolder } = yield* create("feature", undefined, "main");
+        const { taskFolder } = yield* create("feature", undefined, "main");
 
-      assert.isFalse(taskFolder.projectIsWorktree);
-      assert.deepEqual(taskFolder.repositories, [
-        { repositoryPath: api, worktreePath: path.join(taskFolder.root, "api"), name: "api" },
-      ]);
-      assert.isTrue(yield* fileSystem.exists(path.join(taskFolder.root, "cache")));
-      assert.equal(
-        yield* fileSystem.readFileString(path.join(taskFolder.root, "chosen")),
-        `${api}\n${web}`,
-      );
-      assert.equal(
-        yield* run(path.join(taskFolder.root, "api"), "symbolic-ref", "--short", "HEAD"),
-        "feature",
-      );
-      assert.equal(yield* worktreeCount(web), 1);
+        assert.isFalse(taskFolder.projectIsWorktree);
+        assert.deepEqual(taskFolder.repositories, [
+          { repositoryPath: api, worktreePath: path.join(taskFolder.root, "api"), name: "api" },
+        ]);
+        assert.isTrue(yield* fileSystem.exists(path.join(taskFolder.root, "cache")));
+        assert.equal(
+          yield* fileSystem.readFileString(path.join(taskFolder.root, "chosen")),
+          `${api}\n${web}`,
+        );
+        assert.equal(
+          yield* run(path.join(taskFolder.root, "api"), "symbolic-ref", "--short", "HEAD"),
+          "feature",
+        );
+        assert.equal(yield* worktreeCount(web), 1);
 
-      // Storage cleanup inspects each checkout; the teardown runs once all of them may go.
-      yield* (yield* TaskFolders.TaskFolders).remove({
-        root: taskFolder.root,
-        force: true,
-        forget: true,
-        inspect: () => Effect.succeed({ keep: null, force: true }),
-      });
-      assert.isTrue(yield* fileSystem.exists(path.join(shop, "torn-down")));
-      // What the teardown left is removed as usual.
-      assert.equal(yield* worktreeCount(api), 1);
-      assert.isFalse(yield* fileSystem.exists(taskFolder.root));
-    }),
-  ),
+        // Storage cleanup inspects each checkout; the teardown runs once all of them may go.
+        yield* (yield* TaskFolders.TaskFolders).remove({
+          root: taskFolder.root,
+          force: true,
+          forget: true,
+          inspect: () => Effect.succeed({ keep: null, force: true }),
+        });
+        assert.isTrue(yield* fileSystem.exists(path.join(shop, "torn-down")));
+        // What the teardown left is removed as usual.
+        assert.equal(yield* worktreeCount(api), 1);
+        assert.isFalse(yield* fileSystem.exists(taskFolder.root));
+      }),
+    ),
 );
 
-it.live(
+itWithPosixShell(
   "removes what a failed layout command checked out, and refuses a checkout it cannot own",
   () =>
     withState((state) =>
@@ -596,6 +602,7 @@ it.live.each([{ linked: false }, { linked: true }])(
         assert.equal(yield* worktreeCount(mono), linked ? 2 : 1);
       }),
     ),
+  { skip: HostProcess.Platform.defaultValue() === "win32" },
 );
 
 it.live("starts each repository from the base branch where it has one", () =>
@@ -697,7 +704,7 @@ it.live("gives every repository one branch name when one of them already has it"
   ),
 );
 
-it.live("removes what it created when one repository fails", () =>
+itWithLinks("removes what it created when one repository fails", () =>
   withState((state) =>
     Effect.gen(function* () {
       const { fileSystem, path, tmp, run, repository, worktreeCount } = yield* fixture;
@@ -771,7 +778,7 @@ it.live("selects every tracked repository up to eight and none beyond", () =>
   ),
 );
 
-it.live("adds a repository to an existing task folder on the thread's branch", () =>
+itWithLinks("adds a repository to an existing task folder on the thread's branch", () =>
   withState((state) =>
     Effect.gen(function* () {
       const { fileSystem, path, tmp, run, repository, isLink } = yield* fixture;
@@ -857,7 +864,7 @@ it.live("adds a repository to an existing task folder on the thread's branch", (
   ),
 );
 
-it.live("keeps a repository git will not remove and removes the rest", () =>
+itWithLinks("keeps a repository git will not remove and removes the rest", () =>
   withState((state) =>
     Effect.gen(function* () {
       const { fileSystem, path, tmp, repository, worktreeCount } = yield* fixture;
@@ -907,7 +914,7 @@ it.live("keeps a repository git will not remove and removes the rest", () =>
   ),
 );
 
-it.live("restores a recorded repository the project stopped tracking as its worktree", () =>
+itWithLinks("restores a recorded repository the project stopped tracking as its worktree", () =>
   withState((state) =>
     Effect.gen(function* () {
       const { fileSystem, path, tmp, run, repository, isLink } = yield* fixture;

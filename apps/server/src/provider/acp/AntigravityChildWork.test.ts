@@ -666,7 +666,8 @@ it.layer(NodeServices.layer)("readAntigravityChildWork", (it) => {
         yield* write(["messages", "read.json"], "{not json");
         expect(yield* pending()).toBe(false);
 
-        // Symlinked transcript fails closed.
+        // Symlinked transcript fails closed when the host supports creating one.
+        if (!symlinksSupported) return;
         const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-agy-pending-outside-" });
         const external = path.join(outside, "transcript.jsonl");
         yield* fs.writeFileString(

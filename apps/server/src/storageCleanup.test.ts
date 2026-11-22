@@ -1031,6 +1031,8 @@ it.live("removes a task folder's clean worktrees and keeps the one with uncommit
         yield* command(folder, ["config", "user.email", "cleanup@example.test"]);
         yield* command(folder, ["config", "user.name", "Cleanup test"]);
         yield* fs.writeFileString(`${folder}/tracked.txt`, "original\n");
+        // Give the checkout a file large enough to allocate data blocks on NTFS.
+        yield* fs.writeFile(NodePath.join(folder, "fixture.bin"), new Uint8Array(8192).fill(0x61));
         yield* command(folder, ["add", "."]);
         yield* command(folder, ["commit", "-m", "initial"]);
         return { name, path: folder };
@@ -1068,25 +1070,29 @@ it.live("removes a task folder's clean worktrees and keeps the one with uncommit
       ).toEqual([
         { path: root, outcome: "kept", reason: "Holds a repository that was kept" },
         {
-          path: `${root}/dist/api`,
+          path: NodePath.join(root, "dist", "api"),
           outcome: "kept",
           reason: "Has uncommitted changes (1 file)",
         },
-        { path: `${root}/dist/web`, outcome: "removed", reason: expect.any(String) },
+        {
+          path: NodePath.join(root, "dist", "web"),
+          outcome: "removed",
+          reason: expect.any(String),
+        },
       ]);
       expect(
-        report.entries.find((entry) => entry.path === `${root}/dist/web`)?.bytes,
+        report.entries.find((entry) => entry.path === NodePath.join(root, "dist", "web"))?.bytes,
       ).toBeGreaterThan(0);
       expect(yield* fs.readFileString(`${root}/dist/api/tracked.txt`)).toBe("uncommitted\n");
-      expect(yield* fs.exists(`${root}/dist/web`)).toBe(false);
+      expect(yield* fs.exists(NodePath.join(root, "dist", "web"))).toBe(false);
       // The thread is alive, so the record keeps the whole layout for when it resumes.
       expect((yield* taskFolders.find(root))?.repositories).toHaveLength(2);
 
-      yield* command(`${root}/dist/api`, ["checkout", "--", "tracked.txt"]);
+      yield* command(NodePath.join(root, "dist", "api"), ["checkout", "--", "tracked.txt"]);
       const second = yield* service.runNow;
 
       expect(second.entries.filter((entry) => entry.path?.startsWith(root))).toEqual(
-        [`${root}/dist/api`, root].map((path) =>
+        [NodePath.join(root, "dist", "api"), root].map((path) =>
           expect.objectContaining({ path, outcome: "removed" }),
         ),
       );
@@ -4111,32 +4117,36 @@ describe("storage cleanup reports and local file policies", () => {
   it.live.each([
     { kind: "logs", name: "server.log.1", label: "rotated logs" },
     { kind: "browser-artifacts", name: "capture.png", label: "browser artifacts" },
-  ] as const)("skips dangling symlinks during $kind cleanup", ({ kind, name, label }) =>
-    runCleanupTest(
-      Effect.gen(function* () {
-        const { service, fs, config, enableFiles, disable } = yield* cleanupFixture();
-        disable();
-        enableFiles();
-        const directory = kind === "logs" ? `${config.logsDir}/nested` : config.browserArtifactsDir;
-        yield* fs.makeDirectory(directory, { recursive: true });
-        const expired = `${directory}/${name}`;
-        const dangling = `${directory}/00-dangling-${name}`;
-        const linked = `${directory}/01-linked-${name}`;
-        yield* fs.symlink("missing", dangling);
-        yield* fs.symlink(directory, linked);
-        yield* fs.writeFileString(expired, "expired");
-        yield* fs.utimes(expired, 1, 1);
+  ] as const)(
+    "skips dangling symlinks during $kind cleanup",
+    ({ kind, name, label }) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const { service, fs, config, enableFiles, disable } = yield* cleanupFixture();
+          disable();
+          enableFiles();
+          const directory =
+            kind === "logs" ? `${config.logsDir}/nested` : config.browserArtifactsDir;
+          yield* fs.makeDirectory(directory, { recursive: true });
+          const expired = `${directory}/${name}`;
+          const dangling = `${directory}/00-dangling-${name}`;
+          const linked = `${directory}/01-linked-${name}`;
+          yield* fs.symlink("missing", dangling);
+          yield* fs.symlink(directory, linked);
+          yield* fs.writeFileString(expired, "expired");
+          yield* fs.utimes(expired, 1, 1);
 
-        const report = yield* service.runNow;
-        expect(report.entries.filter((entry) => entry.kind === kind)).toMatchObject([
-          { outcome: "removed", reason: `Removed 1 ${label}`, files: 1, bytes: 7 },
-        ]);
-        expect((yield* fs.readDirectory(directory)).toSorted()).toEqual([
-          `00-dangling-${name}`,
-          `01-linked-${name}`,
-        ]);
-      }),
-    ),
+          const report = yield* service.runNow;
+          expect(report.entries.filter((entry) => entry.kind === kind)).toMatchObject([
+            { outcome: "removed", reason: `Removed 1 ${label}`, files: 1, bytes: 7 },
+          ]);
+          expect((yield* fs.readDirectory(directory)).toSorted()).toEqual([
+            `00-dangling-${name}`,
+            `01-linked-${name}`,
+          ]);
+        }),
+      ),
+    { skip: !symlinksSupported },
   );
   it.live.each([
     { linked: "home", outcome: "removed", reason: "Removed 1 rotated logs" },

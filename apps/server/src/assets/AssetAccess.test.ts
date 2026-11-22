@@ -1327,12 +1327,14 @@ describe("AssetAccess", () => {
 
       // An edit to one page leaves the page beside it alone.
       yield* write("b.html", "<h1>B</h1>");
+      yield* fileSystem.utimes(path.join(pages, "b.html"), 1, 1);
       const afterPageEdit = yield* revisions();
       expect(afterPageEdit[0]).toBe(opened[0]);
       expect(afterPageEdit[1]).not.toBe(opened[1]);
 
       // A same-size edit to a requested stylesheet reloads only the page that uses it.
       yield* write("a.css", "body { color: blue }");
+      yield* fileSystem.utimes(path.join(pages, "a.css"), 1, 1);
       const afterStyleEdit = yield* revisions();
       expect(afterStyleEdit[0]).not.toBe(afterPageEdit[0]);
       expect(afterStyleEdit[1]).toBe(afterPageEdit[1]);

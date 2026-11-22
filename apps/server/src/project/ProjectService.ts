@@ -247,7 +247,12 @@ export const make = Effect.gen(function* () {
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
     );
-    if (sameProjectFolders(mergeProjectFolders(discovered, row.trackedFolders), row.trackedFolders))
+    if (
+      sameProjectFolders(
+        mergeProjectFolders(path, discovered, row.trackedFolders),
+        row.trackedFolders,
+      )
+    )
       return;
     const command = {
       type: "project.meta.update",
@@ -258,7 +263,7 @@ export const make = Effect.gen(function* () {
     yield* commit(command, (current) => {
       if (current?.deletedAt !== null || current.workspaceRoot !== row.workspaceRoot)
         return Effect.succeed(null);
-      const trackedFolders = mergeProjectFolders(discovered, current.trackedFolders);
+      const trackedFolders = mergeProjectFolders(path, discovered, current.trackedFolders);
       return Effect.succeed(
         sameProjectFolders(trackedFolders, current.trackedFolders)
           ? null

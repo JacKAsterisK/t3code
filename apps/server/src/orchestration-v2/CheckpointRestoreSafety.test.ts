@@ -1,3 +1,4 @@
+import { makeTestDirectoryLink } from "@t3tools/shared/testing/symlinks";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -220,7 +221,9 @@ it.effect("counts a task folder's repository worktrees as part of what a restore
     const named = path.join(parent, "linked", "task");
     yield* fileSystem.makeDirectory(path.join(real, "shop"), { recursive: true });
     yield* fileSystem.makeDirectory(path.join(real, "web"));
-    yield* fileSystem.symlink(path.join(parent, "real"), path.join(parent, "linked"));
+    yield* Effect.promise(() =>
+      makeTestDirectoryLink(path.join(parent, "real"), path.join(parent, "linked")),
+    );
     const worktreePath = path.join(named, "shop");
     const other = {
       id: ThreadId.make("restore-task-folder-other"),

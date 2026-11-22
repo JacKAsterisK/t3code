@@ -312,12 +312,13 @@ export const discoverFolders = Effect.fn("WorkspaceFolders.discover")(function* 
  * found ones give way when both do not fit.
  */
 export const mergeProjectFolders = (
+  path: Pick<Path.Path, "resolve">,
   discovered: ReadonlyArray<ProjectTrackedFolder>,
   trackedFolders: ReadonlyArray<ProjectTrackedFolder>,
 ): ReadonlyArray<ProjectTrackedFolder> => {
-  const found = new Set(discovered.map((folder) => folder.path));
+  const found = new Set(discovered.map((folder) => path.resolve(folder.path)));
   const added = trackedFolders
-    .filter((folder) => folder.discovered !== true && !found.has(folder.path))
+    .filter((folder) => folder.discovered !== true && !found.has(path.resolve(folder.path)))
     .slice(0, PROJECT_TRACKED_FOLDERS_MAX);
   return [...discovered.slice(0, PROJECT_TRACKED_FOLDERS_MAX - added.length), ...added];
 };
@@ -334,7 +335,12 @@ export const projectFolders = Effect.fn("WorkspaceFolders.projectFolders")(funct
   never,
   FileSystem.FileSystem | Path.Path
 > {
-  return mergeProjectFolders(yield* discoverFolders(project.workspaceRoot), project.trackedFolders);
+  const path = yield* Path.Path;
+  return mergeProjectFolders(
+    path,
+    yield* discoverFolders(project.workspaceRoot),
+    project.trackedFolders,
+  );
 });
 
 /** Whether two tracked lists name the same folders in the same order. */

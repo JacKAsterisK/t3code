@@ -456,7 +456,7 @@ const projectAddCommand = Command.make("add", {
             max: PROJECT_TRACKED_FOLDERS_MAX,
           });
         }
-        const trackedFolders = mergeProjectFolders(found, named);
+        const trackedFolders = mergeProjectFolders(path, found, named);
         const projectId = ProjectId.make(yield* projectCommandUuid);
         yield* dispatch({
           type: "project.create",

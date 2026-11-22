@@ -43,8 +43,10 @@ approval before code or runtime changes.
   owner-policy request. The administrator's
   runtime ceiling still applies.
 - Assisted Full access launches record the requesting thread, Auto and Full
-  access modes, and the owner policy in the child creation event. The child
-  conversation displays the audit.
+  access modes, and the owner policy in the child creation event. Linked
+  audits bind the caller to its authenticated peer credential and verify the
+  source environment when the credential has that binding. The child
+  conversation identifies the peer that reported the thread details.
 - In the sidebar project filter, **Show subagents** defaults off for each user.
   Local subagents and cross-environment delegates appear when enabled. Pinned
   subagents remain in Pinned, and unpinning returns them to the selected filter.

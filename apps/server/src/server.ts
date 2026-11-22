@@ -919,6 +919,7 @@ const layerMakeRoutes = Layer.mergeAll(
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
+    Layer.provide(ApprovalRuntime.layerDestination),
     // T3 Code LAN: MCP Events for outside agents, when agentEventsEnabled was on at startup.
     Layer.provide(
       Layer.mergeAll(

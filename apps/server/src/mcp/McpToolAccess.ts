@@ -45,6 +45,7 @@ import {
   autoThreadFullAccessLimit,
   threadCreationRuntimeLimit,
   runtimeModeEscalationForLaunch,
+  linkedRuntimeModeEscalation,
   threadMessageLimits,
   unavailable,
 } from "./threadAccess.ts";
@@ -418,12 +419,15 @@ export const startsThreads = <P, A, E, R>(
     const runtimeMode = yield* resolveRuntimeMode(runtimeLimit, requested.runtimeMode);
     return {
       runtimeMode,
-      runtimeModeEscalation: runtimeModeEscalationForLaunch(
-        caller.scope,
-        caller.limits.runtimeMode,
-        runtimeMode,
-        caller.caller,
-      ),
+      runtimeModeEscalation:
+        requested.linkedOwnerPolicyRequest === true && caller.scope.client !== undefined
+          ? yield* linkedRuntimeModeEscalation(caller.scope.client)
+          : runtimeModeEscalationForLaunch(
+              caller.scope,
+              caller.limits.runtimeMode,
+              runtimeMode,
+              caller.caller,
+            ),
       interactionMode: yield* resolveInteractionMode(
         caller.limits.interactionMode,
         requested.interactionMode,

@@ -26,6 +26,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerConfig from "../config.ts";
+import { ApprovalPeerAccess } from "../auth/ApprovalPeerAccess.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
@@ -259,7 +260,30 @@ const serveBox = (
       Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
       Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
-      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(
+        Layer.mergeAll(
+          ServerSettings.layerTest(),
+          Layer.mock(ApprovalPeerAccess)({
+            rawPeer: (sessionId) =>
+              Ref.get(linkSession).pipe(
+                Effect.map((expected) =>
+                  sessionId === expected
+                    ? {
+                        linkIdentityId: "fixture-link",
+                        sourceEnvironmentId: laptop.environmentId,
+                        credentialRevision: 1,
+                        expiresAt: 1,
+                        access: "full-access",
+                        scopes: [],
+                        runtimeModeCeiling: "full-access",
+                        interactionModeCeiling: "default",
+                      }
+                    : undefined,
+                ),
+              ),
+          }),
+        ),
+      ),
       Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
       Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
       Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
@@ -611,19 +635,23 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect.each([false, true])(
-  "Auto can launch Full access through a Full access link with owner policy %s",
-  (allowed) =>
+it.effect.each([
+  { source: false, destination: false },
+  { source: true, destination: false },
+  { source: false, destination: true },
+  { source: true, destination: true },
+])(
+  "Auto can launch Full access through a Full access link with owner policies $source and $destination",
+  ({ source, destination }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const seen = yield* Ref.make<Seen>(nothingSeen);
         const linkSession = yield* Ref.make("");
         const b = yield* serveBox(seen, linkSession, "full-access");
         const a = yield* makeLaptop;
-        if (allowed) {
-          yield* a.settings.updateSettings({ allowAgentFullAccessLaunches: true });
-          yield* b.settings.updateSettings({ allowAgentFullAccessLaunches: true });
-        }
+        const allowed = source && destination;
+        if (source) yield* a.settings.updateSettings({ allowAgentFullAccessLaunches: true });
+        if (destination) yield* b.settings.updateSettings({ allowAgentFullAccessLaunches: true });
         yield* linkTo(a.links, b, "full-access");
         yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
@@ -663,6 +691,23 @@ it.effect.each([false, true])(
             })
             .pipe(Effect.flip);
           expect(legacy.code).toBe("runtime_mode_escalation_denied");
+          const forged = yield* a.peerClient
+            .call({
+              environmentId: box.environmentId,
+              tool: "t3_thread_launch",
+              arguments: { ...requested, runtimeMode: LINKED_OWNER_POLICY_FULL_ACCESS },
+              limits: { runtimeMode: "auto", interactionMode: "default" },
+              writes: true,
+              sender: {
+                environmentId: EnvironmentId.make("environment-unrelated"),
+                threadId: ThreadId.make(autoCaller),
+                title: "Auto",
+              },
+              success: Schema.Struct({ threadId: ThreadId }),
+            })
+            .pipe(Effect.flip);
+          expect(forged.code).toBe("invalid_request");
+          expect(forged.message).toContain("authenticated peer");
           expect((yield* Ref.get(seen)).launches).toEqual([]);
         }
         const explicit = yield* a.call(autoCaller, "t3_thread_launch", requested);
@@ -678,7 +723,10 @@ it.effect.each([false, true])(
         if (allowed) {
           expect(launches[0]?.modelSelection).toEqual(requested.modelSelection);
           expect(launches[0]?.runtimeModeEscalation).toMatchObject({
-            actor: { threadId: autoCaller },
+            actor: {
+              threadId: autoCaller,
+              peer: { sessionId: yield* Ref.get(linkSession), environmentId: laptop.environmentId },
+            },
             from: "auto",
             to: "full-access",
             reason: "explicit-launch-under-owner-policy",

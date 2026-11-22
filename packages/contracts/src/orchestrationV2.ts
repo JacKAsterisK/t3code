@@ -165,7 +165,19 @@ export const OrchestrationV2LinkedSender = Schema.Struct({
 export type OrchestrationV2LinkedSender = typeof OrchestrationV2LinkedSender.Type;
 
 export const OrchestrationV2RuntimeModeEscalation = Schema.Struct({
-  actor: OrchestrationV2LinkedSender,
+  actor: Schema.Union([
+    OrchestrationV2LinkedSender,
+    Schema.Struct({
+      threadId: ThreadId,
+      title: Schema.String,
+      // Thread coordinates are asserted by this authenticated credential.
+      peer: Schema.Struct({
+        sessionId: TrimmedNonEmptyString,
+        label: Schema.String,
+        environmentId: Schema.optional(EnvironmentId),
+      }),
+    }),
+  ]),
   from: Schema.Literal("auto"),
   to: Schema.Literal("full-access"),
   reason: Schema.Literal("explicit-launch-under-owner-policy"),

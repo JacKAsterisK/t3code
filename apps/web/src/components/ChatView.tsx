@@ -3484,12 +3484,20 @@ export default function ChatView(props: ChatViewProps) {
               <div className="px-4 py-2 text-sm text-muted-foreground">
                 <strong className="text-foreground">{gt("Started with Full access")}</strong>
                 {" ? "}
-                {gt(
-                  "{actor} requested a change from Auto to Full access. The environment owner allowed it.",
-                  {
-                    actor: runtimeModeEscalation.actor.title,
-                  },
-                )}
+                {"peer" in runtimeModeEscalation.actor
+                  ? gt(
+                      "{peer} reported that {actor} requested a change from Auto to Full access. The environment owner allowed it.",
+                      {
+                        peer: runtimeModeEscalation.actor.peer.label,
+                        actor: runtimeModeEscalation.actor.title,
+                      },
+                    )
+                  : gt(
+                      "{actor} requested a change from Auto to Full access. The environment owner allowed it.",
+                      {
+                        actor: runtimeModeEscalation.actor.title,
+                      },
+                    )}
               </div>
             )}
             <ChatBannerLane

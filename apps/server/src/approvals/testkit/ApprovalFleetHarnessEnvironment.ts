@@ -21,6 +21,7 @@ import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
@@ -482,7 +483,7 @@ export const linkPeer = Effect.fn("ApprovalFleetHarness.linkPeer")(function* (
     yield* Ref.set(token, replacement.token);
     return replacement;
   });
-  return { credential, token, linkIdentityId, rotate };
+  return { access, credential, token, linkIdentityId, rotate };
 });
 export type FleetLink = Effect.Success<ReturnType<typeof linkPeer>>;
 
@@ -491,28 +492,32 @@ export const forwardingLayer = (
   link: FleetLink,
   network: FleetNetwork,
 ) => {
+  const savedLink = Effect.gen(function* () {
+    const url = typeof b.url === "string" ? b.url : yield* Ref.get(b.url);
+    return {
+      environmentId: b.env.id,
+      label: b.env.name,
+      urls: [url],
+      access: link.access,
+      linkedAt: DateTime.toUtc(link.credential.expiresAt),
+      expiresAt: DateTime.toUtc(link.credential.expiresAt),
+      lastReachedAt: null,
+      lastError: null,
+    };
+  });
   const links = Layer.mock(PeerLinks.PeerLinks)({
     enabled: Effect.succeed(true),
     list: Effect.succeed([]),
+    get: (environmentId) =>
+      environmentId === b.env.id
+        ? savedLink.pipe(Effect.map(Option.some))
+        : Effect.succeed(Option.none()),
     resolve: Effect.fn("ApprovalFleetHarness.resolve")(function* () {
-      const url = typeof b.url === "string" ? b.url : yield* Ref.get(b.url);
+      const stored = yield* savedLink;
+      const url = stored.urls[0]!;
       assert.isNotEmpty(url, "An unpublished fixture endpoint must never receive a forwarded call");
       const token = yield* Ref.get(link.token);
-      return {
-        url,
-        token,
-        capabilities: { repositoryIdentity: false },
-        link: {
-          environmentId: b.env.id,
-          label: b.env.name,
-          urls: [url],
-          access: "full-access" as const,
-          linkedAt: DateTime.toUtc(link.credential.expiresAt),
-          expiresAt: DateTime.toUtc(link.credential.expiresAt),
-          lastReachedAt: null,
-          lastError: null,
-        },
-      };
+      return { url, token, capabilities: { repositoryIdentity: false }, link: stored };
     }),
     recordOutcome: () => Effect.void,
   });

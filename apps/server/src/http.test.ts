@@ -10,12 +10,16 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Tracer from "effect/Tracer";
 import { HttpClient, HttpClientRequest, HttpRouter, HttpServerResponse } from "effect/http";
 import { openMediaFile } from "./assets/MediaFile.ts";
+import { ASSET_ROUTE_PREFIX } from "./assets/AssetAccess.ts";
+import { ATTACHMENT_UPLOAD_ROUTE_PREFIX } from "./assets/AttachmentUpload.ts";
+import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
 
 import {
   injectMcpAppCsp,
@@ -175,6 +179,73 @@ describe("browser API CORS", () => {
 });
 
 describe("untraced requests", () => {
+  it.effect("suppresses signed paths before CORS and when no route matches", () =>
+    Effect.gen(function* () {
+      const serverSpans: Array<Tracer.NativeSpan> = [];
+      const requestLogs: Array<unknown> = [];
+      const logger = Logger.make(({ message }) => {
+        requestLogs.push(message);
+      });
+      const tracer = Tracer.make({
+        span: (options) => {
+          const span = new Tracer.NativeSpan(options);
+          if (options.kind === "server") serverSpans.push(span);
+          return span;
+        },
+      });
+      const routes = HttpRouter.add("GET", "/api/environment", HttpServerResponse.empty());
+      const services = yield* Layer.build(
+        HttpRouter.serve(
+          Layer.mergeAll(routes, ServerHttp.layerBrowserApiCors, ServerHttp.layerHttpCompression),
+          { disableListenLog: true, middleware: ServerHttp.suppressSignedUrlRequestLogs },
+        ).pipe(
+          ServerHttp.withUntracedRequests,
+          ServerHttp.withRootRequestSpans,
+          Layer.provideMerge(
+            ServerConfig.layerTest(process.cwd(), { prefix: "http-signed-telemetry-" }),
+          ),
+          Layer.provideMerge(NodeHttpServer.layerTest),
+        ),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(Tracer.Tracer, tracer),
+            Logger.layer([logger], { mergeWithExisting: false }),
+          ),
+        ),
+      );
+      const client = Context.get(services, HttpClient.HttpClient);
+      const ordinary = yield* client.execute(HttpClientRequest.get("/api/environment"));
+      expect(ordinary.status).toBe(204);
+      expect(serverSpans).toHaveLength(1);
+      expect(
+        requestLogs.some((message) => JSON.stringify(message).includes("Sent HTTP response")),
+      ).toBe(true);
+      const controlLogCount = requestLogs.length;
+      for (const prefix of [
+        ASSET_ROUTE_PREFIX,
+        ATTACHMENT_UPLOAD_ROUTE_PREFIX,
+        WEBHOOK_ROUTE_PREFIX,
+      ]) {
+        const url = prefix + "/synthetic-sensitive-path";
+        const preflight = yield* client.execute(
+          HttpClientRequest.options(url, {
+            headers: {
+              origin: "https://app.t3.codes",
+              "access-control-request-method": "POST",
+              "access-control-request-headers": "content-type",
+            },
+          }),
+        );
+        expect(preflight.status).toBe(204);
+        const unmatched = yield* client.execute(HttpClientRequest.get(url));
+        expect(unmatched.status).toBe(404);
+      }
+      expect(serverSpans).toHaveLength(1);
+      expect(requestLogs).toHaveLength(controlLogCount);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("starts a separate trace for each request, not the server's lifetime trace", () =>
     Effect.gen(function* () {
       const requestSpans: Array<Tracer.NativeSpan> = [];

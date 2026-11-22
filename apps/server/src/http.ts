@@ -58,6 +58,7 @@ import {
   MCP_HTTP_PATH,
 } from "./httpCors.ts";
 import { requestUrl } from "./requestUrl.ts";
+import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -418,26 +419,27 @@ export const layerOtlpTracesProxyRoute = HttpRouter.add(
   ),
 );
 
-import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
-
 const requestPath = (request: HttpServerRequest.HttpServerRequest) => {
   const queryIndex = request.url.indexOf("?");
   return queryIndex === -1 ? request.url : request.url.slice(0, queryIndex);
 };
-const isWebhookRequest = (request: HttpServerRequest.HttpServerRequest) =>
-  requestPath(request).startsWith(`${WEBHOOK_ROUTE_PREFIX}/`);
+const isSignedUrlRequest = (request: HttpServerRequest.HttpServerRequest) => {
+  const path = requestPath(request);
+  return (
+    path.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`) ||
+    path.startsWith(`${ASSET_ROUTE_PREFIX}/`) ||
+    path.startsWith(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/`)
+  );
+};
 
-// Webhooks use an HttpApi path token; keep tracing and request logs away from the raw path.
+// CORS preflights and unmatched requests can finish before per-route path redaction.
 const layerUntracedRequests = Layer.succeed(HttpMiddleware.TracerDisabledWhen)(
-  (request) => requestPath(request) === OTLP_TRACES_PROXY_PATH || isWebhookRequest(request),
+  (request) => requestPath(request) === OTLP_TRACES_PROXY_PATH || isSignedUrlRequest(request),
 );
-export const layerUnloggedSignedRequests = HttpRouter.middleware(
-  (httpEffect) =>
-    Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
-      isWebhookRequest(request) ? HttpMiddleware.withLoggerDisabled(httpEffect) : httpEffect,
-    ),
-  { global: true },
-);
+export const suppressSignedUrlRequestLogs = <A, E, R>(httpEffect: Effect.Effect<A, E, R>) =>
+  Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
+    isSignedUrlRequest(request) ? HttpMiddleware.withLoggerDisabled(httpEffect) : httpEffect,
+  );
 
 // Signed URLs carry their bearer token in the path; spans and request logs record it as REDACTED.
 const SIGNED_URL_ROUTE_OPTIONS = { redactedParams: ["*"] };

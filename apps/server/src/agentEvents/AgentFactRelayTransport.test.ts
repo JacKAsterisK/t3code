@@ -167,6 +167,7 @@ it.live.each(["read", "validate"] as const)(
                   Effect.succeed({
                     url: receiver.url,
                     token: "isolated-token",
+                    capabilities: { repositoryIdentity: false },
                     link: {} as Links.ResolvedPeerLink["link"],
                   }),
                 recordOutcome: () => Effect.void,
@@ -259,6 +260,7 @@ it.live("relay deadlines and interruption discard late DNS and close in-flight p
                     Effect.succeed({
                       url: tls?.url ?? receiver.url,
                       token: "isolated-token",
+                      capabilities: { repositoryIdentity: false },
                       link: {} as Links.ResolvedPeerLink["link"],
                     }),
                   recordOutcome: () => Effect.void,
@@ -348,6 +350,7 @@ it.effect("discovery and dead-first URL setup do not consume a valid long-poll b
                 Effect.as({
                   url: "https://isolated.test",
                   token: "isolated",
+                  capabilities: { repositoryIdentity: false },
                   link: {} as Links.ResolvedPeerLink["link"],
                 }),
               ),

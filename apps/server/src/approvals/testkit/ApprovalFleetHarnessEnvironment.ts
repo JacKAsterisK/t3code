@@ -50,6 +50,7 @@ import * as Projections from "../../orchestration-v2/ProjectionStore.ts";
 import * as Commands from "../../orchestration-v2/CommandReceiptStore.ts";
 import * as Outbox from "../../orchestration-v2/EffectOutbox.ts";
 import * as Registry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
+import { layerNoTaskFolders } from "../../orchestration-v2/ProviderTurnStartService.testkit.ts";
 import * as Replay from "../../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as ThreadCommands from "../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as Mcp from "../../mcp/McpHttpServer.ts";
@@ -121,6 +122,7 @@ export const makeEnvironment = Effect.fn("ApprovalFleetHarness.makeEnvironment")
   ).pipe(Layer.provideMerge(authority));
   const services = Service.layer.pipe(
     Layer.provideMerge(ThreadCommands.layer),
+    Layer.provideMerge(layerNoTaskFolders),
     Layer.provideMerge(native),
     Layer.provideMerge(Layer.mock(CheckpointStore.CheckpointStore)({})),
     Layer.provideMerge(Projections.layer.pipe(Layer.provide(database))),
@@ -327,7 +329,7 @@ export const connect = Effect.fn("ApprovalFleetHarness.connect")(function* (
       method: "initialize",
       params: {
         protocolVersion: "2025-06-18",
-        capabilities: {},
+        capabilities: { repositoryIdentity: false },
         clientInfo: { name: "approval-fleet-fixture", version: "1" },
       },
     },
@@ -499,6 +501,7 @@ export const forwardingLayer = (
       return {
         url,
         token,
+        capabilities: { repositoryIdentity: false },
         link: {
           environmentId: b.env.id,
           label: b.env.name,

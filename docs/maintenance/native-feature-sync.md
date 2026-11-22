@@ -8,6 +8,10 @@ approval before code or runtime changes.
 
 ## Baseline
 
+- LAN 1.0.44 integration in progress against upstream `15d945faef` (311 commits
+  after `e6d521012d`). Upstream migrations 103 through 105 append as fork 117 through 119.
+  The target schema is 119, pending the Windows gate and packaged data audits.
+
 - Upstream sync in preparation for LAN 1.0.39: upstream `e6d521012d` (2,111 commits after `ee90bdc940`), application 0.1.11 and toolchain generation 139. Upstream migrations 083 through 102 append as fork 097 through 116. Home repair recognizes schema 116.
 
 - Upstream sync 2026-11-12: upstream `ee90bdc940` (680 commits after `12f3244e0593`), published as LAN 1.0.38 from `d83b739562` (application 0.1.9, toolchain generation 138); previous published LAN 1.0.37 is `68a7fb629f`. Upstream migrations 081 and 082 become fork 095 (ProjectionMessageSearchText) and 096 (TurnItemConversationIndex); schema 96.
@@ -36,7 +40,7 @@ approval before code or runtime changes.
 
 ## LAN 1.0.43
 
-- In Settings ? Connections, the environment owner can enable **Allow Auto
+- In Settings ? Sharing & access, the environment owner can enable **Allow Auto
   threads to start Full access threads**. The default is off. Local agents must
   request Full access explicitly. A linked launch or delegate requires the
   policy on both environments, a Full access link and peer support for the
@@ -332,6 +336,11 @@ decision and may need a normal close before this update.
 - **Revisit:** when upstream shares connections between desktops without the
   cloud, or when the fleet can create native peer links from which the client
   catalog is derived.
+
+- **LAN 1.0.44:** upstream now offers peer-assisted client pairing and link renewal.
+  Keep fleet membership and delivery; use native pairing with the existing
+  outside-sharing policy checked on both ends. A Full access link that derives
+  its rights from a fleet exception cannot mint independent credentials.
 
 ### 2. Agent target discovery
 

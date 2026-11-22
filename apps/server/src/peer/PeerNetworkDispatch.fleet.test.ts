@@ -52,6 +52,7 @@ it.live(
           Effect.succeed({
             url: receiver.origin,
             token: "isolated-token",
+            capabilities: { repositoryIdentity: false },
             link: {} as Links.ResolvedPeerLink["link"],
           }),
         recordOutcome: () => Effect.void,

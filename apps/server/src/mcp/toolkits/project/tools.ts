@@ -132,7 +132,7 @@ const ProjectCloneTool = Tool.make("t3_project_clone", {
 const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   ...shared,
   description:
-    "Launch a top-level thread bound to its workspace. Task in `message`. Omit project, model and modes to inherit (outside a thread, give `projectId` or `scratch`). Auto may request `runtimeMode: full-access` with owner opt-in. Linked launches need both opt-ins and a Full access link. Retry with the same `clientRequestId`. Follow with `t3_thread_read` or `t3_thread_wait` and cite its `link`.",
+    "Launch a workspace-bound top-level thread. Task in message. Omit project/model/modes to inherit. Outside a thread give projectId or scratch. Auto may request runtimeMode: full-access with owner opt-in. Linked launches require both opt-ins and Full access. Retry the same clientRequestId. Read or wait by thread ID and cite its link.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: Schema.optional(ProjectId),
@@ -143,6 +143,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
       }),
     ),
     title: TrimmedNonEmptyString,
+    generateTitle: Schema.optional(Schema.Boolean),
     modelSelection: Schema.optional(ModelSelection),
     runtimeMode: Schema.optional(
       Schema.Union([RuntimeMode, Schema.Literal(LINKED_OWNER_POLICY_FULL_ACCESS)]),
@@ -151,7 +152,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     workspaceStrategy: Schema.optional(
       OrchestrationV2ThreadLaunchWorkspaceStrategy.annotate({
         description:
-          "'worktree': new checkout from `baseRef`. Honor a requested base. Otherwise, independent work uses the default branch as `remote/branch` (e.g. `origin/main`) with `startFromOrigin: true`; with no remote, use the local default branch. Required unpublished commits and dependent or stacked work use their local base with `startFromOrigin: false`. 'existing_worktree': bind `worktreePath`, a project worktree. 'root': project checkout, the default, not your worktree. Uncommitted edits are not copied.",
+          "worktree: new checkout from baseRef. Honor a requested base. Otherwise use remote/default branch with startFromOrigin=true for independent work (local default without a remote). Dependent, stacked or unpublished work uses its local base with startFromOrigin=false. existing_worktree binds a project worktreePath. root defaults to the project checkout. Uncommitted edits stay out.",
       }),
     ),
     message: Schema.optional(
@@ -160,6 +161,11 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
       }),
     ),
     attachments: Schema.optional(Schema.Array(McpAttachmentInput).check(Schema.isMaxLength(8))),
+    outputSchema: Schema.optional(
+      Schema.Record(Schema.String, Schema.Json).annotate({
+        description: "As in `t3_thread_send`. Needs `message`.",
+      }),
+    ),
     clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
     ownerId: Schema.optional(
       FleetUserId.annotate({

@@ -82,6 +82,7 @@ const makeClient = (narrowAt: "resolve" | "initialize" | "first-call") =>
               resolve: () =>
                 (narrowAt === "resolve" ? narrow : Effect.void).pipe(
                   Effect.as({
+                    capabilities: { repositoryIdentity: false },
                     link: {} as PeerLinks.ResolvedPeerLink["link"],
                     url: "https://peer.test",
                     token: "standard-token",
@@ -179,6 +180,7 @@ it.live("guarded calls stop after paused DNS across setup, session reuse, and 40
                     Effect.succeed({
                       url: receiver.url,
                       token: "isolated-token",
+                      capabilities: { repositoryIdentity: false },
                       link: {} as PeerLinks.ResolvedPeerLink["link"],
                     }),
                   recordOutcome: (_id, outcome) =>
@@ -281,6 +283,7 @@ const probeThrough = Effect.fn(function* (http: HttpClient.HttpClient) {
                 },
                 url: "https://peer.example",
                 token: "fixture",
+                capabilities: box.capabilities,
               }),
             recordOutcome: () => Effect.void,
           }),
@@ -569,6 +572,7 @@ it.effect("renews a missing peer session once and reuses its replacement", () =>
                   },
                   url: "https://peer.example",
                   token: "fixture",
+                  capabilities: box.capabilities,
                 }),
               recordOutcome: (_, outcome) => Effect.sync(() => outcomes.push(outcome.error)),
               recordExpiry: (_, expiresAt) =>

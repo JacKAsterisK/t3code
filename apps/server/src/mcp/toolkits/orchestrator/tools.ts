@@ -88,7 +88,7 @@ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
 
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Start one child agent with only `task`. No parent history. With the environment owner?s Full access launch setting enabled, Auto threads may explicitly request `runtimeMode: full-access`. A linked delegate also requires the setting on the destination and a Full access link. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. No secrets in `task`.",
+    "Start one child with `task` and no parent history. Auto may request `runtimeMode: full-access` with owner opt-in. Linked tasks need both opt-ins and a Full access link. Separate checkout or PR: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`. No secrets in `task`.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,

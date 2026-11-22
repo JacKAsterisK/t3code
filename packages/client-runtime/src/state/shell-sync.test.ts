@@ -1172,6 +1172,10 @@ describe("environment shell cold start", () => {
     environment: { serverVersion: "1.0.0" },
   };
   const FAMILY_FLAGS = { omitIdleSubagents: true, omitOlderSettled: true };
+  const PIN_AWARE_DESCRIPTOR = {
+    ...FAMILY_DESCRIPTOR,
+    capabilities: { ...FAMILY_DESCRIPTOR.capabilities, shellKeepsPinnedSubagents: true },
+  };
 
   const makeColdStart = Effect.fn("test.makeColdStartShell")(function* (
     origin: Persistence.ShellCacheOrigin | undefined,
@@ -1180,6 +1184,7 @@ describe("environment shell cold start", () => {
     // that applies its answer, which an interrupt has to wait for.
     early?: {
       readonly serverResumes: boolean;
+      readonly descriptor?: ExecutionEnvironmentDescriptor;
       readonly holdLoads?: boolean | "uninterruptible";
     },
   ) {
@@ -1219,7 +1224,11 @@ describe("environment shell cold start", () => {
       early === undefined ? Option.some(session(client)) : Option.none<RpcSession.RpcSession>(),
     );
     const prepared = yield* SubscriptionRef.make(
-      Option.some(early === undefined ? PREPARED : { ...PREPARED, descriptor: FAMILY_DESCRIPTOR }),
+      Option.some(
+        early === undefined
+          ? PREPARED
+          : { ...PREPARED, descriptor: early.descriptor ?? FAMILY_DESCRIPTOR },
+      ),
     );
     const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
       target: TARGET,
@@ -1392,6 +1401,15 @@ describe("environment shell cold start", () => {
       subscribes: { afterSequence: CACHED_SEQUENCE, httpSnapshotFallback: true },
     },
     {
+      label: "a cache from before the server kept pinned idle subagents",
+      origin: { ...RECENT_ORIGIN, ...FAMILY_FLAGS },
+      serverResumes: true,
+      descriptor: PIN_AWARE_DESCRIPTOR,
+      config: { ...FAMILY_CONFIG, environment: PIN_AWARE_DESCRIPTOR },
+      loads: [FAMILY_FLAGS],
+      subscribes: { afterSequence: HTTP_SEQUENCE, knownProjectIdentities: "identities-1" },
+    },
+    {
       label: "rows the server cannot replay from",
       origin: { ...RECENT_ORIGIN, ...FAMILY_FLAGS },
       serverResumes: false,
@@ -1420,9 +1438,12 @@ describe("environment shell cold start", () => {
     },
   ])(
     "asks for the shell once the connection is prepared, with $label",
-    ({ origin, serverResumes, config, loads, subscribes, expires }) =>
+    ({ origin, serverResumes, descriptor, config, loads, subscribes, expires }) =>
       Effect.gen(function* () {
-        const h = yield* makeColdStart(origin, { serverResumes });
+        const h = yield* makeColdStart(origin, {
+          serverResumes,
+          ...(descriptor === undefined ? {} : { descriptor }),
+        });
         expect(yield* Queue.take(h.loadOptions)).toEqual(loads[0]);
         if (!serverResumes) {
           // The rows are on screen before a socket exists, and are not live yet.

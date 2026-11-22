@@ -132,7 +132,7 @@ const ProjectCloneTool = Tool.make("t3_project_clone", {
 const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   ...shared,
   description:
-    "Create one new top-level thread, bound to its workspace before the agent starts. Task in `message`. Omit `projectId`, model and modes to inherit yours (outside a thread, pass `projectId` or `scratch`). With the environment owner?s Full access launch setting enabled, Auto threads may explicitly request `runtimeMode: full-access`. A linked launch also requires the setting on the destination and a Full access link. After an error or lost reply, retry with the same `clientRequestId`. Follow it with `t3_thread_read` or `t3_thread_wait`. Mention it with its `link`.",
+    "Launch a top-level thread bound to its workspace. Task in `message`. Omit project, model and modes to inherit (outside a thread, give `projectId` or `scratch`). Auto may request `runtimeMode: full-access` with owner opt-in. Linked launches need both opt-ins and a Full access link. Retry with the same `clientRequestId`. Follow with `t3_thread_read` or `t3_thread_wait` and cite its `link`.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: Schema.optional(ProjectId),

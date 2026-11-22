@@ -21,6 +21,7 @@ export const ShellCacheOrigin = Schema.Struct({
   serverVersion: Schema.String,
   databaseMigration: Schema.NullOr(Schema.Int),
   omitIdleSubagents: Schema.Boolean,
+  keepsPinnedSubagents: Schema.optionalKey(Schema.Boolean),
   omitOlderSettled: Schema.Boolean,
   /** Epoch milliseconds of that snapshot; replay does not renew it. */
   snapshotAt: Schema.Number,

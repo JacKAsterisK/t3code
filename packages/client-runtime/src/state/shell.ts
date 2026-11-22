@@ -113,7 +113,8 @@ interface ShellSubscription {
 }
 
 function shellIdentity(
-  environment: Pick<ExecutionEnvironmentDescriptor, "serverVersion" | "databaseMigration">,
+  environment: Pick<ExecutionEnvironmentDescriptor, "serverVersion" | "databaseMigration"> &
+    Partial<Pick<ExecutionEnvironmentDescriptor, "capabilities">>,
   flags: { readonly shellThreadFamilies?: boolean; readonly shellOlderSettled?: boolean },
   includeIdleSubagents: boolean,
 ): ShellOriginIdentity {
@@ -123,6 +124,9 @@ function shellIdentity(
     // Migrations rewrite projections without events, so a migrated server reloads.
     databaseMigration: environment.databaseMigration ?? null,
     omitIdleSubagents,
+    ...(omitIdleSubagents && environment.capabilities?.shellKeepsPinnedSubagents === true
+      ? { keepsPinnedSubagents: true }
+      : {}),
     omitOlderSettled: flags.shellOlderSettled === true && omitIdleSubagents,
   };
 }
@@ -146,6 +150,7 @@ function sameShellIdentity(left: ShellOriginIdentity, right: ShellOriginIdentity
     left.serverVersion === right.serverVersion &&
     left.databaseMigration === right.databaseMigration &&
     left.omitIdleSubagents === right.omitIdleSubagents &&
+    (left.keepsPinnedSubagents === true) === (right.keepsPinnedSubagents === true) &&
     left.omitOlderSettled === right.omitOlderSettled
   );
 }

@@ -422,6 +422,9 @@ describe("project settings permissions", () => {
   it("moves a draft on the removed checkout to a remaining checkout of the group", async () => {
     setup();
     const draftId = DraftId.make("draft-handed-off");
+    using _draft = {
+      [Symbol.dispose]: () => useComposerDraftStore.getState().clearDraftThread(draftId),
+    };
     const [primaryProject, remoteProject] = state.projects;
     const drafts = useComposerDraftStore.getState();
     drafts.setLogicalProjectDraftThreadId(

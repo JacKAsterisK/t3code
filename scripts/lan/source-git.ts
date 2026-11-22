@@ -105,6 +105,12 @@ export const APPROVED_NONBUILD_SOURCE_ENTRIES = Object.freeze([
     mode: "160000" as const,
     blob: "493909133db04153348eabc503f4e30cf0033d96",
   }),
+  // The Windows LAN package never builds the Expo module?s iOS Swift sources.
+  Object.freeze({
+    path: "apps/mobile/modules/t3-voice-transcription/ios/AppleSpeechEngine.swift",
+    mode: "120000" as const,
+    blob: "8c54186f2ac733a69b31bb9590ff4bcec2fe447d",
+  }),
 ]);
 export interface SourceSnapshotExclusion {
   readonly path: string;

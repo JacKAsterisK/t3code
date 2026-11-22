@@ -1074,6 +1074,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           "node_modules/node-pty/prebuilds/win32-x64/pty.node",
           "node_modules/node-pty/prebuilds/win32-x64/conpty/OpenConsole.exe",
           "node_modules/ffi-rs/index.js",
+          "node_modules/runtime-fixture/patches/runtime.json",
           "node_modules/@yuuang/ffi-rs-win32-x64-msvc/ffi-rs.win32-x64-msvc.node",
         ];
         const removed = [
@@ -1084,7 +1085,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           "node_modules/.modules.yaml",
           "node_modules/.pnpm-workspace-state-v1.json",
         ];
-        for (const relative of [...kept, ...removed]) {
+        const installPatch = "patches/ffi-rs.patch";
+        for (const relative of [...kept, ...removed, installPatch]) {
           const contents =
             relative.endsWith(".node") || relative.endsWith(".exe") ? "MZ" : relative;
           for (const root of [sourceDir, repoRoot]) {
@@ -1100,6 +1102,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           lanStage: { stageRoot, repoRoot },
         };
         yield* packWindowsServerAsar(input);
+        assert.isTrue(yield* fs.exists(path.join(sourceDir, installPatch)));
+        assert.throws(() => extractFile(input.asarPath, path.join(...installPatch.split("/"))));
         for (const relative of removed) {
           assert.isFalse(yield* fs.exists(path.join(sourceDir, relative)), relative);
           assert.isTrue(yield* fs.exists(path.join(repoRoot, relative)), relative);

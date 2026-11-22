@@ -3556,7 +3556,11 @@ export const packWindowsServerAsar = Effect.fn("packWindowsServerAsar")(function
         // glob 13 (@electron/asar 4) resolves ignores against cwd; anchor them at the source.
         globOptions: {
           cwd: input.sourceDir,
-          ignore: resolveWindowsServerAsarIgnoreGlobs(input.arch),
+          ignore: [
+            ...resolveWindowsServerAsarIgnoreGlobs(input.arch),
+            // pnpm already applied the stage-root patches to the runtime dependencies.
+            ...(input.lanStage === undefined ? [] : ["patches", "patches/**"]),
+          ],
         },
       }),
     catch: (cause) => new WindowsServerSidecarPackError({ asarPath: input.asarPath, cause }),

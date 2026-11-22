@@ -418,7 +418,15 @@ describe("source file scroll", () => {
       };
 
       await using screen = await render(
-        <div style={{ width: 560, height: 400, display: "flex", flexDirection: "column" }}>
+        <div
+          style={{
+            marginTop: 80,
+            width: 560,
+            height: 400,
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
           {filePreview("notes.md")}
         </div>,
       );
@@ -476,8 +484,14 @@ describe("source file scroll", () => {
       );
       await mouse("mousePressed", startX, startRect.top + 5);
       await anchored;
-      await mouse("mouseMoved", startRect.left + 80, nearEdgeY);
-      await mouse("mouseMoved", startRect.left + 80, outsideEdgeY);
+      if (direction === "up") {
+        // Exercise the editor's selection recovery independently of native
+        // Chromium autoscroll, which varies by host.
+        scroller.scrollTop -= 2200;
+      } else {
+        await mouse("mouseMoved", startRect.left + 80, nearEdgeY);
+        await mouse("mouseMoved", startRect.left + 80, outsideEdgeY);
+      }
       await vi.waitFor(() => {
         const firstMounted = Number(rows()[0]?.getAttribute("data-line"));
         if (direction === "down") {
@@ -486,7 +500,23 @@ describe("source file scroll", () => {
           expect(firstMounted).toBeLessThanOrEqual(targetFirstMounted);
         }
       });
-      await mouse("mouseReleased", startRect.left + 80, outsideEdgeY);
+      if (direction === "up") {
+        const mountedRows = [...rows()];
+        expect(mountedRows).not.toContain(startRow);
+        const earlierText = mountedRows
+          .find((row) => Number(row.getAttribute("data-line")) === expectedIncludedLine - 1)
+          ?.querySelector("[data-char]")?.firstChild;
+        expect(earlierText).toBeDefined();
+        window.getSelection()!.collapse(earlierText!, 0);
+        await vi.waitFor(() =>
+          expect(shadowRoot()!.querySelectorAll("[data-selection-range]").length).toBeGreaterThan(
+            0,
+          ),
+        );
+        await mouse("mouseReleased", startX, nearEdgeY);
+      } else {
+        await mouse("mouseReleased", startRect.left + 80, outsideEdgeY);
+      }
 
       const overlayRanges = shadowRoot()!.querySelectorAll("[data-selection-range]");
       expect(overlayRanges.length).toBeGreaterThan(0);

@@ -39,7 +39,8 @@ approval before code or runtime changes.
 - In Settings ? Connections, the environment owner can enable **Allow Auto
   threads to start Full access threads**. The default is off. Local agents must
   request Full access explicitly. A linked launch or delegate requires the
-  policy on both environments and a Full access link. The administrator's
+  policy on both environments, a Full access link and peer support for the
+  owner-policy request. The administrator's
   runtime ceiling still applies.
 - Assisted Full access launches record the requesting thread, Auto and Full
   access modes, and the owner policy in the child creation event. The child

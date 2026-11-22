@@ -25,6 +25,7 @@ import {
 import { hasPendingBackgroundSubagent } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
 import { ServerSettingsService } from "../serverSettings.ts";
 import { THREAD_ID_INPUT_FORMS } from "@t3tools/shared/threadLinks";
@@ -222,9 +223,10 @@ export const threadCreationRuntimeLimit = Effect.fn("mcp.threadCreationRuntimeLi
   caller?: Pick<OrchestrationV2ThreadShell, "linkOrigin">,
 ) {
   if (runtimeMode !== "auto" || requested !== "full-access") return runtimeMode;
-  const service = yield* ServerSettingsService;
-  const settings = yield* service.getSettings.pipe(Effect.orElseSucceed(() => undefined));
-  const ceiling = service.managedPolicy?.limits?.maxRuntimeMode;
+  const service = yield* Effect.serviceOption(ServerSettingsService);
+  if (Option.isNone(service)) return runtimeMode;
+  const settings = yield* service.value.getSettings.pipe(Effect.orElseSucceed(() => undefined));
+  const ceiling = service.value.managedPolicy?.limits?.maxRuntimeMode;
   if (
     settings?.allowAgentFullAccessLaunches !== true ||
     (ceiling !== undefined && ceiling !== "full-access")

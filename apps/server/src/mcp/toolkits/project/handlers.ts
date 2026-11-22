@@ -5,6 +5,7 @@ import {
   ThreadId,
   OrchestratorMcpFailure,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
+  LINKED_OWNER_POLICY_FULL_ACCESS,
   ProjectId,
   type Project as ProjectRecord,
   type ServerProvider,
@@ -35,7 +36,6 @@ import {
   resolveProjectSettings,
 } from "@t3tools/shared/projectSettings";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
-import { runtimeModeEscalationForLaunch } from "../../threadAccess.ts";
 import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
@@ -203,8 +203,13 @@ const withSavedDefaultModel = Effect.gen(function* () {
 
 export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   t3_thread_launch: McpToolAccess.startsThreads(
-    (input) => input,
-    (input, { runtimeMode, interactionMode, linkOrigin }) =>
+    (input) => ({
+      ...input,
+      runtimeMode:
+        input.runtimeMode === LINKED_OWNER_POLICY_FULL_ACCESS ? "full-access" : input.runtimeMode,
+      linkedOwnerPolicyRequest: input.runtimeMode === LINKED_OWNER_POLICY_FULL_ACCESS,
+    }),
+    (input, { runtimeMode, interactionMode, linkOrigin, runtimeModeEscalation }) =>
       Effect.gen(function* () {
         const scope = yield* McpInvocationContext.McpInvocationContext;
         const context = yield* readCaller();
@@ -398,19 +403,17 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             : runtimeMode;
         if (!replaying) {
           const providers = yield* (yield* ProviderRegistry.ProviderRegistry).getProviders;
-          startedRuntimeMode = yield* resolveRuntimeMode(startedRuntimeMode, input.runtimeMode, {
-            modelSelection,
-            supportedRuntimeModes: providers.find(
-              (provider) => provider.instanceId === modelSelection.instanceId,
-            )?.supportedRuntimeModes,
-          });
+          startedRuntimeMode = yield* resolveRuntimeMode(
+            startedRuntimeMode,
+            input.runtimeMode === undefined ? undefined : runtimeMode,
+            {
+              modelSelection,
+              supportedRuntimeModes: providers.find(
+                (provider) => provider.instanceId === modelSelection.instanceId,
+              )?.supportedRuntimeModes,
+            },
+          );
         }
-        const runtimeModeEscalation = runtimeModeEscalationForLaunch(
-          scope,
-          context.limits.runtimeMode,
-          startedRuntimeMode,
-          caller,
-        );
         const result = yield* ThreadMessageIntake.launchThread({
           commandId,
           threadId,

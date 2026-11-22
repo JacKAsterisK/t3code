@@ -4,6 +4,8 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
+  LINKED_OWNER_POLICY_FULL_ACCESS,
+  RuntimeMode,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShell,
   type SourceControlCloneRepositoryInput,
@@ -19,6 +21,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/ai";
 
@@ -42,11 +45,13 @@ import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
+import { PeerMcpClient } from "./PeerMcpClient.ts";
 import * as PeerLinkRequests from "./PeerLinkRequests.ts";
 import { descriptorOf, layerLinkingEnvironment, linkTo, servePeer } from "./PeerLinks.testkit.ts";
 
 const laptop = descriptorOf("environment-laptop", "Laptop");
 const box = descriptorOf("environment-box", "Box");
+const isLegacyRuntimeMode = Schema.is(RuntimeMode);
 const boxProject = ProjectId.make("project:box");
 const boxThread = ThreadId.make("thread:box-auto");
 const boxRun = RunId.make("run:box-auto");
@@ -386,6 +391,7 @@ const makeLaptop = Effect.gen(function* () {
   return {
     links: Context.get(linking, PeerLinks.PeerLinks),
     settings: Context.get(linking, ServerSettings.ServerSettingsService),
+    peerClient: Context.get(linking, PeerMcpClient),
     call,
   };
 });
@@ -637,6 +643,28 @@ it.effect.each([false, true])(
           runtimeMode: "full-access",
         };
         const autoCaller = "thread:laptop-auto";
+        // Old receivers only accept the original RuntimeMode enum.
+        expect(isLegacyRuntimeMode(LINKED_OWNER_POLICY_FULL_ACCESS)).toBe(false);
+        if (allowed) {
+          // Simulate a legacy sender talking to the real receiver over an approved link.
+          const legacy = yield* a.peerClient
+            .call({
+              environmentId: box.environmentId,
+              tool: "t3_thread_launch",
+              arguments: requested,
+              limits: { runtimeMode: "auto", interactionMode: "default" },
+              writes: true,
+              sender: {
+                environmentId: laptop.environmentId,
+                threadId: ThreadId.make(autoCaller),
+                title: "Auto",
+              },
+              success: Schema.Struct({ threadId: ThreadId }),
+            })
+            .pipe(Effect.flip);
+          expect(legacy.code).toBe("runtime_mode_escalation_denied");
+          expect((yield* Ref.get(seen)).launches).toEqual([]);
+        }
         const explicit = yield* a.call(autoCaller, "t3_thread_launch", requested);
         if (allowed) {
           expect(failureOf(explicit)).toBeUndefined();
@@ -885,10 +913,11 @@ it.effect("refuses a launch there above the link's access, naming the link", () 
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
       const a = yield* makeLaptop;
+      yield* a.settings.updateSettings({ allowAgentFullAccessLaunches: true });
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
-      // An Auto agent here can request Full access, subject to the destination's approval.
+      // Source policy permits the request so this case exercises the link ceiling.
       const launchAboveLink = a.call("thread:laptop-auto", "t3_thread_launch", {
         environmentId: box.environmentId,
         projectId: boxProject,

@@ -10,6 +10,7 @@ import {
   OrchestratorMcpThreadWaitResult,
   type PeerLinkError,
   RuntimeMode,
+  LINKED_OWNER_POLICY_FULL_ACCESS,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -23,10 +24,11 @@ import type * as Tool from "effect/ai/Tool";
 import * as ApprovalAuthority from "../auth/ApprovalAuthority.ts";
 import { initiatingClientForForward } from "../approvals/ApprovalLaunchProvenance.ts";
 import * as Option from "effect/Option";
-import { runtimeModeRank } from "../mcp/delegatedTaskModes.ts";
+import { resolveRuntimeMode, runtimeModeRank } from "../mcp/delegatedTaskModes.ts";
 import { assertNotLinked } from "../mcp/linkOrigin.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
-import { readCaller, unavailable } from "../mcp/threadAccess.ts";
+import { readCaller, threadCreationRuntimeLimit, unavailable } from "../mcp/threadAccess.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
@@ -104,6 +106,7 @@ export const remoteTarget = (scope: Scope, environmentId: EnvironmentId | undefi
   environmentId === scope.environmentId ? undefined : environmentId;
 
 const make = Effect.gen(function* () {
+  const serverSettings = yield* Effect.serviceOption(ServerSettingsService);
   const peers = yield* PeerMcpClient.PeerMcpClient;
   const approvalAuthority = yield* Effect.serviceOption(ApprovalAuthority.ApprovalAuthority);
   const links = yield* PeerLinks.PeerLinks;
@@ -172,6 +175,15 @@ const make = Effect.gen(function* () {
     ).pipe(Effect.mapError(unavailable))) as Record<string, unknown>;
     const { environmentId: _target, ...args } = encoded;
     yield* assertWithinLinkAccess(environmentId, args.runtimeMode);
+    if (toolName === LAUNCH_TOOL && args.runtimeMode === "full-access") {
+      const runtimeLimit = Option.isSome(serverSettings)
+        ? yield* threadCreationRuntimeLimit(scope, limits.runtimeMode, "full-access", caller).pipe(
+            Effect.provideService(ServerSettingsService, serverSettings.value),
+          )
+        : limits.runtimeMode;
+      yield* resolveRuntimeMode(runtimeLimit, "full-access");
+      if (limits.runtimeMode === "auto") args.runtimeMode = LINKED_OWNER_POLICY_FULL_ACCESS;
+    }
     // A pending upload lives here, so it cannot go with the call.
     if (Array.isArray(args.attachments) && args.attachments.length > 0) {
       return yield* new OrchestratorMcpFailure({

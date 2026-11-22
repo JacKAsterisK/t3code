@@ -255,6 +255,7 @@ function omitIdleSubagentShellsWith(
   return threads.filter(
     (thread) =>
       thread.lineage.relationshipToParent !== "subagent" ||
+      thread.pinnedAt != null ||
       isLiveSubagentShell(thread) ||
       facts.subagentParentIds.has(thread.id) ||
       facts.remoteTaskParentIds.has(thread.id),
@@ -378,6 +379,7 @@ function shellSubscriberThreadIds(
     (entry) =>
       entry.lineage.relationshipToParent === "subagent" &&
       (!options.omitIdleSubagents ||
+        entry.pinnedAt != null ||
         entry.mayBeLive ||
         entry.hasRemoteTasks ||
         facts.subagentParentIds.has(entry.id)),

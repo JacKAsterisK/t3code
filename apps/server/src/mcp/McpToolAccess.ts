@@ -27,7 +27,6 @@ import {
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
-import type { ServerSettingsService } from "../serverSettings.ts";
 import {
   assertFullAccessNamingLink,
   assertNotLinked,
@@ -45,6 +44,7 @@ import {
   readCaller,
   autoThreadFullAccessLimit,
   threadCreationRuntimeLimit,
+  runtimeModeEscalationForLaunch,
   threadMessageLimits,
   unavailable,
 } from "./threadAccess.ts";
@@ -82,11 +82,7 @@ const never = () => false;
  */
 type RemoteCheck<P> = (
   params: P,
-) => Effect.Effect<
-  unknown,
-  OrchestratorMcpFailure,
-  Effect.Services<typeof writingCaller> | ServerSettingsService
->;
+) => Effect.Effect<unknown, OrchestratorMcpFailure, Effect.Services<typeof writingCaller>>;
 let remoteCheckOf: <Handler>(declaration: Declaration<Handler>) => RemoteCheck<never> | undefined;
 
 /** What a call answered in a linked environment does here before it returns. */
@@ -376,6 +372,7 @@ export interface StartedModes {
   readonly interactionMode: ProviderInteractionMode;
   /** The linked environment the caller acts for. The thread must carry it. */
   readonly linkOrigin: OrchestrationV2LinkOrigin | undefined;
+  readonly runtimeModeEscalation: ReturnType<typeof runtimeModeEscalationForLaunch>;
 }
 
 /**
@@ -388,6 +385,7 @@ export const startsThreads = <P, A, E, R>(
   modes: (params: P) => {
     readonly runtimeMode?: RuntimeMode | undefined;
     readonly interactionMode?: ProviderInteractionMode | undefined;
+    readonly linkedOwnerPolicyRequest?: boolean;
   },
   handle: (params: P, modes: StartedModes) => Effect.Effect<A, E, R>,
   linked: "stamped" | { readonly refused: string },
@@ -395,16 +393,37 @@ export const startsThreads = <P, A, E, R>(
 ) => {
   const started = Effect.fn("McpToolAccess.started")(function* (caller: Caller, params: P) {
     const requested = modes(params);
-    const runtimeLimit = allowAutoFullAccess
-      ? yield* threadCreationRuntimeLimit(
-          caller.scope,
-          caller.limits.runtimeMode,
-          requested.runtimeMode,
-          caller.caller,
-        )
-      : caller.limits.runtimeMode;
+    const linked = caller.scope.client?.linked === true;
+    if (
+      requested.linkedOwnerPolicyRequest === true &&
+      (!linked ||
+        caller.limits.runtimeMode !== "auto" ||
+        caller.scope.client?.senderThread === undefined)
+    ) {
+      return yield* new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message:
+          "An owner-policy launch must come from an Auto thread through a linked environment.",
+      });
+    }
+    const runtimeLimit =
+      allowAutoFullAccess && (!linked || requested.linkedOwnerPolicyRequest === true)
+        ? yield* threadCreationRuntimeLimit(
+            caller.scope,
+            caller.limits.runtimeMode,
+            requested.runtimeMode,
+            caller.caller,
+          )
+        : caller.limits.runtimeMode;
+    const runtimeMode = yield* resolveRuntimeMode(runtimeLimit, requested.runtimeMode);
     return {
-      runtimeMode: yield* resolveRuntimeMode(runtimeLimit, requested.runtimeMode),
+      runtimeMode,
+      runtimeModeEscalation: runtimeModeEscalationForLaunch(
+        caller.scope,
+        caller.limits.runtimeMode,
+        runtimeMode,
+        caller.caller,
+      ),
       interactionMode: yield* resolveInteractionMode(
         caller.limits.interactionMode,
         requested.interactionMode,

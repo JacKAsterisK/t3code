@@ -10,6 +10,7 @@ import {
   OrchestrationV2RunStatus,
   OrchestrationV2ThreadLaunchWorkspaceStrategy,
   RuntimeMode,
+  LINKED_OWNER_POLICY_FULL_ACCESS,
   ProviderInteractionMode,
   Project,
   ProjectCreatePayload,
@@ -143,7 +144,9 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     ),
     title: TrimmedNonEmptyString,
     modelSelection: Schema.optional(ModelSelection),
-    runtimeMode: Schema.optional(RuntimeMode),
+    runtimeMode: Schema.optional(
+      Schema.Union([RuntimeMode, Schema.Literal(LINKED_OWNER_POLICY_FULL_ACCESS)]),
+    ),
     interactionMode: Schema.optional(ProviderInteractionMode),
     workspaceStrategy: Schema.optional(
       OrchestrationV2ThreadLaunchWorkspaceStrategy.annotate({

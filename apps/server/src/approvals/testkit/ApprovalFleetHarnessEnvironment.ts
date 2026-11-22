@@ -21,7 +21,6 @@ import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
@@ -509,9 +508,7 @@ export const forwardingLayer = (
     enabled: Effect.succeed(true),
     list: Effect.succeed([]),
     get: (environmentId) =>
-      environmentId === b.env.id
-        ? savedLink.pipe(Effect.map(Option.some))
-        : Effect.succeed(Option.none()),
+      environmentId === b.env.id ? savedLink.pipe(Effect.asSome) : Effect.succeedNone,
     resolve: Effect.fn("ApprovalFleetHarness.resolve")(function* () {
       const stored = yield* savedLink;
       const url = stored.urls[0]!;

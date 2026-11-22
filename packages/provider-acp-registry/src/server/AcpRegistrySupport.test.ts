@@ -1679,7 +1679,7 @@ describe("AcpRegistrySupport", () => {
       const binaryAgent = (version: string) => ({
         ...makeAgent({
           binary: {
-            "linux-x86_64": {
+            [nativePlatformTarget]: {
               archive: `https://registry.test/example-agent-${version}.bin`,
               cmd: "./bin/example-agent",
               args: ["acp"],
@@ -1707,7 +1707,11 @@ describe("AcpRegistrySupport", () => {
         const resolved = yield* resolver.resolve(settings(), "/workspace");
 
         expect(resolved.agent?.version).toBe("1.2.4");
-        expect(resolved.spawn.command).toContain("/tools/example-agent/1.2.4/");
+        expect(resolved.spawn.command).toContain(
+          NodePath.normalize(
+            `/tools/example-agent/1.2.4/${nativePlatformTarget}/bin/example-agent`,
+          ),
+        );
         expect(requests).toContain(registryUrl);
       }).pipe(
         Effect.scoped,

@@ -2731,57 +2731,63 @@ describe("CursorAdapterV2", () => {
     ),
   );
 
-  it.live("honors the user's Cursor CLI attribution preferences", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-attribution-" });
-      yield* fileSystem.makeDirectory(path.join(home, ".cursor"));
-      yield* fileSystem.writeFileString(
-        path.join(home, ".cursor", "cli-config.json"),
-        JSON.stringify({
-          attribution: { attributeCommitsToAgent: false, attributePRsToAgent: false },
-        }),
-      );
-      const backend = yield* fakeCursorBackend;
-      // CURSOR_CONFIG_DIR outranks an ambient XDG_CONFIG_HOME; the home overrides keep the real ~/.cursor out.
-      yield* scopedProcessEnv({
-        HOME: home,
-        USERPROFILE: home,
-        CURSOR_CONFIG_DIR: path.join(home, ".cursor"),
-      });
-      const options = makeCursorAgentOptions({
-        apiKey: "synthetic-cursor-api-key",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("cursor"),
-          model: "composer-2",
-        },
-        runtimePolicy: {
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          cwd: home,
-        },
-        threadId: ThreadId.make("cursor-attribution-thread"),
-        mcpSession: undefined,
-        platform: "linux",
-      });
-      const agent = yield* Effect.acquireRelease(
-        Effect.promise(() =>
-          Agent.create({
-            ...options,
-            // The default SQLite store stays open for the process, which keeps Windows from removing the temp home.
-            local: { ...options.local, store: new JsonlLocalAgentStore(path.join(home, "agents")) },
+  // The SDK also holds a workspace SQLite handle when supplied a JSONL agent store.
+  it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "honors the user's Cursor CLI attribution preferences",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-attribution-" });
+        yield* fileSystem.makeDirectory(path.join(home, ".cursor"));
+        yield* fileSystem.writeFileString(
+          path.join(home, ".cursor", "cli-config.json"),
+          JSON.stringify({
+            attribution: { attributeCommitsToAgent: false, attributePRsToAgent: false },
           }),
-        ),
-        (agent) => Effect.sync(() => agent.close()),
-      );
-      yield* Effect.promise(() => agent.send("Commit hello.txt."));
+        );
+        const backend = yield* fakeCursorBackend;
+        // CURSOR_CONFIG_DIR outranks an ambient XDG_CONFIG_HOME; the home overrides keep the real ~/.cursor out.
+        yield* scopedProcessEnv({
+          HOME: home,
+          USERPROFILE: home,
+          CURSOR_CONFIG_DIR: path.join(home, ".cursor"),
+        });
+        const options = makeCursorAgentOptions({
+          apiKey: "synthetic-cursor-api-key",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("cursor"),
+            model: "composer-2",
+          },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: home,
+          },
+          threadId: ThreadId.make("cursor-attribution-thread"),
+          mcpSession: undefined,
+          platform: "linux",
+        });
+        const agent = yield* Effect.acquireRelease(
+          Effect.promise(() =>
+            Agent.create({
+              ...options,
+              // The default SQLite store stays open for the process, which keeps Windows from removing the temp home.
+              local: {
+                ...options.local,
+                store: new JsonlLocalAgentStore(path.join(home, "agents")),
+              },
+            }),
+          ),
+          (agent) => Effect.sync(() => agent.close()),
+        );
+        yield* Effect.promise(() => agent.send("Commit hello.txt."));
 
-      assert.deepEqual(yield* Deferred.await(backend.requestContext), {
-        commitAttributionMessage: undefined,
-        prAttributionMessage: undefined,
-      });
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+        assert.deepEqual(yield* Deferred.await(backend.requestContext), {
+          commitAttributionMessage: undefined,
+          prAttributionMessage: undefined,
+        });
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   // The real SDK keeps its workspace SQLite store open until process exit on Windows.

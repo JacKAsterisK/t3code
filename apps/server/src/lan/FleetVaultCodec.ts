@@ -8,7 +8,11 @@ export const secretMarker = "T3F1:";
 const secretPrefix = new TextEncoder().encode(secretMarker);
 
 type CredentialReader = {
-  readonly getSecret: () => Uint8Array | null | undefined | Promise<Uint8Array | null | undefined>;
+  readonly getSecret: () =>
+    | ArrayLike<number>
+    | null
+    | undefined
+    | Promise<ArrayLike<number> | null | undefined>;
   readonly getPassword: () => string | null | undefined | Promise<string | null | undefined>;
 };
 
@@ -17,9 +21,9 @@ export const readFleetVaultRecord = (openEntry: () => CredentialReader) =>
     try: async () => {
       const entry = openEntry();
       const result = await entry.getSecret();
-      // Windows can return null for an absent entry despite its TypeScript declaration.
+      // A missing entry is null on the synchronous store and undefined on the async store.
       if (result === undefined || result === null) return undefined;
-      // Native keyring builds can return number[] despite declaring Uint8Array.
+      // Synchronous and asynchronous native bindings expose different byte containers.
       const raw = Uint8Array.from(result);
       if (
         raw.length >= secretPrefix.length &&

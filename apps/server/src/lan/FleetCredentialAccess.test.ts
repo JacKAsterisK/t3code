@@ -492,6 +492,26 @@ it.live("revokes the retired fleet session if the shared folder disappears after
   ),
 );
 
+it.live("leaves healthy links in place when authority persistence temporarily blocks use", () =>
+  withRoutes((handler, { auth, revoke }) =>
+    Effect.gen(function* () {
+      const anvil = yield* anvilFleetSession(auth);
+      expect((yield* mintCode(handler, anvil.token)).status).toBe(200);
+      const links = (yield* auth.listPairingLinks()).map((link) => link.id);
+      expect(links).not.toHaveLength(0);
+      policy = { ...policy, credentialAuthorityReady: false };
+      expect((yield* mintCode(handler, anvil.token)).status).toBe(401);
+      yield* revoke;
+      expect(
+        (yield* auth.listSessions()).some((session) => session.sessionId === anvil.sessionId),
+      ).toBe(true);
+      expect((yield* auth.listPairingLinks()).map((link) => link.id)).toEqual(links);
+      policy = { ...policy, credentialAuthorityReady: true };
+      expect((yield* mintCode(handler, anvil.token)).status).toBe(200);
+    }),
+  ),
+);
+
 it.live("refuses everything from a machine that left or is no longer trusted, and revokes it", () =>
   withRoutes((handler, { auth, revoke }) =>
     Effect.gen(function* () {

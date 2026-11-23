@@ -28,7 +28,12 @@ import * as Semaphore from "effect/Semaphore";
 import type * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as ServerConfig from "../config.ts";
-import { FleetCredentialKeyDigests, type FleetPeer } from "./FleetDelivery.ts";
+import {
+  FleetCredentialKeyDigests,
+  FleetPrivateConfig,
+  validateFleetKeys,
+  type FleetPeer,
+} from "./FleetDelivery.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 
 type Level = FleetAccessLevel;
@@ -745,7 +750,28 @@ const make = Effect.gen(function* () {
           ),
           peers: [],
         });
-  const managed = Boolean(rosterPath) || cache?.credentialAuthorityRevision !== undefined;
+  const privateFile = path.join(config.stateDir, "lan-fleet-private.json");
+  const legacyFleet =
+    rosterPath && cache?.credentialAuthorityRevision === undefined
+      ? yield* readFleetJson(privateFile, FleetPrivateConfig).pipe(
+          Effect.flatMap((legacy) =>
+            Effect.try({
+              try: () => {
+                const self = legacy.peers.find(
+                  (peer) => peer.enabled && peer.machineId === legacy.machineId,
+                );
+                if (legacy.managed === true || self === undefined) return false;
+                validateFleetKeys(legacy, self);
+                return true;
+              },
+              catch: configurationError,
+            }),
+          ),
+          Effect.orElseSucceed(() => false),
+        )
+      : false;
+  const managed =
+    cache?.credentialAuthorityRevision !== undefined || (Boolean(rosterPath) && !legacyFleet);
   const state = yield* SubscriptionRef.make({
     ...stateOf(cache, startup, "standard", false),
     ...(managed ? { credentialAuthorityReady: false } : {}),

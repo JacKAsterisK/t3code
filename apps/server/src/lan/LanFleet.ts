@@ -334,40 +334,66 @@ const make = Effect.gen(function* () {
                   sharedFolder &&
                   recipientReady &&
                   credentialKeyDigest !== undefined &&
-                  sent !== undefined &&
-                  sent.credentialKeyDigest !== credentialKeyDigest
+                  (sent === undefined
+                    ? outgoingExists
+                    : sent.credentialKeyDigest !== credentialKeyDigest)
                 ) {
-                  // Only retire a delivery that this server issued for the superseded credential.
+                  let keepCurrentOffer = false;
                   if (outgoingExists) {
-                    const old = yield* readFleetJson(outFile, Delivery.Delivery);
-                    if (
-                      old.header.deliveryId !== sent.deliveryId ||
-                      old.header.expiresAt !== sent.expiresAt ||
-                      !Delivery.verifyDelivery(
-                        old,
-                        self,
-                        peer,
-                        Math.min(now, old.header.expiresAt - 1),
-                      )
-                    )
-                      return yield* new LanFleetError({ reason: "configuration" });
-                    yield* fs.rename(outFile, outFile + ".obsolete-" + old.header.deliveryId);
-                    outgoingExists = false;
+                    const old = yield* readFleetJson(outFile, Delivery.Delivery).pipe(
+                      Effect.orElseSucceed(() => undefined),
+                    );
+                    const ownPath =
+                      old !== undefined &&
+                      old.header.senderId === self.machineId &&
+                      old.header.recipientId === peer.machineId &&
+                      old.header.purpose === undefined;
+                    if (ownPath) {
+                      // A current grant can reconstruct a lost journal. An offer on this same
+                      // path may have been signed by this issuer's previous key.
+                      keepCurrentOffer =
+                        (yield* Effect.try(() =>
+                          Delivery.verifyDelivery(old, self, peer, now),
+                        ).pipe(Effect.orElseSucceed(() => false))) &&
+                        activeGrant(subject, old.header.expiresAt) !== undefined;
+                      if (!keepCurrentOffer)
+                        outgoingExists = !(yield* fs
+                          .rename(outFile, outFile + ".obsolete-" + old.header.deliveryId)
+                          .pipe(
+                            Effect.as(true),
+                            Effect.orElseSucceed(() => false),
+                          ));
+                    }
+                    if (!keepCurrentOffer && outgoingExists) {
+                      machines.push({
+                        machineId: machine.machineId,
+                        environmentId: machine.environmentId,
+                        label: machine.label,
+                        status: "uncertain",
+                      });
+                      continue;
+                    }
                   }
-                  const grant = activeLinks.find(
-                    (link) =>
-                      link.id === sent?.pairingLinkId &&
-                      Delivery.fleetCredentialSubjectParts(link.subject).subject === legacySubject,
-                  );
-                  if (grant !== undefined) {
-                    yield* auth.revokePairingLink(grant.id);
-                    activeLinks.splice(activeLinks.indexOf(grant), 1);
+                  if (keepCurrentOffer) {
+                    delete journal["sent:" + outgoingKey];
+                    sent = undefined;
+                  } else {
+                    const retiredGrants = activeLinks.filter((link) => {
+                      const parts = Delivery.fleetCredentialSubjectParts(link.subject);
+                      return (
+                        parts.subject === legacySubject && parts.keyDigest !== credentialKeyDigest
+                      );
+                    });
+                    for (const grant of retiredGrants) {
+                      yield* auth.revokePairingLink(grant.id);
+                      activeLinks.splice(activeLinks.indexOf(grant), 1);
+                    }
+                    delete journal["sent:" + outgoingKey];
+                    yield* writeFleetJson(journalFile, journal);
+                    sent = undefined;
+                    recipientConnected = false;
+                    requested.add(peer.machineId);
                   }
-                  delete journal["sent:" + outgoingKey];
-                  yield* writeFleetJson(journalFile, journal);
-                  sent = undefined;
-                  recipientConnected = false;
-                  requested.add(peer.machineId);
                 }
                 let outgoingRejected = false;
                 const access =

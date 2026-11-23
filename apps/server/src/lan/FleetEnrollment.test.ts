@@ -43,6 +43,7 @@ import * as LanFleet from "./LanFleet.ts";
 import * as FleetUsers from "./FleetUsers.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import { FLEET_ROSTER_ENV, WINDOWS_FLEET_SHARE_ROOT } from "./FleetBootstrap.ts";
+import * as Delivery from "./FleetDelivery.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 
 vi.mock("./FleetVault.ts", async (importOriginal) => ({
@@ -379,6 +380,25 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
       }).pipe(Effect.provide(configLayer)),
   );
 
+  it.effect("never recreates revision one over an established fleet owner", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(false, "accessible");
+      yield* f.start();
+      const initial = yield* readFleetJson(f.authorityFile, Authority.FleetAuthority).pipe(
+        Effect.provideService(FileSystem.FileSystem, f.fs),
+      );
+      assert.equal(initial.revision, 1);
+      Authority.verifyAuthority(initial, f.a.record());
+      f.a.replaceRecord({ ...f.a.record()!, lastRevision: 2 });
+      yield* f.fs.remove(f.authorityFile);
+      const beforeSaves = f.a.saves();
+      assert.equal((yield* f.start().pipe(Effect.flip)).reason, "configuration");
+      assert.isFalse(yield* f.fs.exists(f.authorityFile));
+      assert.equal(f.a.record()?.lastRevision, 2);
+      assert.equal(f.a.saves(), beforeSaves);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("does not replace an enrolled identity when its vault is temporarily missing", () =>
     Effect.gen(function* () {
       const f = yield* fixture(false, "accessible");
@@ -584,7 +604,54 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         f.b.replaceRecord({ ...candidate, lastRevision: approved.revision });
         yield* f.b.restart;
         yield* f.sync(f.b, [f.b.environmentId]);
+        const ownerPeer = authority.peers.find((peer) => peer.machineId === owner.machineId)!;
+        const previousIssuer = Authority.generateFleetIdentity(
+          owner.environmentId,
+          owner.fleetId,
+          owner.rootPublicKey,
+          false,
+          { autoPickup: true, access: owner.access },
+          owner.machineId,
+        );
+        const previousIssuerPeer = Authority.identityPeer(
+          previousIssuer,
+          ownerPeer.label,
+          ownerPeer.origin,
+        );
+        const deliveries = f.path.join(f.root, "fleet-deliveries");
+        const offerPath = f.path.join(
+          deliveries,
+          Delivery.deliveryFileName(owner.machineId, prior.machineId) + ".json",
+        );
+        const previousOffer = yield* readFleetJson(offerPath, Delivery.Delivery).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        const olderSignedOffer = Delivery.sealDelivery({
+          config: { ...previousIssuer, peers: [previousIssuerPeer, oldPeer] },
+          sender: previousIssuerPeer,
+          recipient: oldPeer,
+          deliveryId: previousOffer.header.deliveryId,
+          expiresAt: previousOffer.header.expiresAt,
+          credential: "synthetic-retired-offer",
+        });
+        assert.isFalse(Delivery.verifyDelivery(olderSignedOffer, ownerPeer, oldPeer, now));
+        yield* writeFleetJson(offerPath, {
+          ...olderSignedOffer,
+          header: { ...olderSignedOffer.header, senderId: "unrelated" },
+        }).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+        const uncertain = yield* f.sync(f.a, [f.a.environmentId]);
+        assert.equal(
+          uncertain.machines.find((machine) => machine.machineId === prior.machineId)?.status,
+          "uncertain",
+        );
+        assert.isTrue(yield* f.fs.exists(offerPath));
+        yield* writeFleetJson(offerPath, olderSignedOffer).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
         yield* f.sync(f.a, [f.a.environmentId]);
+        assert.isTrue(
+          yield* f.fs.exists(offerPath + ".obsolete-" + previousOffer.header.deliveryId),
+        );
         const renewed = (yield* f.sync(f.b, [f.b.environmentId])).incoming.find(
           (delivery) => delivery.environmentId === f.a.environmentId,
         );

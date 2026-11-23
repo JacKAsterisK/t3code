@@ -508,8 +508,9 @@ const make = Effect.gen(function* () {
                       return yield* configurationError();
                     if (
                       input.operation === "start" &&
-                      fresh.authority !== undefined &&
-                      fresh.record?.rootPrivateKey === undefined
+                      (fresh.authority === undefined
+                        ? (fresh.record?.lastRevision ?? 0) > 1
+                        : fresh.record?.rootPrivateKey === undefined)
                     )
                       return yield* configurationError();
                     if (

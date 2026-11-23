@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off -- the test signs a readiness marker as another machine would.
 import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { FLEET_ROSTER_ENV } from "./FleetBootstrap.ts";
 import { describe, expect, it } from "@effect/vitest";
 import { ORCHESTRATION_V2_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -1213,6 +1215,31 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
         );
       }).pipe(Effect.provide(configLayer)),
   );
+  it.effect("an explicit roster path does not block a verified private-file fleet at startup", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const stateDir = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-legacy-fleet-state-" });
+      const path = yield* Path.Path;
+      const makeService = f.machine(stateDir).pipe(
+        Effect.provideService(HostProcess.Environment, {
+          [FLEET_ROSTER_ENV]: path.join(f.root, "roster.json"),
+        }),
+      );
+      expect((yield* (yield* makeService).current).credentialAuthorityReady).toBe(false);
+
+      const legacy: Delivery.FleetPrivateConfig = {
+        version: 1,
+        machineId: f.cryo.peer.machineId,
+        autoPickup: false,
+        signingPrivateKey: f.cryo.signingPrivateKey,
+        encryptionPrivateKey: f.cryo.encryptionPrivateKey,
+        peers: [f.cryo.peer, f.anvil.peer],
+      };
+      yield* writeFleetJson(path.join(stateDir, "lan-fleet-private.json"), legacy);
+      expect((yield* (yield* makeService).current).credentialAuthorityReady).toBeUndefined();
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect(
     "keeps the latest fleet credential generation across delayed refreshes and restart",
     () =>

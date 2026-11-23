@@ -39,6 +39,8 @@ export class FleetCredentialAccess extends Context.Service<
   {
     /** The limit for a credential's subject; undefined when no fleet machine is behind it. */
     readonly limit: (subject: string, taskGrant: boolean) => Effect.Effect<Limit | undefined>;
+    /** A temporary lack of authority blocks use but does not authorize deleting healthy credentials. */
+    readonly revocationLimit: (subject: string) => Effect.Effect<Limit | undefined>;
     readonly scopes: CredentialAttribution.CredentialAccessCap["Service"]["scopes"];
     readonly administersFleet: CredentialAttribution.CredentialAccessCap["Service"]["administersFleet"];
     /** The machines a full trust check last found; anything outside them is refused. */
@@ -124,6 +126,15 @@ const make = Effect.gen(function* () {
 
   const limit: FleetCredentialAccess["Service"]["limit"] = (subject, taskGrant) =>
     attribution(subject, taskGrant).pipe(Effect.map(({ level }) => level));
+
+  const revocationLimit: FleetCredentialAccess["Service"]["revocationLimit"] = (subject) =>
+    attribution(subject, false).pipe(
+      Effect.map(({ state, level }) => {
+        const root = CredentialAttribution.attributionRoot(subject);
+        if (root !== undefined && isRetired(root, state)) return "none";
+        return state.credentialAuthorityReady === false ? undefined : level;
+      }),
+    );
 
   const administersFleet: FleetCredentialAccess["Service"]["administersFleet"] = (credential) =>
     attribution(credential.subject, credential.taskGrant === true).pipe(
@@ -225,6 +236,7 @@ const make = Effect.gen(function* () {
 
   return FleetCredentialAccess.of({
     limit,
+    revocationLimit,
     scopes,
     administersFleet,
     setTrusted: Effect.fn("FleetCredentialAccess.setTrusted")((machineIds) =>
@@ -279,7 +291,7 @@ export const revokeExcess = Effect.fn("FleetCredentialAccess.revokeExcess")(func
     const root = CredentialAttribution.attributionRoot(credential.subject);
     if (root === undefined) return false;
     if (fleet === undefined) return isRetired(root, accepted);
-    const allowed = yield* access.limit(credential.subject, false);
+    const allowed = yield* access.revocationLimit(credential.subject);
     if (allowed === undefined) return false;
     if (allowed === "none") return true;
     return (

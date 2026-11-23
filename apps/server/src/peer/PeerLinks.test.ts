@@ -912,6 +912,23 @@ it.effect("names an untrusted certificate instead of calling the peer something 
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("requires pinned transport for a retained link of unknown provenance", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const a = yield* makeA(laptop);
+      const b = yield* serveB(box);
+      const pairing = yield* b.auth.issuePairingCredential();
+      yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      expect((yield* a.links.resolve(box.environmentId)).url).toBe(b.url);
+      yield* a.sql`UPDATE peer_environment_links SET provenance = 'unknown'
+        WHERE environment_id = ${box.environmentId}`;
+      const unavailable = yield* a.links.resolve(box.environmentId).pipe(Effect.flip);
+      expect(unavailable.reason).toBe("unreachable");
+      expect(unavailable.message).toContain("approved fleet TLS pin");
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it("reads Node's TLS verification code from anywhere in a cause chain", () => {
   for (const code of [
     "DEPTH_ZERO_SELF_SIGNED_CERT",

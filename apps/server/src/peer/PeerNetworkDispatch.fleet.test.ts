@@ -123,9 +123,15 @@ it.live(
       assert.equal(yield* Ref.get(dns.count), receiver.received.length);
       const beforeTrustLoss = yield* Ref.get(dns.count);
       yield* trust.replace([]);
+      activeAuthorization = { ...authorization, generation: "after-pin-loss" };
+      const uncachedDiscovery = discovery
+        .require(activeAuthorization)
+        .pipe(Effect.provideService(Network.NetworkOptions, dns.options));
+      assert.equal((yield* Effect.result(uncachedDiscovery))._tag, "Failure");
       assert.equal((yield* Effect.result(call))._tag, "Failure");
       assert.equal(yield* Ref.get(dns.count), beforeTrustLoss);
       yield* trust.replace([identity]);
+      yield* uncachedDiscovery;
       yield* call;
       const rotated = createFleetTlsCertificate({
         address: "127.0.0.1",

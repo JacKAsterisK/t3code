@@ -698,6 +698,7 @@ const make = Effect.gen(function* () {
       );
       return yield* status;
     },
+    (effect) => (Option.isSome(transport) ? transport.value.serializeSetup(effect) : effect),
     Effect.mapError(translate),
     Effect.provideService(FileSystem.FileSystem, fs),
   );
@@ -740,48 +741,43 @@ const make = Effect.gen(function* () {
       return yield* new LanFleetError({ reason: "unavailable" });
     if (Option.isSome(transport) && repairTarget(current) !== undefined) {
       const service = transport.value;
-      yield* Effect.acquireUseRelease(
-        fs
-          .makeDirectory(setupLock)
-          .pipe(Effect.mapError(() => new LanFleetError({ reason: "busy" }))),
-        () =>
-          Effect.gen(function* () {
-            // Explicit transport changes use this same lock. Re-read before publishing anything.
-            const latest = yield* load();
-            const target = latest === undefined ? undefined : repairTarget(latest);
-            if (target === undefined) return;
-            const { record, local, own, requestsDirectory } = target;
-            let repaired = record;
-            if (record.tls !== undefined) {
-              const approved = Effect.gen(function* () {
-                const observed = yield* load();
-                if (!observed?.rosterAvailable || observed.authority === undefined)
-                  return yield* new LanFleetError({ reason: "unavailable" });
-                const fresh = repairTarget(observed);
-                return (
-                  fresh !== undefined &&
-                  Authority.peerVerificationCode(fresh.own) === Authority.peerVerificationCode(own)
-                );
-              }).pipe(Effect.mapError(translate), Effect.provideService(FileSystem.FileSystem, fs));
-              if (!(yield* service.restore(record, approved))) return;
-            } else {
-              if (
-                (yield* endpoints.resolve()).some((endpoint) =>
-                  endpoint.httpBaseUrl.startsWith("https://"),
-                )
+      yield* service.serializeSetup(
+        Effect.gen(function* () {
+          // Serialize with local setup without leaving a lock behind if the server exits.
+          const latest = yield* load();
+          const target = latest === undefined ? undefined : repairTarget(latest);
+          if (target === undefined) return;
+          const { record, local, own, requestsDirectory } = target;
+          let repaired = record;
+          if (record.tls !== undefined) {
+            const approved = Effect.gen(function* () {
+              const observed = yield* load();
+              if (!observed?.rosterAvailable || observed.authority === undefined)
+                return yield* new LanFleetError({ reason: "unavailable" });
+              const fresh = repairTarget(observed);
+              return (
+                fresh !== undefined &&
+                Authority.peerVerificationCode(fresh.own) === Authority.peerVerificationCode(own)
+              );
+            }).pipe(Effect.mapError(translate), Effect.provideService(FileSystem.FileSystem, fs));
+            if (!(yield* service.restore(record, approved))) return;
+          } else {
+            if (
+              (yield* endpoints.resolve()).some((endpoint) =>
+                endpoint.httpBaseUrl.startsWith("https://"),
               )
-                return;
-              repaired = { ...record, tls: yield* service.prepare(local.origin), tlsEnabled: true };
-              yield* service.persist(repaired);
-            }
-            const peer = Authority.identityPeer(repaired, local.label, local.origin);
-            yield* fs.makeDirectory(requestsDirectory, { recursive: true });
-            yield* writeFleetJson(
-              path.join(requestsDirectory, peer.machineId + ".json"),
-              Authority.enrollmentRequest(repaired, peer),
-            );
-          }),
-        () => fs.remove(setupLock, { recursive: true }).pipe(Effect.ignore),
+            )
+              return;
+            repaired = { ...record, tls: yield* service.prepare(local.origin), tlsEnabled: true };
+            yield* service.persist(repaired);
+          }
+          const peer = Authority.identityPeer(repaired, local.label, local.origin);
+          yield* fs.makeDirectory(requestsDirectory, { recursive: true });
+          yield* writeFleetJson(
+            path.join(requestsDirectory, peer.machineId + ".json"),
+            Authority.enrollmentRequest(repaired, peer),
+          );
+        }),
       );
       current = yield* load();
       if (current?.record === undefined || !current.record.enabled) return null;

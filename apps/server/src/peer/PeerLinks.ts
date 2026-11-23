@@ -752,13 +752,23 @@ const make = Effect.gen(function* () {
       const failures = new Map<string, string>();
       const fleet = yield* Effect.serviceOption(Fleet.FleetPeerTrust);
       const trusted = Option.isSome(fleet) ? yield* fleet.value.current : [];
+      // Migration cannot prove that an unclassified historical link was created manually.
+      const requiresFleetPin = row.value.provenance !== "manual";
+      const urls = requiresFleetPin
+        ? link.urls.filter((url) => trusted.some((peer) => peer.origin === url))
+        : link.urls;
+      if (requiresFleetPin && urls.length === 0)
+        return yield* new PeerLinkError({
+          reason: "unreachable",
+          message: "The approved fleet TLS pin for this link is unavailable.",
+        });
       const answered =
-        link.urls.length === 0
+        urls.length === 0
           ? Option.none()
           : yield* Effect.raceAll(
-              link.urls.map((url) =>
+              urls.map((url) =>
                 probe(url).pipe(
-                  Effect.provideService(Fleet.RequireFleetPin, row.value.provenance === "fleet"),
+                  Effect.provideService(Fleet.RequireFleetPin, requiresFleetPin),
                   Effect.map((peer) => {
                     if (peer.environmentId === environmentId) return Option.some({ url, peer });
                     failures.set(
@@ -804,7 +814,7 @@ const make = Effect.gen(function* () {
         link: yield* withLabel(link, peer.label),
         url,
         token: new TextDecoder().decode(stored.value),
-        ...(row.value.provenance === "fleet" ? { requiresFleetPin: true } : {}),
+        ...(requiresFleetPin ? { requiresFleetPin: true } : {}),
         capabilities: peer.capabilities,
       };
     },

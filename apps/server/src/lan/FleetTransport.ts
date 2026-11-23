@@ -29,6 +29,7 @@ export class FleetTransport extends Context.Service<
       origin: string,
       previous?: StoredTls,
     ) => Effect.Effect<StoredTls, LanFleetError>;
+    readonly serializeSetup: <A, E, R>(operation: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
     readonly ready: (record: FleetVaultRecord) => Effect.Effect<boolean>;
     readonly restore: (
       record: FleetVaultRecord,
@@ -52,6 +53,7 @@ const make = Effect.gen(function* () {
   const vault = yield* Vault.FleetVault;
   const network = yield* Network.FleetNetwork;
   const mutex = yield* Semaphore.make(1);
+  const setup = yield* Semaphore.make(1);
   const forwardedMark = NodeCrypto.randomBytes(32).toString("base64url");
   let running: { origin: string; proxy: FleetProxy } | undefined;
   const suggestions = network.addresses.pipe(
@@ -217,6 +219,7 @@ const make = Effect.gen(function* () {
     prepare,
     persist,
     restore,
+    serializeSetup: setup.withPermits(1),
     origin: Effect.sync(() => running?.origin),
     forwarded: (headers) => {
       const mark = Buffer.from(headers[FLEET_TLS_FORWARD_HEADER] ?? "");

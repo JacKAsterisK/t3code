@@ -1,6 +1,8 @@
 // @effect-diagnostics globalJsonInEffect:off -- Only validated acyclic policy snapshots are serialized for change detection.
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- Ed25519 signs only schema-validated policy fields in a canonical order.
 import * as Gate from "../auth/ApprovalAdmissionGate.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { FLEET_ROSTER_ENV } from "./FleetBootstrap.ts";
 import * as NodeCrypto from "node:crypto";
 import {
   AuthDiagnosticsReadScope,
@@ -178,6 +180,7 @@ const LocalCache = Schema.Struct({
   unverified: Schema.optionalKey(Schema.Array(Digest).check(Schema.isMaxLength(10_000))),
   member: Schema.optionalKey(Schema.Boolean),
   credentialKeyDigests: Schema.optionalKey(FleetCredentialKeyDigests),
+  credentialAuthorityRevision: Schema.optionalKey(Schema.Number),
 });
 type LocalCache = typeof LocalCache.Type;
 
@@ -545,6 +548,9 @@ export const credentialAccess = (credential: {
 export interface FleetAccessState {
   /** Latest owner-signed replacement key for each formerly enrolled machine. */
   readonly credentialKeyDigests?: FleetCredentialKeyDigests;
+  readonly credentialAuthorityRevision?: number;
+  /** A restart needs a current authority read before accepting managed fleet credentials. */
+  readonly credentialAuthorityReady?: boolean;
   /** Current verified keys only; absent until a fresh fleet read publishes under admission. */
   readonly approvalTrust?: {
     readonly fleetId: string;
@@ -628,6 +634,7 @@ export const fleetLinksApply = (state: FleetAccessState) =>
 export const mayRevokeForAccess = (state: FleetAccessState) => state.unavailable !== true;
 
 interface FleetAccessInput {
+  readonly credentialAuthorityRevision?: number;
   readonly credentialKeyDigests?: FleetCredentialKeyDigests;
   readonly root: string;
   readonly fleetId: string;
@@ -686,6 +693,7 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;
   const cacheFile = path.join(config.stateDir, "lan-fleet-access.json");
+  const rosterPath = (yield* HostProcess.Environment)[FLEET_ROSTER_ENV];
   const mutex = yield* Semaphore.make(1);
   const readCache = (yield* fs.exists(cacheFile).pipe(Effect.orElseSucceed(() => false)))
     ? yield* readFleetJson(cacheFile, LocalCache).pipe(
@@ -717,6 +725,9 @@ const make = Effect.gen(function* () {
     // A cache from before this version may name one whose ID is reserved; it is never a peer.
     peers: trustedPeers(value?.peers ?? []),
     member: value?.member === true,
+    ...(value?.credentialAuthorityRevision === undefined
+      ? {}
+      : { credentialAuthorityRevision: value.credentialAuthorityRevision }),
     ...(value?.credentialKeyDigests === undefined
       ? {}
       : { credentialKeyDigests: value.credentialKeyDigests }),
@@ -734,7 +745,11 @@ const make = Effect.gen(function* () {
           ),
           peers: [],
         });
-  const state = yield* SubscriptionRef.make(stateOf(cache, startup, "standard", false));
+  const managed = Boolean(rosterPath) || cache?.credentialAuthorityRevision !== undefined;
+  const state = yield* SubscriptionRef.make({
+    ...stateOf(cache, startup, "standard", false),
+    ...(managed ? { credentialAuthorityReady: false } : {}),
+  });
 
   const readShare = Effect.fn("FleetAccess.readShare")(function* (directory: string) {
     if (!(yield* fs.exists(directory))) return [];
@@ -890,13 +905,20 @@ const make = Effect.gen(function* () {
         candidates: [...kept, ...candidates],
         peers: input.peers,
       });
+      const previous = yield* SubscriptionRef.get(state);
       const credentialKeyDigests = {
         ...(own ? cache?.credentialKeyDigests : undefined),
+        ...(previous.approvalTrust?.fleetId === input.fleetId
+          ? previous.credentialKeyDigests
+          : undefined),
         ...input.credentialKeyDigests,
       };
       const next: LocalCache = {
         version: 1,
         ...(Object.keys(credentialKeyDigests).length === 0 ? {} : { credentialKeyDigests }),
+        ...(input.credentialAuthorityRevision === undefined
+          ? {}
+          : { credentialAuthorityRevision: input.credentialAuthorityRevision }),
         fleetId: input.fleetId,
         machineId: input.machineId,
         peers: trustedPeers(input.peers)
@@ -908,15 +930,17 @@ const make = Effect.gen(function* () {
           .map((item) => item.digest),
         member: input.member,
       };
-      if (JSON.stringify(next) !== JSON.stringify(cache)) {
-        yield* writeFleetJson(cacheFile, next).pipe(
-          Effect.tapError((cause) =>
-            Effect.logWarning("Fleet access policy cache could not be saved.", { cause }),
+      const persisted =
+        JSON.stringify(next) === JSON.stringify(cache) ||
+        (yield* writeFleetJson(cacheFile, next).pipe(
+          Effect.as(true),
+          Effect.catch((cause) =>
+            Effect.logWarning("Fleet access policy cache could not be saved.", { cause }).pipe(
+              Effect.as(false),
+            ),
           ),
-          Effect.ignore,
-        );
-        cache = next;
-      }
+        ));
+      if (persisted) cache = next;
       // Any history here or on the share, even history that cannot be followed, is a list.
       const listed =
         accepted.length > 0 ||
@@ -926,7 +950,7 @@ const make = Effect.gen(function* () {
       const readiness = seed._tag === "valid" ? yield* seedReadiness(input) : undefined;
       const updated = {
         ...stateOf(
-          cache,
+          next,
           evaluation,
           input.legacyAccess,
           unavailable || seed._tag === "unavailable",
@@ -935,6 +959,9 @@ const make = Effect.gen(function* () {
             ? undefined
             : { machineIds: readiness.machineIds },
         ),
+        ...(input.credentialAuthorityRevision === undefined
+          ? {}
+          : { credentialAuthorityReady: persisted }),
         approvalTrust: {
           fleetId: input.fleetId,
           peers: trustedPeers(input.peers)
@@ -946,7 +973,6 @@ const make = Effect.gen(function* () {
             })),
         },
       };
-      const previous = yield* SubscriptionRef.get(state);
       if (seed._tag === "invalid" && previous.seed !== "invalid")
         yield* Effect.logWarning(
           `The fleet's starting access list (${SEED_FILE}) cannot be used; nothing links until it is fixed or removed, or a list is saved.`,
@@ -1257,21 +1283,34 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const superseded = (input: FleetAccessInput, current: FleetAccessState) =>
+    input.credentialAuthorityRevision !== undefined &&
+    current.credentialAuthorityRevision !== undefined &&
+    input.credentialAuthorityRevision < current.credentialAuthorityRevision &&
+    (current.approvalTrust?.fleetId ?? cache?.fleetId) === input.fleetId;
+
   const refresh = (input: FleetAccessInput) =>
     mutex.withPermits(1)(
-      refreshUnlocked(input).pipe(
-        Effect.flatMap((view) =>
-          view.seed._tag !== "valid"
-            ? endorse(input, view)
-            : view.readiness?.ready === true
-              ? adopt(input, view, view.seed.snapshot)
-              : Effect.succeed(view.state),
-        ),
-      ),
+      Effect.gen(function* () {
+        const current = yield* SubscriptionRef.get(state);
+        if (superseded(input, current)) return current;
+        const view = yield* refreshUnlocked(input);
+        if (view.state.credentialAuthorityReady === false) return view.state;
+        if (view.seed._tag !== "valid") return yield* endorse(input, view);
+        return view.readiness?.ready === true
+          ? yield* adopt(input, view, view.seed.snapshot)
+          : view.state;
+      }),
     );
 
   const change: FleetAccess["Service"]["change"] = (input) =>
-    mutex.withPermits(1)(changeUnlocked(input));
+    mutex.withPermits(1)(
+      Effect.gen(function* () {
+        if (superseded(input, yield* SubscriptionRef.get(state)))
+          return yield* configurationError();
+        return yield* changeUnlocked(input);
+      }),
+    );
 
   const leave = mutex.withPermits(1)(
     Effect.gen(function* () {

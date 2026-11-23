@@ -20,7 +20,7 @@ import * as DirectEndpoints from "../environment/DirectEndpoints.ts";
 import * as Config from "../config.ts";
 import * as Vault from "./FleetVault.ts";
 import * as Authority from "./FleetAuthority.ts";
-import type { FleetPrivateConfig } from "./FleetDelivery.ts";
+import { fleetCredentialKeyFor, type FleetPrivateConfig } from "./FleetDelivery.ts";
 import { resolveFleetBootstrap, trustedFleetShareRoot } from "./FleetBootstrap.ts";
 import { readFleetJson, validateRoster, writeFleetJson, writeFleetRoster } from "./FleetFiles.ts";
 import { secureOrigin } from "./GatewayT3OAuthClient.ts";
@@ -145,7 +145,8 @@ const make = Effect.gen(function* () {
             existing.origin === peer.origin &&
             // A member explicitly signed by the fleet owner may refresh its TLS metadata,
             // but an enrollment file cannot restore the superseded signing or encryption keys.
-            (authority.credentialKeyDigests?.[existing.machineId] === undefined ||
+            (fleetCredentialKeyFor(authority.credentialKeyDigests, existing.machineId) ===
+              undefined ||
               (existing.signingPublicKey === peer.signingPublicKey &&
                 existing.encryptionPublicKey === peer.encryptionPublicKey))
           )
@@ -219,6 +220,7 @@ const make = Effect.gen(function* () {
             legacyAccess: record.access,
             member,
             signingPrivateKey: record.signingPrivateKey,
+            credentialAuthorityRevision: authority.revision,
             ...(authority.credentialKeyDigests === undefined
               ? {}
               : { credentialKeyDigests: authority.credentialKeyDigests }),
@@ -226,6 +228,17 @@ const make = Effect.gen(function* () {
               .filter((machine) => !machine.enabled)
               .map((machine) => machine.machineId),
           });
+    if (
+      accessPolicy !== undefined &&
+      (accessPolicy.credentialAuthorityReady === false ||
+        (accessPolicy.credentialAuthorityRevision !== undefined &&
+          accessPolicy.credentialAuthorityRevision !== authority?.revision) ||
+        Object.entries(accessPolicy.credentialKeyDigests ?? {}).some(
+          ([machineId, digest]) =>
+            fleetCredentialKeyFor(authority?.credentialKeyDigests, machineId) !== digest,
+        ))
+    )
+      return yield* new LanFleetError({ reason: "unavailable" });
     return {
       accessPolicy,
       member,
@@ -451,6 +464,7 @@ const make = Effect.gen(function* () {
                 machineId: record.machineId,
                 peers: current.fleetPeers,
                 legacyAccess: record.access,
+                credentialAuthorityRevision: authority.revision,
                 ...(authority.credentialKeyDigests === undefined
                   ? {}
                   : { credentialKeyDigests: authority.credentialKeyDigests }),
@@ -642,9 +656,16 @@ const make = Effect.gen(function* () {
                       try: () => Authority.verifyEnrollment(request, authority),
                       catch: configurationError,
                     });
+                    const approvedKey = fleetCredentialKeyFor(
+                      authority.credentialKeyDigests,
+                      input.machineId,
+                    );
                     if (
                       Authority.peerVerificationCode(request.peer) !== input.verificationCode ||
                       request.peer.machineId !== input.machineId ||
+                      (approvedKey !== undefined &&
+                        approvedKey !==
+                          Authority.fleetSigningKeyDigest(request.peer.signingPublicKey)) ||
                       // No machine takes an ID that could read as an access-list exception.
                       FleetAccessPolicy.reservedMachineId(input.machineId)
                     )
@@ -722,6 +743,10 @@ const make = Effect.gen(function* () {
                     { ...updated, revision: authority.revision + 1 },
                     record.rootPrivateKey,
                   );
+                  yield* Effect.try({
+                    try: () => Authority.verifyAuthority(signed, record),
+                    catch: configurationError,
+                  });
                   yield* writeFleetJson(fresh.authorityFile, signed);
                   yield* vault.save({ ...record, lastRevision: signed.revision });
                 }),

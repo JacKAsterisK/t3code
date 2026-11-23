@@ -51,19 +51,30 @@ const restrictsAnyone = (state: FleetAccessPolicy.FleetAccessState) =>
   (state.defaultAccess === "read-only" ||
     state.machines.some((machine) => machine.access === "read-only"));
 
+function machineOf(root: string, state: FleetAccessPolicy.FleetAccessState) {
+  if (state.machineId === undefined) return undefined;
+  if (root.startsWith(PEER_LINK_PREFIX)) return root.slice(PEER_LINK_PREFIX.length).split(":")[0];
+  const key = root.slice(FLEET_CREDENTIAL_PREFIX.length);
+  return state.peers.find(
+    (peer) => Delivery.deliveryFileName(state.machineId!, peer.machineId) === key,
+  )?.machineId;
+}
+
+function isRetired(root: string, state: FleetAccessPolicy.FleetAccessState): boolean {
+  const { subject, keyDigest } = Delivery.fleetCredentialSubjectParts(root);
+  const machineId = machineOf(subject, state);
+  const expected =
+    machineId === undefined
+      ? undefined
+      : Delivery.fleetCredentialKeyFor(state.credentialKeyDigests, machineId);
+  return expected !== undefined && expected !== keyDigest;
+}
+
 const make = Effect.gen(function* () {
   const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
   const gate = yield* Gate.ApprovalAdmissionGate;
   const approvalPeers = yield* Effect.serviceOption(ApprovalPeerAccess.ApprovalPeerAccess);
   const trusted = yield* Ref.make<ReadonlySet<string> | undefined>(undefined);
-
-  const machineOf = (root: string, state: FleetAccessPolicy.FleetAccessState) => {
-    if (root.startsWith(PEER_LINK_PREFIX)) return root.slice(PEER_LINK_PREFIX.length).split(":")[0];
-    const key = root.slice(FLEET_CREDENTIAL_PREFIX.length);
-    return state.peers.find(
-      (peer) => Delivery.deliveryFileName(state.machineId!, peer.machineId) === key,
-    )?.machineId;
-  };
 
   /** The machine behind a credential here, and what it may do now. */
   const attribution = Effect.fn("FleetCredentialAccess.attribution")(function* (
@@ -71,8 +82,14 @@ const make = Effect.gen(function* () {
     taskGrant: boolean,
   ) {
     const state = yield* fleetAccess.current;
-    if (state.machineId === undefined) return { state, level: undefined };
     const root = CredentialAttribution.attributionRoot(subject);
+    const unattributedGrant = taskGrant && subject === CredentialAttribution.MCP_CLIENT_SUBJECT;
+    if (
+      ((root !== undefined || unattributedGrant) && state.credentialAuthorityReady === false) ||
+      (unattributedGrant && Object.keys(state.credentialKeyDigests ?? {}).length > 0)
+    )
+      return { state, level: "none" as const };
+    if (state.machineId === undefined) return { state, level: undefined };
     if (root === undefined)
       // A task grant from before grants recorded their approver could be any machine's.
       return {
@@ -91,7 +108,7 @@ const make = Effect.gen(function* () {
       machineId === undefined ||
       // An ID an access-list exception could take is never a machine here, whatever the share says.
       FleetAccessPolicy.reservedMachineId(machineId) ||
-      state.credentialKeyDigests?.[machineId] !== keyDigest ||
+      Delivery.fleetCredentialKeyFor(state.credentialKeyDigests, machineId) !== keyDigest ||
       !state.peers.some((peer) => peer.machineId === machineId) ||
       (trust !== undefined && !trust.has(machineId))
     )
@@ -246,11 +263,13 @@ export const revokeExcess = Effect.fn("FleetCredentialAccess.revokeExcess")(func
   const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
   // Only a full trust check against the share decides that a machine lost its trust.
   const fleet = yield* context.load.pipe(Effect.orElseSucceed(() => undefined));
-  if (fleet === undefined) return;
-  yield* access.setTrusted(new Set(fleet.peers.map(({ peer }) => peer.machineId)));
-  // A policy this pass could not read only caps; it never costs a credential recovery would not
-  // give back. The machines' trust above came from a successful check.
-  const forAccess = FleetAccessPolicy.mayRevokeForAccess(yield* fleetAccess.current);
+  if (fleet !== undefined)
+    yield* access.setTrusted(new Set(fleet.peers.map(({ peer }) => peer.machineId)));
+  const accepted = yield* fleetAccess.current;
+  if (fleet === undefined && accepted.credentialKeyDigests === undefined) return;
+  // An already accepted owner-signed generation can retire a credential during a share outage.
+  // All other revocations still need a complete trust check.
+  const forAccess = FleetAccessPolicy.mayRevokeForAccess(accepted);
   const excess = Effect.fn("FleetCredentialAccess.excess")(function* (
     credential: { readonly subject: string } & Parameters<
       typeof FleetAccessPolicy.credentialAccess
@@ -259,6 +278,7 @@ export const revokeExcess = Effect.fn("FleetCredentialAccess.revokeExcess")(func
   ) {
     const root = CredentialAttribution.attributionRoot(credential.subject);
     if (root === undefined) return false;
+    if (fleet === undefined) return isRetired(root, accepted);
     const allowed = yield* access.limit(credential.subject, false);
     if (allowed === undefined) return false;
     if (allowed === "none") return true;

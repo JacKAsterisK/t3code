@@ -42,6 +42,7 @@ const ANVIL = "anviltoad";
 const PANDA = "pandamedic";
 let policy: FleetAccessPolicy.FleetAccessState;
 let trusted: ReadonlyArray<string>;
+let shareAvailable = true;
 const resetFleet = () => {
   policy = {
     revision: 1,
@@ -54,6 +55,7 @@ const resetFleet = () => {
     })),
   };
   trusted = [ANVIL, PANDA];
+  shareAvailable = true;
 };
 const restrict = (machineId: string) => {
   policy = {
@@ -68,16 +70,17 @@ const identities = Object.fromEntries(
 );
 /** What CryoFrog's full trust check finds: itself, and the peers it still trusts. */
 const context = FleetContext.FleetContext.of({
-  load: Effect.sync(
-    () =>
-      ({
-        self: identities[CRYO]!.peer,
-        config: { credentialKeyDigests: policy.credentialKeyDigests },
-        peers: trusted.map((machineId) => ({
-          peer: identities[machineId]!.peer,
-          connectHost: undefined,
-        })),
-      }) as unknown as FleetContext.FleetLinkContext,
+  load: Effect.sync(() =>
+    shareAvailable
+      ? ({
+          self: identities[CRYO]!.peer,
+          config: { credentialKeyDigests: policy.credentialKeyDigests },
+          peers: trusted.map((machineId) => ({
+            peer: identities[machineId]!.peer,
+            connectHost: undefined,
+          })),
+        } as unknown as FleetContext.FleetLinkContext)
+      : undefined,
   ),
 });
 
@@ -458,8 +461,35 @@ it.live(
         expect(yield* accessOf(forgedRefreshed.access_token)).toBe("read-only");
         const replayed = yield* refresh(forgedRefreshed.refresh_token, claim(PANDA, panda.grantId));
         expect(yield* accessOf(replayed.access_token)).toBe("read-only");
+
+        resetFleet();
+        const unattributed = yield* legacy();
+        expect(yield* accessOf(unattributed.token)).toBe("auto");
+        policy = { ...policy, credentialKeyDigests: { [ANVIL]: "2".repeat(64) } };
+        expect(yield* accessOf(unattributed.token).pipe(Effect.isFailure)).toBe(true);
+        const unverified = yield* refresh(
+          unattributed.refreshToken!,
+          claim(ANVIL, unattributed.grantId),
+        );
+        expect(yield* accessOf(unverified.access_token).pipe(Effect.isFailure)).toBe(true);
       }),
     ),
+);
+
+it.live("revokes the retired fleet session if the shared folder disappears after acceptance", () =>
+  withRoutes((handler, { auth, revoke }) =>
+    Effect.gen(function* () {
+      const anvil = yield* anvilFleetSession(auth);
+      expect((yield* mintCode(handler, anvil.token)).status).toBe(200);
+      policy = { ...policy, credentialKeyDigests: { [ANVIL]: "2".repeat(64) } };
+      shareAvailable = false;
+      yield* revoke;
+      expect((yield* mintCode(handler, anvil.token)).status).toBe(401);
+      expect(
+        (yield* auth.listSessions()).some((session) => session.sessionId === anvil.sessionId),
+      ).toBe(false);
+    }),
+  ),
 );
 
 it.live("refuses everything from a machine that left or is no longer trusted, and revokes it", () =>
@@ -677,7 +707,10 @@ it.effect("refuses the previous generation of a rotated machine's fleet credenti
     const retiredKeyDigest = "1".repeat(64);
     const firstRoot = "lan-fleet:" + Delivery.deliveryFileName(CRYO, ANVIL);
     const secondRoot = `lan-fleet-peer-link:${ANVIL}:00000000-0000-4000-8000-000000000001`;
+    expect(yield* access.limit("mcp-client", true)).toBeUndefined();
     policy = { ...policy, credentialKeyDigests: { [ANVIL]: newKeyDigest } };
+    expect(yield* access.limit("mcp-client", true)).toBe("none");
+    expect(yield* access.limit("mcp-client:local", true)).toBeUndefined();
     for (const root of [firstRoot, secondRoot]) {
       for (const prefix of ["", "lan-fleet-by:", "mcp-client:"]) {
         const subject = prefix + root;

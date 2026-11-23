@@ -18,6 +18,15 @@ export type FleetCredentialKeyDigests = typeof FleetCredentialKeyDigests.Type;
 
 const credentialKeySeparator = ":key:";
 
+export function fleetCredentialKeyFor(
+  digests: FleetCredentialKeyDigests | undefined,
+  machineId: string,
+): string | undefined {
+  return digests !== undefined && Object.hasOwn(digests, machineId)
+    ? digests[machineId]
+    : undefined;
+}
+
 export function fleetCredentialSubject(subject: string, keyDigest: string | undefined): string {
   return keyDigest === undefined ? subject : subject + credentialKeySeparator + keyDigest;
 }

@@ -40,6 +40,7 @@ const Record = Schema.Struct({
   expiresAt: Schema.Number,
   status: Schema.Literals(["publishing", "pending", "connecting", "connected"]),
   pairingLinkId: Schema.optionalKey(Schema.String),
+  credentialKeyDigest: Schema.optionalKey(Schema.String),
   senderCatalogCreatedAt: Schema.optionalKey(Schema.Number),
   // A pickup that replaces a credential this machine already holds for the sender.
   replacing: Schema.optionalKey(Schema.Boolean),
@@ -301,10 +302,13 @@ const make = Effect.gen(function* () {
                     : "ready";
               if (peer !== undefined && peer.machineId !== self.machineId) {
                 const outgoingKey = Delivery.deliveryFileName(self.machineId, peer.machineId);
-                const subject = Delivery.fleetCredentialSubject(
-                  "lan-fleet:" + outgoingKey,
-                  config.credentialKeyDigests?.[peer.machineId],
+                const legacySubject = "lan-fleet:" + outgoingKey;
+                const credentialKeyDigest = Delivery.fleetCredentialKeyFor(
+                  config.credentialKeyDigests,
+                  peer.machineId,
                 );
+                const generation = credentialKeyDigest === undefined ? {} : { credentialKeyDigest };
+                const subject = Delivery.fleetCredentialSubject(legacySubject, credentialKeyDigest);
                 const outFile = path.join(config.deliveryDirectory, `${outgoingKey}.json`);
                 let sent = journal[`sent:${outgoingKey}`];
                 let recipientReady = !config.managed;
@@ -326,6 +330,45 @@ const make = Effect.gen(function* () {
                   }
                 }
                 let outgoingExists = yield* fs.exists(outFile);
+                if (
+                  sharedFolder &&
+                  recipientReady &&
+                  credentialKeyDigest !== undefined &&
+                  sent !== undefined &&
+                  sent.credentialKeyDigest !== credentialKeyDigest
+                ) {
+                  // Only retire a delivery that this server issued for the superseded credential.
+                  if (outgoingExists) {
+                    const old = yield* readFleetJson(outFile, Delivery.Delivery);
+                    if (
+                      old.header.deliveryId !== sent.deliveryId ||
+                      old.header.expiresAt !== sent.expiresAt ||
+                      !Delivery.verifyDelivery(
+                        old,
+                        self,
+                        peer,
+                        Math.min(now, old.header.expiresAt - 1),
+                      )
+                    )
+                      return yield* new LanFleetError({ reason: "configuration" });
+                    yield* fs.rename(outFile, outFile + ".obsolete-" + old.header.deliveryId);
+                    outgoingExists = false;
+                  }
+                  const grant = activeLinks.find(
+                    (link) =>
+                      link.id === sent?.pairingLinkId &&
+                      Delivery.fleetCredentialSubjectParts(link.subject).subject === legacySubject,
+                  );
+                  if (grant !== undefined) {
+                    yield* auth.revokePairingLink(grant.id);
+                    activeLinks.splice(activeLinks.indexOf(grant), 1);
+                  }
+                  delete journal["sent:" + outgoingKey];
+                  yield* writeFleetJson(journalFile, journal);
+                  sent = undefined;
+                  recipientConnected = false;
+                  requested.add(peer.machineId);
+                }
                 let outgoingRejected = false;
                 const access =
                   policy !== undefined && policyActive
@@ -474,6 +517,7 @@ const make = Effect.gen(function* () {
                         deliveryId: existing.header.deliveryId,
                         expiresAt: existing.header.expiresAt,
                         pairingLinkId: grant.id,
+                        ...generation,
                         status: "pending",
                       };
                       journal[`sent:${outgoingKey}`] = sent;
@@ -486,6 +530,7 @@ const make = Effect.gen(function* () {
                   sent = {
                     deliveryId: sent?.deliveryId ?? EXISTING_CONNECTION,
                     expiresAt: sent?.expiresAt ?? now,
+                    ...generation,
                     status: "connected",
                   };
                   journal[`sent:${outgoingKey}`] = sent;
@@ -501,6 +546,7 @@ const make = Effect.gen(function* () {
                   sent = {
                     deliveryId: NodeCrypto.randomUUID(),
                     expiresAt: now + 24 * 60 * 60 * 1000,
+                    ...generation,
                     status: "publishing",
                   };
                   journal[`sent:${outgoingKey}`] = sent;

@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as TestClock from "effect/testing/TestClock";
 
 import { requiredScopeForRpcMethod } from "../auth/RpcAuthorization.ts";
@@ -1210,6 +1211,61 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
         expect((yield* f.change(oddService, odd, own.revision, []).pipe(Effect.flip)).reason).toBe(
           "configuration",
         );
+      }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect(
+    "keeps the latest fleet credential generation across delayed refreshes and restart",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fleet();
+        const stateDir = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-fleet-key-state-" });
+        const service = yield* f.machine(stateDir);
+        const first = {
+          ...f.input(f.cryo),
+          credentialAuthorityRevision: 2,
+          credentialKeyDigests: { [f.anvil.peer.machineId]: "1".repeat(64) },
+        };
+        const next = {
+          ...first,
+          credentialAuthorityRevision: 3,
+          credentialKeyDigests: { [f.anvil.peer.machineId]: "2".repeat(64) },
+        };
+        yield* service.refresh(first);
+        const failOnce = { pending: true };
+        const interrupted = yield* f.machine(stateDir).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...f.fs,
+            rename: (source, destination) => {
+              if (!failOnce.pending || !destination.endsWith("lan-fleet-access.json"))
+                return f.fs.rename(source, destination);
+              failOnce.pending = false;
+              return Effect.fail(
+                PlatformError.systemError({
+                  _tag: "PermissionDenied",
+                  module: "FileSystem",
+                  method: "rename",
+                  description: "simulated durable cache failure",
+                  pathOrDescriptor: destination,
+                }),
+              );
+            },
+          }),
+        );
+        const pending = yield* interrupted.refresh(next);
+        expect(pending.credentialAuthorityReady).toBe(false);
+        expect(pending.credentialKeyDigests).toEqual(next.credentialKeyDigests);
+        const afterFailedWrite = yield* f.machine(stateDir);
+        expect((yield* afterFailedWrite.current).credentialAuthorityReady).toBe(false);
+        expect((yield* interrupted.refresh(next)).credentialAuthorityReady).toBe(true);
+        yield* service.refresh(next);
+        expect((yield* service.refresh(first)).credentialKeyDigests).toEqual(
+          next.credentialKeyDigests,
+        );
+        const restarted = yield* f.machine(stateDir);
+        expect((yield* restarted.current).credentialKeyDigests).toEqual(next.credentialKeyDigests);
+        expect((yield* restarted.current).credentialAuthorityReady).toBe(false);
+        expect((yield* restarted.refresh(first)).credentialAuthorityReady).toBe(false);
+        expect((yield* restarted.refresh(next)).credentialAuthorityReady).toBe(true);
       }).pipe(Effect.provide(configLayer)),
   );
 });

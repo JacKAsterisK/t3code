@@ -492,17 +492,31 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
     "keeps the owner-approved member keys when a prior enrollment remains on the share",
     () =>
       Effect.gen(function* () {
-        const f = yield* fixture(false, "accessible");
-        const initial = yield* f.start();
+        const f = yield* fixture(true, "accessible");
+        const initial = yield* f.a.enrollment.configure({
+          operation: "start",
+          confirmed: true,
+          origin: "https://192.168.40.10:4001",
+          managedTls: true,
+          autoPickup: true,
+          access: "read-only",
+        });
         const origin = "https://192.168.40.11:4001";
         const enrolled = yield* f.b.enrollment.configure({
           operation: "join",
           confirmed: true,
           origin,
           ownerCode: initial.ownerCode!,
-          autoPickup: false,
+          managedTls: true,
+          autoPickup: true,
           access: "read-only",
         });
+        yield* f.sync(f.b, [f.b.environmentId]);
+        yield* f.sync(f.a, [f.a.environmentId]);
+        const previousDelivery = (yield* f.sync(f.b, [f.b.environmentId])).incoming.find(
+          (delivery) => delivery.environmentId === f.a.environmentId,
+        );
+        assert.isDefined(previousDelivery);
         const owner = f.a.record()!;
         const prior = f.b.record()!;
         const roster = yield* readFleetJson(f.rosterPath, FleetRoster).pipe(
@@ -567,6 +581,27 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
           updatedPeer,
         );
         assert.isNull(yield* f.b.enrollment.resolve);
+        f.b.replaceRecord({ ...candidate, lastRevision: approved.revision });
+        yield* f.b.restart;
+        yield* f.sync(f.b, [f.b.environmentId]);
+        yield* f.sync(f.a, [f.a.environmentId]);
+        const renewed = (yield* f.sync(f.b, [f.b.environmentId])).incoming.find(
+          (delivery) => delivery.environmentId === f.a.environmentId,
+        );
+        assert.isDefined(renewed);
+        assert.notEqual(renewed?.deliveryId, previousDelivery?.deliveryId);
+
+        yield* f.a.enrollment.configure({
+          operation: "revoke",
+          confirmed: true,
+          machineId: prior.machineId,
+        });
+        const revoked = yield* f.fs.readFileString(f.authorityFile);
+        const refused = yield* f
+          .approve(prior.machineId, Authority.peerVerificationCode(oldPeer))
+          .pipe(Effect.flip);
+        assert.equal(refused.reason, "configuration");
+        assert.equal(yield* f.fs.readFileString(f.authorityFile), revoked);
       }).pipe(Effect.provide(configLayer)),
   );
 

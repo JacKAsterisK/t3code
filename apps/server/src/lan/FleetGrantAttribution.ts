@@ -9,6 +9,7 @@ import * as Schema from "effect/Schema";
 import * as CredentialAttribution from "../auth/CredentialAttribution.ts";
 import * as FleetContext from "./FleetContext.ts";
 import * as Delivery from "./FleetDelivery.ts";
+import { fleetSigningKeyDigest } from "./FleetAuthority.ts";
 import * as FleetEnrollment from "./FleetEnrollment.ts";
 import { RoutingFleetIdentity } from "./RemoteTaskTransport.ts";
 
@@ -92,13 +93,26 @@ export const layerServices = Layer.effect(
           now: yield* Clock.currentTimeMillis,
         });
         if (claim === undefined || claim.signer === fleet.self.machineId) return undefined;
+        const keyDigest = Delivery.fleetCredentialKeyFor(
+          fleet.config.credentialKeyDigests,
+          claim.signer,
+        );
+        if (
+          keyDigest !== undefined &&
+          !fleet.peers.some(
+            ({ peer }) =>
+              peer.machineId === claim.signer &&
+              fleetSigningKeyDigest(peer.signingPublicKey) === keyDigest,
+          )
+        )
+          return undefined;
         // The subject of what this machine's fleet credential for the signer approves.
         return {
           grantId: claim.grantId,
           subject: CredentialAttribution.mcpClientSubject(
             Delivery.fleetCredentialSubject(
               "lan-fleet:" + Delivery.deliveryFileName(fleet.self.machineId, claim.signer),
-              fleet.config.credentialKeyDigests?.[claim.signer],
+              keyDigest,
             ),
           ),
         };

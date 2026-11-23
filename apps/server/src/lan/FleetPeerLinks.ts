@@ -283,7 +283,7 @@ const make = Effect.gen(function* () {
           ttl: CODE_TTL,
           subject: Delivery.fleetCredentialSubject(
             codePrefix(peer.machineId) + deliveryId,
-            fleet.config.credentialKeyDigests?.[peer.machineId],
+            Delivery.fleetCredentialKeyFor(fleet.config.credentialKeyDigests, peer.machineId),
           ),
           scopes: mcpClientScopes(linkAccess(granted)),
         });

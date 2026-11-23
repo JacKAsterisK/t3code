@@ -35,6 +35,7 @@ import {
   type FleetPeer,
 } from "./FleetDelivery.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
+import * as Vault from "./FleetVault.ts";
 
 type Level = FleetAccessLevel;
 const Digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
@@ -692,7 +693,9 @@ export class FleetAccess extends Context.Service<
 const configurationError = () => new LanFleetError({ reason: "configuration" });
 const isFleetError = Schema.is(LanFleetError);
 
-const make = Effect.gen(function* () {
+const make = Effect.fn("FleetAccess.make")(function* (
+  readCredential: typeof Vault.readStartupCredential,
+) {
   const gate = yield* Gate.ApprovalAdmissionGate;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -766,6 +769,12 @@ const make = Effect.gen(function* () {
               },
               catch: configurationError,
             }),
+          ),
+          // Enrollment takes precedence over the private file, even when the share is offline.
+          Effect.flatMap((valid) =>
+            valid
+              ? readCredential.pipe(Effect.map((record) => record === undefined))
+              : Effect.succeed(false),
           ),
           Effect.orElseSucceed(() => false),
         )
@@ -1375,4 +1384,6 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(FleetAccess, make).pipe(Layer.provideMerge(Gate.layer));
+export const layerWithCredentialReader = (readCredential: typeof Vault.readStartupCredential) =>
+  Layer.effect(FleetAccess, make(readCredential)).pipe(Layer.provideMerge(Gate.layer));
+export const layer = layerWithCredentialReader(Vault.readStartupCredential);

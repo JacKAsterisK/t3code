@@ -292,7 +292,18 @@ const make = Effect.gen(function* () {
               ...(input.mode === "status" ? [] : input.sendMachineIds),
               ...campaignIds,
             ]);
+            const readOffer = (file: string) => {
+              const read = readFleetJson(file, Delivery.Delivery);
+              return sharedFolder ? Effect.option(read) : read.pipe(Effect.asSome);
+            };
             for (const machine of roster.machines.filter((item) => item.enabled)) {
+              const reportStatus = (status: LanFleetSyncResult["machines"][number]["status"]) =>
+                machines.push({
+                  machineId: machine.machineId,
+                  environmentId: machine.environmentId,
+                  label: machine.label,
+                  status,
+                });
               const peer = trusted(machine);
               let status: LanFleetSyncResult["machines"][number]["status"] =
                 machine.machineId === self.machineId
@@ -340,9 +351,7 @@ const make = Effect.gen(function* () {
                 ) {
                   let keepCurrentOffer = false;
                   if (outgoingExists) {
-                    const old = yield* readFleetJson(outFile, Delivery.Delivery).pipe(
-                      Effect.orElseSucceed(() => undefined),
-                    );
+                    const old = Option.getOrUndefined(yield* readOffer(outFile));
                     const ownPath =
                       old !== undefined &&
                       old.header.senderId === self.machineId &&
@@ -365,12 +374,7 @@ const make = Effect.gen(function* () {
                           ));
                     }
                     if (!keepCurrentOffer && outgoingExists) {
-                      machines.push({
-                        machineId: machine.machineId,
-                        environmentId: machine.environmentId,
-                        label: machine.label,
-                        status: "uncertain",
-                      });
+                      reportStatus("uncertain");
                       continue;
                     }
                   }
@@ -485,10 +489,12 @@ const make = Effect.gen(function* () {
                     // The peer keeps a connection here with no credential at its access, or one
                     // that is about to expire or already has: replace it.
                     if (outgoingExists) {
-                      const replaced = yield* readFleetJson(outFile, Delivery.Delivery).pipe(
-                        Effect.map((delivery) => delivery.header.deliveryId),
-                        Effect.orElseSucceed(() => NodeCrypto.randomUUID()),
-                      );
+                      const previous = yield* readOffer(outFile);
+                      if (Option.isNone(previous)) {
+                        reportStatus("uncertain");
+                        continue;
+                      }
+                      const replaced = previous.value.header.deliveryId;
                       yield* fs.rename(outFile, `${outFile}.obsolete-${replaced}`);
                     }
                     delete journal[`sent:${outgoingKey}`];
@@ -499,7 +505,12 @@ const make = Effect.gen(function* () {
                   }
                 }
                 if (sharedFolder && outgoingExists && !recipientConnected) {
-                  const existing = yield* readFleetJson(outFile, Delivery.Delivery);
+                  const offer = yield* readOffer(outFile);
+                  if (Option.isNone(offer)) {
+                    reportStatus("uncertain");
+                    continue;
+                  }
+                  const existing = offer.value;
                   const valid = yield* Effect.try(() =>
                     Delivery.verifyDelivery(existing, self, peer, now),
                   );
@@ -655,7 +666,12 @@ const make = Effect.gen(function* () {
                 const incomingKey = Delivery.deliveryFileName(peer.machineId, self.machineId);
                 const inFile = path.join(config.deliveryDirectory, `${incomingKey}.json`);
                 if (yield* fs.exists(inFile)) {
-                  const delivery = yield* readFleetJson(inFile, Delivery.Delivery);
+                  const offer = yield* readOffer(inFile);
+                  if (Option.isNone(offer)) {
+                    reportStatus("uncertain");
+                    continue;
+                  }
+                  const delivery = offer.value;
                   const received = journal[`received:${incomingKey}`];
                   const grantAvailable =
                     sharedFolder &&
@@ -759,12 +775,7 @@ const make = Effect.gen(function* () {
                   }
                 }
               }
-              machines.push({
-                machineId: machine.machineId,
-                environmentId: machine.environmentId,
-                label: machine.label,
-                status,
-              });
+              reportStatus(status);
             }
             yield* writeFleetJson(journalFile, journal);
             if (config.managed)

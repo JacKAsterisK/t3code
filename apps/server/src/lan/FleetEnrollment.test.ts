@@ -19,6 +19,7 @@ import * as Layer from "effect/Layer";
 import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Context from "effect/Context";
 import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
@@ -71,6 +72,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
   let sharedFolderAccessible = share === "accessible";
   // Paths that briefly read as not found, as a share can.
   const absent = new Set<string>();
+  const unreadable = new Set<string>();
   const localPath = (file: string) =>
     share && (file === root || file.startsWith(root + "\\"))
       ? path.join(diskRoot, file.slice(root.length))
@@ -80,7 +82,18 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     ...diskFs,
     exists: (file) => (absent.has(file) ? Effect.succeed(false) : diskFs.exists(localPath(file))),
     stat: (file) => diskFs.stat(localPath(file)),
-    readFileString: (file, options) => diskFs.readFileString(localPath(file), options),
+    readFileString: (file, options) =>
+      unreadable.has(file)
+        ? Effect.fail(
+            PlatformError.systemError({
+              _tag: "PermissionDenied",
+              module: "FileSystem",
+              method: "readFileString",
+              description: "simulated unreadable share file",
+              pathOrDescriptor: file,
+            }),
+          )
+        : diskFs.readFileString(localPath(file), options),
     makeDirectory: (file, options) => diskFs.makeDirectory(localPath(file), options),
     open: (file, options) => diskFs.open(localPath(file), options),
     rename: (from, to) => diskFs.rename(localPath(from), localPath(to)),
@@ -189,7 +202,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
             ),
             Layer.provide(Layer.succeed(HostProcess.Environment, launchEnvironment)),
             Layer.provideMerge(
-              FleetAccessPolicy.layer.pipe(
+              FleetAccessPolicy.layerWithCredentialReader(vault.read).pipe(
                 Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)),
                 Layer.provide(Config.layer(config)),
               ),
@@ -333,6 +346,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     setSharedFolderAccessible: (value: boolean) => {
       sharedFolderAccessible = value;
     },
+    unreadable,
     setAbsent: (file: string, value: boolean) => {
       if (value) absent.add(file);
       else absent.delete(file);
@@ -603,7 +617,6 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         assert.isNull(yield* f.b.enrollment.resolve);
         f.b.replaceRecord({ ...candidate, lastRevision: approved.revision });
         yield* f.b.restart;
-        yield* f.sync(f.b, [f.b.environmentId]);
         const ownerPeer = authority.peers.find((peer) => peer.machineId === owner.machineId)!;
         const previousIssuer = Authority.generateFleetIdentity(
           owner.environmentId,
@@ -625,6 +638,36 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         );
         const previousOffer = yield* readFleetJson(offerPath, Delivery.Delivery).pipe(
           Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        const catalogFor = (peer: Delivery.FleetPeer) =>
+          readFleetJson(
+            f.path.join(
+              deliveries,
+              Delivery.deliveryFileName(peer.machineId, peer.machineId) + ".catalog.json",
+            ),
+            Delivery.FleetCatalog,
+          ).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+        f.unreadable.add(offerPath);
+        const issuerSync = yield* f.sync(f.a, [f.a.environmentId]);
+        assert.equal(
+          issuerSync.machines.find((machine) => machine.machineId === prior.machineId)?.status,
+          "uncertain",
+        );
+        const recipientSync = yield* f.sync(f.b, [f.b.environmentId]);
+        assert.equal(
+          recipientSync.machines.find((machine) => machine.machineId === owner.machineId)?.status,
+          "uncertain",
+        );
+        assert.isTrue(Delivery.verifyFleetCatalog(yield* catalogFor(ownerPeer), ownerPeer, now));
+        assert.isTrue(
+          Delivery.verifyFleetCatalog(yield* catalogFor(updatedPeer), updatedPeer, now),
+        );
+        f.unreadable.delete(offerPath);
+        assert.deepEqual(
+          yield* readFleetJson(offerPath, Delivery.Delivery).pipe(
+            Effect.provideService(FileSystem.FileSystem, f.fs),
+          ),
+          previousOffer,
         );
         const olderSignedOffer = Delivery.sealDelivery({
           config: { ...previousIssuer, peers: [previousIssuerPeer, oldPeer] },

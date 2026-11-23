@@ -4,7 +4,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { FLEET_ROSTER_ENV } from "./FleetBootstrap.ts";
 import { describe, expect, it } from "@effect/vitest";
-import { ORCHESTRATION_V2_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
+import { LanFleetError, ORCHESTRATION_V2_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -17,6 +17,8 @@ import * as TestClock from "effect/testing/TestClock";
 import { requiredScopeForRpcMethod } from "../auth/RpcAuthorization.ts";
 import * as Config from "../config.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
+import * as Authority from "./FleetAuthority.ts";
+import * as Vault from "./FleetVault.ts";
 import { credentialAccess, fleetCredentialScopes } from "./FleetAccessPolicy.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import type { FleetPeer } from "./FleetDelivery.ts";
@@ -62,11 +64,16 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
   const anvil = syntheticFleetPeer("anviltoad");
   const spd = syntheticFleetPeer("spdevmachine");
   let peers: ReadonlyArray<FleetPeer> = [cryo.peer, panda.peer, anvil.peer, spd.peer];
-  const machine = Effect.fn("FleetAccessPolicyTest.machine")(function* (existingStateDir?: string) {
+  const machine = Effect.fn("FleetAccessPolicyTest.machine")(function* (
+    existingStateDir?: string,
+    read: Vault.FleetVault["Service"]["read"] = Effect.undefined,
+  ) {
     const stateDir =
       existingStateDir ?? (yield* fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-state-" }));
     const context = yield* Layer.build(
-      FleetAccessPolicy.layer.pipe(Layer.provide(Config.layer({ ...base, stateDir }))),
+      FleetAccessPolicy.layerWithCredentialReader(read).pipe(
+        Layer.provide(Config.layer({ ...base, stateDir })),
+      ),
     );
     return Context.get(context, FleetAccessPolicy.FleetAccess);
   });
@@ -1220,12 +1227,13 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
       const f = yield* fleet();
       const stateDir = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-legacy-fleet-state-" });
       const path = yield* Path.Path;
-      const makeService = f.machine(stateDir).pipe(
-        Effect.provideService(HostProcess.Environment, {
-          [FLEET_ROSTER_ENV]: path.join(f.root, "roster.json"),
-        }),
-      );
-      expect((yield* (yield* makeService).current).credentialAuthorityReady).toBe(false);
+      const makeService = (read?: Vault.FleetVault["Service"]["read"]) =>
+        f.machine(stateDir, read).pipe(
+          Effect.provideService(HostProcess.Environment, {
+            [FLEET_ROSTER_ENV]: path.join(f.root, "roster.json"),
+          }),
+        );
+      expect((yield* (yield* makeService()).current).credentialAuthorityReady).toBe(false);
 
       const legacy: Delivery.FleetPrivateConfig = {
         version: 1,
@@ -1236,7 +1244,22 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
         peers: [f.cryo.peer, f.anvil.peer],
       };
       yield* writeFleetJson(path.join(stateDir, "lan-fleet-private.json"), legacy);
-      expect((yield* (yield* makeService).current).credentialAuthorityReady).toBeUndefined();
+      expect((yield* (yield* makeService()).current).credentialAuthorityReady).toBeUndefined();
+
+      const enrolled = Authority.generateFleetIdentity(
+        f.cryo.peer.environmentId,
+        FLEET_ID,
+        f.anvil.peer.signingPublicKey,
+        false,
+        { autoPickup: true, access: "standard" },
+        f.cryo.peer.machineId,
+      );
+      const managed = yield* makeService(Effect.succeed(enrolled));
+      expect((yield* managed.current).credentialAuthorityReady).toBe(false);
+      const unavailable = yield* makeService(
+        Effect.fail(new LanFleetError({ reason: "configuration" })),
+      );
+      expect((yield* unavailable.current).credentialAuthorityReady).toBe(false);
     }).pipe(Effect.provide(configLayer)),
   );
 

@@ -29,6 +29,48 @@ export class FleetVault extends Context.Service<
 const decode = Schema.decodeSync(Schema.fromJsonString(FleetVaultRecord));
 const secretMarker = "T3F1:";
 const secretPrefix = new TextEncoder().encode(secretMarker);
+const credentialEntry = (id: string, platform: NodeJS.Platform) =>
+  // On Windows the synchronous store must stay on the calling thread.
+  platform === "win32"
+    ? new Entry("T3 Code LAN fleet", id)
+    : new AsyncEntry("T3 Code LAN fleet", id);
+
+const readRecord = (openEntry: () => ReturnType<typeof credentialEntry>) =>
+  Effect.tryPromise({
+    try: async () => {
+      const entry = openEntry();
+      const result = await entry.getSecret();
+      // Windows can return null for an absent entry despite its TypeScript declaration.
+      if (result === undefined || result === null) return undefined;
+      // Native keyring builds can return number[] despite declaring Uint8Array.
+      const raw = Uint8Array.from(result);
+      if (
+        raw.length >= secretPrefix.length &&
+        secretPrefix.every((value, index) => raw[index] === value)
+      )
+        return decode(
+          new TextDecoder("utf-8", { fatal: true }).decode(raw.subarray(secretPrefix.length)),
+        );
+      // Existing entries use the keyring's UTF-16 password encoding.
+      const legacy = await entry.getPassword();
+      if (legacy === undefined || legacy === null)
+        throw new Error("Existing fleet credential cannot be decoded.");
+      return decode(legacy);
+    },
+    catch: () => new LanFleetError({ reason: "configuration" }),
+  });
+
+// Startup can check an existing identity before descriptor services initialize. Reading the
+// persisted ID never creates a new one and uses the same credential target and decoder as enrollment.
+export const readStartupCredential = Effect.gen(function* () {
+  const config = yield* Config.ServerConfig;
+  const fs = yield* FileSystem.FileSystem;
+  const platform = yield* HostProcess.Platform;
+  const id = (yield* fs.readFileString(config.environmentIdPath)).trim();
+  if (id === "") return yield* new LanFleetError({ reason: "configuration" });
+  return yield* readRecord(() => credentialEntry(id, platform));
+}).pipe(Effect.mapError(() => new LanFleetError({ reason: "configuration" })));
+
 const make = Effect.gen(function* () {
   const config = yield* Config.ServerConfig;
   const environment = yield* ServerEnvironment.ServerEnvironment;
@@ -38,44 +80,15 @@ const make = Effect.gen(function* () {
   const id = yield* environment.getEnvironmentId;
   const mutex = yield* Semaphore.make(1);
   let knownIdentity = false;
-  // Windows credential reads must stay on the writing thread; its native store can return
-  // false absence across background threads, and keyring 1.3 suppresses those read errors.
-  const entry = () =>
-    platform === "win32"
-      ? new Entry("T3 Code LAN fleet", id)
-      : new AsyncEntry("T3 Code LAN fleet", id);
-  const decodeRecord = (value: string) => {
-    const record = decode(value);
-    knownIdentity = true;
-    return record;
-  };
+  const entry = () => credentialEntry(id, platform);
   const lock = path.join(config.stateDir, "lan-fleet-vault.lock");
-  const readStored = Effect.tryPromise({
-    try: async () => {
-      const result = await entry().getSecret();
-      // Windows keyring returns null for an absent credential despite its TypeScript declaration.
-      if (result === undefined || result === null) {
-        if (knownIdentity) throw new Error("The saved fleet credential became unavailable.");
-        return undefined;
-      }
-      // Native keyring builds can return number[] despite declaring Uint8Array.
-      const raw = Uint8Array.from(result);
-      if (
-        raw.length >= secretPrefix.length &&
-        secretPrefix.every((value, index) => raw[index] === value)
-      )
-        return decodeRecord(
-          new TextDecoder("utf-8", { fatal: true }).decode(raw.subarray(secretPrefix.length)),
-        );
-      // Existing entries use the keyring's UTF-16 password encoding. Read them
-      // without rewriting or regenerating any identity material.
-      const legacy = await entry().getPassword();
-      if (legacy === undefined || legacy === null)
-        throw new Error("Existing fleet credential cannot be decoded.");
-      return decodeRecord(legacy);
-    },
-    catch: () => new LanFleetError({ reason: "configuration" }),
-  });
+  const readStored = readRecord(entry).pipe(
+    Effect.flatMap((record) => {
+      if (record !== undefined) knownIdentity = true;
+      else if (knownIdentity) return Effect.fail(new LanFleetError({ reason: "configuration" }));
+      return Effect.succeed(record);
+    }),
+  );
   const read = readStored.pipe(mutex.withPermit);
   const update = Effect.fn("FleetVault.update")(function* (
     select: (

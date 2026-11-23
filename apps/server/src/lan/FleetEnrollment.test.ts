@@ -12,6 +12,8 @@ import {
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
@@ -93,9 +95,16 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     yield* fs.makeDirectory(stateDir);
     let record: Authority.FleetVaultRecord | undefined;
     let saves = 0;
+    let beforeNextVaultRead: Effect.Effect<void> | undefined;
     const activeLinks: Array<EnvironmentAuth.IssuedPairingLink> = [];
     const vault = FleetVault.FleetVault.of({
-      read: Effect.sync(() => record),
+      read: Effect.gen(function* () {
+        const observed = record;
+        const before = beforeNextVaultRead;
+        beforeNextVaultRead = undefined;
+        if (before !== undefined) yield* before;
+        return observed;
+      }),
       advanceRevision: (_expected, revision) =>
         Effect.sync(() => {
           if (record === undefined || record.lastRevision >= revision) return;
@@ -265,6 +274,9 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
         launchEnvironment[FLEET_ROSTER_ENV] = "";
       },
       record: () => record,
+      pauseNextVaultRead: (before: Effect.Effect<void>) => {
+        beforeNextVaultRead = before;
+      },
       replaceRecord: (next: Authority.FleetVaultRecord | undefined) => {
         record = next;
       },
@@ -825,6 +837,10 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         assert.equal((yield* f.a.enrollment.status).tlsReady, false);
         f.a.setPortBusy(false);
         const beforeDisable = f.a.network();
+        f.setAbsent(f.rosterPath, true);
+        assert.equal((yield* f.a.enrollment.resolve.pipe(Effect.flip)).reason, "unavailable");
+        assert.deepEqual(f.a.network(), beforeDisable);
+        f.setAbsent(f.rosterPath, false);
         const roster = yield* readFleetJson(f.rosterPath, FleetRoster).pipe(
           Effect.provideService(FileSystem.FileSystem, f.fs),
         );
@@ -866,6 +882,50 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         assert.equal(f.issued.length, 2);
       }).pipe(Effect.provide(configLayer)),
   );
+  it.effect("keeps a confirmed Stop when a shared-folder repair read older consent", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(true, "accessible");
+      const origin = "https://192.168.40.10:4001";
+      yield* f.a.enrollment.configure({
+        operation: "start",
+        confirmed: true,
+        origin,
+        managedTls: true,
+        autoPickup: true,
+        access: "read-only",
+      });
+      const saved = f.a.record()!;
+      const { tls: _tls, ...oldPublicRecord } = saved;
+      const oldPeer = Authority.identityPeer(oldPublicRecord, "Test alpha", origin);
+      yield* f.fs.makeDirectory(f.path.join(f.root, "fleet-enrollment"), { recursive: true });
+      const enrollmentFile = f.path.join(f.root, "fleet-enrollment", saved.machineId + ".json");
+      yield* writeFleetJson(
+        enrollmentFile,
+        Authority.enrollmentRequest(oldPublicRecord, oldPeer),
+      ).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+      const originalEnrollment = yield* f.fs.readFileString(enrollmentFile);
+      f.a.setPortBusy(true);
+      yield* f.a.restart;
+      f.a.setPortBusy(false);
+      const read = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      f.a.pauseNextVaultRead(
+        Deferred.succeed(read, undefined).pipe(Effect.andThen(Deferred.await(resume))),
+      );
+      const repair = yield* f.a.enrollment.resolve.pipe(Effect.forkScoped);
+      yield* Deferred.await(read);
+      yield* f.a.enrollment.configure({ operation: "transport", confirmed: true, enabled: false });
+      const afterStop = f.a.network();
+      yield* Deferred.succeed(resume, undefined);
+      assert.isNull(yield* Fiber.join(repair));
+      yield* f.a.restart;
+      assert.deepEqual(f.a.network(), afterStop);
+      assert.deepEqual(f.a.record()?.tls, saved.tls);
+      assert.isFalse(f.a.record()?.tlsEnabled);
+      assert.equal(yield* f.fs.readFileString(enrollmentFile), originalEnrollment);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect(
     "syncs the fleet access policy and refuses a read-only machine lifting its own restriction",
     () =>

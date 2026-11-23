@@ -30,7 +30,10 @@ export class FleetTransport extends Context.Service<
       previous?: StoredTls,
     ) => Effect.Effect<StoredTls, LanFleetError>;
     readonly ready: (record: FleetVaultRecord) => Effect.Effect<boolean>;
-    readonly restore: (record: FleetVaultRecord) => Effect.Effect<void, LanFleetError>;
+    readonly restore: (
+      record: FleetVaultRecord,
+      approved?: Effect.Effect<boolean, LanFleetError>,
+    ) => Effect.Effect<boolean, LanFleetError>;
     readonly persist: (record: FleetVaultRecord) => Effect.Effect<void, LanFleetError>;
     /** The https origin of the encrypted endpoint this server is running, if any. */
     readonly origin: Effect.Effect<string | undefined>;
@@ -135,18 +138,33 @@ const make = Effect.gen(function* () {
     running = { origin: identity.origin, proxy };
   });
   const restore = Effect.fn("FleetTransport.restore")(
-    function* (expected: FleetVaultRecord) {
+    function* (
+      expected: FleetVaultRecord,
+      approved: Effect.Effect<boolean, LanFleetError> = Effect.succeed(true),
+    ) {
       // An explicit stop can commit while an enrollment refresh is waiting for the mutex.
       const saved = yield* vault.read;
       if (
         saved?.tls === undefined ||
+        !saved.enabled ||
         saved.tlsEnabled === false ||
+        saved.environmentId !== expected.environmentId ||
+        saved.fleetId !== expected.fleetId ||
         saved.machineId !== expected.machineId ||
         saved.tls.origin !== expected.tls?.origin ||
         saved.tls.publicKeySha256 !== expected.tls?.publicKeySha256
       )
-        return;
+        return false;
+      if (!(yield* approved)) return false;
+      const previous = running;
       yield* ensure(saved);
+      const valid = yield* approved.pipe(
+        Effect.tapError(() =>
+          previous === undefined ? ensure({ ...saved, tlsEnabled: false }) : Effect.void,
+        ),
+      );
+      if (!valid && previous === undefined) yield* ensure({ ...saved, tlsEnabled: false });
+      return valid;
     },
     Effect.uninterruptible,
     mutex.withPermit,

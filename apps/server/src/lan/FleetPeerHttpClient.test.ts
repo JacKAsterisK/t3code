@@ -61,6 +61,12 @@ it.live("reaches a trusted fleet peer only at its pinned key and leaves other or
       // Without trust, the self-signed endpoint is refused exactly as before.
       expect((yield* Effect.result(text(origin)))._tag).toBe("Failure");
       expect(yield* text(plain)).toBe("reached");
+      expect(
+        (yield* text(plain).pipe(
+          Effect.provideService(FleetPeerHttpClient.RequireFleetPin, true),
+          Effect.result,
+        ))._tag,
+      ).toBe("Failure");
 
       yield* trust.replace([
         { origin, certificate: approved.certificate, publicKeySha256: approved.publicKeySha256 },

@@ -86,6 +86,7 @@ export interface ResolvedPeerLink {
   /** The first address that answered as this peer. */
   readonly url: string;
   readonly token: string;
+  readonly requiresFleetPin?: boolean;
   /** What the peer said it can do when it answered. */
   readonly capabilities: ExecutionEnvironmentCapabilities;
 }
@@ -159,6 +160,7 @@ interface PeerLinkRow {
   readonly last_reached_at: string | null;
   readonly last_error: string | null;
   readonly fenced: number;
+  readonly provenance: string;
 }
 
 const decodeUrls = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(Schema.String)));
@@ -756,6 +758,7 @@ const make = Effect.gen(function* () {
           : yield* Effect.raceAll(
               link.urls.map((url) =>
                 probe(url).pipe(
+                  Effect.provideService(Fleet.RequireFleetPin, row.value.provenance === "fleet"),
                   Effect.map((peer) => {
                     if (peer.environmentId === environmentId) return Option.some({ url, peer });
                     failures.set(
@@ -801,6 +804,7 @@ const make = Effect.gen(function* () {
         link: yield* withLabel(link, peer.label),
         url,
         token: new TextDecoder().decode(stored.value),
+        ...(row.value.provenance === "fleet" ? { requiresFleetPin: true } : {}),
         capabilities: peer.capabilities,
       };
     },

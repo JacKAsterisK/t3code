@@ -52,6 +52,8 @@ const execute = Effect.fn("PeerNetworkDispatch.execute")(function* <E>(
       : undefined;
   });
   const captured = yield* currentPeer;
+  if (captured === undefined && (yield* Fleet.RequireFleetPin))
+    return yield* failed("Trusted fleet pin unavailable");
   const host = url.hostname.startsWith("[") ? url.hostname.slice(1, -1) : url.hostname;
   const route = captured?.connectHost ?? host;
   const family = NodeNet.isIP(route);

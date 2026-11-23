@@ -262,6 +262,23 @@ it.layer(NodeServices.layer)("confirmed fleet transport", (it) => {
     }).pipe(Effect.provide(configLayer)),
   );
 
+  it.effect("closes a retried listener when signed membership changes during bind", () =>
+    Effect.gen(function* () {
+      const first = yield* fixture();
+      const tls = yield* first.transport.prepare(first.origin);
+      const record = { ...first.identity, tls, tlsEnabled: true };
+      const restarted = yield* fixture(record, { conflict: true });
+      restarted.conflict(false);
+      let checks = 0;
+      const stillApproved = Effect.sync(() => ++checks === 1);
+      expect(yield* restarted.transport.restore(record, stillApproved)).toBe(false);
+      expect(restarted.stats()).toMatchObject({ starts: 1, closes: 1, saves: 0, record });
+      expect(yield* restarted.transport.ready(record)).toBe(false);
+      expect(yield* restarted.transport.restore(record)).toBe(true);
+      expect(restarted.stats()).toMatchObject({ starts: 2, closes: 1, saves: 0, record });
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("cleans up a listener acquired while startup is interrupted", () =>
     Effect.gen(function* () {
       const first = yield* fixture();

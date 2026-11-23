@@ -52,6 +52,7 @@ it.live(
           Effect.succeed({
             url: receiver.origin,
             token: "isolated-token",
+            requiresFleetPin: true,
             capabilities: { repositoryIdentity: false },
             link: {} as Links.ResolvedPeerLink["link"],
           }),
@@ -120,6 +121,12 @@ it.live(
         assert.equal(row.headers["t3-initiating-client-id"], "approval-caller");
       assert.isTrue(names.every((name) => name === "false"));
       assert.equal(yield* Ref.get(dns.count), receiver.received.length);
+      const beforeTrustLoss = yield* Ref.get(dns.count);
+      yield* trust.replace([]);
+      assert.equal((yield* Effect.result(call))._tag, "Failure");
+      assert.equal(yield* Ref.get(dns.count), beforeTrustLoss);
+      yield* trust.replace([identity]);
+      yield* call;
       const rotated = createFleetTlsCertificate({
         address: "127.0.0.1",
         now: yield* Clock.currentTimeMillis,

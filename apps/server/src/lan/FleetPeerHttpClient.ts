@@ -23,6 +23,11 @@ export class FleetPeerTrust extends Context.Service<
   }
 >()("t3/lan/FleetPeerHttpClient/FleetPeerTrust") {}
 
+/** Managed links require their signed pin even while fleet startup is incomplete. */
+export const RequireFleetPin = Context.Reference<boolean>("t3/lan/RequireFleetPin", {
+  defaultValue: () => false,
+});
+
 export const layerTrust = Layer.effect(
   FleetPeerTrust,
   Effect.gen(function* () {
@@ -105,7 +110,16 @@ export const layer = Layer.effect(
       Effect.gen(function* () {
         const origin = URL.parse(request.url)?.origin;
         const peer = (yield* trust.current).find((candidate) => candidate.origin === origin);
-        if (peer === undefined) return yield* response;
+        if (peer === undefined) {
+          if (yield* RequireFleetPin)
+            return yield* new HttpClientError.HttpClientError({
+              reason: new HttpClientError.TransportError({
+                request,
+                cause: "Trusted fleet pin unavailable",
+              }),
+            });
+          return yield* response;
+        }
         const now = yield* Clock.currentTimeMillis;
         const fetch = yield* Effect.try({
           try: () => pinnedFetch(peer, now),

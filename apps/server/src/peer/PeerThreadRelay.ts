@@ -28,6 +28,7 @@ import type * as HttpClientResponse from "effect/http/HttpClientResponse";
 
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PeerLinks from "./PeerLinks.ts";
+import { RequireFleetPin } from "../lan/FleetPeerHttpClient.ts";
 
 /**
  * The linked environment sends a heartbeat every 20 seconds, so a stream this quiet has lost its
@@ -182,6 +183,7 @@ const make = Effect.gen(function* () {
         ),
       )
       .pipe(
+        Effect.provideService(RequireFleetPin, resolved.requiresFleetPin === true),
         // Bounds the headers only: an open stream stays quiet for as long as the thread does.
         Effect.timeout(timeout),
         Effect.mapError((error) => unreachable(label, error)),

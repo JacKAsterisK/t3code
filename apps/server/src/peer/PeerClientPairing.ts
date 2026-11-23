@@ -24,6 +24,7 @@ import * as HttpApiClient from "effect/http-api/HttpApiClient";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as PeerLinks from "./PeerLinks.ts";
+import { RequireFleetPin } from "../lan/FleetPeerHttpClient.ts";
 
 /** Long enough for the client to reach the linked environment and redeem it, and no longer. */
 const CLIENT_PAIRING_TTL = Duration.minutes(3);
@@ -239,6 +240,7 @@ const make = Effect.gen(function* () {
         payload: request,
       })
       .pipe(
+        Effect.provideService(RequireFleetPin, peer.requiresFleetPin === true),
         Effect.timeout(PeerLinks.probeTimeout(peer.url)),
         Effect.map((issued): PeerLinkClientPairingResult => ({
           type: "credential",

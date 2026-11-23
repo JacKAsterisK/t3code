@@ -2813,6 +2813,7 @@
   "be54224dbe3c6be5": "Partir de cette branche lorsqu’un dépôt l’a",
   "5c6a6009aedbf1d0": "Tout sélectionner",
   "24c98c5086b8e76e": "Tout désélectionner",
+  "1e0e035b988a160c": "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
   "e171ad5dd254389e": "Impossible de préparer l’environnement SSH : {message}",
   "e0465384c9425d24": "L’environnement SSH n’a pas émis d’identifiant d’appairage.",
   "69c97cece949d88c": "Cet hôte mène à {label}, une autre machine. Ajoutez-la plutôt comme environnement à part entière.",

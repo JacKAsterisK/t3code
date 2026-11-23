@@ -2813,6 +2813,7 @@
   "be54224dbe3c6be5": "Начинать с этой ветки там, где она есть в репозитории",
   "5c6a6009aedbf1d0": "Выбрать все",
   "24c98c5086b8e76e": "Снять выбор",
+  "1e0e035b988a160c": "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
   "e171ad5dd254389e": "Не удалось подготовить SSH-окружение: {message}",
   "e0465384c9425d24": "SSH-окружение не выдало учётные данные для сопряжения.",
   "69c97cece949d88c": "Этот хост ведёт на {label}, другую машину. Добавьте её как отдельное окружение.",

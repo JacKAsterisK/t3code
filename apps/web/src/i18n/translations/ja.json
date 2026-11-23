@@ -2811,6 +2811,7 @@
   "be54224dbe3c6be5": "リポジトリにこのブランチがある場合はそこから開始",
   "5c6a6009aedbf1d0": "すべて選択",
   "24c98c5086b8e76e": "選択を解除",
+  "1e0e035b988a160c": "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
   "e171ad5dd254389e": "SSH 環境を準備できませんでした: {message}",
   "e0465384c9425d24": "SSH 環境がペアリング用の資格情報を発行しませんでした。",
   "69c97cece949d88c": "そのホストは別のマシンである {label} に接続されます。代わりに独立した環境として追加してください。",

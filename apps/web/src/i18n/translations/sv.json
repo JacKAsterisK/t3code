@@ -2813,6 +2813,7 @@
   "be54224dbe3c6be5": "Utgå från den här grenen där ett repo har den",
   "5c6a6009aedbf1d0": "Markera allt",
   "24c98c5086b8e76e": "Välj ingen",
+  "1e0e035b988a160c": "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
   "e171ad5dd254389e": "Kunde inte förbereda SSH-miljön: {message}",
   "e0465384c9425d24": "SSH-miljön utfärdade ingen parkopplingsuppgift.",
   "69c97cece949d88c": "Den värden når {label}, en annan dator. Lägg till den som en egen miljö i stället.",

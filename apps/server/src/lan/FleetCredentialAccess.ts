@@ -84,12 +84,14 @@ const make = Effect.gen(function* () {
             ? ("read-only" as const)
             : undefined,
       };
-    const machineId = machineOf(root, state);
+    const { subject: fleetSubject, keyDigest } = Delivery.fleetCredentialSubjectParts(root);
+    const machineId = machineOf(fleetSubject, state);
     const trust = yield* Ref.get(trusted);
     if (
       machineId === undefined ||
       // An ID an access-list exception could take is never a machine here, whatever the share says.
       FleetAccessPolicy.reservedMachineId(machineId) ||
+      state.credentialKeyDigests?.[machineId] !== keyDigest ||
       !state.peers.some((peer) => peer.machineId === machineId) ||
       (trust !== undefined && !trust.has(machineId))
     )

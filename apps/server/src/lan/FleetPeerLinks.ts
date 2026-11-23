@@ -281,7 +281,10 @@ const make = Effect.gen(function* () {
         const deliveryId = NodeCrypto.randomUUID();
         const issued = yield* auth.createPairingLink({
           ttl: CODE_TTL,
-          subject: `${codePrefix(peer.machineId)}${deliveryId}`,
+          subject: Delivery.fleetCredentialSubject(
+            codePrefix(peer.machineId) + deliveryId,
+            fleet.config.credentialKeyDigests?.[peer.machineId],
+          ),
           scopes: mcpClientScopes(linkAccess(granted)),
         });
         const withdraw = revokeCodes(codePrefix(peer.machineId));

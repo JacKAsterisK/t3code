@@ -2817,6 +2817,7 @@
   "be54224dbe3c6be5": "仓库中有此分支时从该分支开始",
   "5c6a6009aedbf1d0": "全选",
   "24c98c5086b8e76e": "全不选",
+  "1e0e035b988a160c": "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
   "e171ad5dd254389e": "无法准备 SSH 环境：{message}",
   "e0465384c9425d24": "SSH 环境没有签发配对凭据。",
   "69c97cece949d88c": "该主机连接到的是另一台机器 {label}。请将其作为单独的环境添加。",

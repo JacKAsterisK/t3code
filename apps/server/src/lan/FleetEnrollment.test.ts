@@ -11,6 +11,7 @@ import {
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { createFleetTlsCertificate } from "@t3tools/shared/fleetTlsCertificate";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -33,6 +34,11 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as FleetEnrollment from "./FleetEnrollment.ts";
 import * as FleetVault from "./FleetVault.ts";
 import * as Authority from "./FleetAuthority.ts";
+import {
+  approveFleetCredentialRecovery,
+  fleetCredentialRecoveryCode,
+  prepareFleetCredentialRecovery,
+} from "./FleetCredentialRecovery.ts";
 import * as LanFleet from "./LanFleet.ts";
 import * as FleetUsers from "./FleetUsers.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
@@ -95,7 +101,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     yield* fs.makeDirectory(stateDir);
     let record: Authority.FleetVaultRecord | undefined;
     let saves = 0;
-    let beforeNextVaultRead: Effect.Effect<void> | undefined;
+    let beforeNextVaultRead: Effect.Effect<void, LanFleetError> | undefined;
     const activeLinks: Array<EnvironmentAuth.IssuedPairingLink> = [];
     const vault = FleetVault.FleetVault.of({
       read: Effect.gen(function* () {
@@ -274,7 +280,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
         launchEnvironment[FLEET_ROSTER_ENV] = "";
       },
       record: () => record,
-      pauseNextVaultRead: (before: Effect.Effect<void>) => {
+      pauseNextVaultRead: (before: Effect.Effect<void, LanFleetError>) => {
         beforeNextVaultRead = before;
       },
       replaceRecord: (next: Authority.FleetVaultRecord | undefined) => {
@@ -351,6 +357,7 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
           access: "standard",
         });
         const before = f.a.record()!;
+        const previousSaves = f.a.saves();
         const users = [{ id: "dan", name: "Dan", color: "blue" as const }];
         yield* writeFleetJson(f.path.join(f.root, FleetUsers.FLEET_USERS_FILE), {
           version: 1,
@@ -366,7 +373,8 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
           machineId: before.machineId,
           defaultOwnerId: "dan",
         });
-        assert.deepEqual(f.a.record()!.tls, before.tls);
+        assert.deepEqual(f.a.record(), before);
+        assert.equal(f.a.saves(), previousSaves);
         assert.deepEqual(f.a.network(), { starts: 2, closes: 1 });
       }).pipe(Effect.provide(configLayer)),
   );
@@ -376,7 +384,14 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
       const f = yield* fixture(false, "accessible");
       yield* f.start();
       const originalAuthority = yield* f.fs.readFileString(f.authorityFile);
+      assert.isUndefined((yield* f.a.enrollment.status).credentialUnavailable);
+      const retained = f.a.record();
+      const readError = new LanFleetError({ reason: "configuration" });
+      f.a.pauseNextVaultRead(Effect.fail(readError));
+      assert.isTrue((yield* f.a.enrollment.status).credentialUnavailable);
+      assert.deepEqual(f.a.record(), retained);
       f.a.replaceRecord(undefined);
+      assert.isTrue((yield* f.a.enrollment.status).credentialUnavailable);
       const failed = yield* f.a.enrollment
         .configure({
           operation: "join",
@@ -470,6 +485,88 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         assert.equal((yield* f.a.enrollment.status).stage, "active");
         assert.deepEqual(f.a.record()!.tls, saved.tls);
         assert.equal(f.a.record()!.signingPrivateKey, saved.signingPrivateKey);
+      }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect(
+    "keeps the owner-approved member keys when a prior enrollment remains on the share",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false, "accessible");
+        const initial = yield* f.start();
+        const origin = "https://192.168.40.11:4001";
+        const enrolled = yield* f.b.enrollment.configure({
+          operation: "join",
+          confirmed: true,
+          origin,
+          ownerCode: initial.ownerCode!,
+          autoPickup: false,
+          access: "read-only",
+        });
+        const owner = f.a.record()!;
+        const prior = f.b.record()!;
+        const roster = yield* readFleetJson(f.rosterPath, FleetRoster).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        const row = roster.machines.find((machine) => machine.machineId === prior.machineId)!;
+        const oldPeer = Authority.identityPeer(prior, row.label, row.origin);
+        assert.equal(enrolled.deviceCode, Authority.peerVerificationCode(oldPeer));
+
+        const updated = Authority.generateFleetIdentity(
+          prior.environmentId,
+          prior.fleetId,
+          prior.rootPublicKey,
+          false,
+          { autoPickup: prior.autoPickup, access: prior.access },
+          prior.machineId,
+        );
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        const authority = yield* readFleetJson(f.authorityFile, Authority.FleetAuthority).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        const review = {
+          authority,
+          predecessor: oldPeer,
+          accessCeiling: prior.access,
+          accessPolicyDigest: "e".repeat(64),
+          now,
+        };
+        const candidate = {
+          ...updated,
+          tls: { origin, ...createFleetTlsCertificate({ address: "192.168.40.11", now }) },
+          tlsEnabled: true,
+        };
+        const request = prepareFleetCredentialRecovery(
+          "f0ddb5dc-6531-4d9f-8dc8-f1c5d2db01ab",
+          candidate,
+          review,
+        );
+        const code = fleetCredentialRecoveryCode(request);
+        assert.throws(() => approveFleetCredentialRecovery(request, code, prior, review));
+        assert.throws(() =>
+          approveFleetCredentialRecovery(request, code, owner, {
+            ...review,
+            accessCeiling: "standard",
+          }),
+        );
+        assert.throws(() =>
+          approveFleetCredentialRecovery(request, code, owner, {
+            ...review,
+            now: request.expiresAt,
+          }),
+        );
+        const approved = approveFleetCredentialRecovery(request, code, owner, review);
+        yield* writeFleetJson(f.authorityFile, approved).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        const updatedPeer = request.enrollment.peer;
+        // The BuildShare enrollment still contains the old keys when a peer reloads.
+        const resolved = yield* f.a.enrollment.resolve;
+        assert.deepEqual(
+          resolved?.peers.find((peer) => peer.environmentId === prior.environmentId),
+          updatedPeer,
+        );
+        assert.isNull(yield* f.b.enrollment.resolve);
       }).pipe(Effect.provide(configLayer)),
   );
 
@@ -1192,7 +1289,9 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         yield* f.fs.writeFileString(f.authorityFile, original);
         assert.equal((yield* f.b.enrollment.resolve.pipe(Effect.flip)).reason, "configuration");
         yield* f.fs.writeFileString(f.authorityFile, current);
-        const authority = yield* readFleetJson(f.authorityFile, Authority.FleetAuthority);
+        const authority = yield* readFleetJson(f.authorityFile, Authority.FleetAuthority).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
         const replacement = Authority.generateFleetIdentity(
           f.b.environmentId,
           authority.fleetId,
@@ -1281,7 +1380,9 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
               `https://${name}.example.test`,
             );
             const { encryptionPublicKey: _e, signingPublicKey: _s, tls: _tls, ...metadata } = peer;
-            const roster = yield* readFleetJson(f.rosterPath, FleetRoster);
+            const roster = yield* readFleetJson(f.rosterPath, FleetRoster).pipe(
+              Effect.provideService(FileSystem.FileSystem, f.fs),
+            );
             yield* writeFleetJson(f.rosterPath, {
               ...roster,
               machines: [...roster.machines, metadata],

@@ -63,7 +63,7 @@ const make = Effect.gen(function* () {
   // membership cached from an earlier launch is cleared here, at startup.
   if ((yield* bootstrap().pipe(Effect.orElseSucceed(() => null))) === undefined)
     yield* fleetAccess.leave;
-  const load = Effect.fn("FleetEnrollment.load")(function* () {
+  const load = Effect.fn("FleetEnrollment.load")(function* (observeVaultError = false) {
     const paths = yield* bootstrap();
     if (paths === undefined) {
       yield* fleetAccess.leave;
@@ -80,7 +80,14 @@ const make = Effect.gen(function* () {
     const root = path.dirname(paths.rosterPath);
     const authorityFile = path.join(root, "fleet-authority.json");
     const requestsDirectory = path.join(root, "fleet-enrollment");
-    const record = yield* vault.read;
+    const credential = yield* vault.read.pipe(
+      Effect.map((record) => ({ record, error: undefined })),
+      Effect.catchIf(
+        () => observeVaultError,
+        (error) => Effect.succeed({ record: undefined, error }),
+      ),
+    );
+    const { record } = credential;
     const authority = (yield* fs.exists(authorityFile))
       ? yield* readFleetJson(authorityFile, Authority.FleetAuthority)
       : undefined;
@@ -135,7 +142,12 @@ const make = Effect.gen(function* () {
             existing.enabled &&
             existing.machineId === peer.machineId &&
             existing.environmentId === peer.environmentId &&
-            existing.origin === peer.origin
+            existing.origin === peer.origin &&
+            // A member explicitly signed by the fleet owner may refresh its TLS metadata,
+            // but an enrollment file cannot restore the superseded signing or encryption keys.
+            (authority.credentialKeyDigests?.[existing.machineId] === undefined ||
+              (existing.signingPublicKey === peer.signingPublicKey &&
+                existing.encryptionPublicKey === peer.encryptionPublicKey))
           )
             peers[index] = peer;
         }
@@ -195,7 +207,7 @@ const make = Effect.gen(function* () {
       );
     // With no enrollment here the fleet no longer links this machine. A missing authority file may
     // only be a share blip, so it changes nothing.
-    if (record === undefined) yield* fleetAccess.leave;
+    if (record === undefined && credential.error === undefined) yield* fleetAccess.leave;
     const accessPolicy =
       record === undefined || authority === undefined || record.fleetId !== authority.fleetId
         ? undefined
@@ -207,6 +219,9 @@ const make = Effect.gen(function* () {
             legacyAccess: record.access,
             member,
             signingPrivateKey: record.signingPrivateKey,
+            ...(authority.credentialKeyDigests === undefined
+              ? {}
+              : { credentialKeyDigests: authority.credentialKeyDigests }),
             rosterDisabled: roster.machines
               .filter((machine) => !machine.enabled)
               .map((machine) => machine.machineId),
@@ -219,6 +234,7 @@ const make = Effect.gen(function* () {
       authorityFile,
       requestsDirectory,
       record,
+      credentialError: credential.error,
       authority,
       roster,
       rosterAvailable,
@@ -230,10 +246,24 @@ const make = Effect.gen(function* () {
 
   const status = Effect.gen(function* () {
     const descriptor = yield* environment.getDescriptor;
-    const current = yield* load();
+    const current = yield* load(true);
     const local = current?.roster.machines.find(
       (machine) => machine.environmentId === descriptor.environmentId,
     );
+    const credentialUnavailable =
+      current?.sharedFolderTrust === true &&
+      current.record === undefined &&
+      current.authority !== undefined &&
+      local?.enabled === true &&
+      current.peers.some(
+        (peer) =>
+          peer.enabled &&
+          peer.machineId === local.machineId &&
+          peer.environmentId === local.environmentId &&
+          peer.origin === local.origin,
+      );
+    if (current?.credentialError !== undefined && !credentialUnavailable)
+      return yield* current.credentialError;
     const advertised = yield* endpoints.resolve();
     const suggestedTlsOrigins = Option.isSome(transport) ? yield* transport.value.suggestions : [];
     const tlsReady =
@@ -252,6 +282,7 @@ const make = Effect.gen(function* () {
     const base: LanFleetSetupState = {
       available: current !== undefined,
       sharedFolderTrust: current?.sharedFolderTrust ?? false,
+      ...(credentialUnavailable ? { credentialUnavailable } : {}),
       stage: "unconfigured",
       owner: false,
       ownerCode: null,
@@ -420,6 +451,9 @@ const make = Effect.gen(function* () {
                 machineId: record.machineId,
                 peers: current.fleetPeers,
                 legacyAccess: record.access,
+                ...(authority.credentialKeyDigests === undefined
+                  ? {}
+                  : { credentialKeyDigests: authority.credentialKeyDigests }),
                 member: current.member,
                 signingPrivateKey: record.signingPrivateKey,
                 expectedRevision: input.revision,
@@ -820,6 +854,9 @@ const make = Effect.gen(function* () {
       signingPrivateKey: record.signingPrivateKey,
       peers: current.peers,
       managed: true,
+      ...(authority.credentialKeyDigests === undefined
+        ? {}
+        : { credentialKeyDigests: authority.credentialKeyDigests }),
       access: record.access,
       campaign: current.sharedFolderTrust
         ? {

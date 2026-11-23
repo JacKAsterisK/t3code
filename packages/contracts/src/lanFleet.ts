@@ -184,6 +184,7 @@ export type LanFleetSetupInput = typeof LanFleetSetupInput.Type;
 export const LanFleetSetupState = Schema.Struct({
   available: Schema.Boolean,
   sharedFolderTrust: Schema.optionalKey(Schema.Boolean),
+  credentialUnavailable: Schema.optionalKey(Schema.Boolean),
   stage: Schema.Literals(["unconfigured", "join", "pending", "active", "paused"]),
   owner: Schema.Boolean,
   ownerCode: Schema.NullOr(VerificationCode),

@@ -2814,6 +2814,7 @@
   "be54224dbe3c6be5": "Von diesem Branch starten, sofern ein Repository ihn hat",
   "5c6a6009aedbf1d0": "Alles auswählen",
   "24c98c5086b8e76e": "Keine auswählen",
+  "1e0e035b988a160c": "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
   "e171ad5dd254389e": "Die SSH-Umgebung konnte nicht vorbereitet werden: {message}",
   "e0465384c9425d24": "Die SSH-Umgebung hat keine Kopplungsdaten ausgestellt.",
   "69c97cece949d88c": "Dieser Host erreicht {label}, einen anderen Rechner. Füge ihn stattdessen als eigene Umgebung hinzu.",

@@ -14,6 +14,8 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { Atom } from "effect/reactivity";
 import * as Schema from "effect/Schema";
+import { msg } from "gt-react";
+import { m } from "../i18n/messages";
 import { environmentCatalog } from "./catalog";
 import { resolveFleetEnvironmentId, resolveNativeWindowsPrimary } from "./lanFleetEnvironment";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
@@ -194,7 +196,14 @@ export function useLanFleet() {
     allowed,
     summary,
     setup,
-    error,
+    error:
+      setup?.credentialUnavailable === true
+        ? m(
+            msg(
+              "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
+            ),
+          )
+        : error,
     busy,
     paused,
     pause,

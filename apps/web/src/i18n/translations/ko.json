@@ -2812,6 +2812,7 @@
   "be54224dbe3c6be5": "저장소에 이 브랜치가 있으면 거기서 시작",
   "5c6a6009aedbf1d0": "모두 선택",
   "24c98c5086b8e76e": "모두 선택 해제",
+  "1e0e035b988a160c": "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
   "e171ad5dd254389e": "SSH 환경을 준비할 수 없습니다: {message}",
   "e0465384c9425d24": "SSH 환경에서 페어링 자격 증명을 발급하지 않았습니다.",
   "69c97cece949d88c": "해당 호스트는 다른 머신인 {label}에 연결됩니다. 별도의 환경으로 추가하세요.",

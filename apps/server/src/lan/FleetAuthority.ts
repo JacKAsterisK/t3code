@@ -2,7 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import { EnvironmentId, FleetMachineId, FleetTlsIdentity } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { FleetCampaign, FleetPeer } from "./FleetDelivery.ts";
+import { FleetCampaign, FleetCredentialKeyDigests, FleetPeer } from "./FleetDelivery.ts";
 
 const Pem = Schema.String.check(Schema.isMaxLength(8192));
 export const FleetVaultRecord = Schema.Struct({
@@ -31,6 +31,7 @@ export const FleetAuthority = Schema.Struct({
   revision: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
   peers: Schema.Array(FleetPeer).check(Schema.isMaxLength(100)),
   campaign: Schema.NullOr(FleetCampaign),
+  credentialKeyDigests: Schema.optionalKey(FleetCredentialKeyDigests),
   signature: Schema.String.check(Schema.isMaxLength(1024)),
 });
 export type FleetAuthority = typeof FleetAuthority.Type;
@@ -56,6 +57,9 @@ const authorityData = (value: FleetAuthority) =>
     value.revision,
     value.peers,
     value.campaign,
+    ...(value.credentialKeyDigests === undefined
+      ? []
+      : [Object.entries(value.credentialKeyDigests).toSorted()]),
   ]);
 const requestData = (value: FleetEnrollmentRequest) =>
   JSON.stringify([value.version, value.fleetId, value.peer]);
@@ -142,6 +146,9 @@ export function signAuthority(value: FleetAuthority, privateKey: string): FleetA
   };
 }
 
+export const fleetSigningKeyDigest = (key: string) =>
+  NodeCrypto.createHash("sha256").update(key).digest("hex");
+
 export function verifyAuthority(value: FleetAuthority, record?: FleetVaultRecord): void {
   const key = NodeCrypto.createPublicKey(value.rootPublicKey);
   if (
@@ -154,6 +161,15 @@ export function verifyAuthority(value: FleetAuthority, record?: FleetVaultRecord
     ) ||
     new Set(value.peers.map((peer) => peer.machineId)).size !== value.peers.length ||
     new Set(value.peers.map((peer) => peer.environmentId)).size !== value.peers.length ||
+    Object.entries(value.credentialKeyDigests ?? {}).some(
+      ([machineId, digest]) =>
+        !value.peers.some(
+          (peer) =>
+            peer.machineId === machineId &&
+            peer.environmentId !== value.ownerEnvironmentId &&
+            fleetSigningKeyDigest(peer.signingPublicKey) === digest,
+        ),
+    ) ||
     (record !== undefined &&
       (value.fleetId !== record.fleetId ||
         value.rootPublicKey !== record.rootPublicKey ||

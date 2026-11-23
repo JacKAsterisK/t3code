@@ -2813,6 +2813,7 @@
   "be54224dbe3c6be5": "Partir de esta rama cuando un repositorio la tenga",
   "5c6a6009aedbf1d0": "Seleccionar todo",
   "24c98c5086b8e76e": "No seleccionar ninguno",
+  "1e0e035b988a160c": "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
   "e171ad5dd254389e": "No se pudo preparar el entorno SSH: {message}",
   "e0465384c9425d24": "El entorno SSH no emitió una credencial de emparejamiento.",
   "69c97cece949d88c": "Ese host lleva a {label}, otra máquina. Añádelo como un entorno propio.",

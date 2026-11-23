@@ -26,7 +26,7 @@ import * as Semaphore from "effect/Semaphore";
 import type * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as ServerConfig from "../config.ts";
-import type { FleetPeer } from "./FleetDelivery.ts";
+import { FleetCredentialKeyDigests, type FleetPeer } from "./FleetDelivery.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 
 type Level = FleetAccessLevel;
@@ -177,6 +177,7 @@ const LocalCache = Schema.Struct({
   // Entries kept only so later ones still have their parents; they never count as verified.
   unverified: Schema.optionalKey(Schema.Array(Digest).check(Schema.isMaxLength(10_000))),
   member: Schema.optionalKey(Schema.Boolean),
+  credentialKeyDigests: Schema.optionalKey(FleetCredentialKeyDigests),
 });
 type LocalCache = typeof LocalCache.Type;
 
@@ -542,6 +543,8 @@ export const credentialAccess = (credential: {
     : "read-only";
 
 export interface FleetAccessState {
+  /** Latest owner-signed replacement key for each formerly enrolled machine. */
+  readonly credentialKeyDigests?: FleetCredentialKeyDigests;
   /** Current verified keys only; absent until a fresh fleet read publishes under admission. */
   readonly approvalTrust?: {
     readonly fleetId: string;
@@ -625,6 +628,7 @@ export const fleetLinksApply = (state: FleetAccessState) =>
 export const mayRevokeForAccess = (state: FleetAccessState) => state.unavailable !== true;
 
 interface FleetAccessInput {
+  readonly credentialKeyDigests?: FleetCredentialKeyDigests;
   readonly root: string;
   readonly fleetId: string;
   readonly machineId: string;
@@ -713,6 +717,9 @@ const make = Effect.gen(function* () {
     // A cache from before this version may name one whose ID is reserved; it is never a peer.
     peers: trustedPeers(value?.peers ?? []),
     member: value?.member === true,
+    ...(value?.credentialKeyDigests === undefined
+      ? {}
+      : { credentialKeyDigests: value.credentialKeyDigests }),
     ...(unavailable ? { unavailable: true } : {}),
     ...(seed === undefined ? {} : { seed }),
     ...(seedPending === undefined ? {} : { seedPending }),
@@ -883,8 +890,13 @@ const make = Effect.gen(function* () {
         candidates: [...kept, ...candidates],
         peers: input.peers,
       });
+      const credentialKeyDigests = {
+        ...(own ? cache?.credentialKeyDigests : undefined),
+        ...input.credentialKeyDigests,
+      };
       const next: LocalCache = {
         version: 1,
+        ...(Object.keys(credentialKeyDigests).length === 0 ? {} : { credentialKeyDigests }),
         fleetId: input.fleetId,
         machineId: input.machineId,
         peers: trustedPeers(input.peers)

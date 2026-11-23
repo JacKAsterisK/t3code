@@ -2813,6 +2813,7 @@
   "be54224dbe3c6be5": "Começar a partir deste branch quando um repositório o tiver",
   "5c6a6009aedbf1d0": "Selecionar tudo",
   "24c98c5086b8e76e": "Selecionar nenhum",
+  "1e0e035b988a160c": "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
   "e171ad5dd254389e": "Não foi possível preparar o ambiente SSH: {message}",
   "e0465384c9425d24": "O ambiente SSH não emitiu uma credencial de pareamento.",
   "69c97cece949d88c": "Esse host leva a {label}, outra máquina. Adicione-a como um ambiente próprio.",

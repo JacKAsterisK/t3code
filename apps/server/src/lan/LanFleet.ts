@@ -267,14 +267,10 @@ const make = Effect.gen(function* () {
             const activeSessions = sharedFolder ? yield* auth.listSessions() : [];
             const availableDeliveryIds = new Set<string>();
             const rejectedDeliveryIds = new Set<string>();
-            const activeGrant = (
-              outgoingKey: string,
-              expiresAt: number,
-              pairingLinkId?: string,
-            ) => {
+            const activeGrant = (subject: string, expiresAt: number, pairingLinkId?: string) => {
               const matches = activeLinks.filter(
                 (link) =>
-                  link.subject === `lan-fleet:${outgoingKey}` &&
+                  link.subject === subject &&
                   (pairingLinkId === undefined || link.id === pairingLinkId) &&
                   DateTime.toEpochMillis(link.expiresAt) > now &&
                   Math.abs(DateTime.toEpochMillis(link.expiresAt) - expiresAt) <= 60_000,
@@ -305,6 +301,10 @@ const make = Effect.gen(function* () {
                     : "ready";
               if (peer !== undefined && peer.machineId !== self.machineId) {
                 const outgoingKey = Delivery.deliveryFileName(self.machineId, peer.machineId);
+                const subject = Delivery.fleetCredentialSubject(
+                  "lan-fleet:" + outgoingKey,
+                  config.credentialKeyDigests?.[peer.machineId],
+                );
                 const outFile = path.join(config.deliveryDirectory, `${outgoingKey}.json`);
                 let sent = journal[`sent:${outgoingKey}`];
                 let recipientReady = !config.managed;
@@ -335,7 +335,6 @@ const make = Effect.gen(function* () {
                       : "standard";
                 if (sharedFolder) {
                   // What this machine actually issued the peer is the truth, not the journal.
-                  const subject = `lan-fleet:${outgoingKey}`;
                   const held = [
                     ...activeSessions
                       .filter((session) => session.subject === subject)
@@ -436,7 +435,7 @@ const make = Effect.gen(function* () {
                     Delivery.verifyDelivery(existing, self, peer, now),
                   );
                   const grant = activeGrant(
-                    outgoingKey,
+                    subject,
                     existing.header.expiresAt,
                     sent?.pairingLinkId,
                   );
@@ -524,7 +523,7 @@ const make = Effect.gen(function* () {
                   const minted = yield* liveAccess(access);
                   const issued = yield* auth.createPairingLink({
                     ttl: Duration.hours(24),
-                    subject: `lan-fleet:${outgoingKey}`,
+                    subject,
                     scopes: FleetAccessPolicy.fleetCredentialScopes(minted),
                   });
                   if (sharedFolder) {

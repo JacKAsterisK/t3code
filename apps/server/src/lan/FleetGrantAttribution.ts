@@ -96,7 +96,10 @@ export const layerServices = Layer.effect(
         return {
           grantId: claim.grantId,
           subject: CredentialAttribution.mcpClientSubject(
-            `lan-fleet:${Delivery.deliveryFileName(fleet.self.machineId, claim.signer)}`,
+            Delivery.fleetCredentialSubject(
+              "lan-fleet:" + Delivery.deliveryFileName(fleet.self.machineId, claim.signer),
+              fleet.config.credentialKeyDigests?.[claim.signer],
+            ),
           ),
         };
       }),

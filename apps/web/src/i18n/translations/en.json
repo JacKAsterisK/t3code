@@ -2813,6 +2813,7 @@
   "be54224dbe3c6be5": "Start from this branch where a repository has it",
   "5c6a6009aedbf1d0": "Select all",
   "24c98c5086b8e76e": "Select none",
+  "1e0e035b988a160c": "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
   "e171ad5dd254389e": "Could not prepare the SSH environment: {message}",
   "e0465384c9425d24": "The SSH environment did not issue a pairing credential.",
   "69c97cece949d88c": "That host reaches {label}, a different machine. Add it as its own environment instead.",

@@ -35,7 +35,7 @@ import {
   type FleetPeer,
 } from "./FleetDelivery.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
-import * as Vault from "./FleetVault.ts";
+import { readStartupCredential } from "./FleetVaultStartup.ts";
 
 type Level = FleetAccessLevel;
 const Digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
@@ -694,7 +694,7 @@ const configurationError = () => new LanFleetError({ reason: "configuration" });
 const isFleetError = Schema.is(LanFleetError);
 
 const make = Effect.fn("FleetAccess.make")(function* (
-  readCredential: typeof Vault.readStartupCredential,
+  readCredential: typeof readStartupCredential,
 ) {
   const gate = yield* Gate.ApprovalAdmissionGate;
   const fs = yield* FileSystem.FileSystem;
@@ -1384,6 +1384,6 @@ const make = Effect.fn("FleetAccess.make")(function* (
   });
 });
 
-export const layerWithCredentialReader = (readCredential: typeof Vault.readStartupCredential) =>
+export const layerWithCredentialReader = (readCredential: typeof readStartupCredential) =>
   Layer.effect(FleetAccess, make(readCredential)).pipe(Layer.provideMerge(Gate.layer));
-export const layer = layerWithCredentialReader(Vault.readStartupCredential);
+export const layer = layerWithCredentialReader(readStartupCredential);

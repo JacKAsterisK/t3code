@@ -11,6 +11,7 @@ import {
   type LanFleetSetupInput,
   type LanFleetSetupState,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -20,6 +21,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -341,6 +343,49 @@ const make = Effect.gen(function* () {
                   }
                 }
                 let outgoingExists = yield* fs.exists(outFile);
+                if (
+                  sharedFolder &&
+                  recipientReady &&
+                  outgoingExists &&
+                  (sent !== undefined ||
+                    credentialKeyDigest !== undefined ||
+                    requested.has(peer.machineId))
+                ) {
+                  const previous = yield* readFleetJson(outFile, Delivery.Delivery).pipe(
+                    Effect.result,
+                  );
+                  if (
+                    Result.isFailure(previous) &&
+                    (Cause.isUnknownError(previous.failure) ||
+                      Schema.isSchemaError(previous.failure))
+                  ) {
+                    // The bytes arrived but cannot describe a delivery. Preserve them under the
+                    // issuer's sync lock. Access or transport errors still leave the file in place.
+                    const archived = yield* fs
+                      .rename(outFile, outFile + ".invalid-" + NodeCrypto.randomUUID())
+                      .pipe(
+                        Effect.as(true),
+                        Effect.orElseSucceed(() => false),
+                      );
+                    if (!archived) {
+                      reportStatus("uncertain");
+                      continue;
+                    }
+                    const grant = activeLinks.find(
+                      (link) =>
+                        link.id === sent?.pairingLinkId &&
+                        Delivery.fleetCredentialSubjectParts(link.subject).subject ===
+                          legacySubject,
+                    );
+                    if (grant !== undefined && (yield* auth.revokePairingLink(grant.id)))
+                      activeLinks.splice(activeLinks.indexOf(grant), 1);
+                    if (sent?.status !== "connected") requested.add(peer.machineId);
+                    delete journal[`sent:${outgoingKey}`];
+                    sent = undefined;
+                    outgoingExists = false;
+                    yield* writeFleetJson(journalFile, journal);
+                  }
+                }
                 if (
                   sharedFolder &&
                   recipientReady &&

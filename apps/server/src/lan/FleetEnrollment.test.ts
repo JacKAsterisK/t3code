@@ -828,6 +828,31 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         assert.isDefined(renewed);
         assert.notEqual(renewed?.deliveryId, previousDelivery?.deliveryId);
 
+        for (const [index, invalidBytes] of ['{"header":', '{"header":null}'].entries()) {
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const output = yield* f.fs.open(offerPath, { flag: "w" });
+              yield* output.writeAll(new TextEncoder().encode(invalidBytes));
+            }),
+          );
+          yield* f.sync(f.a, [f.a.environmentId]);
+          const quarantined = (yield* f.fs.readDirectory(deliveries)).filter((file) =>
+            file.startsWith(f.path.basename(offerPath) + ".invalid-"),
+          );
+          assert.lengthOf(quarantined, index + 1);
+          assert.include(
+            yield* Effect.forEach(quarantined, (file) =>
+              f.fs.readFileString(f.path.join(deliveries, file)),
+            ),
+            invalidBytes,
+          );
+          const replacement = yield* readFleetJson(offerPath, Delivery.Delivery).pipe(
+            Effect.provideService(FileSystem.FileSystem, f.fs),
+          );
+          assert.notEqual(replacement.header.deliveryId, renewed!.deliveryId);
+          assert.isTrue(Delivery.verifyDelivery(replacement, ownerPeer, updatedPeer, now));
+        }
+
         yield* f.a.enrollment.configure({
           operation: "revoke",
           confirmed: true,

@@ -30,6 +30,7 @@ export class FleetTransport extends Context.Service<
       previous?: StoredTls,
     ) => Effect.Effect<StoredTls, LanFleetError>;
     readonly ready: (record: FleetVaultRecord) => Effect.Effect<boolean>;
+    readonly restore: (record: FleetVaultRecord) => Effect.Effect<void, LanFleetError>;
     readonly persist: (record: FleetVaultRecord) => Effect.Effect<void, LanFleetError>;
     /** The https origin of the encrypted endpoint this server is running, if any. */
     readonly origin: Effect.Effect<string | undefined>;
@@ -133,6 +134,23 @@ const make = Effect.gen(function* () {
       );
     running = { origin: identity.origin, proxy };
   });
+  const restore = Effect.fn("FleetTransport.restore")(
+    function* (expected: FleetVaultRecord) {
+      // An explicit stop can commit while an enrollment refresh is waiting for the mutex.
+      const saved = yield* vault.read;
+      if (
+        saved?.tls === undefined ||
+        saved.tlsEnabled === false ||
+        saved.machineId !== expected.machineId ||
+        saved.tls.origin !== expected.tls?.origin ||
+        saved.tls.publicKeySha256 !== expected.tls?.publicKeySha256
+      )
+        return;
+      yield* ensure(saved);
+    },
+    Effect.uninterruptible,
+    mutex.withPermit,
+  );
   const persist = Effect.fn("FleetTransport.persist")(
     function* (record: FleetVaultRecord) {
       const previous = running;
@@ -180,6 +198,7 @@ const make = Effect.gen(function* () {
     suggestions,
     prepare,
     persist,
+    restore,
     origin: Effect.sync(() => running?.origin),
     forwarded: (headers) => {
       const mark = Buffer.from(headers[FLEET_TLS_FORWARD_HEADER] ?? "");

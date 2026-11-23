@@ -5,6 +5,7 @@ import { vi } from "vite-plus/test";
 import {
   EnvironmentId,
   FleetRoster,
+  LanFleetError,
   AuthStandardClientScopes,
   AuthFilesystemWriteScope,
   type AuthEnvironmentScope,
@@ -95,6 +96,12 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     const activeLinks: Array<EnvironmentAuth.IssuedPairingLink> = [];
     const vault = FleetVault.FleetVault.of({
       read: Effect.sync(() => record),
+      advanceRevision: (_expected, revision) =>
+        Effect.sync(() => {
+          if (record === undefined || record.lastRevision >= revision) return;
+          saves++;
+          record = { ...record, lastRevision: revision };
+        }),
       save: (next) =>
         Effect.sync(() => {
           saves++;
@@ -119,10 +126,12 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     const launchEnvironment: Record<string, string> = { [FLEET_ROSTER_ENV]: rosterPath };
     let starts = 0;
     let closes = 0;
+    let portBusy = false;
     const networkLayer = Layer.succeed(FleetNetwork.FleetNetwork, {
       addresses: Effect.succeed([name === "alpha" ? "192.168.40.10" : "192.168.40.11"]),
       listen: (input) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
+          if (portBusy) return yield* new LanFleetError({ reason: "transport" });
           starts++;
           return {
             httpBaseUrl: "https://" + input.listen.address + ":" + input.listen.port + "/",
@@ -261,6 +270,9 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
       },
       saves: () => saves,
       network: () => ({ starts, closes }),
+      setPortBusy: (busy: boolean) => {
+        portBusy = busy;
+      },
     };
   });
   const a = yield* create("alpha");
@@ -807,10 +819,30 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
           f.issued.find((grant) => grant.issuer === "beta")!.scopes,
           AuthStandardClientScopes,
         );
+        f.a.setPortBusy(true);
         yield* f.a.restart;
         yield* f.b.restart;
+        assert.equal((yield* f.a.enrollment.status).tlsReady, false);
+        f.a.setPortBusy(false);
+        const beforeDisable = f.a.network();
+        const roster = yield* readFleetJson(f.rosterPath, FleetRoster).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        yield* writeFleetJson(f.rosterPath, {
+          ...roster,
+          machines: roster.machines.map((machine) =>
+            machine.machineId === beforeA.machineId ? { ...machine, enabled: false } : machine,
+          ),
+        }).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+        assert.equal(yield* f.a.enrollment.resolve, null);
+        assert.deepEqual(f.a.network(), beforeDisable);
+        yield* writeFleetJson(f.rosterPath, roster).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
         yield* f.sync(f.a, [f.a.environmentId, f.b.environmentId]);
         yield* f.sync(f.b, [f.a.environmentId, f.b.environmentId]);
+        assert.equal((yield* f.a.enrollment.status).tlsReady, true);
+        assert.deepEqual(f.a.record()!.tls, beforeA.tls);
         assert.equal(f.issued.length, 2);
         yield* f.a.enrollment.configure({
           operation: "transport",

@@ -1,3 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Loopback socket checks verify the saved fleet identity.
+import * as NodeTls from "node:tls";
+import { fleetTlsRequestOptions, startFleetProxy } from "@t3tools/shared/fleetTlsProxy";
+import * as Clock from "effect/Clock";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
@@ -26,6 +30,7 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
     events?: string[];
     ipv6Unavailable?: boolean;
     remoteAllowed?: boolean;
+    realListener?: boolean;
   } = {},
 ) {
   const config = yield* Config.ServerConfig;
@@ -36,6 +41,7 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
   let conflict = options.conflict ?? false;
   let vaultUnavailable = options.vaultUnavailable ?? false;
   let reads = 0;
+  let listeningOrigin: string | undefined;
   const listenAddresses: string[] = [];
   const services = yield* Layer.build(
     FleetTransport.layerServices.pipe(
@@ -66,6 +72,7 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
               ? Effect.fail(new LanFleetError({ reason: "unavailable" }))
               : Effect.succeed(record);
           }),
+          advanceRevision: () => Effect.void,
           save: (next) =>
             vaultUnavailable
               ? Effect.fail(new LanFleetError({ reason: "unavailable" }))
@@ -87,6 +94,15 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
               if (conflict) return yield* new LanFleetError({ reason: "transport" });
               starts++;
               options.events?.push("start");
+              if (options.realListener) {
+                const proxy = yield* Effect.tryPromise({
+                  try: () =>
+                    startFleetProxy({ ...input, listen: { address: "127.0.0.1", port: 0 } }),
+                  catch: () => new LanFleetError({ reason: "transport" }),
+                });
+                listeningOrigin = new URL(proxy.httpBaseUrl).origin;
+                return proxy;
+              }
               return {
                 httpBaseUrl: `https://${input.listen.address}:${input.listen.port}/`,
                 wsBaseUrl: "wss://synthetic-only/",
@@ -115,7 +131,7 @@ const fixture = Effect.fn("FleetTransportTest.fixture")(function* (
     identity,
     origin: `https://192.168.40.10:${port}`,
     listenAddresses,
-    stats: () => ({ record, starts, closes, saves, reads }),
+    stats: () => ({ record, starts, closes, saves, reads, listeningOrigin }),
     conflict: (value: boolean) => {
       conflict = value;
     },
@@ -215,6 +231,37 @@ it.layer(NodeServices.layer)("confirmed fleet transport", (it) => {
       expect(yield* recovered.transport.ready(record)).toBe(true);
     }).pipe(Effect.provide(configLayer)),
   );
+  it.effect("recovers the saved listener after a transient startup failure", () =>
+    Effect.gen(function* () {
+      const first = yield* fixture();
+      const tls = yield* first.transport.prepare(first.origin);
+      const record = { ...first.identity, tls, tlsEnabled: true };
+      const restarted = yield* fixture(record, { conflict: true });
+      expect(yield* restarted.transport.ready(record)).toBe(false);
+
+      restarted.conflict(false);
+      yield* Effect.all(
+        [restarted.transport.restore(record), restarted.transport.restore(record)],
+        { concurrency: "unbounded" },
+      );
+      expect(yield* restarted.transport.ready(record)).toBe(true);
+      expect(restarted.stats()).toMatchObject({ starts: 1, saves: 0, record });
+    }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect("does not restore a stopped endpoint from an older observation", () =>
+    Effect.gen(function* () {
+      const first = yield* fixture();
+      const tls = yield* first.transport.prepare(first.origin);
+      const record = { ...first.identity, tls, tlsEnabled: true };
+      const restarted = yield* fixture(record, { conflict: true });
+      restarted.conflict(false);
+      yield* restarted.transport.persist({ ...record, tlsEnabled: false });
+      yield* restarted.transport.restore(record);
+      expect(restarted.stats()).toMatchObject({ starts: 0, saves: 1 });
+      expect(yield* restarted.transport.ready(record)).toBe(false);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("cleans up a listener acquired while startup is interrupted", () =>
     Effect.gen(function* () {
       const first = yield* fixture();
@@ -335,4 +382,47 @@ it.effect(
       );
       expect(denied.stats()).toMatchObject({ starts: 0, saves: 0, record });
     }).pipe(Effect.provide(configLayer.pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.live("resumes the saved TLS endpoint using its pinned certificate", () =>
+  Effect.gen(function* () {
+    const addresses = ["127.0.0.1"];
+    const first = yield* fixture(undefined, { addresses });
+    const tls = yield* first.transport.prepare(
+      first.origin.replace("192.168.40.10", addresses[0]!),
+    );
+    const record = { ...first.identity, tls, tlsEnabled: true };
+    const restarted = yield* fixture(record, { addresses, conflict: true, realListener: true });
+    expect(yield* restarted.transport.ready(record)).toBe(false);
+
+    restarted.conflict(false);
+    yield* restarted.transport.restore(record);
+    const origin = restarted.stats().listeningOrigin;
+    if (origin === undefined) return yield* Effect.die("Saved TLS listener did not start.");
+    const now = yield* Clock.currentTimeMillis;
+    const authorized = yield* Effect.promise(
+      () =>
+        new Promise<boolean>((resolve, reject) => {
+          const peer = new URL(origin);
+          const { ca, checkServerIdentity } = fleetTlsRequestOptions({ ...tls, origin }, now);
+          const socket = NodeTls.connect({
+            ca,
+            allowPartialTrustChain: true,
+            rejectUnauthorized: true,
+            checkServerIdentity: (host, cert) =>
+              checkServerIdentity?.(host, cert as NodeTls.DetailedPeerCertificate),
+            host: peer.hostname,
+            port: Number(peer.port),
+          });
+          socket.setTimeout(2_000, () => socket.destroy(new Error("TLS handshake timed out.")));
+          socket.once("error", reject);
+          socket.once("secureConnect", () => {
+            resolve(socket.authorized);
+            socket.destroy();
+          });
+        }),
+    );
+    expect(authorized).toBe(true);
+    expect(restarted.stats()).toMatchObject({ starts: 1, saves: 0, record });
+  }).pipe(Effect.provide(configLayer.pipe(Layer.provideMerge(NodeServices.layer))), Effect.scoped),
 );

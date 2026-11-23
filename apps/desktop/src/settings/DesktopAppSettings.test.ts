@@ -241,6 +241,29 @@ describe("DesktopSettings", () => {
     ),
   );
 
+  it.effect("retains the LAN exposure from an older Windows desktop settings document", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        yield* fileSystem.makeDirectory(environment.stateDir, { recursive: true });
+        for (const prefix of ["", "\uFEFF"]) {
+          yield* fileSystem.writeFileString(
+            environment.desktopSettingsPath,
+            prefix + '{"serverExposureMode":"network-accessible","mainWindowMaximized":true}\n',
+          );
+          assert.equal((yield* settings.load).serverExposureMode, "network-accessible");
+          yield* settings.setMainWindowBounds({ x: 10, y: 20, width: 800, height: 600 }, false);
+          const persisted = yield* decodeDesktopSettingsPatch(
+            yield* fileSystem.readFileString(environment.desktopSettingsPath),
+          );
+          assert.equal(persisted.serverExposureMode, "network-accessible");
+        }
+      }),
+    ),
+  );
+
   it.effect("keeps Local environment off when another value in the file is unreadable", () =>
     withSettings(
       Effect.gen(function* () {

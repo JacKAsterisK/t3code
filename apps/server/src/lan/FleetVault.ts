@@ -19,6 +19,10 @@ export class FleetVault extends Context.Service<
   {
     readonly read: Effect.Effect<FleetVaultRecord | undefined, LanFleetError>;
     readonly save: (record: FleetVaultRecord) => Effect.Effect<void, LanFleetError>;
+    readonly advanceRevision: (
+      expected: FleetVaultRecord,
+      revision: number,
+    ) => Effect.Effect<void, LanFleetError>;
   }
 >()("t3/lan/FleetVault") {}
 
@@ -73,12 +77,18 @@ const make = Effect.gen(function* () {
     catch: () => new LanFleetError({ reason: "configuration" }),
   });
   const read = readStored.pipe(mutex.withPermit);
-  const save = Effect.fn("FleetVault.save")(function* (record: FleetVaultRecord) {
+  const update = Effect.fn("FleetVault.update")(function* (
+    select: (
+      previous: FleetVaultRecord | undefined,
+    ) => Effect.Effect<FleetVaultRecord | undefined, LanFleetError>,
+  ) {
     yield* Effect.acquireUseRelease(
       fs.makeDirectory(lock).pipe(Effect.mapError(() => new LanFleetError({ reason: "busy" }))),
       () =>
         Effect.gen(function* () {
           const previous = yield* readStored;
+          const record = yield* select(previous);
+          if (record === undefined) return;
           if (
             record.environmentId !== id ||
             (previous !== undefined &&
@@ -116,6 +126,25 @@ const make = Effect.gen(function* () {
       () => fs.remove(lock, { recursive: true }).pipe(Effect.ignore),
     );
   }, mutex.withPermit);
-  return FleetVault.of({ read, save });
+  const save = (record: FleetVaultRecord) => update(() => Effect.succeed(record));
+
+  const advanceRevision = Effect.fn("FleetVault.advanceRevision")(
+    (expected: FleetVaultRecord, revision: number) =>
+      update((previous) => {
+        if (
+          previous === undefined ||
+          previous.environmentId !== expected.environmentId ||
+          previous.fleetId !== expected.fleetId ||
+          previous.machineId !== expected.machineId ||
+          previous.rootPublicKey !== expected.rootPublicKey
+        )
+          return Effect.fail(new LanFleetError({ reason: "configuration" }));
+        return Effect.succeed(
+          revision > previous.lastRevision ? { ...previous, lastRevision: revision } : undefined,
+        );
+      }),
+  );
+
+  return FleetVault.of({ read, save, advanceRevision });
 });
 export const layer = Layer.effect(FleetVault, make);

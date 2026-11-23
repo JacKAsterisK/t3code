@@ -90,7 +90,7 @@ const make = Effect.gen(function* () {
         catch: configurationError,
       });
       if (record !== undefined && authority.revision > record.lastRevision)
-        yield* vault.save({ ...record, lastRevision: authority.revision });
+        yield* vault.advanceRevision(record, authority.revision);
     }
     const roster = (yield* fs.exists(paths.rosterPath))
       ? yield* readFleetJson(paths.rosterPath, FleetRoster)
@@ -743,12 +743,8 @@ const make = Effect.gen(function* () {
       if (current?.record === undefined || current.authority === undefined) return null;
     }
     if (current.record.tls !== undefined && current.record.tlsEnabled === false) return null;
-    if (
-      current.record.tls !== undefined &&
-      (Option.isNone(transport) || !(yield* transport.value.ready(current.record)))
-    )
-      return yield* new LanFleetError({ reason: "transport" });
     const { record, authority } = current;
+    if (!current.member) return null;
     const self = current.peers.find(
       (peer) =>
         peer.environmentId === record.environmentId &&
@@ -761,7 +757,14 @@ const make = Effect.gen(function* () {
         Authority.peerVerificationCode(Authority.identityPeer(record, self.label, self.origin))
     )
       return null;
-    yield* vault.save({ ...record, lastRevision: authority.revision });
+    if (record.tls !== undefined) {
+      if (Option.isNone(transport)) return yield* new LanFleetError({ reason: "transport" });
+      // A saved endpoint can be temporarily unavailable during server startup.
+      // Restore that exact endpoint before restoring the fleet's pinned peer routes.
+      if (!(yield* transport.value.ready(record))) yield* transport.value.restore(record);
+      if (!(yield* transport.value.ready(record)))
+        return yield* new LanFleetError({ reason: "transport" });
+    }
     return {
       version: 1 as const,
       machineId: record.machineId,

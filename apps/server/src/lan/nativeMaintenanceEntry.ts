@@ -9,6 +9,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { NativeActivationBuildIdentity, NativeMaintenanceRequest } from "@t3tools/contracts";
 import { isEntrypoint } from "../entrypoint.ts";
 import * as NativeMaintenance from "./NativeMaintenance.ts";
+import {
+  FleetCredentialRecoveryCommand,
+  fleetRecoveryRefusal,
+  recoverFleetCredential,
+} from "./fleetCredentialRecoveryEntry.ts";
 import { strictJson } from "@t3tools/shared/strictJson";
 
 declare const __T3_LAN_BUILD_IDENTITY__: unknown;
@@ -30,6 +35,7 @@ if (
   })
 ) {
   let fallbackReason: NativeMaintenance.NativeMaintenanceError["reason"] = "identity";
+  let fleetRecovery = false;
   try {
     const compiled =
       typeof __T3_LAN_BUILD_IDENTITY__ === "undefined" ? null : __T3_LAN_BUILD_IDENTITY__;
@@ -55,13 +61,44 @@ if (
         if (length > 8192) throw new Error("invalid_request");
         chunks.push(bytes);
       }
-      const request = Schema.decodeUnknownSync(NativeMaintenanceRequest, {
-        onExcessProperty: "error",
-      })(strictJson(Buffer.concat(chunks)));
+      const document = strictJson(Buffer.concat(chunks));
+      fleetRecovery =
+        typeof document === "object" &&
+        document !== null &&
+        "operation" in document &&
+        document.operation === "fleet-credential-recovery";
+      const recovery = fleetRecovery
+        ? Schema.decodeUnknownSync(FleetCredentialRecoveryCommand, { onExcessProperty: "error" })(
+            document,
+          )
+        : undefined;
+      const request = recovery
+        ? {
+            schemaVersion: 1 as const,
+            operation: "inspect" as const,
+            nonce: recovery.nonce,
+            homeDirectory: recovery.homeDirectory,
+            environmentId: recovery.environmentId,
+            journalPath: recovery.journalPath,
+            generationVersion: 2 as const,
+          }
+        : Schema.decodeUnknownSync(NativeMaintenanceRequest, { onExcessProperty: "error" })(
+            document,
+          );
       fallbackReason = "io";
       const result = await Effect.runPromise(
         Effect.gen(function* () {
           const service = yield* NativeMaintenance.NativeMaintenance;
+          if (recovery !== undefined) {
+            yield* service.inspect(request);
+            const result = yield* recoverFleetCredential(recovery);
+            return {
+              ...result,
+              nonce: recovery.nonce,
+              sourceCommit: identity.sourceCommit,
+              environmentId: recovery.environmentId,
+            };
+          }
           return yield* request.operation === "probe"
             ? service.probe(request)
             : request.operation === "bootstrap"
@@ -85,7 +122,12 @@ if (
       NodeFS.writeSync(process.stdout.fd, `${JSON.stringify(result.success)}\n`);
     }
   } catch (cause) {
-    NodeFS.writeSync(process.stderr.fd, nativeMaintenanceRefusalMessage(cause, fallbackReason));
+    NodeFS.writeSync(
+      process.stderr.fd,
+      fleetRecovery
+        ? `fleet_credential_recovery_refused:${fleetRecoveryRefusal(cause)}\n`
+        : nativeMaintenanceRefusalMessage(cause, fallbackReason),
+    );
     process.exitCode = 1;
   }
 }

@@ -27,6 +27,7 @@ import { secureOrigin } from "./GatewayT3OAuthClient.ts";
 import * as FleetTransport from "./FleetTransport.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import { makeMembership } from "./FleetMembership.ts";
+import { reportFleetRecoveryReceiver } from "./fleetCredentialRecoveryEntry.ts";
 
 export class FleetEnrollment extends Context.Service<
   FleetEnrollment,
@@ -57,6 +58,8 @@ const make = Effect.gen(function* () {
   const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
   const setupLock = path.join(config.stateDir, "lan-fleet-setup.lock");
   const membership = yield* makeMembership(path.join(config.stateDir, "lan-fleet-members.json"));
+  let reportedRecoveryAuthority: string | undefined;
+  let nextRecoveryReport = 0;
   const bootstrap = () =>
     Effect.try({ try: () => resolveFleetBootstrap(processEnvironment), catch: configurationError });
   // Sync and the fleet context stop before reading enrollment when the fleet is switched off, so a
@@ -239,6 +242,24 @@ const make = Effect.gen(function* () {
         ))
     )
       return yield* new LanFleetError({ reason: "unavailable" });
+    if (
+      sharedFolderTrust &&
+      member &&
+      record !== undefined &&
+      ownPeer !== undefined &&
+      authority !== undefined &&
+      accessPolicy?.credentialAuthorityReady === true
+    ) {
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      if (reportedRecoveryAuthority !== authority.signature || now >= nextRecoveryReport) {
+        // A signed observation supports an owner-approved recovery. It never grants fleet access.
+        reportedRecoveryAuthority = authority.signature;
+        nextRecoveryReport = now + 60_000;
+        yield* reportFleetRecoveryReceiver(root, authority, record, ownPeer, now).pipe(
+          Effect.ignore,
+        );
+      }
+    }
     return {
       accessPolicy,
       member,

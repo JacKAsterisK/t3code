@@ -22,6 +22,7 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Context from "effect/Context";
 import * as Scope from "effect/Scope";
+import * as Schema from "effect/Schema";
 import * as Exit from "effect/Exit";
 import * as Duration from "effect/Duration";
 import * as TestClock from "effect/testing/TestClock";
@@ -46,6 +47,11 @@ import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import { FLEET_ROSTER_ENV, WINDOWS_FLEET_SHARE_ROOT } from "./FleetBootstrap.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
+import { recoverFleetCredential } from "./fleetCredentialRecoveryEntry.ts";
+
+const decodeVaultRecord = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Authority.FleetVaultRecord),
+);
 
 vi.mock("./FleetVault.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./FleetVault.ts")>()),
@@ -269,6 +275,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
     let services = yield* build();
     return {
       environmentId,
+      stateDir,
       get enrollment() {
         return services.enrollment;
       },
@@ -520,6 +527,126 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         assert.deepEqual(f.a.record()!.tls, saved.tls);
         assert.equal(f.a.record()!.signingPrivateKey, saved.signingPrivateKey);
       }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("replaces only the matching approved fleet credential through the stopped helper", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(true, "accessible");
+      const initial = yield* f.a.enrollment.configure({
+        operation: "start",
+        confirmed: true,
+        origin: "https://192.168.40.10:4001",
+        managedTls: true,
+        autoPickup: true,
+        access: "read-only",
+      });
+      yield* f.b.enrollment.configure({
+        operation: "join",
+        confirmed: true,
+        origin: "https://192.168.40.11:4001",
+        ownerCode: initial.ownerCode!,
+        managedTls: true,
+        autoPickup: true,
+        access: "read-only",
+      });
+      yield* f.a.enrollment.resolve;
+      yield* f.b.enrollment.resolve;
+
+      const owner = f.a.record()!;
+      const predecessor = f.b.record()!;
+      const copyHome = Effect.fn("FleetRecoveryTest.copyHome")(function* (stateDir: string) {
+        const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-fleet-recovery-home-" });
+        const state = f.path.join(root, "userdata");
+        yield* f.fs.makeDirectory(state);
+        yield* f.fs.copyFile(
+          f.path.join(stateDir, "lan-fleet-members.json"),
+          f.path.join(state, "lan-fleet-members.json"),
+        );
+        return root;
+      });
+      const ownerHome = yield* copyHome(f.a.stateDir);
+      const targetHome = yield* copyHome(f.b.stateDir);
+      const values = new Map<string, Uint8Array>();
+      class InMemoryVault {
+        readonly target: string;
+        constructor(service: string, account: string) {
+          this.target = service + ":" + account;
+        }
+        getSecret() {
+          return values.get(this.target) ?? null;
+        }
+        getPassword() {
+          return null;
+        }
+        setSecret(bytes: Uint8Array) {
+          values.set(this.target, bytes.slice());
+        }
+        deleteCredential() {
+          values.delete(this.target);
+        }
+      }
+      const ownerKey = "T3 Code LAN fleet:" + f.a.environmentId;
+      const targetKey = "T3 Code LAN fleet:" + f.b.environmentId;
+      const ownerBytes = new TextEncoder().encode("T3F1:" + JSON.stringify(owner));
+      values.set(ownerKey, ownerBytes);
+      const run = (
+        root: string,
+        environmentId: EnvironmentId,
+        credentialState: "missing" | "present",
+        comparisonCode?: string,
+      ) =>
+        recoverFleetCredential(
+          {
+            schemaVersion: 1,
+            operation: "fleet-credential-recovery",
+            nonce: "a".repeat(64),
+            homeDirectory: root,
+            environmentId,
+            journalPath: f.path.join(root, "activation.json"),
+            rosterPath: f.rosterPath,
+            credentialState,
+            ...(comparisonCode === undefined ? {} : { comparisonCode }),
+          },
+          () => InMemoryVault,
+        ).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+      const readAuthority = readFleetJson(f.authorityFile, Authority.FleetAuthority).pipe(
+        Effect.provideService(FileSystem.FileSystem, f.fs),
+      );
+      const before = yield* readAuthority;
+      const prepared = yield* run(targetHome, f.b.environmentId, "missing");
+      assert.equal(prepared.status, "awaiting-approval");
+      const code = prepared.comparisonCode!;
+      assert.isFalse(values.has(targetKey));
+      assert.deepEqual(yield* readAuthority, before);
+      assert.deepEqual(yield* run(targetHome, f.b.environmentId, "missing"), prepared);
+
+      const approved = yield* run(ownerHome, f.a.environmentId, "present", code);
+      assert.equal(approved.status, "approved");
+      const current = yield* readAuthority;
+      assert.equal(current.revision, before.revision + 1);
+      assert.strictEqual(values.get(ownerKey), ownerBytes);
+      assert.isFalse(values.has(targetKey));
+      const installed = yield* run(targetHome, f.b.environmentId, "missing");
+      assert.equal(installed.status, "installed");
+      const saved = values.get(targetKey)!;
+      assert.isDefined(saved);
+      assert.deepEqual(yield* run(targetHome, f.b.environmentId, "present"), installed);
+      assert.strictEqual(values.get(targetKey), saved);
+      assert.deepEqual(yield* run(ownerHome, f.a.environmentId, "present", code), approved);
+      assert.deepEqual(yield* readAuthority, current);
+      const record = yield* decodeVaultRecord(
+        new TextDecoder().decode(saved).slice("T3F1:".length),
+      );
+      assert.equal(record.machineId, predecessor.machineId);
+      assert.equal(record.access, "read-only");
+      assert.notEqual(record.signingPrivateKey, predecessor.signingPrivateKey);
+      assert.equal(
+        current.credentialKeyDigests?.[record.machineId],
+        Authority.fleetSigningKeyDigest(
+          Authority.identityPeer(record, "test", "https://192.168.40.11:4001").signingPublicKey,
+        ),
+      );
+    }).pipe(Effect.provide(configLayer)),
   );
 
   it.effect(

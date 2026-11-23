@@ -33,6 +33,7 @@ import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as McpToolAccess from "../mcp/McpToolAccess.ts";
 import * as PeerLinks from "./PeerLinks.ts";
+import * as Fleet from "../lan/FleetPeerHttpClient.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   descriptorOf,
@@ -925,6 +926,36 @@ it.effect("requires pinned transport for a retained link of unknown provenance",
       const unavailable = yield* a.links.resolve(box.environmentId).pipe(Effect.flip);
       expect(unavailable.reason).toBe("unreachable");
       expect(unavailable.message).toContain("approved fleet TLS pin");
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("reads live fleet pins outside the link layer that supplied the trust service", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const context = yield* layerLinkingEnvironment(laptop).pipe(
+        Layer.provideMerge(Fleet.layerTrust),
+        Layer.build,
+      );
+      const links = Context.get(context, PeerLinks.PeerLinks);
+      const sql = Context.get(context, SqlClient.SqlClient);
+      const trust = Context.get(context, Fleet.FleetPeerTrust);
+      const b = yield* serveB(box);
+      const pairing = yield* b.auth.issuePairingCredential();
+      yield* links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      yield* sql`UPDATE peer_environment_links SET provenance = 'fleet'
+        WHERE environment_id = ${box.environmentId}`;
+      // The test HTTP client provides the transport itself. The service under test must keep
+      // using this trust table after the WebSocket-like caller loses the construction context.
+      const entry = { origin: b.url, certificate: "synthetic", publicKeySha256: "0".repeat(64) };
+      expect(Option.isNone(yield* Effect.serviceOption(Fleet.FleetPeerTrust))).toBe(true);
+      yield* trust.replace([entry]);
+      expect((yield* links.resolve(box.environmentId)).requiresFleetPin).toBe(true);
+      yield* trust.replace([]);
+      const unavailable = yield* links.resolve(box.environmentId).pipe(Effect.flip);
+      expect(unavailable.message).toContain("approved fleet TLS pin");
+      yield* trust.replace([entry]);
+      expect((yield* links.resolve(box.environmentId)).url).toBe(b.url);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

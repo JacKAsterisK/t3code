@@ -258,6 +258,7 @@ const linkLimitsHold = (peer: { readonly capabilities: ExecutionEnvironmentCapab
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const fleetTrust = yield* Effect.serviceOption(Fleet.FleetPeerTrust);
   const { withGate } = yield* Gate.ApprovalAdmissionGate;
   const changes = yield* PubSub.unbounded<string>();
   const secrets = yield* ServerSecretStore.ServerSecretStore;
@@ -750,8 +751,7 @@ const make = Effect.gen(function* () {
       }
       // Race the addresses without a credential, then use only one that still answers as this peer.
       const failures = new Map<string, string>();
-      const fleet = yield* Effect.serviceOption(Fleet.FleetPeerTrust);
-      const trusted = Option.isSome(fleet) ? yield* fleet.value.current : [];
+      const trusted = Option.isSome(fleetTrust) ? yield* fleetTrust.value.current : [];
       // Migration cannot prove that an unclassified historical link was created manually.
       const requiresFleetPin = row.value.provenance !== "manual";
       const urls = requiresFleetPin

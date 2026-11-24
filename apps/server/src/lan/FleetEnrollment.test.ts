@@ -430,6 +430,29 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         assert.equal((yield* f.a.enrollment.status).owner, true);
         assert.equal((yield* f.a.enrollment.status).tlsReady, true);
         assert.equal((yield* f.b.enrollment.status).tlsReady, true);
+        // The old desktop still lists the owner as connected. The new fleet
+        // requires a new credential and must explicitly offer a replacement.
+        yield* f.sync(f.b, [f.b.environmentId, f.a.environmentId]);
+        yield* f.sync(f.a, [f.a.environmentId]);
+        const picked = yield* f.sync(f.b, [f.b.environmentId, f.a.environmentId]);
+        assert.deepEqual(
+          picked.incoming.map(
+            ({ environmentId, replace, preserveManualConnection, pairingCode }) => ({
+              environmentId,
+              replace,
+              preserveManualConnection,
+              pairingCode,
+            }),
+          ),
+          [
+            {
+              environmentId: f.a.environmentId,
+              replace: true,
+              preserveManualConnection: true,
+              pairingCode: "synthetic-alpha-credential",
+            },
+          ],
+        );
         assert.equal(
           yield* f.fs.exists(f.path.join(f.root, "T3CodeLAN", "fleet-roster.json")),
           false,

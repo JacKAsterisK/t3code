@@ -522,6 +522,7 @@ const make = Effect.gen(function* () {
                         (item.used || now - item.issuedAt < UNUSED_SESSION_GRACE_MS)));
                   // Without a policy, only a peer that took a fleet credential is renewed.
                   const renewable =
+                    config.credentialScope !== undefined ||
                     enforcePolicy ||
                     held.some((item) => item.session) ||
                     (sent !== undefined && sent.deliveryId !== EXISTING_CONNECTION);
@@ -739,8 +740,11 @@ const make = Effect.gen(function* () {
                   // The sender only offers a new grant to a connected machine to replace its credential.
                   const replacement =
                     grantAvailable &&
-                    received?.status === "connected" &&
-                    received.deliveryId !== delivery.header.deliveryId;
+                    ((received?.status === "connected" &&
+                      received.deliveryId !== delivery.header.deliveryId) ||
+                      (config.credentialScope !== undefined &&
+                        received === undefined &&
+                        input.connectedEnvironmentIds.includes(peer.environmentId)));
                   // A grant that follows an unspent replacement, such as one that lapsed while
                   // this machine was offline, still replaces.
                   const replacing =
@@ -824,6 +828,9 @@ const make = Effect.gen(function* () {
                         pairingCode: payload.credential,
                         ...(tls === undefined ? {} : { tls }),
                         ...(replacing ? { replace: true } : {}),
+                        ...(replacing && config.credentialScope !== undefined
+                          ? { preserveManualConnection: true }
+                          : {}),
                       });
                     }
                     if (

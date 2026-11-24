@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   FLEET_ROSTER_ENV,
+  FLEET_SWITCH_ROSTER,
+  fleetLocalName,
   resolveFleetBootstrap,
   trustedFleetShareRoot,
   WINDOWS_FLEET_SHARE_ROOT,
@@ -27,6 +29,21 @@ describe("Hub fleet metadata bootstrap", () => {
     ])
       expect(trustedFleetShareRoot(value)).toBeUndefined();
   });
+  it("canonicalizes equivalent D178 UNC paths before selecting vault or delivery storage", () => {
+    for (const input of [
+      FLEET_SWITCH_ROSTER,
+      "\\\\BuildMachine\\BuildShare\\T3CodeLAN-D178\\.\\fleet-roster.json",
+      "//BuildMachine/BuildShare/T3CodeLAN-D178/fleet-roster.json",
+      "\\\\?\\UNC\\BuildMachine\\BuildShare\\T3CodeLAN-D178\\fleet-roster.json",
+    ]) {
+      expect(fleetLocalName("synthetic-environment", input)).toBe("synthetic-environment.d178");
+      expect(resolveFleetBootstrap({ [FLEET_ROSTER_ENV]: input })).toEqual({
+        rosterPath: FLEET_SWITCH_ROSTER,
+        deliveryDirectory: WINDOWS_FLEET_SHARE_ROOT + "\\T3CodeLAN-D178\\fleet-deliveries",
+      });
+    }
+  });
+
   it("honors the explicit child-process path before a local fallback and derives sibling delivery storage", () => {
     const result = resolveFleetBootstrap(
       { [FLEET_ROSTER_ENV]: "C:\\SyntheticFleet\\roster.json" },

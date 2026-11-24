@@ -164,6 +164,9 @@ export function useLanFleet() {
             expectedEnvironmentId: delivery.environmentId,
             // A replacement swaps the saved credential, such as after a fleet access change.
             skipExisting: delivery.replace !== true,
+            ...(delivery.preserveManualConnection === true
+              ? { preserveManualConnection: true }
+              : {}),
           });
           if (connected._tag !== "Success") {
             appAtomRegistry.set(

@@ -106,6 +106,7 @@ export const LanFleetSyncResult = Schema.Struct({
       tls: Schema.optionalKey(FleetTlsIdentity),
       // The sender replaced a credential this machine already holds, such as after an access change.
       replace: Schema.optionalKey(Schema.Boolean),
+      preserveManualConnection: Schema.optionalKey(Schema.Literal(true)),
     }),
   ),
 });

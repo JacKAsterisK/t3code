@@ -6,8 +6,11 @@ export const FLEET_ROSTER_ENV = "T3CODE_LAN_FLEET_ROSTER_PATH";
 export const WINDOWS_FLEET_SHARE_ROOT = "\\\\BuildMachine\\BuildShare";
 export const FLEET_SWITCH_ROSTER = WINDOWS_FLEET_SHARE_ROOT + "\\T3CodeLAN-D178\\fleet-roster.json";
 
-export const isFleetSwitchRoster = (rosterPath: string | undefined) =>
-  rosterPath?.toLowerCase() === FLEET_SWITCH_ROSTER.toLowerCase();
+export function isFleetSwitchRoster(rosterPath: string | undefined): boolean {
+  if (rosterPath === undefined) return false;
+  const unc = rosterPath.replaceAll("/", "\\").replace(/^\\\\\?\\UNC\\/iu, "\\\\");
+  return NodePath.win32.normalize(unc).toLowerCase() === FLEET_SWITCH_ROSTER.toLowerCase();
+}
 
 // The legacy vault account and local trust files are the archive. Select a different
 // namespace without reading, replacing, or exporting those protected bytes.
@@ -35,7 +38,8 @@ export function resolveFleetBootstrap(
   configuredRoster?: string,
   configuredDeliveries?: string,
 ) {
-  const rosterPath = environment[FLEET_ROSTER_ENV] ?? configuredRoster;
+  const selectedRoster = environment[FLEET_ROSTER_ENV] ?? configuredRoster;
+  const rosterPath = isFleetSwitchRoster(selectedRoster) ? FLEET_SWITCH_ROSTER : selectedRoster;
   if (rosterPath === undefined || rosterPath === "") return undefined;
   if (!rosterPath.trim() || rosterPath !== rosterPath.trim() || !NodePath.isAbsolute(rosterPath))
     throw new Error("Fleet roster requires an explicit absolute JSON file path");

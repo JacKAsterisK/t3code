@@ -56,6 +56,7 @@ export interface PairingConnectionInput {
   readonly pairingCode?: string;
   readonly expectedEnvironmentId?: EnvironmentId;
   readonly skipExisting?: boolean;
+  readonly preserveManualConnection?: boolean;
   readonly tls?: FleetTlsIdentity;
 }
 
@@ -233,11 +234,22 @@ const registerPairingConnection = Effect.fn(
 )(function* (input: PairingConnectionInput) {
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
   if (
-    input.skipExisting === true &&
     input.expectedEnvironmentId !== undefined &&
-    (yield* SubscriptionRef.get(registry.entries)).has(input.expectedEnvironmentId)
-  )
-    return input.expectedEnvironmentId;
+    (input.skipExisting === true || input.preserveManualConnection === true)
+  ) {
+    const saved = (yield* SubscriptionRef.get(registry.entries)).get(input.expectedEnvironmentId);
+    if (
+      saved !== undefined &&
+      (input.skipExisting === true ||
+        !connectionRoutes(saved).some(
+          ({ profile }) =>
+            Option.isSome(profile) &&
+            profile.value._tag === "BearerConnectionProfile" &&
+            profile.value.fleetTls !== undefined,
+        ))
+    )
+      return input.expectedEnvironmentId;
+  }
   const registration = yield* preparePairingRegistration(input);
   const knownAddressOnly = input.expectedEnvironmentId === undefined;
   if (!(yield* registry.register(registration, { knownAddressOnly }))) {

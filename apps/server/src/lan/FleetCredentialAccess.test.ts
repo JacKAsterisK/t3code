@@ -74,7 +74,10 @@ const context = FleetContext.FleetContext.of({
     shareAvailable
       ? ({
           self: identities[CRYO]!.peer,
-          config: { credentialKeyDigests: policy.credentialKeyDigests },
+          config: {
+            credentialKeyDigests: policy.credentialKeyDigests,
+            credentialScope: policy.credentialScope,
+          },
           peers: trusted.map((machineId) => ({
             peer: identities[machineId]!.peer,
             connectHost: undefined,
@@ -472,6 +475,35 @@ it.live(
           claim(ANVIL, unattributed.grantId),
         );
         expect(yield* accessOf(unverified.access_token).pipe(Effect.isFailure)).toBe(true);
+
+        resetFleet();
+        const previousFleet = yield* legacy();
+        policy = {
+          ...policy,
+          credentialScope: "replacement-fleet",
+          credentialAuthorityReady: true,
+        };
+        const revived = yield* refresh(
+          previousFleet.refreshToken!,
+          claim(ANVIL, previousFleet.grantId),
+        );
+        expect(yield* accessOf(revived.access_token).pipe(Effect.isFailure)).toBe(true);
+
+        const digest = Delivery.fleetCredentialKeyFor(undefined, ANVIL, policy.credentialScope);
+        const member = yield* auth.issueSession({
+          subject: Delivery.fleetCredentialSubject(
+            "lan-fleet:" + Delivery.deliveryFileName(CRYO, ANVIL),
+            digest,
+          ),
+          scopes: AuthStandardClientScopes,
+        });
+        const minted = yield* mintCode(handler, member.token);
+        expect(minted.status).toBe(200);
+        const approved = yield* approveTaskGrant(
+          handler,
+          (yield* json<{ credential: string }>(minted)).credential,
+        );
+        expect(yield* accessOf(approved.access_token)).toBe("auto");
       }),
     ),
 );

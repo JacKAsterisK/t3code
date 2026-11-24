@@ -85,7 +85,9 @@ export const layerServices = Layer.effect(
     return CredentialAttribution.McpGrantAttribution.of({
       verify: Effect.fn("FleetGrantAttribution.verify")(function* (assertion) {
         const fleet = yield* context.load.pipe(Effect.orElseSucceed(() => undefined));
-        if (fleet === undefined) return undefined;
+        // A new fleet requires a new approval. A member cannot adopt an older
+        // unattributed grant by signing for its existing refresh token.
+        if (fleet === undefined || fleet.config.credentialScope !== undefined) return undefined;
         const claim = verifyGrantAssertion({
           assertion,
           peers: fleet.peers.map(({ peer }) => peer),
@@ -93,24 +95,20 @@ export const layerServices = Layer.effect(
           now: yield* Clock.currentTimeMillis,
         });
         if (claim === undefined || claim.signer === fleet.self.machineId) return undefined;
-        const signedKeyDigest = Delivery.fleetCredentialKeyFor(
+        const keyDigest = Delivery.fleetCredentialKeyFor(
           fleet.config.credentialKeyDigests,
           claim.signer,
         );
         if (
-          signedKeyDigest !== undefined &&
+          keyDigest !== undefined &&
           !fleet.peers.some(
             ({ peer }) =>
               peer.machineId === claim.signer &&
-              fleetSigningKeyDigest(peer.signingPublicKey) === signedKeyDigest,
+              fleetSigningKeyDigest(peer.signingPublicKey) === keyDigest,
           )
         )
           return undefined;
-        const keyDigest = Delivery.fleetCredentialKeyFor(
-          fleet.config.credentialKeyDigests,
-          claim.signer,
-          fleet.config.credentialScope,
-        );
+
         // The subject of what this machine's fleet credential for the signer approves.
         return {
           grantId: claim.grantId,

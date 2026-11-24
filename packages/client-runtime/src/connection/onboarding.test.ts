@@ -2,6 +2,7 @@ import {
   AuthStandardClientScopes,
   EnvironmentId,
   type AuthEnvironmentScope,
+  type FleetTlsIdentity,
   ORCHESTRATION_PROTOCOL_VERSION,
 } from "@t3tools/contracts";
 import { assert, describe, expect, it } from "@effect/vitest";
@@ -231,29 +232,35 @@ const UNSUPPORTED_ERROR = new ConnectionBlockedError({
   detail: "The saved server used an incompatible orchestration protocol.",
 });
 
-const registerSwitchedOffEnvironment = Effect.gen(function* () {
-  const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-  const registration = new BearerConnectionRegistration({
-    target: new BearerConnectionTarget({
-      environmentId: PAIRED_ENVIRONMENT_ID,
-      connectionId: PAIRED_PROFILE.connectionId,
-      label: "Old label",
-    }),
-    profile: new BearerConnectionProfile({ ...PAIRED_PROFILE, label: "Old label" }),
-    credential: new BearerConnectionCredential({ token: "old-token" }),
+const registerSavedEnvironment = (fleetTls?: FleetTlsIdentity) =>
+  Effect.gen(function* () {
+    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+    const registration = new BearerConnectionRegistration({
+      target: new BearerConnectionTarget({
+        environmentId: PAIRED_ENVIRONMENT_ID,
+        connectionId: PAIRED_PROFILE.connectionId,
+        label: "Old label",
+      }),
+      profile: new BearerConnectionProfile({
+        ...PAIRED_PROFILE,
+        label: "Old label",
+        ...(fleetTls === undefined ? {} : { fleetTls }),
+      }),
+      credential: new BearerConnectionCredential({ token: "old-token" }),
+    });
+    yield* registry.register(registration);
+    yield* registry.setEnabled(PAIRED_ENVIRONMENT_ID, false);
+    yield* registry.setCompatibility(PAIRED_ENVIRONMENT_ID, UNSUPPORTED_ERROR);
+    const entries = yield* SubscriptionRef.get(registry.entries);
+    expect(entries.get(PAIRED_ENVIRONMENT_ID)).toEqual({
+      target: registration.target,
+      profile: Option.some(registration.profile),
+      enabled: false,
+      unsupportedReason: UNSUPPORTED_ERROR.message,
+    });
+    return entries;
   });
-  yield* registry.register(registration);
-  yield* registry.setEnabled(PAIRED_ENVIRONMENT_ID, false);
-  yield* registry.setCompatibility(PAIRED_ENVIRONMENT_ID, UNSUPPORTED_ERROR);
-  const entries = yield* SubscriptionRef.get(registry.entries);
-  expect(entries.get(PAIRED_ENVIRONMENT_ID)).toEqual({
-    target: registration.target,
-    profile: Option.some(registration.profile),
-    enabled: false,
-    unsupportedReason: UNSUPPORTED_ERROR.message,
-  });
-  return entries;
-});
+const registerSwitchedOffEnvironment = registerSavedEnvironment();
 
 describe("connection onboarding", () => {
   it.effect(
@@ -340,16 +347,41 @@ describe("connection onboarding", () => {
       }).pipe(Effect.provide(layerPairingOnboarding(undefined, calls)));
     },
   );
+  it.effect(
+    "keeps a manual desktop connection when the replacement fleet offers a credential",
+    () => {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      return Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        const before = yield* registerSwitchedOffEnvironment;
+        const result = yield* onboarding.registerPairing({
+          ...PAIRING_INPUT,
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          preserveManualConnection: true,
+        });
+        expect(result).toBe(PAIRED_ENVIRONMENT_ID);
+        expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
+        expect(calls).toEqual([]);
+      }).pipe(Effect.provide(layerPairingOnboarding(undefined, calls)));
+    },
+  );
+
   it.effect("swaps the saved credential when a fleet sender replaces it", () => {
     const registered: unknown[] = [];
     return Effect.gen(function* () {
       const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
       const onboarding = yield* Onboarding.ConnectionOnboarding;
-      yield* registerSwitchedOffEnvironment;
+      yield* registerSavedEnvironment({
+        origin: "https://remote.example.test",
+        certificate: "synthetic-public-certificate",
+        publicKeySha256: "a".repeat(64),
+      });
       const result = yield* onboarding.registerPairing({
         ...PAIRING_INPUT,
         expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
         skipExisting: false,
+        preserveManualConnection: true,
       });
       expect(result).toBe(PAIRED_ENVIRONMENT_ID);
       expect(registered.at(-1)).toMatchObject({

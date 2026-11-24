@@ -24,6 +24,7 @@ export const NativeMaintenanceRequest = Schema.Struct({
   bootstrapId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   manualActivation: Schema.optionalKey(Schema.Boolean),
   reportStaleWork: Schema.optionalKey(Schema.Boolean),
+  fleetSwitch: Schema.optionalKey(Schema.Literal(true)),
   generationVersion: Schema.optionalKey(Schema.Literal(2)),
 });
 export type NativeMaintenanceRequest = typeof NativeMaintenanceRequest.Type;

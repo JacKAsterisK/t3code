@@ -2,7 +2,7 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- Ed25519 signs only schema-validated policy fields in a canonical order.
 import * as Gate from "../auth/ApprovalAdmissionGate.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { FLEET_ROSTER_ENV } from "./FleetBootstrap.ts";
+import { FLEET_ROSTER_ENV, fleetLocalName, isFleetSwitchRoster } from "./FleetBootstrap.ts";
 import * as NodeCrypto from "node:crypto";
 import {
   AuthDiagnosticsReadScope,
@@ -556,6 +556,7 @@ export interface FleetAccessState {
   readonly credentialKeyDigests?: FleetCredentialKeyDigests;
   readonly credentialAuthorityRevision?: number;
   /** A restart needs a current authority read before accepting managed fleet credentials. */
+  readonly credentialScope?: string;
   readonly credentialAuthorityReady?: boolean;
   /** Current verified keys only; absent until a fresh fleet read publishes under admission. */
   readonly approvalTrust?: {
@@ -700,8 +701,9 @@ const make = Effect.fn("FleetAccess.make")(function* (
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;
-  const cacheFile = path.join(config.stateDir, "lan-fleet-access.json");
   const rosterPath = (yield* HostProcess.Environment)[FLEET_ROSTER_ENV];
+  const switchedFleet = isFleetSwitchRoster(rosterPath);
+  const cacheFile = path.join(config.stateDir, fleetLocalName("lan-fleet-access.json", rosterPath));
   const mutex = yield* Semaphore.make(1);
   const readCache = (yield* fs.exists(cacheFile).pipe(Effect.orElseSucceed(() => false)))
     ? yield* readFleetJson(cacheFile, LocalCache).pipe(
@@ -739,6 +741,7 @@ const make = Effect.fn("FleetAccess.make")(function* (
     ...(value?.credentialKeyDigests === undefined
       ? {}
       : { credentialKeyDigests: value.credentialKeyDigests }),
+    ...(switchedFleet && value !== undefined ? { credentialScope: value.fleetId } : {}),
     ...(unavailable ? { unavailable: true } : {}),
     ...(seed === undefined ? {} : { seed }),
     ...(seedPending === undefined ? {} : { seedPending }),
@@ -755,7 +758,7 @@ const make = Effect.fn("FleetAccess.make")(function* (
         });
   const privateFile = path.join(config.stateDir, "lan-fleet-private.json");
   const legacyFleet =
-    rosterPath && cache?.credentialAuthorityRevision === undefined
+    rosterPath && !switchedFleet && cache?.credentialAuthorityRevision === undefined
       ? yield* readFleetJson(privateFile, FleetPrivateConfig).pipe(
           Effect.flatMap((legacy) =>
             Effect.try({

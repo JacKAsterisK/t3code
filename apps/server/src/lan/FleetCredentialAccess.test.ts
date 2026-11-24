@@ -750,6 +750,47 @@ it.effect("refuses the previous generation of a rotated machine's fleet credenti
   }).pipe(Effect.provide(layerAccess)),
 );
 
+it.effect("keeps manual sessions while denying credentials from the previous fleet", () =>
+  Effect.gen(function* () {
+    resetFleet();
+    const access = yield* FleetCredentialAccess.FleetCredentialAccess;
+    const previousDigest = "2".repeat(64);
+    policy = { ...policy, credentialAuthorityReady: false };
+    const roots = [
+      "lan-fleet:" + Delivery.deliveryFileName(CRYO, ANVIL),
+      "lan-fleet-peer-link:" + ANVIL + ":00000000-0000-4000-8000-000000000001",
+    ];
+    expect(yield* access.limit(roots[0]!, false)).toBe("none");
+    expect(yield* access.limit("browser-session", false)).toBeUndefined();
+
+    policy = {
+      ...policy,
+      credentialAuthorityReady: true,
+      credentialScope: "replacement-fleet",
+      credentialKeyDigests: { [ANVIL]: previousDigest },
+    };
+    for (const root of roots) {
+      for (const prefix of ["", "lan-fleet-by:", "mcp-client:"]) {
+        const subject = prefix + root;
+        expect(yield* access.limit(subject, false)).toBe("none");
+        expect(
+          yield* access.limit(Delivery.fleetCredentialSubject(subject, previousDigest), false),
+        ).toBe("none");
+        const current = Delivery.fleetCredentialKeyFor(
+          policy.credentialKeyDigests,
+          ANVIL,
+          policy.credentialScope,
+        );
+        expect(yield* access.limit(Delivery.fleetCredentialSubject(subject, current), false)).toBe(
+          "standard",
+        );
+      }
+    }
+    expect(yield* access.limit("browser-session", false)).toBeUndefined();
+    expect(yield* access.limit("mcp-client", true)).toBe("none");
+  }).pipe(Effect.provide(layerAccess)),
+);
+
 it.effect("refuses every credential of a machine whose ID an exception could take", () =>
   Effect.gen(function* () {
     resetFleet();

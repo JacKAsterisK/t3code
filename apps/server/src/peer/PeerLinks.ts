@@ -12,6 +12,7 @@ import {
   type PeerLinkName,
   type PeerLinkSummary,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -42,6 +43,7 @@ import { isLocalLoopbackHost, isTailnetHost } from "@t3tools/shared/hostClassifi
 
 import { peerConnectionFailure } from "@t3tools/shared/fleetTlsProxy";
 import * as Fleet from "../lan/FleetPeerHttpClient.ts";
+import { FLEET_ROSTER_ENV, isFleetSwitchRoster } from "../lan/FleetBootstrap.ts";
 import * as Gate from "../auth/ApprovalAdmissionGate.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -257,6 +259,9 @@ const linkLimitsHold = (peer: { readonly capabilities: ExecutionEnvironmentCapab
   peer.capabilities.mcpModeLimitHeader === true && peer.capabilities.linkFence === true;
 
 const make = Effect.gen(function* () {
+  const preserveManualLinks = isFleetSwitchRoster(
+    (yield* HostProcess.Environment)[FLEET_ROSTER_ENV],
+  );
   const sql = yield* SqlClient.SqlClient;
   const fleetTrust = yield* Effect.serviceOption(Fleet.FleetPeerTrust);
   const { withGate } = yield* Gate.ApprovalAdmissionGate;
@@ -529,6 +534,17 @@ const make = Effect.gen(function* () {
     return { primary, peer: yield* probe(primary), origins };
   });
 
+  const preserveManual = (row: Option.Option<PeerLinkRow>, automatic: boolean) =>
+    preserveManualLinks && automatic && Option.isSome(row) && row.value.provenance !== "fleet"
+      ? Effect.fail(
+          new PeerLinkError({
+            reason: "pairing_rejected",
+            message:
+              "This environment already has a manual or older link. Hub preserved it during the fleet switch.",
+          }),
+        )
+      : Effect.void;
+
   const linkWith = Effect.fn("PeerLinks.link")(function* (
     input: PeerLinkCreateInput,
     keepLinked: boolean,
@@ -549,6 +565,7 @@ const make = Effect.gen(function* () {
             input.expectedLabel ?? input.expectedEnvironmentId,
           );
     const row = yield* readRow(peer.environmentId);
+    yield* preserveManual(row, provenance !== undefined);
     const stored = Option.isSome(row) ? yield* toLink(row.value) : undefined;
     const current =
       stored !== undefined && DateTime.isGreaterThan(stored.expiresAt, yield* DateTime.now)
@@ -608,6 +625,7 @@ const make = Effect.gen(function* () {
         return yield* new PeerLinkError({ reason: "disabled", message: LINKED_ENVIRONMENTS_OFF });
       const urlsJson = yield* encodeUrls(origins).pipe(Effect.catch(failStorage));
       const previous = yield* readRow(peer.environmentId);
+      yield* preserveManual(previous, provenance !== undefined);
       yield* sql`
         INSERT INTO peer_environment_links (
           environment_id, secret_name, label, urls_json, access, linked_at, expires_at,

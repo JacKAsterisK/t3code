@@ -35,6 +35,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import * as FleetContext from "./FleetContext.ts";
 import * as Delivery from "./FleetDelivery.ts";
+import { FLEET_ROSTER_ENV, fleetLocalName } from "./FleetBootstrap.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 import { FleetPeerTrust } from "./FleetPeerHttpClient.ts";
 
@@ -130,7 +131,10 @@ const make = Effect.gen(function* () {
   const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
   const context = yield* FleetContext.FleetContext;
   const trust = yield* FleetPeerTrust;
-  const stateFile = path.join(serverConfig.stateDir, "lan-fleet-peer-links.json");
+  const stateFile = path.join(
+    serverConfig.stateDir,
+    fleetLocalName("lan-fleet-peer-links.json", launchEnvironment[FLEET_ROSTER_ENV]),
+  );
   const passLock = yield* Semaphore.make(1);
   const writeLock = yield* Semaphore.make(1);
   const requests = yield* Queue.sliding<void>(1);
@@ -283,7 +287,11 @@ const make = Effect.gen(function* () {
           ttl: CODE_TTL,
           subject: Delivery.fleetCredentialSubject(
             codePrefix(peer.machineId) + deliveryId,
-            Delivery.fleetCredentialKeyFor(fleet.config.credentialKeyDigests, peer.machineId),
+            Delivery.fleetCredentialKeyFor(
+              fleet.config.credentialKeyDigests,
+              peer.machineId,
+              fleet.config.credentialScope,
+            ),
           ),
           scopes: mcpClientScopes(linkAccess(granted)),
         });

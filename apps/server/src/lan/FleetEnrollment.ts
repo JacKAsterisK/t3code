@@ -21,7 +21,13 @@ import * as Config from "../config.ts";
 import * as Vault from "./FleetVault.ts";
 import * as Authority from "./FleetAuthority.ts";
 import { fleetCredentialKeyFor, type FleetPrivateConfig } from "./FleetDelivery.ts";
-import { resolveFleetBootstrap, trustedFleetShareRoot } from "./FleetBootstrap.ts";
+import {
+  FLEET_ROSTER_ENV,
+  fleetLocalName,
+  isFleetSwitchRoster,
+  resolveFleetBootstrap,
+  trustedFleetShareRoot,
+} from "./FleetBootstrap.ts";
 import { readFleetJson, validateRoster, writeFleetJson, writeFleetRoster } from "./FleetFiles.ts";
 import { secureOrigin } from "./GatewayT3OAuthClient.ts";
 import * as FleetTransport from "./FleetTransport.ts";
@@ -50,6 +56,7 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const processEnvironment = yield* HostProcess.Environment;
   const platform = yield* HostProcess.Platform;
+  const hostname = yield* HostProcess.Hostname;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const endpoints = yield* DirectEndpoints.DirectEndpoints;
   const config = yield* Config.ServerConfig;
@@ -57,7 +64,13 @@ const make = Effect.gen(function* () {
   const transport = yield* Effect.serviceOption(FleetTransport.FleetTransport);
   const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
   const setupLock = path.join(config.stateDir, "lan-fleet-setup.lock");
-  const membership = yield* makeMembership(path.join(config.stateDir, "lan-fleet-members.json"));
+  const switchedFleet = isFleetSwitchRoster(processEnvironment[FLEET_ROSTER_ENV]);
+  const membership = yield* makeMembership(
+    path.join(
+      config.stateDir,
+      fleetLocalName("lan-fleet-members.json", processEnvironment[FLEET_ROSTER_ENV]),
+    ),
+  );
   let reportedRecoveryAuthority: string | undefined;
   let nextRecoveryReport = 0;
   const bootstrap = () =>
@@ -148,8 +161,9 @@ const make = Effect.gen(function* () {
             existing.origin === peer.origin &&
             // A member explicitly signed by the fleet owner may refresh its TLS metadata,
             // but an enrollment file cannot restore the superseded signing or encryption keys.
-            (fleetCredentialKeyFor(authority.credentialKeyDigests, existing.machineId) ===
-              undefined ||
+            (((!switchedFleet || existing.environmentId !== authority.ownerEnvironmentId) &&
+              fleetCredentialKeyFor(authority.credentialKeyDigests, existing.machineId) ===
+                undefined) ||
               (existing.signingPublicKey === peer.signingPublicKey &&
                 existing.encryptionPublicKey === peer.encryptionPublicKey))
           )
@@ -507,6 +521,12 @@ const make = Effect.gen(function* () {
               });
               return;
             }
+            if (
+              switchedFleet &&
+              input.operation === "start" &&
+              hostname.toLowerCase() !== "buildmachine"
+            )
+              return yield* configurationError();
             yield* fs.makeDirectory(current.root, { recursive: true });
             const ownerLock = path.join(current.root, "fleet-authority.lock");
             yield* Effect.acquireUseRelease(
@@ -529,9 +549,10 @@ const make = Effect.gen(function* () {
                       return yield* configurationError();
                     if (
                       input.operation === "start" &&
-                      (fresh.authority === undefined
-                        ? (fresh.record?.lastRevision ?? 0) > 1
-                        : fresh.record?.rootPrivateKey === undefined)
+                      (fresh.record === undefined
+                        ? fresh.authority !== undefined
+                        : fresh.record.rootPrivateKey === undefined ||
+                          (fresh.authority === undefined && fresh.record.lastRevision > 1))
                     )
                       return yield* configurationError();
                     if (
@@ -901,6 +922,7 @@ const make = Effect.gen(function* () {
       signingPrivateKey: record.signingPrivateKey,
       peers: current.peers,
       managed: true,
+      ...(switchedFleet ? { credentialScope: authority.fleetId } : {}),
       ...(authority.credentialKeyDigests === undefined
         ? {}
         : { credentialKeyDigests: authority.credentialKeyDigests }),

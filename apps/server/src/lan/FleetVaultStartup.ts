@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Config from "../config.ts";
 import { readFleetVaultRecord } from "./FleetVaultCodec.ts";
+import { FLEET_ROSTER_ENV, fleetLocalName } from "./FleetBootstrap.ts";
 
 // Resolve the normal server's external dependency only when startup found a valid legacy file.
 // Offline inspection and home repair never instantiate the fleet policy runtime.
@@ -27,5 +28,8 @@ export const readStartupCredential = Effect.gen(function* () {
   const platform = yield* HostProcess.Platform;
   const id = (yield* fs.readFileString(config.environmentIdPath)).trim();
   if (id === "") return yield* new LanFleetError({ reason: "configuration" });
-  return yield* readFleetVaultRecord(() => readStartupEntry(id, platform));
+  const rosterPath = (yield* HostProcess.Environment)[FLEET_ROSTER_ENV];
+  return yield* readFleetVaultRecord(() =>
+    readStartupEntry(fleetLocalName(id, rosterPath), platform),
+  );
 }).pipe(Effect.mapError(() => new LanFleetError({ reason: "configuration" })));

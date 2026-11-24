@@ -13,6 +13,7 @@ import * as Config from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import type { FleetVaultRecord } from "./FleetAuthority.ts";
 import { readFleetVaultRecord, secretMarker } from "./FleetVaultCodec.ts";
+import { FLEET_ROSTER_ENV, fleetLocalName } from "./FleetBootstrap.ts";
 
 export class FleetVault extends Context.Service<
   FleetVault,
@@ -39,9 +40,10 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const platform = yield* HostProcess.Platform;
   const id = yield* environment.getEnvironmentId;
+  const rosterPath = (yield* HostProcess.Environment)[FLEET_ROSTER_ENV];
   const mutex = yield* Semaphore.make(1);
   let knownIdentity = false;
-  const entry = () => credentialEntry(id, platform);
+  const entry = () => credentialEntry(fleetLocalName(id, rosterPath), platform);
   const lock = path.join(config.stateDir, "lan-fleet-vault.lock");
   const readStored = readFleetVaultRecord(entry).pipe(
     Effect.flatMap((record) => {

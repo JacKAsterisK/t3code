@@ -93,19 +93,24 @@ export const layerServices = Layer.effect(
           now: yield* Clock.currentTimeMillis,
         });
         if (claim === undefined || claim.signer === fleet.self.machineId) return undefined;
-        const keyDigest = Delivery.fleetCredentialKeyFor(
+        const signedKeyDigest = Delivery.fleetCredentialKeyFor(
           fleet.config.credentialKeyDigests,
           claim.signer,
         );
         if (
-          keyDigest !== undefined &&
+          signedKeyDigest !== undefined &&
           !fleet.peers.some(
             ({ peer }) =>
               peer.machineId === claim.signer &&
-              fleetSigningKeyDigest(peer.signingPublicKey) === keyDigest,
+              fleetSigningKeyDigest(peer.signingPublicKey) === signedKeyDigest,
           )
         )
           return undefined;
+        const keyDigest = Delivery.fleetCredentialKeyFor(
+          fleet.config.credentialKeyDigests,
+          claim.signer,
+          fleet.config.credentialScope,
+        );
         // The subject of what this machine's fleet credential for the signer approves.
         return {
           grantId: claim.grantId,

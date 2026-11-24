@@ -44,7 +44,11 @@ import {
 import * as LanFleet from "./LanFleet.ts";
 import * as FleetUsers from "./FleetUsers.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
-import { FLEET_ROSTER_ENV, WINDOWS_FLEET_SHARE_ROOT } from "./FleetBootstrap.ts";
+import {
+  FLEET_ROSTER_ENV,
+  FLEET_SWITCH_ROSTER,
+  WINDOWS_FLEET_SHARE_ROOT,
+} from "./FleetBootstrap.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 import { recoverFleetCredential } from "./fleetCredentialRecoveryEntry.ts";
@@ -67,6 +71,7 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
   managedTls = false,
   share: false | "accessible" | "inaccessible" = false,
   platform: NodeJS.Platform = "win32",
+  switchFleet = false,
 ) {
   const diskFs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -112,8 +117,8 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
         options,
       ),
   });
-  const rosterPath = path.join(root, "roster.json");
-  const authorityFile = path.join(root, "fleet-authority.json");
+  const rosterPath = switchFleet ? FLEET_SWITCH_ROSTER : path.join(root, "roster.json");
+  const authorityFile = path.join(path.dirname(rosterPath), "fleet-authority.json");
   const issued: Array<{ issuer: string; scopes: ReadonlyArray<AuthEnvironmentScope> }> = [];
   const create = Effect.fn("FleetEnrollmentTest.create")(function* (name: string) {
     const environmentId = EnvironmentId.make(`environment:${name}`);
@@ -199,6 +204,9 @@ const fixture = Effect.fn("FleetEnrollmentTest.fixture")(function* (
             Layer.provide(networkLayer),
             Layer.provide(Layer.succeed(FileSystem.FileSystem, fs)),
             Layer.provide(Layer.succeed(HostProcess.Platform, platform)),
+            Layer.provide(
+              Layer.succeed(HostProcess.Hostname, name === "alpha" ? "BUILDMACHINE" : "OTHER"),
+            ),
             Layer.provide(productionEnrollment ? Layer.empty : transportLayer),
             Layer.provide(Config.layer(config)),
             Layer.provide(Layer.succeed(ServerEnvironment.ServerEnvironment, environment)),
@@ -365,6 +373,69 @@ const configLayer = Config.ServerConfig.layerTest(process.cwd(), {
 });
 
 it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
+  it.effect(
+    "refuses to start a fleet with a saved member credential before publishing a roster",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(false, "accessible");
+        const oldMember = Authority.generateFleetIdentity(
+          f.a.environmentId,
+          "old-fleet",
+          "old-owner",
+          false,
+          { autoPickup: true, access: "read-only" },
+        );
+        f.a.replaceRecord(oldMember);
+        yield* f.start().pipe(Effect.flip);
+        assert.equal(yield* f.fs.exists(f.rosterPath), false);
+        assert.equal(yield* f.fs.exists(f.authorityFile), false);
+        assert.deepEqual(f.a.record(), oldMember);
+        assert.equal(f.a.saves(), 0);
+      }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect(
+    "founds the replacement fleet only on BuildMachine and enrolls the same environments",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(true, "accessible", "win32", true);
+        const founding = {
+          operation: "start",
+          confirmed: true,
+          origin: "https://192.168.40.10:4001",
+          managedTls: true,
+          autoPickup: true,
+          access: "standard",
+        } as const;
+        yield* f.b.enrollment.configure(founding).pipe(Effect.flip);
+        assert.equal(yield* f.fs.exists(f.rosterPath), false);
+        assert.equal(f.b.saves(), 0);
+        yield* f.a.enrollment.configure(founding);
+        const authority = yield* readFleetJson(f.authorityFile, Authority.FleetAuthority).pipe(
+          Effect.provideService(FileSystem.FileSystem, f.fs),
+        );
+        Authority.verifyAuthority(authority);
+        assert.equal(authority.ownerEnvironmentId, f.a.environmentId);
+        assert.equal(authority.revision, 1);
+        yield* f.b.enrollment.configure({
+          ...founding,
+          operation: "join",
+          origin: "https://192.168.40.11:4001",
+          ownerCode: Authority.ownerVerificationCode(authority),
+        });
+        const member = yield* f.b.enrollment.resolve;
+        assert.equal(member?.credentialScope, authority.fleetId);
+        assert.equal(f.b.record()?.environmentId, f.b.environmentId);
+        assert.equal((yield* f.b.enrollment.status).stage, "active");
+        assert.equal((yield* f.a.enrollment.status).owner, true);
+        assert.equal((yield* f.a.enrollment.status).tlsReady, true);
+        assert.equal((yield* f.b.enrollment.status).tlsReady, true);
+        assert.equal(
+          yield* f.fs.exists(f.path.join(f.root, "T3CodeLAN", "fleet-roster.json")),
+          false,
+        );
+      }).pipe(Effect.provide(configLayer)),
+  );
   it.effect(
     "restores fleet sync and the owner directory when enrollment initializes before routes",
     () =>

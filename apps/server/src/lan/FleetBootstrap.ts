@@ -4,6 +4,15 @@ import * as NodePath from "node:path";
 export const FLEET_ROSTER_ENV = "T3CODE_LAN_FLEET_ROSTER_PATH";
 
 export const WINDOWS_FLEET_SHARE_ROOT = "\\\\BuildMachine\\BuildShare";
+export const FLEET_SWITCH_ROSTER = WINDOWS_FLEET_SHARE_ROOT + "\\T3CodeLAN-D178\\fleet-roster.json";
+
+export const isFleetSwitchRoster = (rosterPath: string | undefined) =>
+  rosterPath?.toLowerCase() === FLEET_SWITCH_ROSTER.toLowerCase();
+
+// The legacy vault account and local trust files are the archive. Select a different
+// namespace without reading, replacing, or exporting those protected bytes.
+export const fleetLocalName = (name: string, rosterPath: string | undefined) =>
+  isFleetSwitchRoster(rosterPath) ? name + ".d178" : name;
 
 /** This names the Windows share boundary; callers must also prove filesystem access. */
 export function trustedFleetShareRoot(rosterPath: string): string | undefined {

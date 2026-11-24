@@ -31,7 +31,12 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { isProcessAlive } from "../serverRuntimeState.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import { readFleetJson, validateRoster, writeFleetJson } from "./FleetFiles.ts";
-import { FLEET_ROSTER_ENV, resolveFleetBootstrap } from "./FleetBootstrap.ts";
+import {
+  FLEET_ROSTER_ENV,
+  fleetLocalName,
+  isFleetSwitchRoster,
+  resolveFleetBootstrap,
+} from "./FleetBootstrap.ts";
 import * as FleetEnrollment from "./FleetEnrollment.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import * as FleetPeerLinks from "./FleetPeerLinks.ts";
@@ -102,8 +107,12 @@ const make = Effect.gen(function* () {
   const fleetUsers = yield* Effect.serviceOption(FleetUsers.FleetUsers);
   // A sync may bring new catalogs, trust or peer-link requests for the peer-link adapter.
   const requestPeerLinkPass = Option.isSome(peerLinks) ? peerLinks.value.requestPass : Effect.void;
+  const rosterPath = launchEnvironment[FLEET_ROSTER_ENV];
   const privateFile = path.join(serverConfig.stateDir, "lan-fleet-private.json");
-  const journalFile = path.join(serverConfig.stateDir, "lan-fleet-state.json");
+  const journalFile = path.join(
+    serverConfig.stateDir,
+    fleetLocalName("lan-fleet-state.json", rosterPath),
+  );
   const lock = path.join(serverConfig.stateDir, "lan-fleet.lock");
   const disabled: LanFleetSyncResult = {
     enabled: false,
@@ -156,10 +165,14 @@ const make = Effect.gen(function* () {
 
   const run = Effect.fn("LanFleet.sync")(
     function* (request: LanFleetSyncInput | "background") {
-      if (launchEnvironment[FLEET_ROSTER_ENV] === "") return disabled;
+      if (rosterPath === "") return disabled;
       const enrolled = yield* enrollment.resolve;
       if (enrolled === null) return disabled;
-      if (enrolled === undefined && !(yield* fs.exists(privateFile))) return disabled;
+      if (
+        enrolled === undefined &&
+        (isFleetSwitchRoster(rosterPath) || !(yield* fs.exists(privateFile)))
+      )
+        return disabled;
       // Every operation reloads trust and metadata; revocation takes effect without restarting.
       const privateConfig =
         enrolled ??
@@ -319,6 +332,7 @@ const make = Effect.gen(function* () {
                 const credentialKeyDigest = Delivery.fleetCredentialKeyFor(
                   config.credentialKeyDigests,
                   peer.machineId,
+                  config.credentialScope,
                 );
                 const generation = credentialKeyDigest === undefined ? {} : { credentialKeyDigest };
                 const subject = Delivery.fleetCredentialSubject(legacySubject, credentialKeyDigest);

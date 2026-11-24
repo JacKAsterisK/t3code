@@ -10,7 +10,7 @@ import * as Clock from "effect/Clock";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Authority from "./FleetAuthority.ts";
-import { trustedFleetShareRoot } from "./FleetBootstrap.ts";
+import { fleetLocalName, trustedFleetShareRoot } from "./FleetBootstrap.ts";
 import { FleetPeer } from "./FleetDelivery.ts";
 import { readFleetJson, validateRoster, writeFleetJson } from "./FleetFiles.ts";
 import {
@@ -196,10 +196,11 @@ export const recoverFleetCredential = Effect.fn("FleetRecovery.run")(function* (
   yield* attempt(() => validateRoster(roster));
   const state = NodePath.join(command.homeDirectory, "userdata");
   const membership = yield* readFleetJson(
-    NodePath.join(state, "lan-fleet-members.json"),
+    NodePath.join(state, fleetLocalName("lan-fleet-members.json", command.rosterPath)),
     Membership,
   );
-  const key = new Entry("T3 Code LAN fleet", command.environmentId);
+  const account = fleetLocalName(command.environmentId, command.rosterPath);
+  const key = new Entry("T3 Code LAN fleet", account);
   const observed = yield* attempt(() => readEntry(key));
   if ((observed === undefined) !== (command.credentialState === "missing"))
     return yield* new RecoveryRefused({ reason: "credential-changed" });
@@ -224,9 +225,12 @@ export const recoverFleetCredential = Effect.fn("FleetRecovery.run")(function* (
       .map(({ peer }) => peer)
       .find((peer) => peer.environmentId === environmentId && enrolledOnRoster(peer)) ??
     refuse("trusted-membership-missing");
-  const local = NodePath.join(state, "fleet-credential-recovery.json");
+  const local = NodePath.join(
+    state,
+    fleetLocalName("fleet-credential-recovery.json", command.rosterPath),
+  );
   const pendingSlot = (requestId: string) =>
-    new Entry("T3 Code LAN fleet recovery", command.environmentId + "." + requestId);
+    new Entry("T3 Code LAN fleet recovery", account + "." + requestId);
   const requestFile = (id: string) => NodePath.join(directory, id + ".request.json");
   const approvalFile = (id: string) => NodePath.join(directory, id + ".approval.json");
 

@@ -68,7 +68,11 @@ function isRetired(root: string, state: FleetAccessPolicy.FleetAccessState): boo
   const expected =
     machineId === undefined
       ? undefined
-      : Delivery.fleetCredentialKeyFor(state.credentialKeyDigests, machineId);
+      : Delivery.fleetCredentialKeyFor(
+          state.credentialKeyDigests,
+          machineId,
+          state.credentialScope,
+        );
   return expected !== undefined && expected !== keyDigest;
 }
 
@@ -88,7 +92,9 @@ const make = Effect.gen(function* () {
     const unattributedGrant = taskGrant && subject === CredentialAttribution.MCP_CLIENT_SUBJECT;
     if (
       ((root !== undefined || unattributedGrant) && state.credentialAuthorityReady === false) ||
-      (unattributedGrant && Object.keys(state.credentialKeyDigests ?? {}).length > 0)
+      (unattributedGrant &&
+        (state.credentialScope !== undefined ||
+          Object.keys(state.credentialKeyDigests ?? {}).length > 0))
     )
       return { state, level: "none" as const };
     if (state.machineId === undefined) return { state, level: undefined };
@@ -110,7 +116,11 @@ const make = Effect.gen(function* () {
       machineId === undefined ||
       // An ID an access-list exception could take is never a machine here, whatever the share says.
       FleetAccessPolicy.reservedMachineId(machineId) ||
-      Delivery.fleetCredentialKeyFor(state.credentialKeyDigests, machineId) !== keyDigest ||
+      Delivery.fleetCredentialKeyFor(
+        state.credentialKeyDigests,
+        machineId,
+        state.credentialScope,
+      ) !== keyDigest ||
       !state.peers.some((peer) => peer.machineId === machineId) ||
       (trust !== undefined && !trust.has(machineId))
     )
@@ -278,7 +288,12 @@ export const revokeExcess = Effect.fn("FleetCredentialAccess.revokeExcess")(func
   if (fleet !== undefined)
     yield* access.setTrusted(new Set(fleet.peers.map(({ peer }) => peer.machineId)));
   const accepted = yield* fleetAccess.current;
-  if (fleet === undefined && accepted.credentialKeyDigests === undefined) return;
+  if (
+    fleet === undefined &&
+    accepted.credentialKeyDigests === undefined &&
+    accepted.credentialScope === undefined
+  )
+    return;
   // An already accepted owner-signed generation can retire a credential during a share outage.
   // All other revocations still need a complete trust check.
   const forAccess = FleetAccessPolicy.mayRevokeForAccess(accepted);

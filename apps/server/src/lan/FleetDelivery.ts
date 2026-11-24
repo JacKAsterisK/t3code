@@ -21,10 +21,15 @@ const credentialKeySeparator = ":key:";
 export function fleetCredentialKeyFor(
   digests: FleetCredentialKeyDigests | undefined,
   machineId: string,
+  credentialScope?: string,
 ): string | undefined {
-  return digests !== undefined && Object.hasOwn(digests, machineId)
-    ? digests[machineId]
-    : undefined;
+  const digest =
+    digests !== undefined && Object.hasOwn(digests, machineId) ? digests[machineId] : undefined;
+  return credentialScope === undefined
+    ? digest
+    : NodeCrypto.createHash("sha256")
+        .update(JSON.stringify(["fleet-credential", credentialScope, machineId, digest ?? null]))
+        .digest("hex");
 }
 
 export function fleetCredentialSubject(subject: string, keyDigest: string | undefined): string {
@@ -63,6 +68,7 @@ export const FleetPrivateConfig = Schema.Struct({
   signingPrivateKey: Pem,
   peers: Schema.Array(FleetPeer).check(Schema.isMaxLength(100)),
   managed: Schema.optionalKey(Schema.Boolean),
+  credentialScope: Schema.optionalKey(Schema.String),
   credentialKeyDigests: Schema.optionalKey(FleetCredentialKeyDigests),
   access: Schema.optionalKey(Schema.Literals(["read-only", "standard"])),
   campaign: Schema.optionalKey(Schema.NullOr(FleetCampaign)),

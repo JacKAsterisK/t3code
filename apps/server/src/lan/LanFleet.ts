@@ -741,7 +741,9 @@ const make = Effect.gen(function* () {
                   const replacementOffer =
                     (received?.status === "connected" &&
                       received.deliveryId !== delivery.header.deliveryId) ||
-                    ((sharedFolder || config.credentialScope !== undefined) &&
+                    ((sharedFolder ||
+                      config.credentialScope !== undefined ||
+                      grantOffered === true) &&
                       received === undefined &&
                       connected);
                   const replacement = grantAvailable && replacementOffer;

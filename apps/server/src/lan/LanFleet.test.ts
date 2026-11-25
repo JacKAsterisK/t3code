@@ -530,39 +530,45 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
         assert.deepEqual(f.revoked, ["session-synthetic-1"]);
       }).pipe(Effect.provide(testConfig)),
   );
-  it.effect("keeps an unspent scoped replacement pending after journal and share trust loss", () =>
-    Effect.gen(function* () {
-      const f = yield* setup(false, false, true, false, "synthetic-switched-fleet");
-      const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
-      f.setPolicy({ revision: 1 });
-      yield* f.sync(f.recipient.service, { mode: "status" });
-      yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
-      assert.equal((yield* f.sync(f.recipient.service)).incoming.length, 1);
-      f.consume("alpha");
-      yield* f.sync(f.recipient.service, connected);
-      const receiptPath = f.path.join(
-        f.deliveryDirectory,
-        `${Delivery.deliveryFileName("alpha", "beta")}.receipt.json`,
-      );
-      const oldReceipt = yield* f.fs.readFileString(receiptPath);
+  it.effect.each(["scoped", "unscoped"] as const)(
+    "keeps an unspent %s replacement pending after journal and share trust loss",
+    (scope) =>
+      Effect.gen(function* () {
+        const credentialScope = scope === "scoped" ? "synthetic-switched-fleet" : undefined;
+        const f = yield* setup(false, false, true, false, credentialScope);
+        const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
+        f.setPolicy({ revision: 1 });
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        assert.equal((yield* f.sync(f.recipient.service)).incoming.length, 1);
+        f.consume("alpha");
+        yield* f.sync(f.recipient.service, connected);
+        const receiptPath = f.path.join(
+          f.deliveryDirectory,
+          `${Delivery.deliveryFileName("alpha", "beta")}.receipt.json`,
+        );
+        const oldReceipt = yield* f.fs.readFileString(receiptPath);
 
-      f.setPolicy({ revision: 2, machines: [{ machineId: "beta", access: "read-only" }] });
-      yield* TestClock.adjust("1 second");
-      assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "pending");
-      yield* f.fs.remove(f.path.join(f.recipient.stateDir, "lan-fleet-state.json"));
-      f.setShareTrust(false);
+        f.setPolicy({ revision: 2, machines: [{ machineId: "beta", access: "read-only" }] });
+        yield* TestClock.adjust("1 second");
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "pending");
+        yield* f.fs.remove(f.path.join(f.recipient.stateDir, "lan-fleet-state.json"));
+        f.setShareTrust(false);
 
-      yield* f.sync(f.recipient.service, { ...connected, mode: "status" });
-      assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
-      assert.equal((yield* f.sync(f.recipient.service, connected)).incoming.length, 0);
-      assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
+        yield* f.sync(f.recipient.service, { ...connected, mode: "status" });
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming.length, 0);
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
 
-      f.setShareTrust(true);
-      const resumed = yield* f.sync(f.recipient.service, connected);
-      assert.equal(resumed.incoming.length, 1);
-      assert.equal(resumed.incoming[0]?.preserveManualConnection, true);
-      assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
-    }).pipe(Effect.provide(testConfig)),
+        f.setShareTrust(true);
+        const resumed = yield* f.sync(f.recipient.service, connected);
+        assert.equal(resumed.incoming.length, 1);
+        assert.equal(
+          resumed.incoming[0]?.preserveManualConnection,
+          credentialScope === undefined ? undefined : true,
+        );
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
+      }).pipe(Effect.provide(testConfig)),
   );
   it.effect(
     "keeps a downgraded peer reading until it uses its replacement, however long that takes",

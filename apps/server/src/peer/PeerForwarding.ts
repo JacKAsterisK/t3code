@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  isRuntimeModeAbove,
   OrchestratorMcpFailure,
   type OrchestratorMcpEnvironmentLinksResult,
   OrchestratorMcpThreadInterruptInput,
@@ -30,6 +31,8 @@ import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { readCaller, threadCreationRuntimeLimit, unavailable } from "../mcp/threadAccess.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import { providerRuntimeMode } from "../orchestration-v2/RuntimePolicy.ts";
+import { ProviderInstanceRegistry } from "../provider/ProviderInstanceRegistry.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
 
@@ -41,6 +44,7 @@ const MAX_WAIT_TIMEOUT_MS = 45_000;
 type Scope = McpInvocationContext.McpInvocationScope;
 
 const LAUNCH_TOOL = "t3_thread_launch";
+const SET_RUNTIME_MODE_TOOL = "t3_thread_set_runtime_mode";
 
 /**
  * Runs T3 MCP tools in a linked environment for an agent here. The tool's own
@@ -124,6 +128,7 @@ export const readNewestOrRetry = Effect.fn("PeerForwarding.readNewestOrRetry")(f
 
 const make = Effect.gen(function* () {
   const serverSettings = yield* Effect.serviceOption(ServerSettingsService);
+  const providerInstances = yield* Effect.serviceOption(ProviderInstanceRegistry);
   const peers = yield* PeerMcpClient.PeerMcpClient;
   const approvalAuthority = yield* Effect.serviceOption(ApprovalAuthority.ApprovalAuthority);
   const links = yield* PeerLinks.PeerLinks;
@@ -186,11 +191,40 @@ const make = Effect.gen(function* () {
     params: unknown,
     writes: boolean,
   ) {
-    const { caller, limits } = yield* forwardingCaller(scope);
+    const { caller, limits: callerLimits } = yield* forwardingCaller(scope);
+    let limits = callerLimits;
     const encoded = (yield* Schema.encodeUnknownEffect(parameters as Schema.Encoder<unknown>)(
       params,
     ).pipe(Effect.mapError(unavailable))) as Record<string, unknown>;
     const { environmentId: _target, ...args } = encoded;
+    if (toolName === SET_RUNTIME_MODE_TOOL) {
+      if (scope.client?.linked === true || caller?.linkOrigin != null) {
+        return yield* new OrchestratorMcpFailure({
+          code: "forwarding_chain_refused",
+          message: "Runtime-mode changes support one linked hop.",
+        });
+      }
+      let runtimeMode = limits.runtimeMode;
+      if (caller !== undefined) {
+        const instance = Option.isNone(providerInstances)
+          ? undefined
+          : yield* providerInstances.value.getInstance(caller.providerInstanceId);
+        if (instance === undefined) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "The calling thread has no active provider instance.",
+          });
+        }
+        const { supportedRuntimeModes } = yield* instance.snapshot.getSnapshot;
+        runtimeMode = providerRuntimeMode(runtimeMode, supportedRuntimeModes);
+      }
+      const ceiling = Option.getOrUndefined(serverSettings)?.managedPolicy?.limits?.maxRuntimeMode;
+      if (ceiling !== undefined && isRuntimeModeAbove(runtimeMode, ceiling)) runtimeMode = ceiling;
+      if (isRuntimeMode(args.expectedRuntimeMode)) {
+        yield* resolveRuntimeMode(runtimeMode, args.expectedRuntimeMode);
+      }
+      limits = { ...limits, runtimeMode };
+    }
     yield* assertWithinLinkAccess(environmentId, args.runtimeMode);
     if (toolName === LAUNCH_TOOL && args.runtimeMode === "full-access") {
       const runtimeLimit = Option.isSome(serverSettings)

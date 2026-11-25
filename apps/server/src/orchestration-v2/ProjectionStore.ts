@@ -584,6 +584,10 @@ export interface ProjectionStoreV2Shape {
   readonly hasPendingDelegatedCompletion: (
     childThreadId: ThreadId,
   ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
+  /** Busy related work, read on the transaction connection when validating a mode write. */
+  readonly hasBusyRuntimeModeDelegation: (
+    threadId: ThreadId,
+  ) => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly getNextTurnItemOrdinal: (
     threadId: ThreadId,
   ) => Effect.Effect<number, ProjectionStoreV2Error>;
@@ -6887,6 +6891,31 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           Effect.mapError(controlReadError(childThreadId)),
         ),
       );
+    const hasBusyRuntimeModeDelegation: ProjectionStoreV2Shape["hasBusyRuntimeModeDelegation"] = (
+      threadId,
+    ) =>
+      sql`
+          SELECT 1 FROM orchestration_v2_projection_subagents AS task
+          WHERE task.thread_id = ${threadId} AND task.origin = 'app_owned'
+            AND (
+              task.completion_delivery_state IN ('pending', 'claimed')
+              OR json_type(task.payload_json, '$.remoteChild.stoppedThere') = 'false'
+              OR EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_runs AS child_run
+                WHERE child_run.thread_id = task.child_thread_id
+                  AND child_run.status IN ('preparing', 'queued', 'starting', 'running', 'waiting')
+              )
+            )
+          UNION ALL
+          SELECT 1 FROM orchestration_v2_projection_subagents AS task
+          WHERE task.child_thread_id = ${threadId} AND task.origin = 'app_owned'
+            AND (task.completion_delivery_state IN ('pending', 'claimed')
+              OR json_extract(task.payload_json, '$.result') IS NULL)
+          LIMIT 1
+        `.pipe(
+        Effect.map((rows) => rows.length > 0),
+        Effect.mapError(controlReadError(threadId)),
+      );
     const getNextTurnItemOrdinal: ProjectionStoreV2Shape["getNextTurnItemOrdinal"] = (threadId) =>
       sql<{ ordinal: number | null }>`SELECT MAX(ordinal) AS ordinal
         FROM orchestration_v2_projection_turn_items WHERE thread_id = ${threadId}`.pipe(
@@ -9974,6 +10003,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getRunCount: readOnReader(getRunCount),
       listAppOwnedChildThreadIds: readOnReader(listAppOwnedChildThreadIds),
       hasPendingDelegatedCompletion: readOnReader(hasPendingDelegatedCompletion),
+      hasBusyRuntimeModeDelegation,
       getNextTurnItemOrdinal: readOnReader(getNextTurnItemOrdinal),
       getTurnItem: readOnReader(getTurnItem),
       getMessagesById: readOnReader(getMessagesById),

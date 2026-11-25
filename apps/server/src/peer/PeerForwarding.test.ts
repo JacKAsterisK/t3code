@@ -39,6 +39,8 @@ import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterReg
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import { ProviderInstanceRegistry } from "../provider/ProviderInstanceRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -328,7 +330,9 @@ const mcpClient = McpSchema.McpServerClient.of({
  * Environment A: its own orchestrator toolkit with forwarding, and a thread
  * caller whose modes the test picks. Its local threads never matter here.
  */
-const makeLaptop = Effect.gen(function* () {
+const makeLaptop = Effect.fn("makeLaptop")(function* (
+  supportedModes: Effect.Effect<ReadonlyArray<RuntimeMode> | undefined> = Effect.undefined,
+) {
   const linking = yield* layerLinkingEnvironment(laptop).pipe(Layer.build);
   const layerHere = Layer.mergeAll(
     McpHttpServer.layerOrchestratorToolkit,
@@ -351,6 +355,18 @@ const makeLaptop = Effect.gen(function* () {
     ),
     Layer.provide(NodeServices.layer),
     Layer.provide(PeerForwarding.layer),
+    Layer.provide(
+      Layer.mock(ProviderInstanceRegistry)({
+        getInstance: () =>
+          Effect.succeed({
+            snapshot: {
+              getSnapshot: supportedModes.pipe(
+                Effect.map((supportedRuntimeModes) => ({ supportedRuntimeModes })),
+              ),
+            },
+          } as ProviderInstance),
+      }),
+    ),
     Layer.provide(Layer.succeedContext(linking)),
     Layer.provide(NodeCrypto.layer),
     Layer.provideMerge(
@@ -451,7 +467,7 @@ it.effect("an agent here works on a linked environment's threads within its own 
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
@@ -527,7 +543,7 @@ it.effect("forwards Auto messages to a Full access thread through a Full access 
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession, "full-access");
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "full-access");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
@@ -563,7 +579,7 @@ it.effect("keeps a forwarded wait short and its retries scoped to the caller", (
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
@@ -608,7 +624,7 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "full-access");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
       const codex = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
@@ -668,7 +684,7 @@ it.effect.each([
         const seen = yield* Ref.make<Seen>(nothingSeen);
         const linkSession = yield* Ref.make("");
         const b = yield* serveBox(seen, linkSession, "full-access");
-        const a = yield* makeLaptop;
+        const a = yield* makeLaptop();
         const allowed = source && destination;
         if (source) yield* a.settings.updateSettings({ allowAgentFullAccessLaunches: true });
         if (destination) yield* b.settings.updateSettings({ allowAgentFullAccessLaunches: true });
@@ -778,7 +794,7 @@ it.effect("a launch in a linked environment keeps the calling thread's owner", (
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "full-access");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
       const launch = (
@@ -818,7 +834,7 @@ it.effect("brings a repository to a linked environment, only through full access
     Effect.gen(function* () {
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const b = yield* serveBox(seen, yield* Ref.make(""));
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       const clone = { repository: "pingdotgg/t3code", destinationPath: "/home/box/t3code" };
       const register = { title: "t3code", workspaceRoot: "/home/box/t3code" };
 
@@ -873,7 +889,8 @@ it.effect("runs any tool that takes a linked environment there", () =>
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const modes = yield* Ref.make<ReadonlyArray<RuntimeMode> | undefined>(undefined);
+      const a = yield* makeLaptop(Ref.get(modes));
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
@@ -906,6 +923,16 @@ it.effect("runs any tool that takes a linked environment there", () =>
         runtimeMode: "full-access",
       });
       expect(failureOf(raised)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+      yield* Ref.set(modes, ["approval-required"]);
+      const fallbackWrite = yield* a.call("thread:laptop-auto", "t3_thread_set_runtime_mode", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        expectedRuntimeMode: "auto",
+        runtimeMode: "approval-required",
+      });
+      expect(failureOf(fallbackWrite)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+      expect((yield* Ref.get(seen)).stops).not.toContain("thread.runtime-mode.set " + boxThread);
+      yield* Ref.set(modes, undefined);
       const lowered = yield* a.call("thread:laptop-full", "t3_thread_set_runtime_mode", {
         environmentId: box.environmentId,
         threadId: boxThread,
@@ -937,7 +964,7 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
       yield* Ref.set(b.bearers, []);
@@ -1009,7 +1036,7 @@ it.effect("refuses a launch there above the link's access, naming the link", () 
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* a.settings.updateSettings({ allowAgentFullAccessLaunches: true });
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);

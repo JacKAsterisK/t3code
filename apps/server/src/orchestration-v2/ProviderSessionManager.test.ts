@@ -1899,6 +1899,14 @@ it.effect(
             reason: "manual_shutdown",
           });
 
+        // The projected thread has no running turn, but the runtime still owns the start.
+        assert.isTrue(yield* manager.hasBusyTurns(providerSessionId));
+        assert.isFalse(
+          yield* manager.hasBusyTurns(providerSessionId, [providerThreadOf(stopping).id]),
+        );
+        assert.isTrue(
+          yield* manager.hasBusyTurns(providerSessionId, [providerThreadOf(sibling).id]),
+        );
         assert.isFalse(yield* release(stopping));
         assert.isTrue(yield* manager.isLive(providerSessionId));
         assert.isTrue(yield* release(sibling));

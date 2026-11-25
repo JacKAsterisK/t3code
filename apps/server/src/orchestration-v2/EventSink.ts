@@ -217,7 +217,7 @@ export interface EventSinkV2Shape {
   >;
   readonly commitCommand: (input: {
     readonly approvalGuard?: ApprovalGuard;
-    readonly expectedThreadSequence?: number;
+    readonly runtimeModeGuard?: { readonly expectedThreadSequence: number };
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
     readonly commandType: string;
@@ -837,9 +837,10 @@ const layerBase: Layer.Layer<
           [input.threadId, ...projectedThreadIds(input.events)],
           Effect.gen(function* () {
             if (
-              input.expectedThreadSequence !== undefined &&
-              (yield* eventStore.latestSequence({ threadId: input.threadId })) !==
-                input.expectedThreadSequence
+              input.runtimeModeGuard !== undefined &&
+              ((yield* eventStore.latestSequence({ threadId: input.threadId })) !==
+                input.runtimeModeGuard.expectedThreadSequence ||
+                (yield* projectionStore.hasBusyRuntimeModeDelegation(input.threadId)))
             ) {
               return yield* new EventSinkThreadChanged({ threadId: input.threadId });
             }
@@ -902,9 +903,9 @@ const layerBase: Layer.Layer<
             // A Stop that changes nothing can still queue the stop of its delegated tasks.
             const sequence =
               storedEvents.at(-1)?.sequence ??
-              (input.effects.length === 0
-                ? undefined
-                : yield* eventStore.latestSequence({ threadId: input.threadId }));
+              (input.effects.length > 0 || input.runtimeModeGuard !== undefined
+                ? yield* eventStore.latestSequence({ threadId: input.threadId })
+                : undefined);
             if (sequence === undefined) {
               return yield* Effect.die(
                 new Error(`Command ${input.commandId} produced no orchestration events.`),

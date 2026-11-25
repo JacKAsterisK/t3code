@@ -161,6 +161,7 @@ function layerExecutorFor(input: {
         release: () => record("release"),
         detach: () => record("detach"),
         otherWorkingThreads: () => Effect.succeed([]),
+        hasBusyTurns: () => Effect.succeed(false),
         releaseUnlessBusy: () => Effect.succeed(true),
         forgetLoadedProviderThread: () => Effect.void,
         subscribePromptSuggestion: () => Stream.empty,

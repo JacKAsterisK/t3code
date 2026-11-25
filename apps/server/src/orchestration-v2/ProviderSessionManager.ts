@@ -261,6 +261,11 @@ export interface ProviderSessionManagerV2Shape {
     ProviderSessionManagerV2Error
   >;
   readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
+  /** Omit the thread filter to check every turn on an exclusive or unscoped session. */
+  readonly hasBusyTurns: (
+    providerSessionId: ProviderSessionId,
+    providerThreadIds?: ReadonlyArray<ProviderThreadId>,
+  ) => Effect.Effect<boolean>;
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -3316,6 +3321,18 @@ export const layerWithOptions = (
         isLive: (providerSessionId) =>
           Ref.get(sessions).pipe(
             Effect.map((current) => current.has(sessionKey(providerSessionId))),
+          ),
+        hasBusyTurns: (providerSessionId, providerThreadIds) =>
+          Ref.get(sessions).pipe(
+            Effect.map((current) => {
+              const entry = current.get(sessionKey(providerSessionId));
+              return (
+                entry !== undefined &&
+                (providerThreadIds === undefined
+                  ? entry.busyTurns.size > 0
+                  : providerThreadIds.some((id) => hasBusyTurn(entry, id)))
+              );
+            }),
           ),
         get: Effect.fn("ProviderSessionManager.get")(
           function* (providerSessionId) {

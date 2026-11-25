@@ -4,14 +4,18 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
+  NodeId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
+  ProviderThreadId,
   ThreadId,
   TurnItemId,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import { ServerSettingsService } from "../serverSettings.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -67,6 +71,7 @@ const testLayer = (
               },
             }),
         settings: {
+          linkedEnvironmentsEnabled: true,
           allowAgentFullAccessLaunches: true,
           ...(enabled ? { allowAgentFullAccessModeChanges: true } : {}),
         },
@@ -302,6 +307,59 @@ it.effect("refuses a linked raise and accepts a linked downgrade under the link 
   }).pipe(Effect.provide(testLayer(true))),
 );
 
+const setFixtureModes = Effect.fn("RuntimeModeTest.setFixtureModes")(function* (withLink: boolean) {
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const sink = yield* EventSink.EventSinkV2;
+  const now = yield* DateTime.now;
+  for (const threadId of [target, caller.threadId]) {
+    const { thread } = yield* orchestrator.getThreadRecords(threadId, []);
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("event:stored-mode:" + threadId),
+          type: "thread.runtime-mode-updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            runtimeMode: "full-access",
+            ...(withLink
+              ? {
+                  linkOrigin: { sessionId: "fixture-link", label: "Peer", access: "auto" as const },
+                }
+              : {}),
+          },
+        },
+      ],
+    });
+  }
+});
+
+it.effect(
+  "caps a fenced caller at its linked access even when the owner raised its stored mode",
+  () =>
+    Effect.gen(function* () {
+      yield* seed;
+      yield* setFixtureModes(true);
+      assert.propertyVal(
+        yield* change("fenced-cap", "auto", "full-access").pipe(Effect.flip),
+        "code",
+        "runtime_mode_escalation_denied",
+      );
+    }).pipe(Effect.provide(testLayer(true))),
+);
+
+it.effect("caps a thread caller whose stored mode is above the managed ceiling", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    yield* setFixtureModes(false);
+    assert.propertyVal(
+      yield* change("managed-cap", "auto", "full-access").pipe(Effect.flip),
+      "code",
+      "runtime_mode_escalation_denied",
+    );
+  }).pipe(Effect.provide(testLayer(true, true))),
+);
 it.layer(testLayer(true, true))("managed runtime ceiling", (it) => {
   it.effect("owner opt-in cannot raise the administrator ceiling", () =>
     Effect.gen(function* () {
@@ -455,6 +513,191 @@ const addWaitingLink = Effect.fn("RuntimeModeTest.addWaitingLink")(function* () 
   });
 });
 
+const addDelegatedTask = Effect.fn("RuntimeModeTest.addDelegatedTask")(function* (
+  state: "remote-stop" | "pending" | "claimed" | "delivered",
+  childThreadId: ThreadId | null = null,
+) {
+  const sink = yield* EventSink.EventSinkV2;
+  const now = yield* DateTime.now;
+  const id = NodeId.make("node:mode-delegate");
+  yield* sink.write({
+    events: [
+      {
+        id: EventId.make("event:mode-delegate"),
+        type: "subagent.updated",
+        threadId: target,
+        occurredAt: now,
+        payload: {
+          id,
+          threadId: target,
+          runId: null,
+          parentNodeId: id,
+          origin: "app_owned",
+          createdBy: "agent",
+          driver: ProviderDriverKind.make("codex"),
+          providerInstanceId: instanceId,
+          providerThreadId: null,
+          childThreadId,
+          nativeTaskRef: null,
+          prompt: "",
+          title: null,
+          model: null,
+          ...(state === "remote-stop"
+            ? {
+                remoteChild: {
+                  threadId: ThreadId.make("thread:remote-child"),
+                  environmentId: EnvironmentId.make("other"),
+                  label: "Peer",
+                  stoppedThere: false,
+                },
+              }
+            : { completionDelivery: { state, observedByRunId: null } }),
+          status: state === "remote-stop" ? "cancelled" : "completed",
+          result: "finished",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        },
+      },
+    ],
+  });
+});
+
+it.effect.each(["remote-stop", "pending", "claimed"] as const)(
+  "refuses an idle parent with unfinished delegation (%s)",
+  (state) =>
+    Effect.gen(function* () {
+      yield* seed;
+      yield* addDelegatedTask(state);
+      assert.propertyVal(
+        yield* change("parent-busy", "full-access").pipe(Effect.flip),
+        "code",
+        "thread_busy",
+      );
+    }).pipe(Effect.provide(testLayer(true))),
+);
+
+it.effect("refuses a child with an undelivered completion", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const child = ThreadId.make("thread:mode-local-child");
+    yield* create(child).pipe(Effect.provideService(ThreadCreationOrigin, ownerOrigin));
+    yield* addDelegatedTask("claimed", child);
+    assert.propertyVal(
+      yield* change("child-busy", "full-access", "auto", caller, child).pipe(Effect.flip),
+      "code",
+      "thread_busy",
+    );
+  }).pipe(Effect.provide(testLayer(true))),
+);
+
+it.effect("refuses a parent if a local child resumes after the first idle check", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const child = ThreadId.make("thread:mode-local-child");
+    yield* create(child);
+    yield* addDelegatedTask("delivered", child);
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const checks = yield* Ref.make(0);
+    const actor = {
+      ...linkedActor,
+      revalidate: Ref.updateAndGet(checks, (count) => count + 1).pipe(
+        Effect.flatMap((count) =>
+          count === 1
+            ? linkedActor.revalidate
+            : send(child, "resumed child").pipe(
+                Effect.provideService(Orchestrator.OrchestratorV2, orchestrator),
+                Effect.orDie,
+                Effect.andThen(linkedActor.revalidate),
+              ),
+        ),
+      ),
+    };
+    assert.propertyVal(
+      yield* change("child-resumed", "approval-required", "auto", actor).pipe(Effect.flip),
+      "code",
+      "thread_busy",
+    );
+    const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+    assert.equal((yield* receipts.getByCommandId(CommandId.make("child-resumed")))._tag, "None");
+  }).pipe(Effect.provide(testLayer(true))),
+);
+
+it.effect("allows an idle thread in a shared switching session while a sibling is running", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const sink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const sessionId = ProviderSessionId.make("provider-session:mode-shared");
+    const driver = ProviderDriverKind.make("codex");
+    const session = {
+      id: sessionId,
+      driver,
+      providerInstanceId: instanceId,
+      status: "running",
+      cwd: process.cwd(),
+      model: null,
+      extensionStatuses: [],
+      lastError: null,
+      capabilities: {
+        ...CodexProviderCapabilitiesV2,
+        sessions: {
+          ...CodexProviderCapabilitiesV2.sessions,
+          supportsMultipleProviderThreadsPerSession: true,
+          supportsRuntimeModeSwitchInSession: true,
+        },
+      },
+      createdAt: now,
+      updatedAt: now,
+    } as const;
+    yield* sink.write({
+      events: [
+        ...[target, caller.threadId].map((threadId) => ({
+          id: EventId.make("event:attach:" + threadId),
+          type: "provider-session.attached" as const,
+          threadId,
+          providerInstanceId: instanceId,
+          occurredAt: now,
+          payload: session,
+        })),
+        {
+          id: EventId.make("event:mode-provider-thread"),
+          type: "provider-thread.updated",
+          threadId: target,
+          providerInstanceId: instanceId,
+          occurredAt: now,
+          payload: {
+            id: ProviderThreadId.make("provider-thread:mode-target"),
+            driver,
+            providerInstanceId: instanceId,
+            providerSessionId: sessionId,
+            appThreadId: target,
+            ownerNodeId: null,
+            nativeThreadRef: null,
+            nativeConversationHeadRef: null,
+            status: "idle",
+            firstRunOrdinal: null,
+            lastRunOrdinal: null,
+            handoffIds: [],
+            forkedFrom: null,
+            pendingBackgroundTasks: [],
+            contextUsage: null,
+            nativeMetadata: null,
+            goal: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+      ],
+    });
+    const result = yield* change("shared-session", "full-access");
+    assert.deepEqual(
+      result.storedEvents.map(({ event }) => event.type),
+      ["thread.runtime-mode-updated", "turn-item.updated"],
+    );
+  }).pipe(Effect.provide(testLayer(true))),
+);
+
 it.effect("refuses an unanswered link card with no active run", () =>
   Effect.gen(function* () {
     yield* seed;
@@ -505,43 +748,74 @@ it.effect("refuses a client revoked while the target lock is held", () =>
   }).pipe(Effect.provide(testLayer(true))),
 );
 
-it.effect("refuses a mode change when a request is written after idle inspection", () =>
+it.effect("refuses a still-authorized linked client if links turn off after admission", () =>
   Effect.gen(function* () {
     yield* seed;
-    const inspected = yield* Deferred.make<void>();
-    const resume = yield* Deferred.make<void>();
-    const rechecks = yield* Ref.make(0);
-    const actor = {
-      ...linkedActor,
-      revalidate: Ref.updateAndGet(rechecks, (count) => count + 1).pipe(
-        Effect.flatMap((count) =>
-          count === 1
-            ? linkedActor.revalidate
-            : Deferred.succeed(inspected, undefined).pipe(
-                Effect.andThen(Deferred.await(resume)),
-                Effect.andThen(linkedActor.revalidate),
-              ),
-        ),
-      ),
-    };
-    const pending = yield* change("raced", "approval-required", "auto", actor).pipe(
+    const settings = yield* ServerSettingsService;
+    const locks = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+    const holding = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const lock = yield* locks
+      .withLock(
+        target,
+        Deferred.succeed(holding, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      )
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(holding);
+    const pending = yield* change("links-off", "approval-required", "auto", linkedActor).pipe(
       Effect.flip,
-      Effect.forkChild,
+      Effect.forkChild({ startImmediately: true }),
     );
-    yield* Deferred.await(inspected);
-    yield* addWaitingLink();
-    yield* Deferred.succeed(resume, undefined);
-    assert.propertyVal(yield* Fiber.join(pending), "code", "thread_busy");
+    yield* settings.updateSettings({ linkedEnvironmentsEnabled: false });
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(lock);
+    assert.propertyVal(yield* Fiber.join(pending), "code", "capability_denied");
     const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
-    assert.equal((yield* receipts.getByCommandId(CommandId.make("raced")))._tag, "None");
+    assert.equal((yield* receipts.getByCommandId(CommandId.make("links-off")))._tag, "None");
     const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const { thread, turnItems } = yield* orchestrator.getThreadRecords(target, ["turnItems"]);
-    assert.equal(thread.runtimeMode, "auto");
-    assert.deepEqual(
-      turnItems.map((item) => item.type),
-      ["link_request"],
-    );
+    assert.equal((yield* orchestrator.getThreadRecords(target, [])).thread.runtimeMode, "auto");
   }).pipe(Effect.provide(testLayer(true))),
+);
+
+it.effect.each(["approval-required", "auto"] as const)(
+  "refuses a %s request when a card is written after idle inspection",
+  (requestedMode) =>
+    Effect.gen(function* () {
+      yield* seed;
+      const inspected = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      const rechecks = yield* Ref.make(0);
+      const actor = {
+        ...linkedActor,
+        revalidate: Ref.updateAndGet(rechecks, (count) => count + 1).pipe(
+          Effect.flatMap((count) =>
+            count === 1
+              ? linkedActor.revalidate
+              : Deferred.succeed(inspected, undefined).pipe(
+                  Effect.andThen(Deferred.await(resume)),
+                  Effect.andThen(linkedActor.revalidate),
+                ),
+          ),
+        ),
+      };
+      const pending = yield* change("raced", requestedMode, "auto", actor).pipe(
+        Effect.flip,
+        Effect.forkChild,
+      );
+      yield* Deferred.await(inspected);
+      yield* addWaitingLink();
+      yield* Deferred.succeed(resume, undefined);
+      assert.propertyVal(yield* Fiber.join(pending), "code", "thread_busy");
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      assert.equal((yield* receipts.getByCommandId(CommandId.make("raced")))._tag, "None");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { thread, turnItems } = yield* orchestrator.getThreadRecords(target, ["turnItems"]);
+      assert.equal(thread.runtimeMode, "auto");
+      assert.deepEqual(
+        turnItems.map((item) => item.type),
+        ["link_request"],
+      );
+    }).pipe(Effect.provide(testLayer(true))),
 );
 
 it.effect("refuses to elevate a stored thread whose creation predates provenance", () =>

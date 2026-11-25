@@ -4559,7 +4559,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { type: "thread.runtime-mode.set" }>,
     thread: OrchestrationV2AppThread,
     change: NonNullable<typeof ThreadRuntimeModeChange.Service>,
-    allowElevation: boolean,
+    settings: Pick<
+      Effect.Success<typeof serverSettings.getSettings>,
+      "allowAgentFullAccessModeChanges" | "linkedEnvironmentsEnabled"
+    >,
   ): Effect.fn.Return<OrchestrationV2RuntimeModeChange, OrchestratorV2Error> {
     const { runtimeMode } = command;
     const from = thread.runtimeMode;
@@ -4617,11 +4620,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       sameEnvironmentAgent =
         shell.linkOrigin == null &&
         (shell.delegatedFrom == null || shell.delegatedFrom.environmentId === caller.environmentId);
-      fencedSessionId =
-        shell.linkOrigin != null && linkOriginIsFenced(shell.linkOrigin)
-          ? shell.linkOrigin.sessionId
-          : undefined;
+      if (shell.linkOrigin != null && linkOriginIsFenced(shell.linkOrigin)) {
+        fencedSessionId = shell.linkOrigin.sessionId;
+        const linkAccess = shell.linkOrigin.access;
+        if (linkAccess === "read-only") {
+          return yield* new ThreadRuntimeModeChangeError({
+            code: "capability_denied",
+            message: "This thread was started through a read-only link.",
+          });
+        }
+        const linkMode = linkAccess ?? "approval-required";
+        if (isRuntimeModeAbove(limits.runtimeMode, linkMode)) {
+          limits = { ...limits, runtimeMode: linkMode };
+        }
+      }
     } else {
+      if (caller.actor.kind === "linked-client" && !settings.linkedEnvironmentsEnabled) {
+        return yield* new ThreadRuntimeModeChangeError({
+          code: "capability_denied",
+          message: "Linked environments is disabled on this machine.",
+        });
+      }
       const current = yield* caller.revalidate;
       if (current === undefined) {
         return yield* new ThreadRuntimeModeChangeError({
@@ -4633,6 +4652,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       limits = current.limits;
       if (current.fenced) fencedSessionId = actor.sessionId;
     }
+    limits = narrowToCeiling(limits, runtimeModeCeiling)!;
     if (fencedSessionId !== undefined && thread.linkOrigin?.sessionId !== fencedSessionId) {
       return yield* new ThreadRuntimeModeChangeError({
         code: "capability_denied",
@@ -4655,7 +4675,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       isRuntimeModeAbove(runtimeMode, from) || isRuntimeModeAbove(runtimeMode, effectiveFrom);
     const elevated =
       upward &&
-      allowElevation &&
+      settings.allowAgentFullAccessModeChanges &&
       sameEnvironmentAgent &&
       thread.linkOrigin == null &&
       caller.kind === "thread" &&
@@ -4722,13 +4742,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       runtimeRequests.length > 0 ||
       turnItems.length > 0 ||
       providerTurns.some((turn) => turn.status === "pending" || turn.status === "running") ||
-      subagents.some((task) => isOrchestrationV2WorkActive(task.status))
+      subagents.some((task) => isOrchestrationV2WorkActive(task.status)) ||
+      (yield* projectionStore
+        .hasBusyRuntimeModeDelegation(threadId)
+        .pipe(mapDispatchError(command)))
     )
       return yield* busy;
     for (const session of providerContext.providerSessions) {
+      const { supportsMultipleProviderThreadsPerSession, supportsRuntimeModeSwitchInSession } =
+        session.capabilities.sessions;
+      const ownProviderThreadIds = providerThreads
+        .filter((providerThread) => providerThread.providerSessionId === session.id)
+        .map((providerThread) => providerThread.id);
+      const scopedToThread =
+        supportsMultipleProviderThreadsPerSession &&
+        supportsRuntimeModeSwitchInSession &&
+        ownProviderThreadIds.length > 0;
+      if (
+        yield* providerSessions.hasBusyTurns(
+          session.id,
+          scopedToThread ? ownProviderThreadIds : undefined,
+        )
+      ) {
+        return yield* busy;
+      }
       if (session.status === "stopped" || session.status === "error") continue;
       if (
-        session.status !== "ready" ||
+        (session.status !== "ready" && (!scopedToThread || session.status === "starting")) ||
         (yield* sessionHasBackgroundWork(session, providerThreads, true))
       ) {
         return yield* busy;
@@ -5091,11 +5131,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.type === "thread.runtime-mode.set" ? yield* ThreadRuntimeModeChange : undefined;
     let modeAudit: OrchestrationV2RuntimeModeChange | undefined;
     if (command.type === "thread.runtime-mode.set" && modeChange !== undefined) {
-      const allowElevation =
-        isRuntimeModeAbove(command.runtimeMode, thread.runtimeMode) &&
-        (yield* serverSettings.getSettings.pipe(mapDispatchError(command)))
-          .allowAgentFullAccessModeChanges;
-      modeAudit = yield* authorizeMcpRuntimeMode(command, thread, modeChange, allowElevation);
+      const settings = yield* serverSettings.getSettings.pipe(mapDispatchError(command));
+      modeAudit = yield* authorizeMcpRuntimeMode(command, thread, modeChange, settings);
       yield* assertMcpRuntimeModeIdle(command, providerContext!);
       if (isProviderNativeSubagentThread(thread)) {
         return yield* new ThreadRuntimeModeChangeError({
@@ -16977,7 +17014,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
     );
 
-    if (plan.events.length === 0 && plan.effects.length === 0 && cancelledTask === undefined) {
+    if (
+      modeChange === undefined &&
+      plan.events.length === 0 &&
+      plan.effects.length === 0 &&
+      cancelledTask === undefined
+    ) {
       // A settle that ended nothing still records its receipt: a replayed Stop
       // effect then finds it instead of settling work that appeared since.
       const { resultSequence, inserted } = yield* Effect.gen(function* () {
@@ -17024,7 +17066,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const commit = eventSink
       .commitCommand({
         ...("approvalGuard" in command ? { approvalGuard: command.approvalGuard } : {}),
-        ...(expectedThreadSequence === undefined ? {} : { expectedThreadSequence }),
+        ...(expectedThreadSequence === undefined
+          ? {}
+          : { runtimeModeGuard: { expectedThreadSequence } }),
         commandId: command.commandId,
         threadId: commandThreadId(command),
         commandType: command.type,
@@ -17071,12 +17115,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             projectionStore.getThread(command.threadId).pipe(
               mapDispatchError(command),
               Effect.flatMap((thread) =>
-                authorizeMcpRuntimeMode(
-                  command,
-                  thread,
-                  modeChange,
-                  settings.allowAgentFullAccessModeChanges,
-                ),
+                authorizeMcpRuntimeMode(command, thread, modeChange, settings),
               ),
               Effect.andThen(commit),
             ),

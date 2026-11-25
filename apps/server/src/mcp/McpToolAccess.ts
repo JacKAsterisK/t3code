@@ -432,8 +432,8 @@ export const setsThreadRuntimeMode = <P extends RuntimeModeChangeInput, A, E, R>
       }),
     (params: P) =>
       writingCaller.pipe(
-        Effect.flatMap(({ scope, limits }) => {
-          if (scope.client?.linked === true) {
+        Effect.flatMap(({ scope, limits, caller }) => {
+          if (scope.client?.linked === true || caller?.linkOrigin != null) {
             return Effect.fail(
               new OrchestratorMcpFailure({
                 code: "forwarding_chain_refused",

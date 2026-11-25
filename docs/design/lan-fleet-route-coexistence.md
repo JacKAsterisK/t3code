@@ -15,3 +15,17 @@ Candidate 1.0.54 keeps the 1.0.53 sender and credential lookup behavior. Fleet I
 - How should upgrades preserve legitimate borrowed aliases and isolate credentials as a route gains a pin? How long should the desktop keep an alternate loopback gateway?
 - How can a signed report prove it follows the relevant acknowledgment? How should a mixed-version fleet renew legacy unpinned sessions and report a new pickup accurately?
 - What should owner re-arm do when the prior session has already been redeemed, or the journal lacks the exact unspent grant ID?
+
+## Self-healing after a dead peer link
+
+On 2026-11-25, BuildMachine stopped accepting all incoming fleet peer-link
+sessions. The likely cause was a reset of its served-link state or auth store.
+Linking adapters kept the revoked links and could wait up to 30 days before
+renewing. The links stayed broken until someone unlinked them by hand.
+
+When a forwarded call on a fleet-provenance link returns HTTP 401 with
+`no longer accepts this link`, the linking adapter should mark the link due
+for renewal and write a fresh peer-link request immediately. Limit this to
+one request per peer per pass. Keep the existing link in place until the
+replacement is in use so recovery preserves any link that still works.
+Manual links keep their existing behavior.

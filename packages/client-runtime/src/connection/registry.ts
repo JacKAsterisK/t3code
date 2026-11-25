@@ -650,14 +650,7 @@ export const make = Effect.gen(function* () {
             !retiring &&
             replacement === undefined &&
             profile !== undefined &&
-            conflictsWithSavedRoute(
-              unpinnedRenewal
-                ? retained.filter(
-                    (route) => connectionRouteId(route.target) !== profile.connectionId,
-                  )
-                : retained,
-              profile,
-            )) ||
+            conflictsWithSavedRoute(retained, profile, unpinnedRenewal)) ||
           (unpinnedRenewal && retained.some((route) => fleetTlsOfRoute(route) !== undefined))
         )
           return yield* new ConnectionBlockedError({

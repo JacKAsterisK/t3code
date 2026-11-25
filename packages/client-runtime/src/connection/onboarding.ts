@@ -159,10 +159,12 @@ export const preparePairingRegistration = Effect.fn(
       reason: "configuration",
       detail: "Fleet endpoint identity does not match this delivery.",
     });
+  const unpinnedRenewal = input.replacementDeliveryId !== undefined && input.tls === undefined;
   if (
     fleetReplacement !== undefined ||
     retiredIdentities.length > 0 ||
-    input.requireSavedConnection === true
+    input.requireSavedConnection === true ||
+    unpinnedRenewal
   ) {
     const environmentId = input.expectedEnvironmentId;
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
@@ -176,6 +178,8 @@ export const preparePairingRegistration = Effect.fn(
         detail: "This saved connection was removed. Add it again to reconnect.",
       });
     const { saved } = splitOldFleetRoutes(current, input.fleetId);
+    const retained = saved === undefined ? [] : connectionRoutes(saved);
+    const retiring = retiredIdentities.length > 0;
     const candidate =
       environmentId === undefined
         ? undefined
@@ -183,14 +187,19 @@ export const preparePairingRegistration = Effect.fn(
             connectionId: bearerConnectionId(environmentId, resolved.httpBaseUrl),
             httpBaseUrl: resolved.httpBaseUrl,
             ...(input.tls === undefined ? {} : { fleetTls: input.tls }),
+            ...(input.fleetId === undefined ? {} : { fleetId: input.fleetId }),
           };
     if (
-      retiredIdentities.length > 0
-        ? candidate === undefined ||
-          (saved !== undefined && conflictsWithSavedRoute(connectionRoutes(saved), candidate))
-        : fleetReplacement !== undefined &&
-          (candidate === undefined ||
-            fleetReplacementRoutes(saved, candidate, fleetReplacement.previousIdentity) === null)
+      (retiring && (candidate === undefined || conflictsWithSavedRoute(retained, candidate))) ||
+      (fleetReplacement !== undefined &&
+        (candidate === undefined ||
+          fleetReplacementRoutes(saved, candidate, fleetReplacement.previousIdentity) === null)) ||
+      (unpinnedRenewal &&
+        (retained.some((route) => fleetTlsOfRoute(route) !== undefined) ||
+          (!retiring &&
+            fleetReplacement === undefined &&
+            candidate !== undefined &&
+            conflictsWithSavedRoute(retained, candidate, true))))
     )
       return yield* new ConnectionBlockedError({
         reason: "configuration",

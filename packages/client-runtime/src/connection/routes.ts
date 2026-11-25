@@ -5,7 +5,6 @@ import {
   isTailnetHost,
 } from "@t3tools/shared/hostClassification";
 import {
-  sameFleetTlsIdentity,
   sameFleetTlsRoute,
   type DesktopSshEnvironmentTarget,
   type FleetTlsIdentity,
@@ -49,21 +48,35 @@ export function fleetTlsOfRoute(route: ConnectionRoute) {
   return profile?._tag === "BearerConnectionProfile" ? profile.fleetTls : undefined;
 }
 
+function isOldFleetPin(route: ConnectionRoute, fleetId: string): boolean {
+  const saved = Option.getOrUndefined(route.profile);
+  return (
+    saved?._tag === "BearerConnectionProfile" &&
+    saved.fleetTls !== undefined &&
+    saved.fleetId !== undefined &&
+    saved.fleetId !== fleetId
+  );
+}
+
+function borrowsCredentialFrom(route: ConnectionRoute, connectionId: string): boolean {
+  return (
+    route.target._tag === "BearerConnectionTarget" &&
+    route.target.connectionId !== connectionId &&
+    credentialConnectionId(route.target.connectionId) === connectionId
+  );
+}
+
 export function splitOldFleetRoutes(
   entry: ConnectionCatalogEntry | undefined,
   fleetId: string | undefined,
 ) {
   if (entry === undefined || fleetId === undefined) return { saved: entry, retired: [] };
   const routes = connectionRoutes(entry);
-  const retired = routes.filter(({ profile }) => {
-    const saved = Option.getOrUndefined(profile);
-    return (
-      saved?._tag === "BearerConnectionProfile" &&
-      saved.fleetTls !== undefined &&
-      saved.fleetId !== undefined &&
-      saved.fleetId !== fleetId
-    );
-  });
+  const retired = routes.filter(
+    (route) =>
+      isOldFleetPin(route, fleetId) &&
+      !routes.some((alias) => borrowsCredentialFrom(alias, connectionRouteId(route.target))),
+  );
   if (retired.length === 0) return { saved: entry, retired };
   const retained = routes.filter((route) => !retired.includes(route));
   return { saved: retained.length === 0 ? undefined : entryWithRoutes(entry, retained), retired };
@@ -83,7 +96,7 @@ export function savedFleetIdentity(
   // D204 lets the gateway verify and replace a sole saved pin, even when the pin changes.
   if (pinned.length === 1) return pinned[0]!.identity;
   const exact = pinned.filter(
-    ({ identity }) => incoming !== undefined && sameFleetTlsIdentity(identity, incoming),
+    ({ identity }) => incoming !== undefined && sameFleetTlsRoute(identity, incoming),
   );
   const match = exact.length === 1 ? exact[0] : undefined;
   // With several pins, only a route with known fleet provenance can renew in place.
@@ -96,6 +109,7 @@ export function fleetReplacementRoutes(
     readonly connectionId: string;
     readonly httpBaseUrl: string;
     readonly fleetTls?: FleetTlsIdentity;
+    readonly fleetId?: string;
   },
   predecessor: FleetTlsIdentity | undefined,
 ): ReadonlyArray<ConnectionRoute> | null {
@@ -115,24 +129,30 @@ export function fleetReplacementRoutes(
   });
   if (current !== undefined && predecessorRoute === undefined) return null;
   const retained = routes.filter((route) => route !== predecessorRoute);
-  if (
-    predecessorRoute !== undefined &&
-    connectionRouteId(predecessorRoute.target) !== candidate.connectionId &&
-    retained.some((route) => fleetTlsOfRoute(route) !== undefined)
-  )
-    return null;
+  if (predecessorRoute !== undefined) {
+    const predecessorId = connectionRouteId(predecessorRoute.target);
+    if (
+      predecessorId !== candidate.connectionId &&
+      (retained.some((route) => fleetTlsOfRoute(route) !== undefined) ||
+        (candidate.fleetId !== undefined &&
+          isOldFleetPin(predecessorRoute, candidate.fleetId) &&
+          retained.some((route) => borrowsCredentialFrom(route, predecessorId))))
+    )
+      return null;
+  }
   return conflictsWithSavedRoute(retained, candidate) ? null : retained;
 }
 
 export function conflictsWithSavedRoute(
   routes: ReadonlyArray<ConnectionRoute>,
   candidate: { readonly connectionId: string; readonly httpBaseUrl: string },
+  allowSameConnection = false,
 ): boolean {
   const address = candidate.httpBaseUrl.replace(/\/+$/u, "");
-  return routes.some(
-    (route) =>
-      connectionRouteId(route.target) === candidate.connectionId ||
-      routeHttpBaseUrl(route)?.replace(/\/+$/u, "") === address,
+  return routes.some((route) =>
+    connectionRouteId(route.target) === candidate.connectionId
+      ? !allowSameConnection
+      : routeHttpBaseUrl(route)?.replace(/\/+$/u, "") === address,
   );
 }
 

@@ -7,7 +7,15 @@ D250/D258:
 - A route with no fleet provenance (no fleetId and no fleet TLS pin, i.e. a manual route) is never overwritten or retired.
 - A single pinned route without a fleetId follows the 1.0.53 D204 verified replacement exactly. That replacement requires a replace delivery, a saved pin that matches the active gateway, and a staged promotion.
 - A proven old-fleet route (a recorded fleetId that differs, plus a pin) may be retired after a fully successful pairing.
-- 1.0.54 never retires or replaces a route in any case where 1.0.53 would not.
+- 1.0.54 never retires a route, or replaces a route's identity or credential with a different one, in any case where 1.0.53 would not. Renewing a fleetId-tagged route in place on an exact pin match is a same-identity renewal and is explicitly allowed.
+
+Known limitation from 1.0.53. A legacy unpinned renewal sent to the original
+address can still revert a saved address and label edited by hand and replace
+the credential, because the edit preserves the connection ID. A durable
+manual-edit marker is planned for the next release.
+
+Automatic retirement keeps a pinned route while another saved route borrows
+its credential.
 
 ## Findings from candidate B
 

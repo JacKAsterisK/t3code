@@ -434,11 +434,12 @@ Each delivery is claimed once; uncertain exchanges pause for review instead of
 rotating credentials or replaying enrollment.
 
 A saved connection records its fleet ID when the pairing delivery includes one.
-If a delivery arrives for a different fleet, a route with both an older fleet ID
-and a fleet TLS pin does not block pickup. After pairing succeeds and the desktop
-promotes the new gateway for a pinned delivery, the catalog saves the new route
-and retires the proven old routes and their credentials in one update. A failed
-pairing or catalog write keeps the saved routes and credentials. The environment
+A delivery from a different fleet can retire a route with both an older fleet ID
+and a fleet TLS pin. A pin stays saved while another route borrows its credential.
+After pairing succeeds and the desktop promotes the gateway for a pinned
+delivery, the catalog saves the new route and retires eligible old routes and
+their credentials in one update. A failed pairing or catalog write keeps the
+saved routes and credentials. The environment
 retains its enabled or disabled state. An unpinned replacement stops if a TLS
 pin would remain, including one saved during pairing. A successful unpinned
 pickup closes the gateway only after the last fleet TLS pin is gone.
@@ -448,15 +449,20 @@ D250/D258:
 - A route with no fleet provenance (no fleetId and no fleet TLS pin, i.e. a manual route) is never overwritten or retired.
 - A single pinned route without a fleetId follows the 1.0.53 D204 verified replacement exactly. That replacement requires a replace delivery, a saved pin that matches the active gateway, and a staged promotion.
 - A proven old-fleet route (a recorded fleetId that differs, plus a pin) may be retired after a fully successful pairing.
-- 1.0.54 never retires or replaces a route in any case where 1.0.53 would not.
+- 1.0.54 never retires a route, or replaces a route's identity or credential with a different one, in any case where 1.0.53 would not. Renewing a fleetId-tagged route in place on an exact pin match is a same-identity renewal and is explicitly allowed.
 
 Legacy unpinned shared-folder connections can still renew their credentials in
 place. A replace delivery can omit its fleet ID during a mixed-version rollout.
 If the gateway check fails, the prior route and credential stay in place. If
 several pins remain, only an exact renewal of a route with a recorded fleet ID
-can proceed, at the same saved address. An exact TLS pin renewal keeps the
-recorded fleet ID when the delivery omits it. Editing a saved address clears its
-fleet ID.
+can proceed, at the same saved address and gateway hostname. An exact TLS pin
+renewal keeps the recorded fleet ID when the delivery omits it. Editing a saved
+address clears its fleet ID.
+
+Known limitation from 1.0.53. A legacy unpinned renewal sent to the original
+address can still revert a saved address and label edited by hand and replace
+the credential, because the edit preserves the connection ID. A durable
+manual-edit marker is planned for the next release.
 
 Deliveries and owner link requests expire after 24 hours; signed connection
 summaries last ten minutes. Polling stops after three consecutive failures and

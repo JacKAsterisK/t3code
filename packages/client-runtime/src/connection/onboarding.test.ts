@@ -502,6 +502,50 @@ describe("connection onboarding", () => {
     }).pipe(Effect.provide(layerPairingOnboarding(undefined, [], undefined, registered)));
   });
 
+  it.effect("keeps a newer fleet pin installed during an unpinned renewal", () => {
+    let reached!: () => void;
+    let release!: () => void;
+    const exchangeReached = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const exchangeGate = {
+      reached,
+      release: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    };
+    const registered: unknown[] = [];
+    const newerPin = {
+      origin: "https://remote.example.test",
+      certificate: "newer-synthetic-pin",
+      publicKeySha256: "c".repeat(64),
+    };
+    return Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      yield* registerSavedEnvironment();
+      const renewal = yield* onboarding
+        .registerPairing({
+          ...PAIRING_INPUT,
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          replacementDeliveryId: "synthetic-renewal",
+          requireSavedConnection: true,
+        })
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* Effect.promise(() => exchangeReached);
+      const newer = yield* registerSavedEnvironment(newerPin);
+      release();
+
+      expect(yield* Fiber.join(renewal)).toMatchObject({ reason: "configuration" });
+      expect(yield* SubscriptionRef.get(registry.entries)).toEqual(newer);
+      expect(registered).toHaveLength(2);
+      expect(registered.at(-1)).toMatchObject({
+        profile: { fleetTls: newerPin },
+        credential: { token: "old-token" },
+      });
+    }).pipe(Effect.provide(layerPairingOnboarding({ exchangeGate }, [], undefined, registered)));
+  });
+
   it.effect("leaves an unspent automatic renewal when the environment was forgotten", () => {
     const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
     return Effect.gen(function* () {

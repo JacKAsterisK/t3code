@@ -52,6 +52,7 @@ import {
   entryWithRoutes,
   findRouteToSameAddress,
   fleetReplacementRoutes,
+  fleetTlsOfRoute,
   hasSavedBearerRoute,
   mergeLearnedRoutes,
   routesAfterRemoving,
@@ -605,7 +606,14 @@ export const make = Effect.gen(function* () {
             : registration._tag === "BearerConnectionRegistration"
               ? fleetReplacementRoutes(previous, registration.profile, replacement.previousIdentity)
               : null;
-        if (retained === null)
+        const unpinnedRenewal =
+          registration._tag === "BearerConnectionRegistration" &&
+          registration.profile.fleetReplacementDeliveryId !== undefined &&
+          registration.profile.fleetTls === undefined;
+        if (
+          retained === null ||
+          (unpinnedRenewal && retained.some((saved) => fleetTlsOfRoute(saved) !== undefined))
+        )
           return yield* new ConnectionBlockedError({
             reason: "configuration",
             detail: "The saved fleet connection changed before the replacement could be saved.",

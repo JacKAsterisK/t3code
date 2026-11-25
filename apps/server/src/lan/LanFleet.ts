@@ -733,23 +733,24 @@ const make = Effect.gen(function* () {
                   }
                   const delivery = offer.value;
                   const received = journal[`received:${incomingKey}`];
-                  const grantAvailable =
-                    sharedFolder &&
-                    peerCatalog?.availableDeliveryIds?.includes(delivery.header.deliveryId) ===
-                      true;
+                  const grantOffered = peerCatalog?.availableDeliveryIds?.includes(
+                    delivery.header.deliveryId,
+                  );
+                  const grantAvailable = sharedFolder && grantOffered === true;
                   const connected = input.connectedEnvironmentIds.includes(peer.environmentId);
                   const replacementOffer =
                     (received?.status === "connected" &&
                       received.deliveryId !== delivery.header.deliveryId) ||
-                    (sharedFolder && received === undefined && connected);
+                    ((sharedFolder || config.credentialScope !== undefined) &&
+                      received === undefined &&
+                      connected);
                   const replacement = grantAvailable && replacementOffer;
                   // A following grant still replaces if the previous pickup was unfinished.
                   const replacing =
                     replacementOffer ||
                     (received?.replacing === true && received.status === "connecting");
                   const replacementSaved =
-                    peerCatalog?.availableDeliveryIds !== undefined &&
-                    !grantAvailable &&
+                    grantOffered === false &&
                     input.completedReplacementDeliveryIds?.includes(delivery.header.deliveryId) ===
                       true;
                   if (
@@ -779,9 +780,7 @@ const make = Effect.gen(function* () {
                         status: "connected",
                       };
                     } else if (
-                      (!sharedFolder ||
-                        peerCatalog?.availableDeliveryIds?.includes(delivery.header.deliveryId) ===
-                          true) &&
+                      (grantAvailable || (!sharedFolder && !replacing)) &&
                       (received === undefined ||
                         replacement ||
                         (sharedFolder &&

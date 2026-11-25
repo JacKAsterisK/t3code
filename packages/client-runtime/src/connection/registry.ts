@@ -56,7 +56,6 @@ import {
   connectionRouteId,
   connectionRoutes,
   conflictsWithSavedFleetRoute,
-  credentialConnectionId,
   entryWithRoutes,
   findRouteToSameAddress,
   fleetDeliveryConnectionId,
@@ -65,6 +64,8 @@ import {
   fleetTlsOfRoute,
   hasSavedBearerRoute,
   mergeLearnedRoutes,
+  isLegacyBorrowedRoute,
+  manualPairingConnectionId,
   routesAfterRemoving,
   upsertRoute,
   type ReportedEndpoint,
@@ -77,6 +78,7 @@ interface ConnectionRegistrationOptions {
   readonly knownAddressOnly?: boolean;
   readonly requireSavedConnection?: boolean;
   readonly fleetDelivery?: boolean;
+  readonly manualPairing?: boolean;
   readonly fleetReplacement?: { readonly previousIdentity: FleetTlsIdentity | undefined };
 }
 
@@ -273,7 +275,10 @@ export const make = Effect.gen(function* () {
           const id = connectionRouteId(route.target);
           if (seen.has(id)) return false;
           seen.add(id);
-          return !(id.startsWith("learned:") && Option.isNone(route.profile));
+          return (
+            !isLegacyBorrowedRoute(route) &&
+            !(id.startsWith("learned:") && Option.isNone(route.profile))
+          );
         });
         const routes = usable.length > 0 ? usable : loaded.slice(0, 1);
         const first = routes[0]!;
@@ -623,9 +628,17 @@ export const make = Effect.gen(function* () {
         );
         const savedRoutes = saved === undefined ? [] : connectionRoutes(saved);
         const candidate =
-          profile === undefined || options?.fleetDelivery !== true
-            ? profile
-            : { ...profile, connectionId: fleetDeliveryConnectionId(savedRoutes, profile) };
+          profile === undefined
+            ? undefined
+            : {
+                ...profile,
+                connectionId:
+                  options?.fleetDelivery === true
+                    ? fleetDeliveryConnectionId(savedRoutes, profile)
+                    : options?.manualPairing === true
+                      ? manualPairingConnectionId(savedRoutes, profile)
+                      : profile.connectionId,
+              };
         const retained =
           replacement === undefined
             ? savedRoutes
@@ -687,7 +700,7 @@ export const make = Effect.gen(function* () {
         let entry = connectionRegistrationCatalogEntry(persistedRegistration);
         const route: ConnectionRoute = { target: entry.target, profile: entry.profile };
         if (previous !== undefined) {
-          const existing = retained;
+          const existing = retained.filter((route) => !isLegacyBorrowedRoute(route));
           const sameAddress = findRouteToSameAddress(existing, route, "replace");
           const routes = existing.filter(
             (existing) =>
@@ -865,8 +878,7 @@ export const make = Effect.gen(function* () {
                 yield* SubscriptionRef.updateSome(scope.supervisor.prepared, (current) =>
                   Option.isSome(current) &&
                   current.value.target._tag === "BearerConnectionTarget" &&
-                  credentialConnectionId(current.value.target.connectionId) ===
-                    registration.target.connectionId &&
+                  current.value.target.connectionId === registration.target.connectionId &&
                   current.value.httpAuthorization?._tag === "Bearer" &&
                   current.value.httpAuthorization.token !== token
                     ? Option.some(
@@ -1046,8 +1058,7 @@ export const make = Effect.gen(function* () {
     typeof globalThis.location === "undefined" || globalThis.location.protocol !== "https:";
 
   /**
-   * Learned routes reuse the active route's credential, so they do not revoke pull request routing
-   * trust the way a newly paired address does.
+   * T3 Connect learns alternate endpoints using its own authorization, without changing routing trust.
    */
   const learnRoutes = Effect.fn("EnvironmentRegistry.learnRoutes")(function* (input: {
     readonly environmentId: EnvironmentId;

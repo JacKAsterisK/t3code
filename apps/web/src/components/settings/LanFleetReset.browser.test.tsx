@@ -10,10 +10,13 @@ import {
   type LanFleetResetPreview,
   type LanFleetResetReceipt,
   type LanFleetSetupState,
+  type LanFleetSyncInput,
+  type LanFleetSyncResult,
 } from "@t3tools/contracts";
 import {
   BearerConnectionProfile,
   BearerConnectionTarget,
+  PrimaryConnectionTarget,
   type ConnectionCatalogEntry,
 } from "@t3tools/client-runtime/connection";
 import { RegistryContext } from "@effect/atom-react";
@@ -34,6 +37,9 @@ const fixtures = vi.hoisted(() => ({
     >(),
   remove: vi.fn(),
   useLanFleet: vi.fn(),
+  setup: vi.fn<() => LanFleetSetupState>(),
+  configure: vi.fn<(input: unknown) => LanFleetSetupState>(),
+  sync: vi.fn<(input: LanFleetSyncInput) => LanFleetSyncResult>(),
 }));
 
 vi.mock(import("@t3tools/client-runtime/state/runtime"), async (original) => {
@@ -46,6 +52,21 @@ vi.mock(import("@t3tools/client-runtime/state/runtime"), async (original) => {
       _runtime: unknown,
       options: Parameters<typeof runtime.createEnvironmentRpcCommand>[1],
     ) => {
+      const action =
+        options.tag === "server.syncLanFleet"
+          ? (input: LanFleetSyncInput) => fixtures.sync(input)
+          : options.tag === "server.getLanFleetSetup"
+            ? () => fixtures.setup()
+            : options.tag === "server.configureLanFleet"
+              ? (input: unknown) => fixtures.configure(input)
+              : undefined;
+      if (action !== undefined)
+        return {
+          label: options.label,
+          permissionAtom: () => Atom.make(true),
+          run: (_registry: unknown, { input }: { input: LanFleetSyncInput }) =>
+            Effect.sync(() => action(input)),
+        };
       if (options.tag !== "server.resetLanFleetLinks")
         return runtime.createEnvironmentRpcCommand(_runtime as never, options);
       return {
@@ -78,6 +99,13 @@ vi.mock(import("../../connection/lanFleet"), async (original) => {
   return { useLanFleetReset, useLanFleet: fixtures.useLanFleet };
 });
 vi.mock(import("./LanFleetSetup"), () => ({ LanFleetSetup: () => <></> }));
+vi.mock(import("../../environments/primary/target"), async (original) => ({
+  ...(await original()),
+  readPrimaryEnvironmentTarget: (() => ({
+    source: "desktop-managed",
+    target: { httpBaseUrl: "http://127.0.0.1:3773/", wsBaseUrl: "ws://127.0.0.1:3773/" },
+  })) as never,
+}));
 
 function setup() {
   const environmentId = EnvironmentId.make("fixture-local");
@@ -166,6 +194,99 @@ function setup() {
   fixtures.remove.mockReset();
   return { environmentId, preview, receipt, registry, setRoutes, entries, route };
 }
+
+it("Link both ways configures the owner campaign and syncs with fleet route evidence", async () => {
+  const { environmentId, registry, route, setRoutes } = setup();
+  const manual = route("Manual connection");
+  const savedFleet = route("Existing fleet connection", "synthetic-fleet");
+  const peer = {
+    machineId: "fixture-peer",
+    environmentId: manual.target.environmentId,
+    label: "Fixture peer",
+  };
+  const setupState: LanFleetSetupState = {
+    available: true,
+    stage: "active",
+    owner: true,
+    ownerCode: null,
+    deviceCode: null,
+    environmentId,
+    label: "Fixture owner",
+    origin: "https://fixture-owner.example.test",
+    autoPickup: true,
+    access: "standard",
+    peers: [
+      {
+        ...peer,
+        origin: "https://fixture-peer.example.test",
+        verificationCode: "123456789012",
+        status: "approved",
+      },
+    ],
+  };
+  const { useLanFleet } = await vi.importActual<typeof import("../../connection/lanFleet")>(
+    "../../connection/lanFleet",
+  );
+  fixtures.useLanFleet.mockImplementation(useLanFleet);
+  fixtures.setup.mockReset().mockReturnValue(setupState);
+  fixtures.configure.mockReset().mockReturnValue(setupState);
+  fixtures.sync.mockReset().mockReturnValue({
+    enabled: true,
+    autoPickup: true,
+    machines: [{ ...peer, status: "pending" }],
+    incoming: [],
+  });
+  setRoutes([
+    {
+      target: new PrimaryConnectionTarget({
+        environmentId,
+        label: "Fixture owner",
+        httpBaseUrl: "http://127.0.0.1:3773/",
+        wsBaseUrl: "ws://127.0.0.1:3773/",
+      }),
+      enabled: true,
+      profile: Option.none(),
+    },
+    manual,
+    savedFleet,
+  ]);
+  vi.stubGlobal("desktopBridge", {
+    getClientPlatform: () => "win32",
+    getLocalEnvironmentBootstraps: () => [
+      {
+        id: "primary",
+        runningDistro: null,
+        httpBaseUrl: "http://127.0.0.1:3773/",
+        wsBaseUrl: "ws://127.0.0.1:3773/",
+      },
+    ],
+  });
+  try {
+    await using screen = await render(
+      <RegistryContext.Provider value={registry}>
+        <LanFleetSettings />
+      </RegistryContext.Provider>,
+    );
+    await screen.getByRole("button", { name: "Sync now" }).click();
+    await screen.getByRole("button", { name: "Link both ways" }).click();
+    await vi.waitFor(() => expect(fixtures.sync).toHaveBeenCalledTimes(2));
+    expect(fixtures.configure).toHaveBeenCalledExactlyOnceWith({
+      operation: "link",
+      confirmed: true,
+      machineIds: [peer.machineId],
+    });
+    expect(fixtures.sync).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        mode: "manual",
+        sendMachineIds: [],
+        fleetConnectedEnvironmentIds: [savedFleet.target.environmentId],
+        completedDeliveryIds: [],
+      }),
+    );
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 
 it("reviews a fleet reset, refuses stale review, and removes saved routes only when included", async () => {
   const { environmentId, preview, receipt, registry, setRoutes, entries, route } = setup();

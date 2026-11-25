@@ -49,6 +49,8 @@ const Record = Schema.Struct({
   expiresAt: Schema.Number,
   status: Schema.Literals(["publishing", "pending", "connecting", "connected"]),
   pairingLinkId: Schema.optionalKey(Schema.String),
+  campaignId: Schema.optionalKey(Schema.String),
+  withdrawn: Schema.optionalKey(Schema.Literal(true)),
   credentialKeyDigest: Schema.optionalKey(Schema.String),
   senderCatalogCreatedAt: Schema.optionalKey(Schema.Number),
   // A pickup that replaces a credential this machine already holds for the sender.
@@ -302,9 +304,11 @@ const make = Effect.gen(function* () {
               fleetIds.length > 0 && !fleetIds.includes(fleetId) ? [environmentId] : [],
             ),
       );
-      const connectedEnvironmentIds = input.connectedEnvironmentIds.filter(
-        (id) => !oldFleetOnly.has(id),
-      );
+      const connectedEnvironmentIds = (
+        input.fleetConnectedEnvironmentIds ?? input.connectedEnvironmentIds
+      ).filter((id) => !oldFleetOnly.has(id));
+      const completedDeliveryIds = new Set(input.completedDeliveryIds);
+      const completedReplacementDeliveryIds = new Set(input.completedReplacementDeliveryIds);
       const trusted = (machine: FleetRoster["machines"][number]) =>
         config.peers.find(
           (peer) =>
@@ -340,8 +344,17 @@ const make = Effect.gen(function* () {
             const machines: Array<LanFleetSyncResult["machines"][number]> = [];
             const incoming: Array<LanFleetSyncResult["incoming"][number]> = [];
             const explicitSends = new Set(input.mode === "status" ? [] : input.sendMachineIds);
+            const configuredCampaign = config.campaign;
+            const campaign =
+              configuredCampaign &&
+              configuredCampaign.expiresAt > now &&
+              configuredCampaign.machineIds.includes(self.machineId) &&
+              (input.mode === "manual" || (input.mode === "automatic" && config.autoPickup))
+                ? configuredCampaign
+                : undefined;
+            const campaignIds = new Set(campaign?.machineIds);
             const activeLinks =
-              sharedFolder || (config.managed && explicitSends.size > 0)
+              sharedFolder || (config.managed && (explicitSends.size > 0 || campaign !== undefined))
                 ? [...(yield* auth.listPairingLinks())]
                 : [];
             const activeSessions = sharedFolder ? yield* auth.listSessions() : [];
@@ -351,24 +364,16 @@ const make = Effect.gen(function* () {
               activeLinks.filter(
                 (link) =>
                   link.subject === subject &&
-                  (pairingLinkId === undefined || link.id === pairingLinkId) &&
                   DateTime.toEpochMillis(link.expiresAt) > now &&
-                  Math.abs(DateTime.toEpochMillis(link.expiresAt) - expiresAt) <= 60_000,
+                  (pairingLinkId === undefined
+                    ? Math.abs(DateTime.toEpochMillis(link.expiresAt) - expiresAt) <= 60_000
+                    : link.id === pairingLinkId),
               );
             const activeGrant = (subject: string, expiresAt: number, pairingLinkId?: string) => {
               const matches = matchingGrants(subject, expiresAt, pairingLinkId);
               return matches.length === 1 ? matches[0] : undefined;
             };
             yield* fs.makeDirectory(config.deliveryDirectory, { recursive: true });
-            const campaign = config.campaign;
-            const campaignIds =
-              campaign !== undefined &&
-              campaign !== null &&
-              campaign.expiresAt > now &&
-              campaign.machineIds.includes(self.machineId) &&
-              (input.mode === "manual" || (input.mode === "automatic" && config.autoPickup))
-                ? campaign.machineIds
-                : [];
             const requested = new Set([...explicitSends, ...campaignIds]);
             const readOffer = (file: string) => {
               const read = readFleetJson(file, Delivery.Delivery);
@@ -577,6 +582,11 @@ const make = Effect.gen(function* () {
                     for (const credential of held.filter(
                       (item) => item.link !== undefined && item.access !== access,
                     )) {
+                      if (sent !== undefined && sent.pairingLinkId === credential.link!.id) {
+                        sent = { ...sent, withdrawn: true };
+                        journal[`sent:${outgoingKey}`] = sent;
+                        yield* writeFleetJson(journalFile, journal);
+                      }
                       yield* credential.revoke;
                       activeLinks.splice(activeLinks.indexOf(credential.link!), 1);
                     }
@@ -706,11 +716,19 @@ const make = Effect.gen(function* () {
                     acknowledged = Delivery.verifyReceipt(receipt, sent.deliveryId, self, peer);
                   }
                 }
+                const peerCampaign = campaignIds.has(peer.machineId) ? campaign : undefined;
+                // Older journals have no campaign ID. Both campaigns and offers last one day.
+                const newCampaign =
+                  peerCampaign !== undefined &&
+                  sent !== undefined &&
+                  (sent.campaignId === undefined
+                    ? peerCampaign.expiresAt > sent.expiresAt
+                    : peerCampaign.id !== sent.campaignId);
                 if (
                   !sharedFolder &&
                   peerCatalog !== undefined &&
                   !recipientConnected &&
-                  explicitSends.has(peer.machineId) &&
+                  (explicitSends.has(peer.machineId) || newCampaign) &&
                   sent !== undefined &&
                   sent.deliveryId !== EXISTING_CONNECTION &&
                   sent.status !== "publishing" &&
@@ -744,23 +762,28 @@ const make = Effect.gen(function* () {
                   outgoingExists = false;
                   acknowledged = false;
                 }
-                if (recipientConnected) {
+                const catalogConfirms =
+                  recipientConnected &&
+                  (sent === undefined ||
+                    sent.deliveryId === EXISTING_CONNECTION ||
+                    sent.withdrawn === true ||
+                    sent.expiresAt <= now ||
+                    acknowledged);
+                if (recipientConnected && sent === undefined && !outgoingExists) {
                   sent = {
-                    deliveryId: sent?.deliveryId ?? EXISTING_CONNECTION,
-                    expiresAt: sent?.expiresAt ?? now,
-                    ...(sent?.pairingLinkId === undefined
-                      ? {}
-                      : { pairingLinkId: sent.pairingLinkId }),
+                    deliveryId: EXISTING_CONNECTION,
+                    expiresAt: now,
                     ...generation,
                     status: "connected",
                   };
+                  journal[`sent:${outgoingKey}`] = sent;
+                } else if (acknowledged && sent?.status === "pending") {
+                  sent = { ...sent, status: "connected" };
                   journal[`sent:${outgoingKey}`] = sent;
                 }
                 if (sent === undefined && outgoingExists) {
                   // A lost local journal must never rotate a delivery still present on the share.
                   status = "uncertain";
-                } else if (sent === undefined && recipientConnected) {
-                  status = "connected";
                 } else if (sent === undefined && requested.has(peer.machineId) && !recipientReady) {
                   status = "pending";
                 } else if (sent === undefined && requested.has(peer.machineId)) {
@@ -769,6 +792,7 @@ const make = Effect.gen(function* () {
                     expiresAt: now + 24 * 60 * 60 * 1000,
                     ...generation,
                     status: "publishing",
+                    ...(peerCampaign === undefined ? {} : { campaignId: peerCampaign.id }),
                   };
                   journal[`sent:${outgoingKey}`] = sent;
                   // Reserve durably before minting. An interrupted issue needs review, never rotation.
@@ -830,11 +854,11 @@ const make = Effect.gen(function* () {
                 if (sent !== undefined) {
                   status = outgoingRejected
                     ? "uncertain"
-                    : recipientConnected || sent.deliveryId === EXISTING_CONNECTION
+                    : catalogConfirms || sent.deliveryId === EXISTING_CONNECTION
                       ? "connected"
                       : sent.status === "publishing"
                         ? "uncertain"
-                        : sent.expiresAt <= now
+                        : sent.expiresAt <= now || sent.withdrawn === true
                           ? "expired"
                           : acknowledged
                             ? "connected"
@@ -874,12 +898,16 @@ const make = Effect.gen(function* () {
                   const replacement = grantAvailable && replacementOffer;
                   // A following grant still replaces if the previous pickup was unfinished.
                   const replacing =
-                    replacementOffer ||
-                    (received?.replacing === true && received.status === "connecting");
-                  const replacementSaved =
-                    grantOffered === false &&
-                    input.completedReplacementDeliveryIds?.includes(delivery.header.deliveryId) ===
-                      true;
+                    !ownerResend &&
+                    (replacementOffer ||
+                      (received?.replacing === true && received.status === "connecting"));
+                  const pickupSaved =
+                    connected &&
+                    received?.deliveryId === delivery.header.deliveryId &&
+                    (received.status === "connecting" || received.status === "connected") &&
+                    (completedDeliveryIds.has(delivery.header.deliveryId) ||
+                      (grantOffered === false &&
+                        completedReplacementDeliveryIds.has(delivery.header.deliveryId)));
                   if (
                     delivery.header.expiresAt > now &&
                     (received === undefined ||
@@ -897,7 +925,7 @@ const make = Effect.gen(function* () {
                     if (payload === undefined) {
                       rejectedDeliveryIds.add(delivery.header.deliveryId);
                       status = "uncertain";
-                    } else if (connected && (!replacing || replacementSaved)) {
+                    } else if (pickupSaved) {
                       yield* writeFleetJson(
                         path.join(config.deliveryDirectory, `${incomingKey}.receipt.json`),
                         Delivery.makeReceipt(delivery, config),
@@ -964,11 +992,7 @@ const make = Effect.gen(function* () {
                           : {}),
                       });
                     }
-                    if (
-                      received?.status === "connecting" &&
-                      !connectedEnvironmentIds.includes(peer.environmentId)
-                    )
-                      status = "uncertain";
+                    if (received?.status === "connecting" && !pickupSaved) status = "uncertain";
                   }
                 }
               }

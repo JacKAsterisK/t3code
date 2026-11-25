@@ -27,7 +27,7 @@ import {
   routeEntry,
   routeHttpBaseUrl,
   routeKeepsItsHost,
-  sendsTokenInClear,
+  isLegacyBorrowedRoute,
   usableRoutes,
 } from "./routes.ts";
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
@@ -282,9 +282,7 @@ export const make = Effect.gen(function* () {
 
   const preflight = (entry: ConnectionCatalogEntry, route: ConnectionRoute) =>
     preflightRoute(
-      sendsTokenInClear(connectionRoutes(entry), route)
-        ? Effect.succeed("silent" as const)
-        : checkRoute(entry, route),
+      isLegacyBorrowedRoute(route) ? Effect.succeed("silent" as const) : checkRoute(entry, route),
       resolver.prepare(routeEntry(entry, route)),
     ).pipe(Effect.withSpan("ConnectionDriver.preflight"));
 

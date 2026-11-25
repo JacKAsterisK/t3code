@@ -1747,6 +1747,77 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
       }).pipe(Effect.provide(configLayer)),
   );
 
+  it.effect("re-arms an acknowledged delivery through the Link both ways action", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const owner = yield* f.start();
+      const pending = yield* f.join(owner.ownerCode!);
+      const machineId = f.b.record()!.machineId;
+      yield* f.approve(machineId, pending.deviceCode!);
+      const ownerSync = (
+        connectedEnvironmentIds: ReadonlyArray<EnvironmentId>,
+        completedDeliveryIds: ReadonlyArray<string> = [],
+      ) =>
+        f.a.links.sync({
+          mode: "manual",
+          sendMachineIds: [],
+          connectedEnvironmentIds,
+          completedDeliveryIds,
+        });
+      const linkBothWays = Effect.fn("FleetEnrollmentTest.linkBothWays")(function* (
+        saved: ReadonlyArray<EnvironmentId>,
+        completed: ReadonlyArray<string> = [],
+      ) {
+        yield* f.a.links.configure({ operation: "link", confirmed: true, machineIds: [machineId] });
+        return yield* ownerSync(saved, completed);
+      });
+      const recipientSync = (
+        connectedEnvironmentIds: ReadonlyArray<EnvironmentId>,
+        completedDeliveryIds: ReadonlyArray<string> = [],
+      ) =>
+        f.b.links.sync({
+          mode: "automatic",
+          sendMachineIds: [],
+          connectedEnvironmentIds,
+          completedDeliveryIds,
+        });
+      yield* recipientSync([]);
+      const firstOwner = yield* linkBothWays([]);
+      const first = (yield* recipientSync([])).incoming[0]!;
+      const reciprocal = firstOwner.incoming[0] ?? (yield* ownerSync([])).incoming[0]!;
+      yield* ownerSync([f.b.environmentId], [reciprocal.deliveryId]);
+      yield* recipientSync([f.a.environmentId], [first.deliveryId]);
+      assert.equal(
+        (yield* ownerSync([f.b.environmentId], [reciprocal.deliveryId])).machines[1]?.status,
+        "connected",
+      );
+
+      yield* recipientSync([]);
+      yield* TestClock.adjust("1 second");
+      assert.equal(
+        (yield* ownerSync([f.b.environmentId], [reciprocal.deliveryId])).machines[1]?.status,
+        "connected",
+      );
+      assert.equal(
+        (yield* linkBothWays([f.b.environmentId], [reciprocal.deliveryId])).machines[1]?.status,
+        "pending",
+      );
+      const resent = (yield* recipientSync([])).incoming[0];
+      assert.isDefined(resent);
+      assert.notEqual(resent.deliveryId, first.deliveryId);
+      assert.deepEqual(f.issued.map(({ issuer }) => issuer).sort(), ["alpha", "alpha", "beta"]);
+      assert.equal(
+        (yield* ownerSync([f.b.environmentId], [reciprocal.deliveryId])).machines[1]?.status,
+        "pending",
+      );
+      yield* recipientSync([f.a.environmentId], [resent.deliveryId]);
+      assert.equal(
+        (yield* ownerSync([f.b.environmentId], [reciprocal.deliveryId])).machines[1]?.status,
+        "connected",
+      );
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect(
     "links both directions from one owner action and skips existing recipient identities without rotating credentials",
     () =>

@@ -2292,7 +2292,7 @@ describe("EnvironmentRegistry routes", () => {
   it.effect("saves the Tailscale mark when the server reports a learned address as tailnet", () =>
     Effect.gen(function* () {
       const httpBaseUrl = "http://100.101.102.103:3773/";
-      const learnedId = `learned:${LAN_TARGET.environmentId}:http://100.101.102.103:3773@${LAN_TARGET.connectionId}`;
+      const learnedId = `learned:${LAN_TARGET.environmentId}:http://100.101.102.103:3773`;
       const learned = new BearerConnectionTarget({ ...LAN_TARGET, connectionId: learnedId });
       const learnedProfile = new BearerConnectionProfile({
         connectionId: learnedId,
@@ -2301,6 +2301,7 @@ describe("EnvironmentRegistry routes", () => {
         httpBaseUrl,
         wsBaseUrl: "ws://100.101.102.103:3773/",
         learned: true,
+        authorization: "t3-connect",
       });
       const harness = yield* makeHarness(
         [LAN_TARGET, learned],
@@ -2332,7 +2333,7 @@ describe("EnvironmentRegistry routes", () => {
 
   it.effect("drops a learned route whose profile was not saved instead of duplicating it", () =>
     Effect.gen(function* () {
-      const learnedId = `learned:${LAN_TARGET.environmentId}:100.64.0.9:3773@${LAN_TARGET.connectionId}`;
+      const learnedId = `learned:${LAN_TARGET.environmentId}:http://100.64.0.9:3773`;
       const learned = new BearerConnectionTarget({ ...LAN_TARGET, connectionId: learnedId });
       const harness = yield* makeHarness(
         [LAN_TARGET, learned, learned],

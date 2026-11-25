@@ -50,7 +50,7 @@ import {
   appendOrchestrationProtocol,
   orchestrationProtocolCompatibilityError,
 } from "./compatibility.ts";
-import { credentialConnectionId } from "./routes.ts";
+
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
 
 export class ConnectionResolver extends Context.Service<
@@ -145,6 +145,8 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
         ),
       });
     }
+    if (profile.connectionId !== target.connectionId)
+      return yield* profileMissingError(target.connectionId);
     if (profile.environmentId !== target.environmentId) {
       return yield* environmentMismatchError({
         expected: target.environmentId,
@@ -158,7 +160,7 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
       });
       return { ...authorized, target } satisfies PreparedConnection;
     }
-    const credential = yield* credentials.get(credentialConnectionId(target.connectionId)).pipe(
+    const credential = yield* credentials.get(target.connectionId).pipe(
       Effect.flatMap(
         Option.match({
           onNone: () => Effect.fail(credentialMissingError(target.connectionId)),
@@ -179,7 +181,7 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
       credential._tag === "DpopConnectionCredential"
         ? yield* remote.authorizeDirectDpop({
             expectedEnvironmentId: target.environmentId,
-            connectionId: credentialConnectionId(target.connectionId),
+            connectionId: target.connectionId,
             httpBaseUrl: endpoint.httpBaseUrl,
             wsBaseUrl: endpoint.wsBaseUrl,
           })

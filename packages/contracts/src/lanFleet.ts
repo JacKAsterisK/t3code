@@ -94,6 +94,12 @@ export type FleetTlsGatewayResult = typeof FleetTlsGatewayResult.Type;
 export const LanFleetSyncInput = Schema.Struct({
   mode: Schema.Literals(["status", "manual", "automatic"]),
   connectedEnvironmentIds: Schema.Array(EnvironmentId).check(Schema.isMaxLength(1000)),
+  fleetConnectedEnvironmentIds: Schema.optionalKey(
+    Schema.Array(EnvironmentId).check(Schema.isMaxLength(1000)),
+  ),
+  completedDeliveryIds: Schema.optionalKey(
+    Schema.Array(Schema.String.check(Schema.isMaxLength(128))).check(Schema.isMaxLength(1000)),
+  ),
   pinnedFleetRoutes: Schema.optionalKey(
     Schema.Array(
       Schema.Struct({

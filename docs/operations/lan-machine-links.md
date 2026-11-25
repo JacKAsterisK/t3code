@@ -434,8 +434,8 @@ Each delivery is claimed once; uncertain exchanges pause for review instead of
 rotating credentials or replaying enrollment.
 
 When a delivery names a different fleet from a saved route to the same machine,
-the desktop can pair using the new delivery. A route needs both a recorded
-fleet ID and a fleet TLS pin to qualify for automatic retirement. The desktop
+the desktop can pair using the new delivery. A recorded fleet ID identifies a
+route that qualifies for automatic retirement. For a pinned delivery, the desktop
 stages the gateway before saving the enabled connection and new credential.
 The catalog saves them and retires proven old-fleet routes in one update.
 The desktop selects the staged gateway when it connects using the saved route.
@@ -450,11 +450,15 @@ the saved route has neither a fleet ID nor a pin, the desktop saves the fleet
 credential under a separate connection ID even when the manual route uses the
 same address. This also applies if the manual route is added during pickup.
 Later deliveries reuse that fleet connection ID, including when the fleet adds
-its first pin. The manual route keeps its ID, address, and credential. At the
-same address, the client tries the pinned fleet route through the desktop gateway
-before its manual counterpart when both routes are reachable.
+its first pin. You can also pair a manual route after the fleet route is saved.
+Each route keeps its own ID, address, and credential. At a shared address the
+client prefers the fleet route when both are reachable and uses the desktop
+gateway for a pinned route.
 
-The connection ID is also the credential key. Reusing it requires ownership
+The connection ID is also the credential key. An alternate address for a
+bearer connection needs its own pairing. Older learned addresses that shared a
+paired credential are skipped. T3 Connect can still discover alternate addresses
+using its own authorization. Reusing a fleet credential key requires ownership
 proved by the saved fleet ID or an exact TLS pin. A fleet ID allows the client
 to allocate a spare ID when a manual route occupies the default one. An incoming
 delivery with neither a fleet ID nor an exact saved pin cannot reuse that
@@ -463,12 +467,15 @@ public key at the same pinned address requires a verified replacement of the
 saved pin. If pickup cannot establish which route to renew or replace, you may
 need to pair again.
 
-An environment with only proven old-fleet routes does not count as connected
-for delivery or acknowledgment. When a fresh signed report shows the recipient
-no longer has the connection, an explicit owner send can replace an acknowledged
-or expired offer. The replacement stays pending until its own pickup is
-acknowledged. An old receipt stops showing the connection as connected when its
-offer expires. A current signed report can still show a saved connection.
+A manual route or a route from a different fleet cannot confirm a fleet
+delivery. The recipient acknowledges the exact offer after the pairing exchange
+finishes and the new route and its credential are saved. When a fresh signed
+report shows that a recipient no longer has the fleet connection, **Link both
+ways** starts a new owner-approved campaign and re-arms an acknowledged or
+expired offer. The new offer stays pending until its pickup is acknowledged.
+A receipt expires with its offer. A current signed report can still confirm
+an existing fleet connection. A desktop that reports only environment IDs
+cannot acknowledge a new offer.
 
 Deliveries and owner link requests expire after 24 hours; signed connection
 summaries last ten minutes. Polling stops after three consecutive failures and

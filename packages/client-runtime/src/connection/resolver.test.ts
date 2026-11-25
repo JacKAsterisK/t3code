@@ -174,6 +174,35 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
 });
 
 describe("ConnectionResolver", () => {
+  it.effect("looks up only the route's own credential for a legacy learned address", () =>
+    Effect.gen(function* () {
+      const pinnedId = "pinned-fleet-route";
+      const connectionId = `learned:${ENVIRONMENT_ID}:https://alternate.example.test@${pinnedId}`;
+      const target = new BearerConnectionTarget({
+        connectionId,
+        environmentId: ENVIRONMENT_ID,
+        label: "Alternate",
+      });
+      const profile = new BearerConnectionProfile({
+        connectionId,
+        environmentId: target.environmentId,
+        label: target.label,
+        ...ENDPOINT,
+        learned: true,
+      });
+      const layer = yield* makeDependencies({
+        credentials: [
+          [pinnedId, new BearerConnectionCredential({ token: "synthetic-fleet-credential" })],
+        ],
+        authorizeBearer: () => Effect.die("The alternate has no stored credential"),
+      });
+      const resolver = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(layer));
+      const error = yield* resolver
+        .prepare(catalogEntry(target, Option.some(profile)))
+        .pipe(Effect.flip);
+      expect(error).toMatchObject({ reason: "authentication" });
+    }),
+  );
   it.effect(
     "reconnects a protected fleet profile through its gateway and never offers its token on gateway failure",
     () =>

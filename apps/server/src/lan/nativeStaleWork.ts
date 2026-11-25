@@ -233,6 +233,9 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
   const providerThreadById = db.prepare(
     "SELECT * FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id=?",
   );
+  const sessionById = db.prepare(
+    "SELECT * FROM orchestration_v2_projection_provider_sessions WHERE provider_session_id=?",
+  );
   const providerTurnById = db.prepare(
     "SELECT * FROM orchestration_v2_projection_provider_turns WHERE provider_turn_id=?",
   );
@@ -241,6 +244,9 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
   );
   const requestAtNode = db.prepare(
     "SELECT 1 FROM orchestration_v2_projection_runtime_requests WHERE node_id=? AND status='pending' LIMIT 1",
+  );
+  const subagentById = db.prepare(
+    "SELECT * FROM orchestration_v2_projection_subagents WHERE subagent_id=?",
   );
   const attemptById = db.prepare(
     "SELECT * FROM orchestration_v2_projection_run_attempts WHERE attempt_id=?",
@@ -256,6 +262,33 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
       ? (value as Record<string, unknown>)
       : undefined;
   };
+  const isNativeNodeChain = (nodeId: string, threadId: string, runId: string) => {
+    const seen = new Set<string>();
+    let current: string | null = nodeId;
+    while (current !== null) {
+      if (seen.has(current)) return false;
+      seen.add(current);
+      const task = subagentById.get(current);
+      if (
+        task !== undefined &&
+        (task.origin !== "provider_native" || payload(task)?.origin !== "provider_native")
+      )
+        return false;
+      const node: WorkRow | undefined = nodeById.get(current);
+      if (node?.thread_id !== threadId || node.run_id !== runId) return false;
+      const value = payload(node);
+      if (
+        value?.id !== current ||
+        value.threadId !== threadId ||
+        value.runId !== runId ||
+        (node.parent_node_id !== null && typeof node.parent_node_id !== "string") ||
+        (value.parentNodeId ?? null) !== node.parent_node_id
+      )
+        return false;
+      current = node.parent_node_id;
+    }
+    return true;
+  };
   const ownNode = (nodeId: unknown, threadId: string, runId: string) => {
     if (typeof nodeId !== "string") return false;
     const node = nodeById.get(nodeId);
@@ -270,7 +303,8 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
       value.status === node.status &&
       node.runtime_request_id === null &&
       value.runtimeRequestId === null &&
-      !requestAtNode.get(nodeId)
+      !requestAtNode.get(nodeId) &&
+      isNativeNodeChain(nodeId, threadId, runId)
     );
   };
   return (table: string, row: WorkRow) => {
@@ -342,7 +376,19 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
       if (
         threadValue?.id !== row.provider_thread_id ||
         threadValue.status !== providerThread.status ||
+        threadValue.appThreadId !== threadId ||
+        threadValue.providerSessionId !== providerThread.provider_session_id ||
         value.providerThreadId !== row.provider_thread_id
+      )
+        return false;
+      if (typeof providerThread.provider_session_id !== "string") return false;
+      const session = sessionById.get(providerThread.provider_session_id);
+      if (session === undefined || !["stopped", "error"].includes(String(session.status)))
+        return false;
+      const sessionValue = payload(session);
+      if (
+        sessionValue?.id !== providerThread.provider_session_id ||
+        sessionValue.status !== session.status
       )
         return false;
     }
@@ -374,6 +420,7 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
         return (
           value.id === row.turn_item_id &&
           value.type === row.type &&
+          (row.type !== "subagent" || value.origin === "provider_native") &&
           value.nodeId === row.node_id &&
           !["approval_request", "secret_request", "link_request", "user_input_request"].includes(
             String(row.type),
@@ -476,12 +523,7 @@ export function carriedMessageInputClassifier(
     )
       return false;
     const run = runById.get(row.run_id);
-    if (
-      run?.thread_id !== row.thread_id ||
-      run === undefined ||
-      !terminalRunStatuses.includes(String(run.status))
-    )
-      return false;
+    if (run?.thread_id !== row.thread_id || run === undefined) return false;
     const runValue = payload(run);
     if (
       runValue.id !== row.run_id ||
@@ -495,6 +537,8 @@ export function carriedMessageInputClassifier(
       node.thread_id !== row.thread_id ||
       node.run_id !== row.run_id ||
       node.kind !== "user_input_request" ||
+      (node.provider_thread_id !== null && node.provider_thread_id !== row.provider_thread_id) ||
+      (node.provider_turn_id !== null && node.provider_turn_id !== row.provider_turn_id) ||
       (node.runtime_request_id !== null && node.runtime_request_id !== card.requestId)
     )
       return false;
@@ -514,8 +558,7 @@ export function carriedMessageInputClassifier(
     if (
       turn === undefined ||
       turn.thread_id !== row.thread_id ||
-      turn.provider_thread_id !== row.provider_thread_id ||
-      !terminalRunStatuses.includes(String(turn.status))
+      turn.provider_thread_id !== row.provider_thread_id
     )
       return false;
     const turnValue = payload(turn);
@@ -523,6 +566,28 @@ export function carriedMessageInputClassifier(
       turnValue.id === row.provider_turn_id &&
       turnValue.status === turn.status &&
       turnValue.providerThreadId === row.provider_thread_id
+    );
+  };
+}
+
+/** Legacy admission can carry orphan cards. Only mutate when their exact owners are present. */
+export function staleApprovalMaySettle(db: NodeSqlite.DatabaseSync) {
+  const requestById = db.prepare(
+    "SELECT * FROM orchestration_v2_projection_runtime_requests WHERE runtime_request_id=?",
+  );
+  const nodeById = db.prepare("SELECT * FROM orchestration_v2_projection_nodes WHERE node_id=?");
+  return (row: WorkRow) => {
+    if (typeof row.payload_json !== "string" || typeof row.node_id !== "string") return false;
+    const value = JSON.parse(row.payload_json) as Record<string, unknown>;
+    if (typeof value.requestId !== "string" || value.nodeId !== row.node_id) return false;
+    const request = requestById.get(value.requestId);
+    const node = nodeById.get(row.node_id);
+    return (
+      request?.thread_id === row.thread_id &&
+      request?.node_id === row.node_id &&
+      node?.thread_id === row.thread_id &&
+      typeof node?.run_id === "string" &&
+      (row.run_id === node.run_id || (row.run_id === null && value.runId === node.run_id))
     );
   };
 }

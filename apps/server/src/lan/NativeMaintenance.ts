@@ -1140,6 +1140,13 @@ const classifyUpdateWork = (
         new Map(messageRequests.map((row) => [row.runtime_request_id, row])),
       )
     : () => false;
+  const turnItems = checkStale ? rows("orchestration_v2_projection_turn_items") : undefined;
+  const messageCards = new Set(
+    (turnItems ?? []).filter(
+      (row) => row.type === "user_input_request" && carriesInputCard(row, payload(row)),
+    ),
+  );
+  const messageCardNodes = new Set([...messageCards].map((row) => row.node_id));
   const tasks = rows("orchestration_v2_projection_subagents");
   const appTask = (row: WorkRow) => {
     const value = payload(row);
@@ -1219,7 +1226,9 @@ const classifyUpdateWork = (
       ].includes(table)
     )
       continue;
-    for (const row of rows(table)) {
+    const candidates =
+      table === "orchestration_v2_projection_turn_items" ? (turnItems ?? rows(table)) : rows(table);
+    for (const row of candidates) {
       if (!(busy as ReadonlyArray<unknown>).includes(row.status)) continue;
       const value = payload(row);
       if (isTerminalDisplay(table, row, value)) continue;
@@ -1237,10 +1246,14 @@ const classifyUpdateWork = (
             text(value.childThreadId) &&
             text(value.subagentId) &&
             delegatedNode(value.subagentId)));
-      if (table === "orchestration_v2_projection_turn_items" && carriesInputCard(row, value)) {
+      if (messageCards.has(row)) {
         carriedWork.backgroundAgents++;
         record(row, "backgroundAgents", 1, true);
-      } else if (preserved) carriedWork.backgroundAgents++;
+      } else if (
+        preserved ||
+        (table === "orchestration_v2_projection_nodes" && messageCardNodes.has(row.node_id))
+      )
+        carriedWork.backgroundAgents++;
       else if (table === "orchestration_v2_projection_turn_items" && isStaleApproval(row, value)) {
         staleApprovals++;
         entries?.push({
@@ -1270,8 +1283,11 @@ const classifyUpdateWork = (
   }
   for (const row of effects) {
     if (!["pending", "running"].includes(String(row.status))) continue;
-    if (replayable(row)) carriedWork.restartContinuations++;
-    else block(row, "restartContinuations");
+    if (replayable(row)) {
+      carriedWork.restartContinuations++;
+      if (row.effect_type === "provider-runtime.continue")
+        record(row, "restartContinuations", 1, true);
+    } else block(row, "restartContinuations");
   }
   for (const row of rows("orchestration_v2_thread_launch_workflows"))
     if (!["completed", "failed"].includes(String(row.status))) block(row, "restartContinuations");

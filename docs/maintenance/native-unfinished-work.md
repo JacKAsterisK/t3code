@@ -10,7 +10,10 @@ format.
 Hub holds its installer lock, the exclusive Windows native-admission handle and
 the exclusive `userdata/server-owner.sqlite` handle for the selected, stopped
 home. The helper checks the lease conflicts, canonical layout, environment ID
-and absence of an activation journal. Bind the launch to the selected artifact
+and absence of an activation journal. The mutation rechecks both leases and
+launcher liveness after the backup and before committing. The Hub must keep its
+handles until the helper exits and place the writer in a Windows job that
+terminates the helper if Hub exits. Bind the launch to the selected artifact
 and the held helper files as for ordinary native maintenance.
 
 ## Review stopped work
@@ -27,7 +30,7 @@ The response echoes the operation, nonce, environment and path. It includes
 `workGeneration`, `reviewSha256`, the normalized `scope` and the
 `blocking`, `carriedWork` and `staleWork` counts. In `threads`, each group
 has `threadId`, `title`, and `items`. Each item has `id`, `kind`,
-`status`, `category`, `count`, `blocking`, `stale`, `selected` and
+`status`, `category`, `count`, `blocking`, `stale`, `canSettle`, `selected` and
 `title`. Top-level store records can have a null thread ID. One record can
 explain more than one category. Reviewable future schedules are included even when they do not block. A waiting
 input card with exact links to a pending message-capable request is carried with
@@ -38,10 +41,11 @@ that will be disabled. The response stays local to Hub.
 ## Settle or cancel
 
 1. Before update or fleet switch while stopped, inspect. If `staleWork` is
-   nonempty, invoke `settle-stale-work` with the same scope and home, a fresh
+   nonempty and an item has `canSettle: true`, invoke `settle-stale-work` with the same scope and home, a fresh
    nonce, `expectedWorkGeneration` and `expectedReviewSha256` from the inspect.
    The operation settles eligible stale entries only and may leave genuinely
-   unfinished work. Save the returned receipt and run ordinary admission again.
+   unfinished work. Save the returned receipt and inspect again if newly eligible
+   stale work was discovered. Then run ordinary admission.
 2. If admission still defers, offer the reviewed list to the owner. On
    confirmation, invoke `cancel-unfinished-work` with the same scope and home,
    a fresh nonce, and the two expected hashes from that exact review.

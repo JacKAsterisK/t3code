@@ -24,11 +24,12 @@ import {
   createPrivateSnapshotDirectory,
   inspectUnfinishedWorkRows,
   NativeMaintenanceError,
+  NativeMaintenanceLease,
   stoppedUnfinishedWorkDatabase,
   type NativeBuildIdentity,
   type NativeWorkEntry,
 } from "./NativeMaintenance.ts";
-import { staleNativeProjectionClassifier } from "./nativeStaleWork.ts";
+import { staleApprovalMaySettle, staleNativeProjectionClassifier } from "./nativeStaleWork.ts";
 import { offlineEventForWork } from "./OfflineWorkCancellation.ts";
 import { emptyNativeWork, nativeWorkStatusDefinitions } from "./nativeWorkStates.ts";
 
@@ -79,6 +80,7 @@ function readReview(db: NodeSqlite.DatabaseSync, request: NativeUnfinishedWorkRe
     if (blocking[category] !== count) throw schemaError();
   }
   if (entries.length > 20_000) throw schemaError();
+  const maySettleApproval = staleApprovalMaySettle(db);
   const stale = staleNativeProjectionClassifier(db, DateTime.toEpochMillis(DateTime.nowUnsafe()));
   const staleWork: Record<string, number> = {};
   const threadTitle = db.prepare(
@@ -122,6 +124,7 @@ function readReview(db: NodeSqlite.DatabaseSync, request: NativeUnfinishedWorkRe
             )
           : null);
     const isStale = entry.stale === true || (category === "backgroundAgents" && stale(table, row));
+    const canSettle = isStale && (entry.stale !== true || maySettleApproval(row));
     if (isStale) {
       if (entry.stale !== true) blocking[category] -= count;
       const staleKind = kind === "turn_item" ? (text(row.type) ?? kind) : kind;
@@ -132,15 +135,21 @@ function readReview(db: NodeSqlite.DatabaseSync, request: NativeUnfinishedWorkRe
         ? scope.includeScheduledWork
         : category === "restartContinuations"
           ? scope.includeRestartContinuations
-          : !carried;
+          : !carried && (!isStale || canSettle);
     const item = {
       id,
-      kind: kind === "turn_item" ? (text(row.type) ?? kind) : kind,
+      kind:
+        kind === "turn_item"
+          ? (text(row.type) ?? kind)
+          : kind === "effect"
+            ? (text(row.effect_type) ?? kind)
+            : kind,
       status,
       category,
       count,
       blocking: !carried && !isStale,
       stale: isStale,
+      canSettle,
       selected,
       title: text(row.title),
     };
@@ -301,11 +310,56 @@ const applyReview = Effect.fn("NativeUnfinishedWork.applyReview")(function* (
       id: EventId.make("event:stopped-work:" + requestId + ":" + ++eventCount),
       occurredAt: at,
     });
+    if (
+      event.type === "provider-thread.updated" &&
+      event.payload.appThreadId !== (row.thread_id ?? null)
+    )
+      return yield* schemaError();
     const threadEvents = eventsByThread.get(threadId) ?? [];
     threadEvents.push(event);
     eventsByThread.set(threadId, threadEvents);
   }
   for (const [threadId, events] of eventsByThread) {
+    const providerUpdates = events.filter((event) => event.type === "provider-thread.updated");
+    if (providerUpdates.length > 0) {
+      const prior = db
+        .prepare(
+          "SELECT active_provider_thread_id, payload_json FROM orchestration_v2_projection_threads WHERE thread_id=?",
+        )
+        .get(threadId);
+      if (prior === undefined || typeof prior.payload_json !== "string")
+        return yield* schemaError();
+      const value = yield* tryIo(
+        () => JSON.parse(prior.payload_json as string) as Record<string, unknown>,
+      );
+      if (
+        value.id !== threadId ||
+        value.activeProviderThreadId !== prior.active_provider_thread_id ||
+        providerUpdates.some(
+          (event) => event.payload.appThreadId !== null && event.payload.appThreadId !== threadId,
+        )
+      )
+        return yield* schemaError();
+      // T3 normally selects a provider thread when updating it. Reassert the
+      // retained selection using an existing replayable event in the same command.
+      if (
+        providerUpdates.some(
+          (event) =>
+            event.payload.appThreadId !== null &&
+            event.payload.id !== prior.active_provider_thread_id,
+        )
+      ) {
+        events.push(
+          yield* decodeEvent({
+            id: EventId.make("event:stopped-work:" + requestId + ":" + ++eventCount),
+            type: "thread.metadata-updated",
+            threadId,
+            occurredAt: at,
+            payload: value,
+          }),
+        );
+      }
+    }
     yield* sink.commitCommand({
       commandId: CommandId.make("command:stopped-work:" + requestId + ":" + threadId),
       threadId: ThreadId.make(threadId),
@@ -361,13 +415,32 @@ export const unfinishedWork = Effect.fn("NativeUnfinishedWork.execute")(function
   compiledIdentity: NativeBuildIdentity,
 ) {
   const file = yield* stoppedUnfinishedWorkDatabase(request);
-  return yield* unfinishedWorkAt(file, request, compiledIdentity);
+  const lease = yield* NativeMaintenanceLease;
+  const hubPid = process.ppid;
+  const assertAdmission = Effect.gen(function* () {
+    yield* Effect.try({
+      try: () => {
+        if (hubPid <= 0) throw new Error("Launcher is unavailable");
+        process.kill(hubPid, 0);
+      },
+      catch: (cause) => new NativeMaintenanceError({ reason: "lease", cause }),
+    });
+    if ((yield* stoppedUnfinishedWorkDatabase(request)) !== file)
+      return yield* new NativeMaintenanceError({ reason: "changed" });
+  });
+  return yield* unfinishedWorkAt(
+    file,
+    request,
+    compiledIdentity,
+    assertAdmission.pipe(Effect.provideService(NativeMaintenanceLease, lease)),
+  );
 });
 
 export const unfinishedWorkAt = Effect.fn("NativeUnfinishedWork.executeAt")(function* (
   file: string,
   request: NativeUnfinishedWorkRequest,
   compiledIdentity: NativeBuildIdentity,
+  assertAdmission: Effect.Effect<void, NativeMaintenanceError> = Effect.void,
 ) {
   const identity = {
     schemaVersion: 1 as const,
@@ -382,6 +455,7 @@ export const unfinishedWorkAt = Effect.fn("NativeUnfinishedWork.executeAt")(func
   const publicReview = ({ described: _private, ...review }: ReturnType<typeof readReview>) =>
     review;
   const initial = yield* tryIo(() => withReader(file, (db) => readReview(db, request)));
+  yield* assertAdmission;
   if (request.operation === "inspect-unfinished-work")
     return { ...identity, ...publicReview(initial) };
   const verifyReview = (review: ReturnType<typeof readReview>) => {
@@ -398,7 +472,7 @@ export const unfinishedWorkAt = Effect.fn("NativeUnfinishedWork.executeAt")(func
   };
   const selected = (review: ReturnType<typeof readReview>) =>
     review.described.filter(
-      ({ item }) => item.selected && (request.operation !== "settle-stale-work" || item.stale),
+      ({ item }) => item.selected && (request.operation !== "settle-stale-work" || item.canSettle),
     );
   yield* tryIo(() => verifyReview(initial));
   if (selected(initial).length === 0)
@@ -424,6 +498,7 @@ export const unfinishedWorkAt = Effect.fn("NativeUnfinishedWork.executeAt")(func
           const sql = yield* SqlClient.SqlClient;
           return yield* sql.withTransaction(
             Effect.gen(function* () {
+              yield* assertAdmission;
               const before = yield* tryIo(() => {
                 if (version !== dataVersion(db))
                   throw new NativeMaintenanceError({ reason: "changed" });
@@ -433,11 +508,21 @@ export const unfinishedWorkAt = Effect.fn("NativeUnfinishedWork.executeAt")(func
               });
               const cancelled = yield* applyReview(db, selected(before), request);
               const after = yield* tryIo(() => readReview(db, request));
-              if (request.operation === "settle-stale-work" && selected(after).length !== 0)
-                return yield* new NativeMaintenanceError({ reason: "busy" });
+              if (request.operation === "settle-stale-work") {
+                const settledKeys = new Set(
+                  selected(before).map(({ entry, item }) => entry.table + "\0" + item.id),
+                );
+                if (
+                  after.described.some(({ entry, item }) =>
+                    settledKeys.has(entry.table + "\0" + item.id),
+                  )
+                )
+                  return yield* new NativeMaintenanceError({ reason: "busy" });
+              }
               if (
                 request.operation === "cancel-unfinished-work" &&
-                bucketNames.some((category) => after.blocking[category] !== 0)
+                (bucketNames.some((category) => after.blocking[category] !== 0) ||
+                  selected(after).length !== 0)
               )
                 return yield* new NativeMaintenanceError({ reason: "busy" });
               const receipt = {
@@ -457,6 +542,7 @@ export const unfinishedWorkAt = Effect.fn("NativeUnfinishedWork.executeAt")(func
                 providerLaunches: 0 as const,
               };
               yield* tryIo(() => savePreparedReceipt(backupDirectory, receipt));
+              yield* assertAdmission;
               return receipt;
             }),
           );

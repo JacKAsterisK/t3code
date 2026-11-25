@@ -312,7 +312,7 @@ it("shows every grant a carried list makes and saves exactly that list for its f
   await expect.element(screen.getByText("Other machine: read only")).toBeVisible();
   await expect.element(screen.getByText("Synthetic device: standard")).toBeVisible();
   await expect
-    .element(screen.getByText("returning (not in this fleet yet): standard"))
+    .element(screen.getByText("returning (not an approved machine here): standard"))
     .toBeVisible();
   await expect.element(screen.getByText("Machines added later: read only")).toBeVisible();
   await expect
@@ -329,6 +329,30 @@ it("shows every grant a carried list makes and saves exactly that list for its f
     exceptions: carryProposal.exceptions,
     carry: { fleetId: "fleet-synthetic" },
   });
+});
+
+it("names a machine by its ID too when another machine shares its label", async () => {
+  setup({
+    stage: "active",
+    sharedFolderTrust: true,
+    peers: accessPeers.map((peer) => ({ ...peer, label: "Twin" })),
+    accessPolicy: {
+      revision: 0,
+      defaultAccess: "standard",
+      machines: [],
+      selfAccess: "standard",
+      canChange: true,
+      carryProposal: {
+        fleetId: "fleet-synthetic",
+        defaultAccess: "standard",
+        machines: [{ machineId: "other", access: "read-only" }],
+        exceptions: [{ machineId: "self", standardOn: ["other"] }],
+      },
+    },
+  });
+  await using screen = await render(<LanFleetSetup />);
+  await expect.element(screen.getByText("Twin (other): read only")).toBeVisible();
+  await expect.element(screen.getByText("Twin (self) standard on Twin (other)")).toBeVisible();
 });
 
 it("locks machine access on a read-only machine", async () => {

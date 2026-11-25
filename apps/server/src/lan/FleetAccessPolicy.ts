@@ -736,12 +736,23 @@ const make = Effect.fn("FleetAccess.make")(function* (
   // An archive that exists but cannot be read stands for a fleet that may have narrowed this
   // machine: nothing older is ever read in its place. The pre-switch cache counts only on a switch
   // roster's very first start, before it has any cache or archive of its own.
+  // Existence decides, not a successful read: a cache file that cannot be read is no first start.
   const archived = yield* fs.exists(previousFleetFile).pipe(Effect.orElseSucceed(() => true));
-  let previousFleet: LocalCache | undefined = archived
-    ? yield* readCacheFile(previousFleetFile)
-    : switchedFleet && readCache === undefined && preSwitchCacheFile !== cacheFile
-      ? yield* readCacheFile(preSwitchCacheFile)
-      : undefined;
+  const cached = yield* fs.exists(cacheFile).pipe(Effect.orElseSucceed(() => true));
+  // A cache that exists but cannot be read may be the fleet that narrowed this machine, so its
+  // previous fleet is unknown: nothing is offered, and the archive is cleared before it is replaced.
+  const unreadableCache = cached && readCache === undefined;
+  let previousFleet: LocalCache | undefined = unreadableCache
+    ? undefined
+    : archived
+      ? yield* readCacheFile(previousFleetFile)
+      : switchedFleet && !cached && preSwitchCacheFile !== cacheFile
+        ? yield* readCacheFile(preSwitchCacheFile)
+        : undefined;
+  // The pre-switch list is archived before the switch roster's first cache is written, so a
+  // restart before anyone saves still offers it.
+  let previousArchived = archived || previousFleet === undefined;
+  let archiveCleared = !unreadableCache;
   const cachedEntries = (value: LocalCache | undefined) => {
     const unverified = new Set(value?.unverified ?? []);
     return {
@@ -1056,21 +1067,46 @@ const make = Effect.fn("FleetAccess.make")(function* (
             Effect.as(true),
             Effect.orElseSucceed(() => false),
           )
-        : cache === undefined ||
-          cache.fleetId === input.fleetId ||
-          (yield* writeFleetJson(previousFleetFile, cache).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                previousFleet = cache;
-              }),
-            ),
-            Effect.as(true),
-            Effect.catch((cause) =>
-              Effect.logWarning("The previous fleet's access list could not be kept.", {
-                cause,
-              }).pipe(Effect.as(false)),
-            ),
-          ));
+        : cache === undefined && !archiveCleared
+          ? yield* fs.remove(previousFleetFile, { force: true }).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  archiveCleared = true;
+                }),
+              ),
+              Effect.as(true),
+              Effect.orElseSucceed(() => false),
+            )
+          : cache === undefined
+            ? previousArchived ||
+              previousFleet === undefined ||
+              (yield* writeFleetJson(previousFleetFile, previousFleet).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    previousArchived = true;
+                  }),
+                ),
+                Effect.as(true),
+                Effect.catch((cause) =>
+                  Effect.logWarning("The previous fleet's access list could not be kept.", {
+                    cause,
+                  }).pipe(Effect.as(false)),
+                ),
+              ))
+            : cache.fleetId === input.fleetId ||
+              (yield* writeFleetJson(previousFleetFile, cache).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    previousFleet = cache;
+                  }),
+                ),
+                Effect.as(true),
+                Effect.catch((cause) =>
+                  Effect.logWarning("The previous fleet's access list could not be kept.", {
+                    cause,
+                  }).pipe(Effect.as(false)),
+                ),
+              ));
       const persisted =
         JSON.stringify(next) === JSON.stringify(cache) ||
         (previousKept &&

@@ -423,13 +423,20 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
   // Every grant the save would make, as it would make it: each machine here, each entry for one
   // not here yet, the default and every exception with its receivers.
   const levelName = (access: FleetAccess) => (access === "read-only" ? "read only" : "standard");
+  // A label another machine shares is not enough to tell who gains access; its ID goes with it.
+  const carryName = (machineId: string) => {
+    const label = labelOf(machineId);
+    return setup.peers.some((peer) => peer.machineId !== machineId && peer.label === label)
+      ? `${label} (${machineId})`
+      : label;
+  };
   const carryLines =
     carry === undefined
       ? []
       : [
           ...machines.map(
             (peer) =>
-              `${peer.label}: ${levelName(
+              `${carryName(peer.machineId)}: ${levelName(
                 carry.machines.find((machine) => machine.machineId === peer.machineId)?.access ??
                   carry.defaultAccess,
               )}`,
@@ -438,12 +445,12 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
             .filter((machine) => !machines.some((peer) => peer.machineId === machine.machineId))
             .map(
               (machine) =>
-                `${machine.machineId} (not in this fleet yet): ${levelName(machine.access)}`,
+                `${machine.machineId} (not an approved machine here): ${levelName(machine.access)}`,
             ),
           `Machines added later: ${levelName(carry.defaultAccess)}`,
           ...carry.exceptions.map(
             (exception) =>
-              `${labelOf(exception.machineId)} standard on ${exception.standardOn.map(labelOf).join(", ")}`,
+              `${carryName(exception.machineId)} standard on ${exception.standardOn.map(carryName).join(", ")}`,
           ),
         ];
   const select = (label: string, value: FleetAccess, machineId: string | null) => (
@@ -510,8 +517,10 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
               <div className="space-y-1 text-xs text-muted-foreground">
                 <p>This machine's previous fleet had this access list. Carrying it over saves:</p>
                 <ul className="list-disc pl-4">
-                  {carryLines.map((line) => (
-                    <li key={line}>{line}</li>
+                  {carryLines.map((line, index) => (
+                    // Lines may repeat; their order is fixed for a given proposal.
+                    // oxlint-disable-next-line react/no-array-index-key -- the list is rebuilt whole, never reordered
+                    <li key={index}>{line}</li>
                   ))}
                 </ul>
               </div>

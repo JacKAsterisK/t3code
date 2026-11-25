@@ -267,7 +267,7 @@ const FLEET_REFUSAL_MESSAGES: Readonly<Record<string, string>> = {
   "roster-origin-mismatch":
     "The fleet roster lists this machine at a different LAN address. Use the address in its roster row, or update that row, then try again.",
   "roster-row-without-keys":
-    "This machine is already in the fleet's roster or trust list, but this install does not have its fleet keys. Ask the fleet owner to revoke this machine in Machine access, then join again.",
+    "This machine is already in the fleet's roster or trust list, but this install does not have its fleet keys, and revoking it does not free its identity to join again. Restore this machine's fleet keys from its backup.",
   "already-member":
     "This machine is already a member of a fleet, so it cannot create one. Join that fleet, or leave it before creating a new one.",
   "owner-authority-missing":

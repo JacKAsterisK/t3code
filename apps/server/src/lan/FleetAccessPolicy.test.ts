@@ -1523,6 +1523,60 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
     }).pipe(Effect.provide(configLayer)),
   );
 
+  it.effect("offers the pre-switch list across a restart before anyone saves", () =>
+    Effect.gen(function* () {
+      const n = yield* nextFleet();
+      yield* n.f.change(yield* n.before(n.f.cryo), n.f.cryo, 0, [n.f.readOnly(n.f.anvil)]);
+      const target = yield* n.fleetAt("fleet-after-switch");
+      for (let start = 0; start < 2; start++) {
+        const state = yield* (yield* n.switched(n.f.cryo)).refresh(target.input(n.f.cryo));
+        expect(state.carryProposal?.machines).toEqual([n.f.readOnly(n.f.anvil)]);
+      }
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("never offers the pre-switch list beside a switch-roster cache it cannot read", () =>
+    Effect.gen(function* () {
+      const n = yield* nextFleet();
+      yield* n.f.change(yield* n.before(n.f.cryo), n.f.cryo, 0, []);
+      // The switch roster's own cache exists but is unreadable, and no archive exists.
+      yield* n.f.fs.writeFileString(
+        n.f.path.join(yield* n.stateDirOf(n.f.cryo), "lan-fleet-access.json.d178"),
+        "{ not json",
+      );
+      const target = yield* n.fleetAt("fleet-after-switch");
+      const state = yield* (yield* n.switched(n.f.cryo)).refresh(target.input(n.f.cryo));
+      expect(state.carryProposal).toBeUndefined();
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("never offers an archived older list beside a current cache it cannot read", () =>
+    Effect.gen(function* () {
+      const n = yield* nextFleet();
+      // Fleet one: CryoFrog standard. Fleet two, rebuilt in place: CryoFrog read-only.
+      yield* n.f.change(yield* n.before(n.f.cryo), n.f.cryo, 0, []);
+      const two = yield* n.fleetAt("fleet-two");
+      yield* (yield* n.before(n.f.panda)).change({
+        ...two.input(n.f.panda),
+        expectedRevision: 0,
+        next: { defaultAccess: "standard", machines: [n.f.readOnly(n.f.cryo)] },
+      });
+      yield* (yield* n.before(n.f.cryo)).refresh(two.input(n.f.cryo));
+      // Fleet one is archived; fleet two's cache then becomes unreadable.
+      const stateDir = yield* n.stateDirOf(n.f.cryo);
+      expect(yield* n.f.fs.exists(n.f.path.join(stateDir, "lan-fleet-access.previous.json"))).toBe(
+        true,
+      );
+      yield* n.f.fs.writeFileString(n.f.path.join(stateDir, "lan-fleet-access.json"), "{ bad");
+      const three = yield* n.fleetAt("fleet-three");
+      for (let start = 0; start < 2; start++) {
+        const state = yield* (yield* n.before(n.f.cryo)).refresh(three.input(n.f.cryo));
+        expect(state.carryProposal).toBeUndefined();
+      }
+      expect(yield* n.f.fs.exists(three.accessDirectory)).toBe(false);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("an explicit roster path does not block a verified private-file fleet at startup", () =>
     Effect.gen(function* () {
       const f = yield* fleet();

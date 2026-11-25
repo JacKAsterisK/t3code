@@ -126,7 +126,11 @@ it.live("stages a fleet gateway without disrupting the saved route until selecti
         certificate: retry.certificate,
         publicKeySha256: retry.publicKeySha256,
       };
-      const savedStage = yield* gateway.prepare({ environmentId, identity, previousIdentity });
+      const savedStage = yield* gateway.prepare({
+        environmentId,
+        identity,
+        retiredIdentities: [{ ...previousIdentity, connectHost: "other.test" }, previousIdentity],
+      });
       expect(savedStage.httpBaseUrl).not.toBe(oldGateway.httpBaseUrl);
       yield* Effect.promise(() =>
         expect(request(failed.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),

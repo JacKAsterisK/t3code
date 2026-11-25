@@ -45,6 +45,7 @@ const setup = Effect.fn("FleetTest.setup")(function* (
   sharedFolder = false,
   tls = false,
   credentialScope?: string,
+  fleetId?: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -115,7 +116,10 @@ const setup = Effect.fn("FleetTest.setup")(function* (
           ),
           Layer.provide(
             Layer.mock(FleetEnrollment.FleetEnrollment)({
-              resolve: Effect.as(Effect.void, undefined),
+              resolve: Effect.as(
+                Effect.void,
+                fleetId === undefined ? undefined : { ...config, fleetId },
+              ),
               status: Effect.sync(() => ({
                 available: true,
                 stage: "active",
@@ -470,12 +474,14 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
     "replaces a connected peer's credential when its fleet access changes, with no approval",
     () =>
       Effect.gen(function* () {
-        const f = yield* setup(false, false, true);
+        const f = yield* setup(false, false, true, false, undefined, "synthetic-fleet");
         f.setPolicy({ revision: 1 });
         const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
         yield* f.sync(f.recipient.service, { mode: "status" });
         yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
-        assert.equal((yield* f.sync(f.recipient.service)).incoming[0]?.replace, undefined);
+        const incoming = (yield* f.sync(f.recipient.service)).incoming[0];
+        assert.equal(incoming?.replace, undefined);
+        assert.equal(incoming?.fleetId, "synthetic-fleet");
         f.consume("alpha");
         yield* f.sync(f.recipient.service, connected);
         assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");

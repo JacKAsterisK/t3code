@@ -8,6 +8,8 @@ import {
   LanFleetError,
   type LanFleetSyncInput,
   type LanFleetSyncResult,
+  type LanFleetResetInput,
+  type LanFleetResetResult,
   type LanFleetSetupInput,
   type LanFleetSetupState,
 } from "@t3tools/contracts";
@@ -84,6 +86,9 @@ export class LanFleet extends Context.Service<
      */
     readonly backgroundSync: Effect.Effect<void, LanFleetError>;
     readonly setup: Effect.Effect<LanFleetSetupState, LanFleetError>;
+    readonly resetLinks: (
+      input: LanFleetResetInput,
+    ) => Effect.Effect<LanFleetResetResult, LanFleetError>;
     readonly configure: (
       input: LanFleetSetupInput,
     ) => Effect.Effect<LanFleetSetupState, LanFleetError>;
@@ -162,6 +167,50 @@ const make = Effect.gen(function* () {
     yield* fs.remove(aside, { recursive: true }).pipe(Effect.ignore);
     yield* claim.pipe(Effect.mapError(busy));
   }).pipe(Effect.provideService(FileSystem.FileSystem, fs));
+
+  const releaseLock = Effect.sync(() => {
+    holding = false;
+  }).pipe(
+    Effect.andThen(fs.remove(lock, { recursive: true })),
+    // The next sync clears it as this server's own.
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Could not release the LAN fleet sync lock.", { cause }),
+    ),
+  );
+
+  const resetLinks = Effect.fn("LanFleet.resetLinks")(
+    function* (input: LanFleetResetInput) {
+      if (Option.isNone(peerLinks)) return yield* new LanFleetError({ reason: "unavailable" });
+      const adapter = peerLinks.value;
+      const reset = Effect.gen(function* () {
+        const fleetId =
+          rosterPath === ""
+            ? undefined
+            : ((yield* enrollment.savedFleetId) ??
+              (isFleetSwitchRoster(rosterPath) || !(yield* fs.exists(privateFile))
+                ? undefined
+                : (yield* readFleetJson(privateFile, Delivery.FleetPrivateConfig)).fleetId));
+        if (fleetId === undefined) {
+          return yield* new LanFleetError({
+            reason: "configuration",
+            ...(input.mode === "apply" ? { refusal: "stale-review" } : {}),
+          });
+        }
+        return yield* adapter.resetLinks(fleetId, input);
+      });
+      return yield* input.mode === "preview"
+        ? reset
+        : Effect.acquireUseRelease(
+            acquireLock,
+            () => reset,
+            () => releaseLock,
+          );
+    },
+    Effect.mapError((error) =>
+      isFleetError(error) ? error : new LanFleetError({ reason: "unavailable" }),
+    ),
+    Effect.provideService(FileSystem.FileSystem, fs),
+  );
 
   const run = Effect.fn("LanFleet.sync")(
     function* (request: LanFleetSyncInput | "background") {
@@ -824,6 +873,7 @@ const make = Effect.gen(function* () {
                       incoming.push({
                         deliveryId: delivery.header.deliveryId,
                         environmentId: peer.environmentId,
+                        ...(config.fleetId === undefined ? {} : { fleetId: config.fleetId }),
                         host: payload.origin,
                         pairingCode: payload.credential,
                         ...(tls === undefined ? {} : { tls }),
@@ -869,16 +919,7 @@ const make = Effect.gen(function* () {
               incoming,
             } satisfies LanFleetSyncResult;
           }),
-        () =>
-          Effect.sync(() => {
-            holding = false;
-          }).pipe(
-            Effect.andThen(fs.remove(lock, { recursive: true })),
-            // The next sync clears it as this server's own.
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Could not release the LAN fleet sync lock.", { cause }),
-            ),
-          ),
+        () => releaseLock,
       );
     },
     Effect.mapError((error) =>
@@ -897,6 +938,7 @@ const make = Effect.gen(function* () {
     backgroundSync: Effect.asVoid(run("background")),
     setup: enrollment.status,
     configure,
+    resetLinks,
   });
 });
 

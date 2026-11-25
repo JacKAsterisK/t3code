@@ -238,7 +238,7 @@ const UNSUPPORTED_ERROR = new ConnectionBlockedError({
   detail: "The saved server used an incompatible orchestration protocol.",
 });
 
-const registerSavedEnvironment = (fleetTls?: FleetTlsIdentity) =>
+const registerSavedEnvironment = (fleetTls?: FleetTlsIdentity, fleetId?: string) =>
   Effect.gen(function* () {
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
     const registration = new BearerConnectionRegistration({
@@ -251,6 +251,7 @@ const registerSavedEnvironment = (fleetTls?: FleetTlsIdentity) =>
         ...PAIRED_PROFILE,
         label: "Old label",
         ...(fleetTls === undefined ? {} : { fleetTls }),
+        ...(fleetId === undefined ? {} : { fleetId }),
       }),
       credential: new BearerConnectionCredential({ token: "old-token" }),
     });
@@ -396,6 +397,110 @@ describe("connection onboarding", () => {
       expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
     }).pipe(Effect.provide(layerPairingOnboarding(undefined, [], undefined, registered)));
   });
+  it.effect.each(["ordinary", "replacement", "legacy preservation", "failed pairing"] as const)(
+    "reconciles proven old fleet routes on %s",
+    (mode) => {
+      const oldTls = {
+        origin: "https://remote.example.test",
+        certificate: "old-public-certificate",
+        publicKeySha256: "a".repeat(64),
+      };
+      const tls = {
+        origin: "https://new-fleet.example.test",
+        certificate: "new-public-certificate",
+        publicKeySha256: "b".repeat(64),
+      };
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      return Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        yield* registerSavedEnvironment(oldTls, "old-fleet");
+        const legacyTls =
+          mode === "legacy preservation"
+            ? {
+                ...tls,
+                origin: "https://ambiguous.example.test",
+              }
+            : tls;
+        if (mode !== "ordinary") {
+          for (const [origin, pin] of [
+            ["https://manual.example.test", undefined],
+            [legacyTls.origin, legacyTls],
+          ] as const) {
+            const connectionId = `bearer:${PAIRED_ENVIRONMENT_ID}:${origin}`;
+            yield* registry.register(
+              new BearerConnectionRegistration({
+                target: new BearerConnectionTarget({
+                  environmentId: PAIRED_ENVIRONMENT_ID,
+                  connectionId,
+                  label: origin,
+                }),
+                profile: new BearerConnectionProfile({
+                  ...PAIRED_PROFILE,
+                  connectionId,
+                  httpBaseUrl: `${origin}/`,
+                  wsBaseUrl: origin.replace("https:", "wss:") + "/",
+                  ...(pin === undefined ? {} : { fleetTls: pin }),
+                }),
+                credential: new BearerConnectionCredential({ token: "saved-token" }),
+              }),
+            );
+          }
+        }
+        const before = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID);
+        const delivery = {
+          host: tls.origin,
+          pairingCode: "synthetic-switch",
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          fleetId: "new-fleet",
+          skipExisting: mode === "ordinary" || mode === "legacy preservation",
+          ...(mode === "replacement" || mode === "failed pairing"
+            ? { replacementDeliveryId: "synthetic-delivery" }
+            : {}),
+          tls,
+        };
+        const pairing = onboarding.registerPairing(delivery);
+        if (mode === "failed pairing") {
+          yield* Effect.flip(pairing);
+          expect((yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID)).toEqual(
+            before,
+          );
+        } else {
+          expect(yield* pairing).toBe(PAIRED_ENVIRONMENT_ID);
+          const saved = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID)!;
+          expect(connectionRoutes(saved).map(routeHttpBaseUrl).sort()).toEqual(
+            [
+              `${tls.origin}/`,
+              ...(mode === "ordinary" ? [] : ["https://manual.example.test/"]),
+              ...(mode === "legacy preservation" ? [`${legacyTls.origin}/`] : []),
+            ].sort(),
+          );
+          expect(
+            connectionRoutes(saved).map(({ profile }) => Option.getOrUndefined(profile)),
+          ).toContainEqual(expect.objectContaining({ fleetId: "new-fleet", fleetTls: tls }));
+        }
+        expect(calls.some(({ url }) => url.endsWith("/oauth/token"))).toBe(true);
+      }).pipe(
+        Effect.provide(
+          layerPairingOnboarding(
+            { failExchange: mode === "failed pairing" },
+            calls,
+            undefined,
+            [],
+            {
+              prepare: () =>
+                Effect.succeed({
+                  httpBaseUrl: "http://127.0.0.1:41001/",
+                  wsBaseUrl: "ws://127.0.0.1:41001/",
+                }),
+              disconnect: () => Effect.void,
+            },
+          ),
+        ),
+      );
+    },
+  );
+
   it.effect.each([false, true])(
     "reconciles a verified replacement and keeps manual routes (pairing failure: %s)",
     (failExchange) => {

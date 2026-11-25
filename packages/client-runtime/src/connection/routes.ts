@@ -5,6 +5,7 @@ import {
   isTailnetHost,
 } from "@t3tools/shared/hostClassification";
 import {
+  sameFleetTlsIdentity,
   sameFleetTlsRoute,
   type DesktopSshEnvironmentTarget,
   type FleetTlsIdentity,
@@ -48,6 +49,59 @@ export function fleetTlsOfRoute(route: ConnectionRoute) {
   return profile?._tag === "BearerConnectionProfile" ? profile.fleetTls : undefined;
 }
 
+export function fleetDeliveryRoutes(
+  entry: ConnectionCatalogEntry | undefined,
+  fleetId: string | undefined,
+) {
+  if (entry === undefined || fleetId === undefined) return { saved: entry, retired: [] };
+  const routes = connectionRoutes(entry);
+  const retired = routes.filter(({ profile }) => {
+    const saved = Option.getOrUndefined(profile);
+    return (
+      saved?._tag === "BearerConnectionProfile" &&
+      saved.fleetId !== undefined &&
+      saved.fleetId !== fleetId
+    );
+  });
+  if (retired.length === 0) return { saved: entry, retired };
+  const retained = retired.reduce(
+    (routes, route) => routesAfterRemoving(routes, connectionRouteId(route.target)),
+    routes,
+  );
+  return { retired, saved: retained.length === 0 ? undefined : entryWithRoutes(entry, retained) };
+}
+
+type FleetRouteCandidate = {
+  readonly connectionId: string;
+  readonly httpBaseUrl: string;
+  readonly fleetTls?: FleetTlsIdentity;
+  readonly fleetId?: string;
+};
+
+export function conflictsWithSavedFleetRoute(
+  routes: ReadonlyArray<ConnectionRoute>,
+  candidate: FleetRouteCandidate,
+): boolean {
+  return (
+    candidate.fleetId !== undefined &&
+    routes.some((route) => {
+      if (
+        connectionRouteId(route.target) !== candidate.connectionId &&
+        routeHttpBaseUrl(route)?.replace(/\/+$/u, "") !== candidate.httpBaseUrl.replace(/\/+$/u, "")
+      )
+        return false;
+      const profile = Option.getOrUndefined(route.profile);
+      if (profile?._tag !== "BearerConnectionProfile") return true;
+      if (profile.fleetId !== undefined) return profile.fleetId !== candidate.fleetId;
+      return (
+        profile.fleetTls === undefined ||
+        candidate.fleetTls === undefined ||
+        !sameFleetTlsIdentity(profile.fleetTls, candidate.fleetTls)
+      );
+    })
+  );
+}
+
 export function savedFleetIdentity(entry: ConnectionCatalogEntry | undefined) {
   if (entry === undefined) return undefined;
   const identities = connectionRoutes(entry).flatMap((route) => fleetTlsOfRoute(route) ?? []);
@@ -56,11 +110,7 @@ export function savedFleetIdentity(entry: ConnectionCatalogEntry | undefined) {
 
 export function fleetReplacementRoutes(
   entry: ConnectionCatalogEntry | undefined,
-  candidate: {
-    readonly connectionId: string;
-    readonly httpBaseUrl: string;
-    readonly fleetTls?: FleetTlsIdentity;
-  },
+  candidate: FleetRouteCandidate,
   predecessor: FleetTlsIdentity | undefined,
 ): ReadonlyArray<ConnectionRoute> | null {
   const current = savedFleetIdentity(entry);
@@ -75,7 +125,18 @@ export function fleetReplacementRoutes(
   const retained =
     entry === undefined
       ? []
-      : connectionRoutes(entry).filter((route) => fleetTlsOfRoute(route) === undefined);
+      : connectionRoutes(entry).filter((route) => {
+          const tls = fleetTlsOfRoute(route);
+          if (tls === undefined) return true;
+          const profile = Option.getOrUndefined(route.profile);
+          // A legacy pin proves membership in this fleet only when the delivery presents the same identity.
+          return (
+            candidate.fleetId !== undefined &&
+            profile?._tag === "BearerConnectionProfile" &&
+            profile.fleetId === undefined &&
+            (candidate.fleetTls === undefined || !sameFleetTlsIdentity(tls, candidate.fleetTls))
+          );
+        });
   const address = candidate.httpBaseUrl.replace(/\/+$/u, "");
   return retained.some(
     (route) =>

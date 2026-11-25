@@ -2559,6 +2559,8 @@ export const layerWsRpc = (
         [WS_METHODS.serverGetLanFleetSetup]: () => administeringFleet(lanFleet.setup),
         [WS_METHODS.serverConfigureLanFleet]: (input) =>
           administeringFleet(lanFleet.configure(input)),
+        [WS_METHODS.serverResetLanFleetLinks]: (input) =>
+          administeringFleet(lanFleet.resetLinks(input)),
         [WS_METHODS.serverSearchAcpRegistry]: (input) =>
           acpRegistryCatalog
             .search(input)

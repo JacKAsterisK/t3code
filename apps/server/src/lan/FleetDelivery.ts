@@ -68,6 +68,7 @@ export const FleetPrivateConfig = Schema.Struct({
   signingPrivateKey: Pem,
   peers: Schema.Array(FleetPeer).check(Schema.isMaxLength(100)),
   managed: Schema.optionalKey(Schema.Boolean),
+  fleetId: Schema.optionalKey(Schema.String),
   credentialScope: Schema.optionalKey(Schema.String),
   credentialKeyDigests: Schema.optionalKey(FleetCredentialKeyDigests),
   access: Schema.optionalKey(Schema.Literals(["read-only", "standard"])),

@@ -6,6 +6,10 @@ import {
   type AuthSessionId,
   EnvironmentId,
   FleetAccess as FleetAccessLevel,
+  LanFleetError,
+  type LanFleetResetInput,
+  LanFleetResetPreview,
+  type LanFleetResetResult,
   mcpClientScopes,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -47,6 +51,14 @@ const REQUEST_TTL = Duration.hours(1);
 const PASS_INTERVAL = Duration.minutes(10);
 const LINK_TIMEOUT = Duration.minutes(1);
 const SUBJECT_PREFIX = "lan-fleet-peer-link:";
+const encodeResetItems = Schema.encodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      fleetId: LanFleetResetPreview.fields.fleetId,
+      items: LanFleetResetPreview.fields.items,
+    }),
+  ),
+);
 
 type Level = FleetAccessLevel;
 
@@ -158,6 +170,10 @@ export class FleetPeerLinks extends Context.Service<
   {
     /** One pass over every fleet peer, both as the linking machine and as the one linked to. */
     readonly pass: Effect.Effect<void>;
+    readonly resetLinks: (
+      fleetId: string,
+      input: LanFleetResetInput,
+    ) => Effect.Effect<LanFleetResetResult, LanFleetError>;
     /** Asks for a pass soon without waiting for it. */
     readonly requestPass: Effect.Effect<void>;
     /** Runs requested passes until interrupted. */
@@ -179,6 +195,7 @@ const make = Effect.gen(function* () {
   const context = yield* FleetContext.FleetContext;
   const trust = yield* FleetPeerTrust;
   const passLock = yield* Semaphore.make(1);
+  const resetLock = yield* Semaphore.make(1);
   const writeLock = yield* Semaphore.make(1);
   const requests = yield* Queue.sliding<void>(1);
   const { stateFile, state: saved } = yield* loadLinkState({
@@ -680,6 +697,73 @@ const make = Effect.gen(function* () {
     ),
   );
 
+  const previewReset = Effect.fn("FleetPeerLinks.previewReset")(function* (fleetId: string) {
+    const current = yield* Ref.get(state);
+    const links = yield* peerLinks.fleetLinks;
+    const sessions = (yield* auth.listSessions())
+      .filter(
+        ({ subject }) =>
+          subject.startsWith(SUBJECT_PREFIX) ||
+          subject.startsWith(`${CredentialAttribution.MCP_CLIENT_SUBJECT}:${SUBJECT_PREFIX}`),
+      )
+      .map(({ sessionId, subject }) => ({ sessionId, subject }))
+      .toSorted((a, b) => (a.sessionId < b.sessionId ? -1 : Number(a.sessionId > b.sessionId)));
+    const codes = (yield* auth.listPairingLinks())
+      .filter(({ subject }) => subject.startsWith(SUBJECT_PREFIX))
+      .map(({ id, subject }) => ({ id, subject }))
+      .toSorted((a, b) => (a.id < b.id ? -1 : Number(a.id > b.id)));
+    const items = {
+      links,
+      sessions,
+      codes,
+      state: {
+        linking: Object.keys(current.linking).length,
+        serving: Object.keys(current.serving).length,
+      },
+    };
+    const canonical = yield* encodeResetItems({ fleetId, items });
+    const digest = NodeCrypto.createHash("sha256").update(canonical).digest("hex");
+    return { fleetId, items, digest } satisfies LanFleetResetPreview;
+  });
+
+  const resetLinks = Effect.fn("FleetPeerLinks.resetLinks")(
+    function* (fleetId: string, input: LanFleetResetInput) {
+      const preview = yield* previewReset(fleetId).pipe(
+        Effect.mapError(() => new LanFleetError({ reason: "unavailable" })),
+      );
+      if (input.mode === "preview") return preview;
+      if (input.fleetId !== fleetId || input.previewDigest !== preview.digest)
+        return yield* new LanFleetError({ reason: "configuration", refusal: "stale-review" });
+      return yield* Effect.gen(function* () {
+        let unlinked = 0;
+        let revokedSessions = 0;
+        let revokedCodes = 0;
+        for (const { environmentId, machineId } of preview.items.links)
+          if (yield* peerLinks.unlink(environmentId, { machineId })) unlinked++;
+        for (const { sessionId } of preview.items.sessions)
+          if (yield* auth.revokeSession(sessionId)) revokedSessions++;
+        for (const { id } of preview.items.codes)
+          if (yield* auth.revokePairingLink(id)) revokedCodes++;
+        // Keep an empty file so a switched roster cannot carry old state in again.
+        yield* writeFleetJson(stateFile, emptyState);
+        yield* Ref.set(state, emptyState);
+        return {
+          fleetId,
+          previewDigest: preview.digest,
+          unlinked,
+          revokedSessions,
+          revokedCodes,
+          completedUtc: DateTime.formatIso(yield* DateTime.now),
+        };
+      }).pipe(
+        Effect.uninterruptible,
+        Effect.mapError(() => new LanFleetError({ reason: "unavailable" })),
+      );
+    },
+    (effect) => passLock.withPermits(1)(resetLock.withPermits(1)(effect)),
+    Effect.provideService(FileSystem.FileSystem, fs),
+  );
+
   const sessionIssued: FleetPeerLinks["Service"]["sessionIssued"] = ({ subject, sessionId }) => {
     if (!subject.startsWith(SUBJECT_PREFIX)) return Effect.succeed(true);
     const [machineId, deliveryId] = subject.slice(SUBJECT_PREFIX.length).split(":");
@@ -688,7 +772,7 @@ const make = Effect.gen(function* () {
     return adapterSetting.pipe(
       Effect.flatMap((enabled) =>
         Option.isSome(enabled) && enabled.value
-          ? recordSession(machineId, deliveryId, sessionId)
+          ? resetLock.withPermits(1)(recordSession(machineId, deliveryId, sessionId))
           : Effect.succeed(false),
       ),
     );
@@ -716,6 +800,7 @@ const make = Effect.gen(function* () {
 
   return FleetPeerLinks.of({
     pass,
+    resetLinks,
     requestPass: Queue.offer(requests, undefined).pipe(Effect.asVoid),
     run: Queue.take(requests).pipe(Effect.andThen(pass), Effect.forever),
     sessionIssued,

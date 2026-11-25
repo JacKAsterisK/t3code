@@ -54,6 +54,8 @@ import {
   LanFleetSyncResult,
   LanFleetSetupInput,
   LanFleetSetupState,
+  LanFleetResetInput,
+  LanFleetResetResult,
 } from "./lanFleet.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
@@ -581,6 +583,7 @@ export const WS_METHODS = {
   serverSyncLanFleet: "server.syncLanFleet",
   serverGetLanFleetSetup: "server.getLanFleetSetup",
   serverConfigureLanFleet: "server.configureLanFleet",
+  serverResetLanFleetLinks: "server.resetLanFleetLinks",
   serverGetNpmRelease: "server.getNpmRelease",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
@@ -763,6 +766,11 @@ const WsServerSyncLanFleetRpc = Rpc.make(WS_METHODS.serverSyncLanFleet, {
 const WsServerGetLanFleetSetupRpc = Rpc.make(WS_METHODS.serverGetLanFleetSetup, {
   payload: Schema.Struct({}),
   success: LanFleetSetupState,
+  error: Schema.Union([LanFleetError, EnvironmentAuthorizationError]),
+});
+const WsServerResetLanFleetLinksRpc = Rpc.make(WS_METHODS.serverResetLanFleetLinks, {
+  payload: LanFleetResetInput,
+  success: LanFleetResetResult,
   error: Schema.Union([LanFleetError, EnvironmentAuthorizationError]),
 });
 const WsServerConfigureLanFleetRpc = Rpc.make(WS_METHODS.serverConfigureLanFleet, {
@@ -2449,6 +2457,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerSyncLanFleetRpc,
   WsServerGetLanFleetSetupRpc,
   WsServerConfigureLanFleetRpc,
+  WsServerResetLanFleetLinksRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsProviderConsumeResetCreditRpc,

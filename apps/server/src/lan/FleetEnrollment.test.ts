@@ -1122,6 +1122,8 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         );
         assert.equal(raw.peers.length, 1);
         assert.equal((yield* f.b.enrollment.resolve)?.peers.length, 2);
+        assert.equal((yield* f.b.enrollment.resolve)?.fleetId, raw.fleetId);
+        assert.equal(yield* f.b.enrollment.savedFleetId, raw.fleetId);
         assert.equal(
           (yield* f.a.enrollment.status).peers.find(
             (peer) => peer.environmentId === f.b.environmentId,

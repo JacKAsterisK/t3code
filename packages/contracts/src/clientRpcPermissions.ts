@@ -22,6 +22,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.serverSyncLanFleet]: AuthEnvironmentMaintainScope,
   [WS_METHODS.serverGetLanFleetSetup]: AuthEnvironmentMaintainScope,
   [WS_METHODS.serverConfigureLanFleet]: AuthEnvironmentMaintainScope,
+  [WS_METHODS.serverResetLanFleetLinks]: AuthEnvironmentMaintainScope,
   [WS_METHODS.providerAuthRemoveMethod]: AuthProvidersManageScope,
   // An MCP sign-in stores a credential for the agent, as an account sign-in does.
   [WS_METHODS.providerMcpSignInStart]: AuthProvidersManageScope,

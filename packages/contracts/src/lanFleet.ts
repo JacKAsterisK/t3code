@@ -1,5 +1,10 @@
 import * as Schema from "effect/Schema";
-import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  AuthSessionId,
+  EnvironmentId,
+  NonNegativeInt,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { ProjectIconColor } from "./project.ts";
 
 export const FleetMachineId = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9_-]{0,63}$/u));
@@ -74,6 +79,7 @@ export const FleetTlsGatewayInput = Schema.Struct({
   identity: FleetTlsIdentity,
   /** Only a verified replacement can name the precise gateway it supersedes. */
   previousIdentity: Schema.optionalKey(FleetTlsIdentity),
+  retiredIdentities: Schema.optionalKey(Schema.Array(FleetTlsIdentity)),
 });
 export type FleetTlsGatewayInput = typeof FleetTlsGatewayInput.Type;
 export const FleetTlsGatewayResult = Schema.Struct({
@@ -117,6 +123,7 @@ export const LanFleetSyncResult = Schema.Struct({
       environmentId: EnvironmentId,
       host: Schema.String,
       pairingCode: Schema.String,
+      fleetId: Schema.optionalKey(Schema.String),
       tls: Schema.optionalKey(FleetTlsIdentity),
       // The sender replaced a credential this machine already holds, such as after an access change.
       replace: Schema.optionalKey(Schema.Boolean),
@@ -126,6 +133,49 @@ export const LanFleetSyncResult = Schema.Struct({
   ),
 });
 export type LanFleetSyncResult = typeof LanFleetSyncResult.Type;
+
+const FleetResetDigest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
+export const LanFleetResetInput = Schema.Union([
+  Schema.Struct({ mode: Schema.Literal("preview") }),
+  Schema.Struct({
+    mode: Schema.Literal("apply"),
+    fleetId: TrimmedNonEmptyString,
+    previewDigest: FleetResetDigest,
+  }),
+]);
+export type LanFleetResetInput = typeof LanFleetResetInput.Type;
+
+export const LanFleetResetPreview = Schema.Struct({
+  fleetId: TrimmedNonEmptyString,
+  items: Schema.Struct({
+    links: Schema.Array(
+      Schema.Struct({
+        environmentId: EnvironmentId,
+        label: Schema.String,
+        machineId: FleetMachineId,
+        linkedAt: Schema.String,
+      }),
+    ),
+    sessions: Schema.Array(Schema.Struct({ sessionId: AuthSessionId, subject: Schema.String })),
+    codes: Schema.Array(Schema.Struct({ id: Schema.String, subject: Schema.String })),
+    state: Schema.Struct({ linking: NonNegativeInt, serving: NonNegativeInt }),
+  }),
+  digest: FleetResetDigest,
+});
+export type LanFleetResetPreview = typeof LanFleetResetPreview.Type;
+
+export const LanFleetResetReceipt = Schema.Struct({
+  fleetId: TrimmedNonEmptyString,
+  previewDigest: FleetResetDigest,
+  unlinked: NonNegativeInt,
+  revokedSessions: NonNegativeInt,
+  revokedCodes: NonNegativeInt,
+  completedUtc: Schema.String,
+});
+export type LanFleetResetReceipt = typeof LanFleetResetReceipt.Type;
+
+export const LanFleetResetResult = Schema.Union([LanFleetResetPreview, LanFleetResetReceipt]);
+export type LanFleetResetResult = typeof LanFleetResetResult.Type;
 
 export const FleetAccess = Schema.Literals(["read-only", "standard"]);
 export type FleetAccess = typeof FleetAccess.Type;

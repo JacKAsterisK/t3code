@@ -43,6 +43,7 @@ export class FleetEnrollment extends Context.Service<
       input: LanFleetSetupInput,
     ) => Effect.Effect<LanFleetSetupState, LanFleetError>;
     readonly resolve: Effect.Effect<FleetPrivateConfig | null | undefined, LanFleetError>;
+    readonly savedFleetId: Effect.Effect<string | undefined, LanFleetError>;
   }
 >()("t3/lan/FleetEnrollment") {}
 
@@ -933,6 +934,7 @@ const make = Effect.gen(function* () {
       signingPrivateKey: record.signingPrivateKey,
       peers: current.peers,
       managed: true,
+      fleetId: authority.fleetId,
       ...(switchedFleet ? { credentialScope: authority.fleetId } : {}),
       ...(authority.credentialKeyDigests === undefined
         ? {}
@@ -947,7 +949,11 @@ const make = Effect.gen(function* () {
         : authority.campaign,
     } satisfies FleetPrivateConfig;
   }).pipe(Effect.mapError(translate), Effect.provideService(FileSystem.FileSystem, fs));
-  return FleetEnrollment.of({ status, configure, resolve });
+  const savedFleetId = Effect.gen(function* () {
+    if ((yield* bootstrap()) === undefined) return undefined;
+    return (yield* vault.read)?.fleetId;
+  }).pipe(Effect.mapError(translate));
+  return FleetEnrollment.of({ status, configure, resolve, savedFleetId });
 });
 
 export const layerServices = Layer.effect(FleetEnrollment, make);

@@ -53,7 +53,16 @@ const make = Effect.gen(function* () {
       const slot = saved ?? {};
       let active = slot.active;
       let pending = slot.replacement;
-      const previousIdentity = input.previousIdentity;
+      const predecessors = [
+        ...(input.previousIdentity === undefined ? [] : [input.previousIdentity]),
+        ...(input.retiredIdentities ?? []),
+      ];
+      const previousIdentity =
+        predecessors.find(
+          (identity) =>
+            (pending !== undefined && sameFleetTlsRoute(identity, pending.gateway.identity)) ||
+            (active !== undefined && sameFleetTlsRoute(identity, active.identity)),
+        ) ?? predecessors[0];
       // A later saved predecessor can confirm a stage even if the resolver chose a manual route.
       if (
         previousIdentity !== undefined &&

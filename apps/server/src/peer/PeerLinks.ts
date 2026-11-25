@@ -11,6 +11,7 @@ import {
   PeerLinkError,
   type PeerLinkName,
   type PeerLinkSummary,
+  type LanFleetResetPreview,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -123,6 +124,7 @@ export class PeerLinks extends Context.Service<
       input: PeerLinkCreateInput,
     ) => Effect.Effect<{ readonly link: PeerLink; readonly alreadyLinked: boolean }, PeerLinkError>;
     readonly list: Effect.Effect<ReadonlyArray<PeerLinkSummary>, PeerLinkError>;
+    readonly fleetLinks: Effect.Effect<LanFleetResetPreview["items"]["links"], PeerLinkError>;
     /** The unexpired links' names, from what is stored, without asking any peer. */
     readonly names: Effect.Effect<ReadonlyArray<PeerLinkName>, PeerLinkError>;
     /** The stored link, without asking the peer whether it answers. */
@@ -703,6 +705,28 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const fleetLinks: PeerLinks["Service"]["fleetLinks"] = sql<{
+    environment_id: string;
+    label: string;
+    fleet_machine_id: string;
+    linked_at: string;
+  }>`
+    SELECT environment_id, label, fleet_machine_id, linked_at FROM peer_environment_links
+    WHERE provenance = 'fleet' AND fleet_machine_id IS NOT NULL
+    ORDER BY environment_id COLLATE BINARY
+  `.pipe(
+    NodeSqliteClient.readOnly,
+    Effect.map((rows) =>
+      rows.map((row) => ({
+        environmentId: EnvironmentId.make(row.environment_id),
+        label: row.label,
+        machineId: row.fleet_machine_id,
+        linkedAt: row.linked_at,
+      })),
+    ),
+    Effect.catch(failStorage),
+  );
+
   const names: PeerLinks["Service"]["names"] = Effect.gen(function* () {
     const links = yield* Effect.forEach(yield* readRows, toLink);
     const now = yield* DateTime.now;
@@ -868,6 +892,7 @@ const make = Effect.gen(function* () {
     link,
     linkUnlessLinked,
     list,
+    fleetLinks,
     names,
     get,
     unlink,

@@ -51,6 +51,7 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.serverSyncLanFleet,
       WS_METHODS.serverGetLanFleetSetup,
       WS_METHODS.serverConfigureLanFleet,
+      WS_METHODS.serverResetLanFleetLinks,
     ])
       expect(requiredScopeForRpcMethod(method)).toBe(AuthEnvironmentMaintainScope);
   });

@@ -1,10 +1,19 @@
+// oxlint-disable t3code/no-untranslated-copy -- T3 Code LAN fleet messages ship English-only alongside fleet setup.
 import { useAtomValue } from "@effect/atom-react";
-import { connectionRoutes } from "@t3tools/client-runtime/connection";
+import {
+  connectionRouteId,
+  connectionRoutes,
+  type ConnectionCatalogEntry,
+} from "@t3tools/client-runtime/connection";
 import { fleetPairingFailureDetail } from "./lanFleetPairingError";
 import * as Option from "effect/Option";
 import {
   LanFleetError,
   WS_METHODS,
+  type EnvironmentId,
+  type LanFleetResetInput,
+  type LanFleetResetPreview,
+  type LanFleetResetReceipt,
   type LanFleetSyncInput,
   type LanFleetSyncResult,
   type LanFleetSetupInput,
@@ -50,6 +59,95 @@ const busyAtom = Atom.make(false);
 const pausedAtom = Atom.make(false);
 const deniedAtom = Atom.make(false);
 const isFleetError = Schema.is(LanFleetError);
+
+const resetFleet = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "web:lan-fleet:reset",
+  tag: WS_METHODS.serverResetLanFleetLinks,
+  scheduler: createAtomCommandScheduler(),
+  concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
+});
+
+function savedFleetConnections(
+  entries: ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>,
+  fleetId: string,
+) {
+  return [...entries].flatMap(([environmentId, entry]) =>
+    connectionRoutes(entry).flatMap((route) => {
+      const profile = Option.getOrUndefined(route.profile);
+      if (profile?._tag !== "BearerConnectionProfile") return [];
+      const expectedFleet =
+        profile.fleetId === fleetId
+          ? { fleetId }
+          : profile.fleetId === undefined && profile.fleetTls !== undefined
+            ? { fleetTls: profile.fleetTls }
+            : undefined;
+      return expectedFleet === undefined
+        ? []
+        : [
+            {
+              environmentId,
+              routeId: connectionRouteId(route.target),
+              expectedFleet,
+              label: route.target.label,
+              address: profile.httpBaseUrl,
+            },
+          ];
+    }),
+  );
+}
+
+export function useLanFleetReset(environmentId: EnvironmentId) {
+  const allowed = useAtomValue(resetFleet.permissionAtom(environmentId));
+  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
+  const run = useAtomCommand(resetFleet, { reportFailure: false });
+  const remove = useAtomCommand(environmentCatalog.removeRoute, { reportFailure: false });
+  const reset = async (
+    input: LanFleetResetInput,
+    routes: ReturnType<typeof savedFleetConnections> = [],
+  ): Promise<
+    | { error: string; preview?: never; receipt?: never }
+    | {
+        preview: LanFleetResetPreview;
+        routes: ReturnType<typeof savedFleetConnections>;
+        error?: never;
+        receipt?: never;
+      }
+    | { receipt: LanFleetResetReceipt; error?: string; preview?: never }
+  > => {
+    if (input.mode === "apply") {
+      if (appAtomRegistry.get(busyAtom)) return { error: "Fleet sync is in progress. Try again." };
+      appAtomRegistry.set(busyAtom, true);
+    }
+    const work = async () => {
+      const result = await run({ environmentId, input });
+      if (result._tag !== "Success") {
+        const failure = squashAtomCommandFailure(result);
+        return {
+          error: isFleetError(failure) ? failure.message : "Reset fleet links could not complete.",
+        };
+      }
+      if ("digest" in result.value) {
+        return {
+          preview: result.value,
+          routes: savedFleetConnections(catalog.entries, result.value.fleetId),
+        };
+      }
+      let removalFailed = false;
+      for (const { environmentId, routeId, expectedFleet } of routes) {
+        const removed = await remove({ environmentId, routeId, expectedFleet });
+        if (removed._tag !== "Success") removalFailed = true;
+      }
+      return {
+        receipt: result.value,
+        ...(removalFailed ? { error: "Some saved fleet connections could not be removed." } : {}),
+      };
+    };
+    return work().finally(() => {
+      if (input.mode === "apply") appAtomRegistry.set(busyAtom, false);
+    });
+  };
+  return { allowed, reset };
+}
 
 export function useLanFleet() {
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
@@ -178,6 +276,7 @@ export function useLanFleet() {
             host: delivery.host,
             pairingCode: delivery.pairingCode,
             ...(delivery.tls === undefined ? {} : { tls: delivery.tls }),
+            ...(delivery.fleetId === undefined ? {} : { fleetId: delivery.fleetId }),
             expectedEnvironmentId: delivery.environmentId,
             // A replacement swaps the saved credential, such as after a fleet access change.
             skipExisting: delivery.replace !== true,

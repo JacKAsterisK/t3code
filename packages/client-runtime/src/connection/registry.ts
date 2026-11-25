@@ -1,6 +1,6 @@
 import { msg } from "gt-i18n";
 import { translatableDetail } from "../errors/translatable.ts";
-import { EnvironmentId, type FleetTlsIdentity } from "@t3tools/contracts";
+import { EnvironmentId, sameFleetTlsRoute, type FleetTlsIdentity } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -48,9 +48,11 @@ import {
   RELAY_ROUTE_ID,
   connectionRouteId,
   connectionRoutes,
+  conflictsWithSavedFleetRoute,
   credentialConnectionId,
   entryWithRoutes,
   findRouteToSameAddress,
+  fleetDeliveryRoutes,
   fleetReplacementRoutes,
   fleetTlsOfRoute,
   hasSavedBearerRoute,
@@ -65,8 +67,11 @@ const isSshConnectionProfile = Schema.is(SshConnectionProfile);
 interface ConnectionRegistrationOptions {
   readonly knownAddressOnly?: boolean;
   readonly requireSavedConnection?: boolean;
+  readonly retireOldFleet?: boolean;
   readonly fleetReplacement?: { readonly previousIdentity: FleetTlsIdentity | undefined };
 }
+
+type ExpectedFleetRoute = { readonly fleetId?: string; readonly fleetTls?: FleetTlsIdentity };
 
 function unsupportedState(
   entry: ConnectionCatalogEntry,
@@ -144,6 +149,7 @@ export class EnvironmentRegistry extends Context.Service<
     readonly removeRoute: (
       environmentId: EnvironmentId,
       routeId: string,
+      expectedFleet?: ExpectedFleetRoute,
     ) => Effect.Effect<
       void,
       | Persistence.ConnectionPersistenceError
@@ -598,20 +604,28 @@ export const make = Effect.gen(function* () {
           });
         let entry = registered;
         const replacement = options?.fleetReplacement;
+        const candidate =
+          registration._tag === "BearerConnectionRegistration" ? registration.profile : undefined;
+        const { saved } = fleetDeliveryRoutes(
+          previous,
+          options?.retireOldFleet === true ? candidate?.fleetId : undefined,
+        );
+        const savedRoutes = saved === undefined ? [] : connectionRoutes(saved);
         const retained =
           replacement === undefined
-            ? previous === undefined
-              ? []
-              : connectionRoutes(previous)
-            : registration._tag === "BearerConnectionRegistration"
-              ? fleetReplacementRoutes(previous, registration.profile, replacement.previousIdentity)
-              : null;
+            ? savedRoutes
+            : candidate === undefined
+              ? null
+              : fleetReplacementRoutes(saved, candidate, replacement.previousIdentity);
         const unpinnedRenewal =
           registration._tag === "BearerConnectionRegistration" &&
           registration.profile.fleetReplacementDeliveryId !== undefined &&
           registration.profile.fleetTls === undefined;
         if (
           retained === null ||
+          (candidate !== undefined &&
+            options?.retireOldFleet === true &&
+            conflictsWithSavedFleetRoute(savedRoutes, candidate)) ||
           (unpinnedRenewal && retained.some((saved) => fleetTlsOfRoute(saved) !== undefined))
         )
           return yield* new ConnectionBlockedError({
@@ -1029,6 +1043,7 @@ export const make = Effect.gen(function* () {
   const removeRoute = Effect.fn("EnvironmentRegistry.removeRoute")(function* (
     environmentId: EnvironmentId,
     routeId: string,
+    expectedFleet?: ExpectedFleetRoute,
   ) {
     // One lock for the whole decision: a route registered between "this was
     // the last route" and the removal must not be deleted with it.
@@ -1039,10 +1054,26 @@ export const make = Effect.gen(function* () {
         const routes = connectionRoutes(entry);
         const route = routes.find((candidate) => connectionRouteId(candidate.target) === routeId);
         if (route === undefined) return;
+        const profile = Option.getOrNull(route.profile);
+        if (
+          expectedFleet !== undefined &&
+          (profile?._tag !== "BearerConnectionProfile" ||
+            profile.fleetId !== expectedFleet.fleetId ||
+            (expectedFleet.fleetId === undefined &&
+              (expectedFleet.fleetTls === undefined ||
+                profile.fleetTls === undefined ||
+                !sameFleetTlsRoute(profile.fleetTls, expectedFleet.fleetTls))))
+        )
+          return;
         const remaining = routesAfterRemoving(routes, routeId);
         if (remaining.length === 0) return yield* removeLocked(environmentId);
         yield* replaceRoutesLocked(entry, remaining);
-        const profile = Option.getOrNull(route.profile);
+        if (
+          profile?._tag === "BearerConnectionProfile" &&
+          profile.fleetTls !== undefined &&
+          remaining.every((route) => fleetTlsOfRoute(route) === undefined)
+        )
+          yield* (fleetTls.disconnect?.(environmentId) ?? Effect.void).pipe(Effect.ignore);
         if (profile !== null && isSshConnectionProfile(profile)) {
           yield* disconnectSsh(environmentId, profile);
         }

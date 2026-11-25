@@ -2208,6 +2208,14 @@ describe("EnvironmentRegistry routes", () => {
       );
       yield* Effect.gen(function* () {
         const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.removeRoute(LAN_TARGET.environmentId, LAN_TARGET.connectionId, {
+          fleetId: "previously-reviewed-fleet",
+        });
+        expect(routesOf(yield* Ref.get(harness.storedTargets), LAN_TARGET.environmentId)).toEqual([
+          LAN_TARGET,
+          RELAY_TARGET,
+        ]);
+
         yield* registry.removeRoute(LAN_TARGET.environmentId, LAN_TARGET.connectionId);
         expect(routesOf(yield* Ref.get(harness.storedTargets), LAN_TARGET.environmentId)).toEqual([
           RELAY_TARGET,

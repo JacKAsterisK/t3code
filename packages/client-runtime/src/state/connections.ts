@@ -165,9 +165,17 @@ export function createEnvironmentCatalogAtoms<R, E>(
     label: "environment-catalog:remove-route",
     scheduler: commandScheduler,
     concurrency: serial,
-    execute: (input: { readonly environmentId: EnvironmentIdType; readonly routeId: string }) =>
+    execute: (input: {
+      readonly environmentId: EnvironmentIdType;
+      readonly routeId: string;
+      readonly expectedFleet?: Parameters<
+        EnvironmentRegistry.EnvironmentRegistry["Service"]["removeRoute"]
+      >[2];
+    }) =>
       EnvironmentRegistry.EnvironmentRegistry.pipe(
-        Effect.flatMap((registry) => registry.removeRoute(input.environmentId, input.routeId)),
+        Effect.flatMap((registry) =>
+          registry.removeRoute(input.environmentId, input.routeId, input.expectedFleet),
+        ),
       ),
   });
   const reorderRoutes = createRuntimeCommand(runtime, {

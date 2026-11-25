@@ -433,6 +433,13 @@ normal importer verifies the destination environment before exchanging its code.
 Each delivery is claimed once; uncertain exchanges pause for review instead of
 rotating credentials or replaying enrollment.
 
+When a delivery names a different fleet from a saved route to the same machine,
+the desktop can pair using the new delivery. Once it saves the new credential,
+it removes the routes and credentials proven to belong to the previous fleet.
+Manual routes and older fleet pins without a recorded fleet ID stay saved.
+A legacy pin that matches the delivery's exact TLS identity can renew as part
+of the current fleet. A failed pairing keeps every route.
+
 Deliveries and owner link requests expire after 24 hours; signed connection
 summaries last ten minutes. Polling stops after three consecutive failures and
 shows a paused state. **Sync now** permits a manual check. Interrupted publishing,
@@ -445,6 +452,29 @@ connections. The owner can revoke a member to stop new links/deliveries. Existin
 sessions are deliberately preserved; withdraw existing access separately through
 Authorized clients. Restoring a lost owner/device key is an administrator recovery
 operation, not an automatic key rotation.
+
+## Reset fleet links
+
+Use **Settings → Connections → LAN machine links → Reset fleet links** on the
+machine you want to reset. Review its fleet-made agent links, sessions it served,
+pending codes, and adapter state. Confirm to retire the reviewed items and see
+a receipt. If the list changed during review, request a fresh preview. You can
+also include the listed saved connections from this fleet or older connections
+with a fleet TLS pin. Manual connections and manual agent links are excluded.
+
+The next fleet pass can rebuild agent links. The reset works on local state only.
+Keep shared files and the desktop connection delivery journal for sync and recovery.
+
+## Share locks: why no fencing
+
+The share operation lock is a directory. A lock older than two minutes can be
+reclaimed. A plain file share provides no atomic fencing, so a holder that
+stalls past the limit can still act after another holder reclaims the lock. LAN
+1.0.53 deliberately kept that limitation (D245).
+
+If stalled holders cause conflicting writes, consider leased locks with a
+heartbeat and holder liveness checks over the fleet link, or a single-writer
+owner service.
 
 ## Agents on other machines
 

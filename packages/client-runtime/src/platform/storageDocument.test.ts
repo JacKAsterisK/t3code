@@ -394,6 +394,34 @@ describe("ConnectionCatalogDocument", () => {
     expect(bearerOnly.remoteDpopTokens).toEqual([]);
   });
 
+  it("persists fleet provenance and drops a retired credential when saving its replacement", () => {
+    const old = registerConnectionInCatalog(
+      EMPTY_CONNECTION_CATALOG_DOCUMENT,
+      new BearerConnectionRegistration({
+        target: BEARER_TARGET,
+        profile: new BearerConnectionProfile({ ...BEARER_PROFILE, fleetId: "old-fleet" }),
+        credential: BEARER_CREDENTIAL,
+      }),
+    );
+    const target = new BearerConnectionTarget({ ...BEARER_TARGET, connectionId: "replacement" });
+    const profile = new BearerConnectionProfile({
+      ...BEARER_PROFILE,
+      connectionId: target.connectionId,
+      fleetId: "new-fleet",
+    });
+    const credential = new BearerConnectionCredential({ token: "replacement-token" });
+    const saved = registerConnectionInCatalog(
+      old,
+      new BearerConnectionRegistration({ target, profile, credential }),
+    );
+    expect(saved.targets).toEqual([target]);
+    expect(saved.profiles).toEqual([profile]);
+    expect(saved.credentials).toEqual([{ connectionId: target.connectionId, credential }]);
+    expect(decodeCatalogDocument(saved).profiles).toEqual([
+      expect.objectContaining({ connectionId: target.connectionId, fleetId: "new-fleet" }),
+    ]);
+  });
+
   it("keeps an environment's position in the catalog when its routes change", () => {
     const other = new RelayConnectionTarget({
       environmentId: EnvironmentId.make("environment-2"),

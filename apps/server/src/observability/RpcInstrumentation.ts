@@ -41,6 +41,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.serverSyncLanFleet]: "server",
   [WS_METHODS.serverGetLanFleetSetup]: "server",
   [WS_METHODS.serverConfigureLanFleet]: "server",
+  [WS_METHODS.serverResetLanFleetLinks]: "server",
   [WS_METHODS.serverGetNpmRelease]: "server",
   [WS_METHODS.serverRefreshProviders]: "server",
   [WS_METHODS.serverUpdateProvider]: "server",

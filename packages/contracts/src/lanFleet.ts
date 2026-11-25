@@ -230,6 +230,15 @@ export const LanFleetSetupState = Schema.Struct({
       seed: Schema.optionalKey(Schema.Literals(["waiting", "invalid"])),
       // While it waits for every enabled machine to run LAN 1.0.26 or later: those not confirmed.
       seedPending: Schema.optionalKey(Schema.Struct({ machineIds: Schema.Array(FleetMachineId) })),
+      // With no list and no starting list: the list this machine had on its previous fleet, for a
+      // person to save as this fleet's first. Never saved on its own.
+      carryProposal: Schema.optionalKey(
+        Schema.Struct({
+          defaultAccess: FleetAccess,
+          machines: Schema.Array(FleetMachineAccess),
+          exceptions: Schema.Array(FleetAccessException),
+        }),
+      ),
     }),
   ),
   peers: Schema.Array(
@@ -252,7 +261,11 @@ const FLEET_REFUSAL_MESSAGES: Readonly<Record<string, string>> = {
   "roster-origin-mismatch":
     "The fleet roster lists this machine at a different LAN address. Use the address in its roster row, or update that row, then try again.",
   "roster-row-without-keys":
-    "This machine is already in the fleet, but this install does not have its fleet keys. Remove its roster row on the shared folder, then join again.",
+    "This machine is already in the fleet's roster or trust list, but this install does not have its fleet keys. Ask the fleet owner to revoke this machine in Machine access, then join again.",
+  "already-member":
+    "This machine is already a member of a fleet, so it cannot create one. Join that fleet, or leave it before creating a new one.",
+  "owner-authority-missing":
+    "This machine owns a fleet whose fleet-authority.json is missing from the shared folder. Restore that file rather than creating the fleet again.",
   "switched-fleet-start":
     "Only BuildMachine creates the replacement fleet. Join that fleet from this machine instead.",
   "fleet-exists": "The shared folder already has a fleet. Join it instead of creating a new one.",

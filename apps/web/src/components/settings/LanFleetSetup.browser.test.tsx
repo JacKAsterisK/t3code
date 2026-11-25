@@ -264,6 +264,58 @@ it("offers no separate save once a fleet has an access list", async () => {
     .not.toBeInTheDocument();
 });
 
+it("hides a save the server would refuse, when no machine would stay standard", async () => {
+  setup({
+    stage: "active",
+    sharedFolderTrust: true,
+    peers: accessPeers,
+    accessPolicy: {
+      revision: 0,
+      defaultAccess: "read-only",
+      machines: [],
+      selfAccess: "standard",
+      canChange: true,
+    },
+  });
+  await using screen = await render(<LanFleetSetup />);
+  await expect.element(screen.getByText(/Give at least one machine standard access/)).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Save access list" }))
+    .not.toBeInTheDocument();
+});
+
+it("names what the previous fleet's list brings and saves it as proposed on one click", async () => {
+  const { configure } = setup({
+    stage: "active",
+    sharedFolderTrust: true,
+    peers: accessPeers,
+    accessPolicy: {
+      revision: 0,
+      defaultAccess: "standard",
+      machines: [],
+      selfAccess: "standard",
+      canChange: true,
+      carryProposal: {
+        defaultAccess: "standard",
+        machines: [{ machineId: "other", access: "read-only" }],
+        exceptions: [],
+      },
+    },
+  });
+  await using screen = await render(<LanFleetSetup />);
+  await expect.element(screen.getByText(/read only: Other machine/)).toBeVisible();
+  expect(configure).not.toHaveBeenCalled();
+  await screen.getByRole("button", { name: "Carry over access list" }).click();
+  expect(configure).toHaveBeenCalledExactlyOnceWith({
+    operation: "access",
+    confirmed: true,
+    revision: 0,
+    defaultAccess: "standard",
+    machines: [{ machineId: "other", access: "read-only" }],
+    exceptions: [],
+  });
+});
+
 it("locks machine access on a read-only machine", async () => {
   setup({
     stage: "active",

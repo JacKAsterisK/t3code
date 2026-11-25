@@ -386,7 +386,7 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
           { autoPickup: true, access: "read-only" },
         );
         f.a.replaceRecord(oldMember);
-        yield* f.start().pipe(Effect.flip);
+        assert.equal((yield* f.start().pipe(Effect.flip)).refusal, "already-member");
         assert.equal(yield* f.fs.exists(f.rosterPath), false);
         assert.equal(yield* f.fs.exists(f.authorityFile), false);
         assert.deepEqual(f.a.record(), oldMember);
@@ -544,7 +544,9 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
       f.a.replaceRecord({ ...f.a.record()!, lastRevision: 2 });
       yield* f.fs.remove(f.authorityFile);
       const beforeSaves = f.a.saves();
-      assert.equal((yield* f.start().pipe(Effect.flip)).reason, "configuration");
+      const refusal = yield* f.start().pipe(Effect.flip);
+      assert.equal(refusal.reason, "configuration");
+      assert.equal(refusal.refusal, "owner-authority-missing");
       assert.isFalse(yield* f.fs.exists(f.authorityFile));
       assert.equal(f.a.record()?.lastRevision, 2);
       assert.equal(f.a.saves(), beforeSaves);

@@ -7,7 +7,7 @@ import * as FleetTransport from "./FleetTransport.ts";
 
 /** Why a forwarded fleet request gets this server's plain-http audience, for the person to fix. */
 export const INACTIVE_FLEET_LINKS_NOTE =
-  "This machine's fleet links are not active yet: the fleet needs a Machine access list, which T3 Settings → Machine access can save. Fleet peers then link to each other automatically, with no agent link card.";
+  "This machine's fleet links are not active: either the fleet has no Machine access list yet, which T3 Settings → Machine access can save, or fleet links are turned off on this machine. While they are active, fleet peers link to each other automatically, with no agent link card.";
 
 /**
  * The encrypted fleet endpoint forwards over plain http, so a peer link's sign-in there must

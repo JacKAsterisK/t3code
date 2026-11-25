@@ -175,15 +175,10 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
   const seedFile = path.join(root, FleetAccessPolicy.SEED_FILE);
   const readyDirectory = path.join(root, FleetAccessPolicy.SEED_READY_DIRECTORY);
   /** What a machine on a build that takes replaced credentials writes, signed by `signer`. */
-  const markReady = (
-    self: Machine,
-    signer: Machine = self,
-    at: { readonly root: string; readonly fleetId: string } = { root, fleetId: FLEET_ID },
-  ) => {
-    const markerDirectory = path.join(at.root, FleetAccessPolicy.SEED_READY_DIRECTORY);
+  const markReady = (self: Machine, signer: Machine = self) => {
     const marker = {
       version: 1 as const,
-      fleetId: at.fleetId,
+      fleetId: FLEET_ID,
       machineId: self.peer.machineId,
       createdAt: 0,
     };
@@ -194,9 +189,9 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
       marker.machineId,
       marker.createdAt,
     ]);
-    return fs.makeDirectory(markerDirectory, { recursive: true }).pipe(
+    return fs.makeDirectory(readyDirectory, { recursive: true }).pipe(
       Effect.andThen(
-        writeFleetJson(path.join(markerDirectory, `${self.peer.machineId}.json`), {
+        writeFleetJson(path.join(readyDirectory, `${self.peer.machineId}.json`), {
           ...marker,
           signature: NodeCrypto.sign(null, Buffer.from(data), signer.signingPrivateKey).toString(
             "base64",
@@ -1228,11 +1223,9 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
       }).pipe(Effect.provide(configLayer)),
   );
 
-  /** A fleet with a list, then the same machines on a new fleet behind the switch roster. */
-  const switchedFleet = Effect.fn("FleetAccessPolicyTest.switchedFleet")(function* () {
+  /** A fleet with a list, then the same machines on a new fleet, switched or rebuilt in place. */
+  const nextFleet = Effect.fn("FleetAccessPolicyTest.nextFleet")(function* () {
     const f = yield* fleet();
-    const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-switched-" });
-    const fleetId = "fleet-after-switch";
     const stateDirs = new Map<Machine, string>();
     const stateDirOf = Effect.fn("FleetAccessPolicyTest.stateDirOf")(function* (self: Machine) {
       const existing = stateDirs.get(self);
@@ -1241,11 +1234,11 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
       stateDirs.set(self, created);
       return created;
     });
-    /** The machine as it ran before the switch, on the previous fleet's share. */
+    /** The machine as it ran before, on the previous fleet's share. */
     const before = (self: Machine) =>
       stateDirOf(self).pipe(Effect.flatMap((stateDir) => f.machine(stateDir)));
-    /** The same machine restarted on the switch roster: its new fleet's cache is separate. */
-    const after = (self: Machine) =>
+    /** The same machine started again on the switch roster: its new fleet's cache is separate. */
+    const switched = (self: Machine) =>
       stateDirOf(self).pipe(
         Effect.flatMap((stateDir) =>
           f.machine(stateDir).pipe(
@@ -1255,100 +1248,199 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
           ),
         ),
       );
-    const input = (self: Machine, peers: ReadonlyArray<FleetPeer> = f.input(self).peers) => ({
-      ...f.input(self),
-      root,
-      fleetId,
-      peers,
-      credentialAuthorityRevision: 1,
+    const fleetAt = Effect.fn("FleetAccessPolicyTest.fleetAt")(function* (fleetId: string) {
+      const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-next-" });
+      const input = (self: Machine, peers: ReadonlyArray<FleetPeer> = f.input(self).peers) => ({
+        ...f.input(self),
+        root,
+        fleetId,
+        peers,
+        credentialAuthorityRevision: 1,
+      });
+      return { root, fleetId, input, accessDirectory: f.path.join(root, "fleet-access") };
     });
-    return { f, root, fleetId, before, after, input };
+    /** Saves `next` as the first list, as Machine access does when a person clicks it. */
+    const save = (
+      service: FleetAccessPolicy.FleetAccess["Service"],
+      input: ReturnType<Effect.Success<ReturnType<typeof fleetAt>>["input"]>,
+      next: FleetAccessPolicy.FleetAccessSnapshot,
+    ) => service.change({ ...input, expectedRevision: 0, next });
+    return { f, before, switched, fleetAt, save, stateDirOf };
   });
+  const byMachine = (
+    machines: ReadonlyArray<{ readonly machineId: string; readonly access: Access }>,
+  ) => machines.toSorted((left, right) => (left.machineId < right.machineId ? -1 : 1));
 
-  it.effect("carries the previous fleet's list to a switched roster that has none", () =>
+  it.effect("offers the previous fleet's list to a switched fleet with none, saving nothing", () =>
     Effect.gen(function* () {
-      const s = yield* switchedFleet();
+      const n = yield* nextFleet();
       // Tonight's fleet: one list, every machine standard.
-      const old = yield* s.before(s.f.cryo);
-      expect((yield* s.f.change(old, s.f.cryo, 0, [])).revision).toBe(1);
-      // Without a carried list the new fleet would never link: revision 0 links nothing.
-      const switched = yield* s.after(s.f.cryo);
-      const state = yield* switched.refresh(s.input(s.f.cryo));
-      expect(state.revision).toBe(1);
-      expect(state.defaultAccess).toBe("standard");
-      expect(FleetAccessPolicy.fleetLinksApply(state)).toBe(true);
-      // It is on the new share, signed by this machine for the new fleet, so every machine reads it.
-      const written = yield* s.f.fs.readDirectory(s.f.path.join(s.root, "fleet-access"));
-      expect(written).toHaveLength(1);
-      const other = yield* (yield* s.after(s.f.panda)).refresh(s.input(s.f.panda));
-      expect(other.revision).toBe(1);
-      expect(FleetAccessPolicy.fleetLinksApply(other)).toBe(true);
+      expect((yield* n.f.change(yield* n.before(n.f.cryo), n.f.cryo, 0, [])).revision).toBe(1);
+      const target = yield* n.fleetAt("fleet-after-switch");
+      const cryo = yield* n.switched(n.f.cryo);
+      const offered = yield* cryo.refresh(target.input(n.f.cryo));
+      expect(offered.revision).toBe(0);
+      expect(offered.carryProposal).toEqual({ defaultAccess: "standard", machines: [], pairs: [] });
+      // No machine saves it on its own, however often it reads the share.
+      yield* cryo.refresh(target.input(n.f.cryo));
+      expect(yield* n.f.fs.exists(target.accessDirectory)).toBe(false);
+      // One click: the normal change path, at revision 0.
+      const saved = yield* n.save(cryo, target.input(n.f.cryo), offered.carryProposal!);
+      expect(saved.revision).toBe(1);
+      expect(saved.carryProposal).toBeUndefined();
+      expect(FleetAccessPolicy.fleetLinksApply(saved)).toBe(true);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("proposes every restriction, unverified and not-yet-enrolled machines included", () =>
+    Effect.gen(function* () {
+      const n = yield* nextFleet();
+      const old = yield* n.before(n.f.cryo);
+      expect((yield* n.f.change(old, n.f.cryo, 0, [n.f.readOnly(n.f.anvil)])).revision).toBe(1);
+      // A later revision this machine kept but could not verify: it only restricts.
+      const cacheFile = n.f.path.join(yield* n.stateDirOf(n.f.cryo), "lan-fleet-access.json");
+      const cached = JSON.parse(yield* n.f.fs.readFileString(cacheFile)) as {
+        entries: Array<FleetAccessPolicy.FleetAccessEntry>;
+        unverified?: Array<string>;
+      };
+      const downgrade = n.f.sign(
+        syntheticFleetPeer("stranger"),
+        2,
+        FleetAccessPolicy.entryDigest(cached.entries[0]!),
+        byMachine([n.f.readOnly(n.f.anvil), n.f.readOnly(n.f.panda)]),
+      );
+      yield* writeFleetJson(cacheFile, {
+        ...cached,
+        entries: [...cached.entries, downgrade],
+        unverified: [FleetAccessPolicy.entryDigest(downgrade)],
+      });
+      // PandaMedic is not enrolled on the new fleet yet.
+      const target = yield* n.fleetAt("fleet-after-switch");
+      const roster = n.f
+        .input(n.f.cryo)
+        .peers.filter((peer) => peer.machineId !== n.f.panda.peer.machineId);
+      const cryo = yield* n.switched(n.f.cryo);
+      const offered = yield* cryo.refresh(target.input(n.f.cryo, roster));
+      expect(offered.carryProposal?.machines).toEqual(
+        byMachine([n.f.readOnly(n.f.anvil), n.f.readOnly(n.f.panda)]),
+      );
+      yield* n.save(cryo, target.input(n.f.cryo, roster), offered.carryProposal!);
+      // PandaMedic joins later, still read-only.
+      const joined = yield* (yield* n.switched(n.f.panda)).refresh(target.input(n.f.panda));
+      expect(joined.revision).toBe(1);
+      expect(n.f.accessOf(joined, n.f.panda)).toBe("read-only");
+      expect(n.f.accessOf(joined, n.f.anvil)).toBe("read-only");
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("proposes only exceptions between the new fleet's machines that still apply", () =>
+    Effect.gen(function* () {
+      const n = yield* nextFleet();
+      yield* (yield* n.before(n.f.cryo)).change({
+        ...n.f.input(n.f.cryo),
+        expectedRevision: 0,
+        next: {
+          defaultAccess: "standard",
+          machines: [n.f.readOnly(n.f.anvil), n.f.readOnly(n.f.spd), n.f.readOnly(n.f.panda)],
+          pairs: FleetAccessPolicy.replaceExceptions(
+            [],
+            [
+              {
+                machineId: n.f.anvil.peer.machineId,
+                standardOn: [n.f.spd.peer.machineId, n.f.panda.peer.machineId],
+              },
+            ],
+          ),
+        },
+      });
+      const target = yield* n.fleetAt("fleet-after-switch");
+      // SPDevMachine is outside the new fleet altogether.
+      const fleetPeers = n.f
+        .input(n.f.cryo)
+        .peers.filter((peer) => peer.machineId !== n.f.spd.peer.machineId);
+      const offered = yield* (yield* n.switched(n.f.cryo)).refresh(
+        target.input(n.f.cryo, fleetPeers),
+      );
+      expect(offered.carryProposal?.pairs).toEqual(
+        FleetAccessPolicy.replaceExceptions(
+          [],
+          [{ machineId: n.f.anvil.peer.machineId, standardOn: [n.f.panda.peer.machineId] }],
+        ),
+      );
+      // Its restriction stays, in case it joins later.
+      expect(
+        offered.carryProposal?.machines.some(
+          (machine) => machine.machineId === n.f.spd.peer.machineId,
+        ),
+      ).toBe(true);
     }).pipe(Effect.provide(configLayer)),
   );
 
   it.effect(
-    "carries only the new roster's machines and exceptions, after every machine is ready",
+    "never proposes from a machine its latest fleet made read-only, older lists aside",
     () =>
       Effect.gen(function* () {
-        const s = yield* switchedFleet();
-        const old = yield* s.before(s.f.cryo);
-        // AnvilToad and SPDevMachine read-only, AnvilToad standard on SPDevMachine.
-        yield* old.change({
-          ...s.f.input(s.f.cryo),
+        const n = yield* nextFleet();
+        // Fleet one: CryoFrog standard.
+        yield* n.f.change(yield* n.before(n.f.cryo), n.f.cryo, 0, []);
+        // Fleet two, on the switch roster: PandaMedic makes CryoFrog read-only.
+        const two = yield* n.fleetAt("fleet-two");
+        yield* (yield* n.switched(n.f.panda)).change({
+          ...two.input(n.f.panda),
           expectedRevision: 0,
-          next: {
-            defaultAccess: "standard",
-            machines: [s.f.readOnly(s.f.anvil), s.f.readOnly(s.f.spd)],
-            pairs: FleetAccessPolicy.replaceExceptions(
-              [],
-              [{ machineId: s.f.anvil.peer.machineId, standardOn: [s.f.spd.peer.machineId] }],
-            ),
-          },
+          next: { defaultAccess: "standard", machines: [n.f.readOnly(n.f.cryo)] },
         });
-        // SPDevMachine is not on the new roster.
-        const roster = s.f
-          .input(s.f.cryo)
-          .peers.filter((peer) => peer.machineId !== s.f.spd.peer.machineId);
-        const switched = yield* s.after(s.f.cryo);
-        // Lowering AnvilToad waits until every enabled machine says it takes a replaced credential.
-        expect((yield* switched.refresh(s.input(s.f.cryo, roster))).revision).toBe(0);
-        expect(yield* s.f.fs.exists(s.f.path.join(s.root, "fleet-access"))).toBe(false);
-        for (const machine of [s.f.panda, s.f.anvil])
-          yield* s.f.markReady(machine, machine, { root: s.root, fleetId: s.fleetId });
-        const state = yield* switched.refresh(s.input(s.f.cryo, roster));
-        expect(state.revision).toBe(1);
-        expect(state.machines).toEqual([s.f.readOnly(s.f.anvil)]);
-        expect(state.pairs).toEqual([]);
-        expect(s.f.accessOf(state, s.f.panda)).toBe("standard");
+        const cryoOnTwo = yield* (yield* n.switched(n.f.cryo)).refresh(two.input(n.f.cryo));
+        expect(n.f.accessOf(cryoOnTwo, n.f.cryo)).toBe("read-only");
+        // Fleet three: CryoFrog proposes nothing, not fleet one's wider list, across a restart.
+        const three = yield* n.fleetAt("fleet-three");
+        for (let start = 0; start < 2; start++) {
+          const state = yield* (yield* n.switched(n.f.cryo)).refresh(three.input(n.f.cryo));
+          expect(state.carryProposal).toBeUndefined();
+        }
+        expect(yield* n.f.fs.exists(three.accessDirectory)).toBe(false);
       }).pipe(Effect.provide(configLayer)),
   );
 
-  it.effect("never carries a list over for a machine it made read-only, or onto any list", () =>
+  it.effect("keeps the previous fleet's list through a restart on a fleet rebuilt in place", () =>
     Effect.gen(function* () {
-      const s = yield* switchedFleet();
-      const old = yield* s.before(s.f.cryo);
-      yield* s.f.change(old, s.f.cryo, 0, [s.f.readOnly(s.f.anvil)]);
-      // AnvilToad accepted the list that made it read-only; it may not write it anywhere.
-      yield* (yield* s.before(s.f.anvil)).refresh(s.f.input(s.f.anvil));
-      const anvil = yield* (yield* s.after(s.f.anvil)).refresh(s.input(s.f.anvil));
-      expect(anvil.revision).toBe(0);
-      expect(yield* s.f.fs.exists(s.f.path.join(s.root, "fleet-access"))).toBe(false);
-      // A starting list on the new share decides instead of the previous fleet's list.
-      yield* s.f.fs.writeFileString(
-        s.f.path.join(s.root, FleetAccessPolicy.SEED_FILE),
+      const n = yield* nextFleet();
+      yield* n.f.change(yield* n.before(n.f.cryo), n.f.cryo, 0, [n.f.readOnly(n.f.anvil)]);
+      const rebuilt = yield* n.fleetAt("fleet-rebuilt");
+      // The first read of the rebuilt fleet replaces the cache in place; then a restart.
+      const first = yield* (yield* n.before(n.f.cryo)).refresh(rebuilt.input(n.f.cryo));
+      expect(first.carryProposal?.machines).toEqual([n.f.readOnly(n.f.anvil)]);
+      const restarted = yield* (yield* n.before(n.f.cryo)).refresh(rebuilt.input(n.f.cryo));
+      expect(restarted.carryProposal?.machines).toEqual([n.f.readOnly(n.f.anvil)]);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("offers nothing once the new fleet has a list or a starting list", () =>
+    Effect.gen(function* () {
+      const n = yield* nextFleet();
+      yield* n.f.change(yield* n.before(n.f.cryo), n.f.cryo, 0, []);
+      const target = yield* n.fleetAt("fleet-after-switch");
+      const seedFile = n.f.path.join(target.root, FleetAccessPolicy.SEED_FILE);
+      yield* n.f.fs.writeFileString(
+        seedFile,
         JSON.stringify({
           version: 1,
-          fleetId: s.fleetId,
+          fleetId: target.fleetId,
           defaultAccess: "standard",
-          readOnly: [s.f.panda.peer.machineId],
+          readOnly: [n.f.panda.peer.machineId],
         }),
       );
-      const seeded = yield* (yield* s.after(s.f.cryo)).refresh(s.input(s.f.cryo));
-      expect(seeded.revision).toBe(0);
+      const seeded = yield* (yield* n.switched(n.f.cryo)).refresh(target.input(n.f.cryo));
       expect(seeded.seed).toBe("waiting");
-      // The same fleet never carries its own list onto itself.
-      const same = yield* (yield* s.before(s.f.panda)).refresh(s.f.input(s.f.panda));
-      expect(same.revision).toBe(1);
+      expect(seeded.carryProposal).toBeUndefined();
+      yield* n.f.fs.remove(seedFile);
+      yield* n.save(yield* n.switched(n.f.anvil), target.input(n.f.anvil), {
+        defaultAccess: "standard",
+        machines: [],
+      });
+      const listed = yield* (yield* n.switched(n.f.cryo)).refresh(target.input(n.f.cryo));
+      expect(listed.revision).toBe(1);
+      expect(listed.carryProposal).toBeUndefined();
     }).pipe(Effect.provide(configLayer)),
   );
 

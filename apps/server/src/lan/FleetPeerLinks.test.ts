@@ -59,6 +59,7 @@ import * as FleetContext from "./FleetContext.ts";
 import * as FleetCredentialAccess from "./FleetCredentialAccess.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import { syntheticFleetPeer } from "./FleetDelivery.fixtures.ts";
+import { FLEET_SWITCH_ROSTER } from "./FleetBootstrap.ts";
 import { writeFleetJson } from "./FleetFiles.ts";
 import * as FleetMcpOrigin from "./FleetMcpOrigin.ts";
 import * as FleetPeerHttpClient from "./FleetPeerHttpClient.ts";
@@ -1186,28 +1187,66 @@ it.live(
     ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-it("starts a switched roster from the previous fleet's links, without their spent tokens", () => {
-  const panda = EnvironmentId.make("environment-panda");
-  const departed = EnvironmentId.make("environment-departed");
-  const carried = FleetPeerLinks.carriedLinkState({
-    linking: {
-      "machine-panda": {
-        environmentId: panda,
-        link: { access: "full-access", deliveryId: "spent", linkedAt: "2026-11-24T06:38:18.485Z" },
-        consumedDeliveryId: "spent",
-        request: { requestId: "old-request", expiresAt: 0 },
-      },
-      "machine-departed": { environmentId: departed, lastError: "unreachable" },
-    },
-  });
-  // Nothing about the previous links survives but where they went: each is due again, and a pass
-  // forgets the fleet-made link to a machine that is not on the new roster.
-  expect(carried).toEqual({
-    version: 1,
-    linking: {
-      "machine-panda": { environmentId: panda },
-      "machine-departed": { environmentId: departed },
-    },
-    serving: {},
-  });
-});
+it.live(
+  "starts a switched roster from the previous fleet's links, without their spent tokens",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-fleet-link-state-" });
+        const panda = EnvironmentId.make("environment-panda");
+        const departed = EnvironmentId.make("environment-departed");
+        const previous = {
+          version: 1,
+          linking: {
+            "machine-panda": {
+              environmentId: panda,
+              link: {
+                access: "full-access",
+                deliveryId: "spent",
+                linkedAt: "2026-11-24T06:38:18.485Z",
+              },
+              consumedDeliveryId: "spent",
+              request: { requestId: "old-request", expiresAt: 0 },
+            },
+            "machine-departed": { environmentId: departed, lastError: "unreachable" },
+          },
+          serving: {
+            "machine-panda": {
+              linked: { deliveryId: "served", level: "standard" },
+              sessions: [{ sessionId: "old-session", deliveryId: "served", level: "standard" }],
+            },
+          },
+        };
+        yield* writeFleetJson(path.join(stateDir, "lan-fleet-peer-links.json"), previous);
+
+        // First start on the switch roster: only where each link went, nothing it was given.
+        const first = yield* FleetPeerLinks.loadLinkState({
+          stateDir,
+          rosterPath: FLEET_SWITCH_ROSTER,
+        });
+        expect(first.stateFile).toBe(path.join(stateDir, "lan-fleet-peer-links.json.d178"));
+        expect(first.state).toEqual({
+          version: 1,
+          linking: {
+            "machine-panda": { environmentId: panda },
+            "machine-departed": { environmentId: departed },
+          },
+          serving: {},
+        });
+
+        // Once the switched roster has its own state, that is what loads.
+        const own = { version: 1, linking: {}, serving: {} };
+        yield* writeFleetJson(first.stateFile, own);
+        expect(
+          (yield* FleetPeerLinks.loadLinkState({ stateDir, rosterPath: FLEET_SWITCH_ROSTER }))
+            .state,
+        ).toEqual(own);
+        // Off the switch roster the machine's own state is untouched.
+        expect(
+          (yield* FleetPeerLinks.loadLinkState({ stateDir, rosterPath: undefined })).state,
+        ).toEqual(previous);
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);

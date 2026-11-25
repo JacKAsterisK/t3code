@@ -435,6 +435,18 @@ const make = Effect.gen(function* () {
                 FleetAccessPolicy.selfAccess(policy) === "standard" && policy.unavailable !== true,
               ...(policy.seed === undefined ? {} : { seed: policy.seed }),
               ...(policy.seedPending === undefined ? {} : { seedPending: policy.seedPending }),
+              ...(policy.carryProposal === undefined
+                ? {}
+                : {
+                    carryProposal: {
+                      defaultAccess: policy.carryProposal.defaultAccess,
+                      machines: policy.carryProposal.machines,
+                      exceptions: FleetAccessPolicy.exceptionsOf(policy.carryProposal, [
+                        ...current.peers.map((peer) => peer.machineId),
+                        ...policy.carryProposal.machines.map((machine) => machine.machineId),
+                      ]),
+                    },
+                  }),
             },
           }),
       stage:
@@ -553,12 +565,16 @@ const make = Effect.gen(function* () {
                       return yield* refused("roster-origin-mismatch");
                     if (
                       input.operation === "start" &&
-                      (fresh.record === undefined
-                        ? fresh.authority !== undefined
-                        : fresh.record.rootPrivateKey === undefined ||
-                          (fresh.authority === undefined && fresh.record.lastRevision > 1))
+                      fresh.record === undefined &&
+                      fresh.authority !== undefined
                     )
                       return yield* refused("fleet-exists");
+                    if (input.operation === "start" && fresh.record !== undefined) {
+                      if (fresh.record.rootPrivateKey === undefined)
+                        return yield* refused("already-member");
+                      if (fresh.authority === undefined && fresh.record.lastRevision > 1)
+                        return yield* refused("owner-authority-missing");
+                    }
                     if (input.operation === "join" && fresh.authority === undefined)
                       return yield* refused("fleet-missing");
                     if (

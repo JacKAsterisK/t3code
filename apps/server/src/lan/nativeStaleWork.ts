@@ -248,6 +248,9 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
   const subagentById = db.prepare(
     "SELECT * FROM orchestration_v2_projection_subagents WHERE subagent_id=?",
   );
+  const appOwnedCard = db.prepare(
+    "SELECT 1 FROM orchestration_v2_projection_turn_items WHERE thread_id=? AND type='subagent' AND status IN ('pending','running','waiting') AND (node_id=? OR json_extract(payload_json,'$.subagentId')=?) AND json_extract(payload_json,'$.origin')='app_owned' LIMIT 1",
+  );
   const attemptById = db.prepare(
     "SELECT * FROM orchestration_v2_projection_run_attempts WHERE attempt_id=?",
   );
@@ -268,6 +271,8 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
     while (current !== null) {
       if (seen.has(current)) return false;
       seen.add(current);
+      // Runtime recovery recognizes ownership from either persisted representation.
+      if (appOwnedCard.get(threadId, current, current)) return false;
       const task = subagentById.get(current);
       if (
         task !== undefined &&
@@ -378,6 +383,12 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
         threadValue.status !== providerThread.status ||
         threadValue.appThreadId !== threadId ||
         threadValue.providerSessionId !== providerThread.provider_session_id ||
+        typeof providerThread.driver !== "string" ||
+        providerThread.driver.length === 0 ||
+        threadValue.driver !== providerThread.driver ||
+        typeof providerThread.provider_instance_id !== "string" ||
+        providerThread.provider_instance_id.length === 0 ||
+        threadValue.providerInstanceId !== providerThread.provider_instance_id ||
         value.providerThreadId !== row.provider_thread_id
       )
         return false;
@@ -388,7 +399,11 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
       const sessionValue = payload(session);
       if (
         sessionValue?.id !== providerThread.provider_session_id ||
-        sessionValue.status !== session.status
+        sessionValue.status !== session.status ||
+        session.driver !== providerThread.driver ||
+        sessionValue.driver !== session.driver ||
+        session.provider_instance_id !== providerThread.provider_instance_id ||
+        sessionValue.providerInstanceId !== session.provider_instance_id
       )
         return false;
     }
@@ -565,7 +580,10 @@ export function carriedMessageInputClassifier(
     return (
       turnValue.id === row.provider_turn_id &&
       turnValue.status === turn.status &&
-      turnValue.providerThreadId === row.provider_thread_id
+      turnValue.providerThreadId === row.provider_thread_id &&
+      typeof turn.node_id === "string" &&
+      turn.node_id.length > 0 &&
+      turnValue.nodeId === turn.node_id
     );
   };
 }
@@ -582,12 +600,26 @@ export function staleApprovalMaySettle(db: NodeSqlite.DatabaseSync) {
     if (typeof value.requestId !== "string" || value.nodeId !== row.node_id) return false;
     const request = requestById.get(value.requestId);
     const node = nodeById.get(row.node_id);
-    return (
-      request?.thread_id === row.thread_id &&
-      request?.node_id === row.node_id &&
-      node?.thread_id === row.thread_id &&
-      typeof node?.run_id === "string" &&
-      (row.run_id === node.run_id || (row.run_id === null && value.runId === node.run_id))
-    );
+    const turnId = row.provider_turn_id;
+    if (
+      request === undefined ||
+      node === undefined ||
+      typeof request.payload_json !== "string" ||
+      typeof node.payload_json !== "string" ||
+      typeof turnId !== "string" ||
+      turnId.length === 0 ||
+      value.providerTurnId !== turnId ||
+      request.provider_turn_id !== turnId ||
+      node.provider_turn_id !== turnId ||
+      request.thread_id !== row.thread_id ||
+      request.node_id !== row.node_id ||
+      node.thread_id !== row.thread_id ||
+      typeof node.run_id !== "string" ||
+      !(row.run_id === node.run_id || (row.run_id === null && value.runId === node.run_id))
+    )
+      return false;
+    const requestValue = JSON.parse(request.payload_json) as Record<string, unknown>;
+    const nodeValue = JSON.parse(node.payload_json) as Record<string, unknown>;
+    return requestValue.providerTurnId === turnId && nodeValue.providerTurnId === turnId;
   };
 }

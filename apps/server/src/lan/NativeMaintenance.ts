@@ -1285,7 +1285,10 @@ const classifyUpdateWork = (
     if (!["pending", "running"].includes(String(row.status))) continue;
     if (replayable(row)) {
       carriedWork.restartContinuations++;
-      if (row.effect_type === "provider-runtime.continue")
+      if (
+        row.effect_type === "provider-runtime.continue" ||
+        row.effect_type === "provider-thread.rollback"
+      )
         record(row, "restartContinuations", 1, true);
     } else block(row, "restartContinuations");
   }

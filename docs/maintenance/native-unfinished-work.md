@@ -36,7 +36,8 @@ explain more than one category. Reviewable future schedules are included even wh
 input card with exact links to a pending message-capable request is carried with
 that request. The card remains answerable after restart.
 Display the review before cancellation, including any selected future schedules
-that will be disabled. The response stays local to Hub.
+that will be disabled. The restart scope lists queued provider continuations and
+workspace rollbacks that can replay on startup. The response stays local to Hub.
 
 ## Settle or cancel
 

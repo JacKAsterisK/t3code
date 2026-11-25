@@ -12559,5 +12559,11 @@
   "27d76249d09eb69f": "Review guide ready",
   "faa3bb26abb39c93": "Review guide failed",
   "b7df38b7d8792d78": "Open guide",
-  "9e91e9a77b664e4e": "Could not start a review guide"
+  "9e91e9a77b664e4e": "Could not start a review guide",
+  "2f6bb22d78893be5": "Active threads on {machine}",
+  "dcb3d8070728e3ab": "{count} running or waiting on {machine}",
+  "7342bfc328008926": "Running",
+  "ab47f58386924b4f": "Previous",
+  "7f8cb8174c6d288f": "Next",
+  "7537ee2dca0db946": "This PC"
 }

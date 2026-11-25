@@ -164,6 +164,7 @@ import {
   useQuietThreadShells,
 } from "../state/entities";
 import { environmentPresentations } from "../state/presentation";
+import { liveShellEnvironmentIdsAtom } from "../state/shell";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { environmentProjects } from "../state/projects";
 import { threadEnvironment } from "../state/threads";
@@ -304,6 +305,10 @@ import {
   sidebarMachineRowId,
   type SidebarMachineEntry,
 } from "./sidebar/SidebarMachineGroupHeader";
+import {
+  EMPTY_MACHINE_ACTIVITY,
+  groupMachineActivity,
+} from "./sidebar/SidebarMachineActivity.logic";
 import {
   SidebarDragBoundary,
   SidebarSectionHeader,
@@ -1243,6 +1248,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // The boring sidebar already folds threads by project, and one machine needs no headers.
   const canGroupByMachine = !boringSidebarEnabled && environmentPresentationList.length > 1;
   const groupByMachine = canGroupByMachine && threadGrouping === "machine";
+  const liveMachineShellIds = useAtomValue(liveShellEnvironmentIdsAtom);
+  const machineActivity = groupByMachine ? groupMachineActivity(threads) : null;
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
   const listedThreads =
     promotingDraftThreadKeys.length === 0
@@ -1562,11 +1569,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         ? null
         : {
             machines: machineEntries,
-            // A project filter narrows the list to matching threads only.
+            // Running children can be hidden under their parent on another machine.
             keepEmpty: (machine) =>
-              scopedProjectGroups.length === 0 &&
-              machine.connection === "connected" &&
-              machineThreadProjects(machine.environmentId).length > 0,
+              (machineActivity?.get(machine.environmentId)?.length ?? 0) > 0 ||
+              (scopedProjectGroups.length === 0 &&
+                (machine.connection !== "connected" ||
+                  !liveMachineShellIds.has(machine.environmentId) ||
+                  machineThreadProjects(machine.environmentId).length > 0)),
           },
   });
   const handleMachineContextMenu = useStableCallback(
@@ -1732,7 +1741,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     return mapping;
   })();
 
-  const navigateToThread = (threadRef: ScopedThreadRef) => {
+  const navigateToThread = useStableCallback((threadRef: ScopedThreadRef) => {
     if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) {
       clearSelection();
     }
@@ -1744,7 +1753,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(threadRef),
     });
-  };
+  });
 
   const handleThreadFileDrop = async (threadRef: ScopedThreadRef, files: File[]) => {
     const dropId = queuePendingFileDrop({ threadRef, files });
@@ -3953,6 +3962,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                   !folder.machine.readOnly &&
                                   machineThreadProjects(folder.machine.environmentId).length > 0
                                 }
+                                activity={
+                                  folder.machine.connection === "connected" &&
+                                  liveMachineShellIds.has(folder.machine.environmentId)
+                                    ? (machineActivity?.get(folder.machine.environmentId) ??
+                                      EMPTY_MACHINE_ACTIVITY)
+                                    : null
+                                }
+                                onOpenActivityThread={navigateToThread}
                                 onToggle={toggleMachineGroup}
                                 onNewThread={startThreadOnMachine}
                                 onContextMenu={handleMachineContextMenu}

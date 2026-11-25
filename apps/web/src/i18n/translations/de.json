@@ -12550,5 +12550,11 @@
   "27d76249d09eb69f": "Review-Leitfaden bereit",
   "faa3bb26abb39c93": "Review-Leitfaden fehlgeschlagen",
   "b7df38b7d8792d78": "Leitfaden öffnen",
-  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden"
+  "9e91e9a77b664e4e": "Review-Leitfaden konnte nicht gestartet werden",
+  "2f6bb22d78893be5": "Aktive Threads auf {machine}",
+  "dcb3d8070728e3ab": "{count} aktiv oder wartend auf {machine}",
+  "7342bfc328008926": "Läuft",
+  "ab47f58386924b4f": "Zurück",
+  "7f8cb8174c6d288f": "Weiter",
+  "7537ee2dca0db946": "Dieser PC"
 }

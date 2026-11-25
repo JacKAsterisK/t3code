@@ -12545,5 +12545,11 @@
   "27d76249d09eb69f": "Guía de revisión lista",
   "faa3bb26abb39c93": "Falló la guía de revisión",
   "b7df38b7d8792d78": "Abrir guía",
-  "9e91e9a77b664e4e": "No se pudo iniciar una guía de revisión"
+  "9e91e9a77b664e4e": "No se pudo iniciar una guía de revisión",
+  "2f6bb22d78893be5": "Hilos activos en {machine}",
+  "dcb3d8070728e3ab": "{count} en ejecución o en espera en {machine}",
+  "7342bfc328008926": "En ejecución",
+  "ab47f58386924b4f": "Anterior",
+  "7f8cb8174c6d288f": "Siguiente",
+  "7537ee2dca0db946": "Este equipo"
 }

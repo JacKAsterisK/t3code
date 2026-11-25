@@ -12557,5 +12557,11 @@
   "27d76249d09eb69f": "Granskningsguiden är klar",
   "faa3bb26abb39c93": "Granskningsguiden misslyckades",
   "b7df38b7d8792d78": "Öppna guiden",
-  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide"
+  "9e91e9a77b664e4e": "Kunde inte starta en granskningsguide",
+  "2f6bb22d78893be5": "Aktiva trådar på {machine}",
+  "dcb3d8070728e3ab": "{count} pågår eller väntar på {machine}",
+  "7342bfc328008926": "Pågår",
+  "ab47f58386924b4f": "Föregående",
+  "7f8cb8174c6d288f": "Nästa",
+  "7537ee2dca0db946": "Den här datorn"
 }

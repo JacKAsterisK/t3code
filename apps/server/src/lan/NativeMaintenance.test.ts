@@ -569,7 +569,14 @@ effectIt.effect.each([false, true])(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-effectIt.effect.each(["missing", "present", "contradictory-status", "native-task-row"] as const)(
+effectIt.effect.each([
+  "missing",
+  "present",
+  "contradictory-status",
+  "native-task-row",
+  "contradictory-type",
+  "native-task-contradictory-type",
+] as const)(
   "keeps an app-owned delegation out of automatic settlement with %s ownership evidence",
   (fixtureCase) =>
     Effect.gen(function* () {
@@ -579,8 +586,11 @@ effectIt.effect.each(["missing", "present", "contradictory-status", "native-task
       const runId = "run:delegate-parent";
       const nodeId = "node:delegate";
       const childThreadId = "thread:delegate-child";
-      const hasTask = fixtureCase === "present" || fixtureCase === "native-task-row";
-      const taskOrigin = fixtureCase === "native-task-row" ? "provider_native" : "app_owned";
+      const nativeTask =
+        fixtureCase === "native-task-row" || fixtureCase === "native-task-contradictory-type";
+      const hasTask = fixtureCase === "present" || nativeTask;
+      const taskOrigin = nativeTask ? "provider_native" : "app_owned";
+      const cardType = fixtureCase.endsWith("contradictory-type") ? "dynamic_tool" : "subagent";
       const taskParentId = "node:native-parent";
       yield* insert("orchestration_v2_projection_runs", "interrupted", {
         thread_id: threadId,
@@ -593,7 +603,7 @@ effectIt.effect.each(["missing", "present", "contradictory-status", "native-task
           completedAt: at,
         }),
       });
-      if (fixtureCase === "native-task-row") {
+      if (nativeTask) {
         yield* insert("orchestration_v2_projection_nodes", "completed", {
           thread_id: threadId,
           run_id: runId,
@@ -655,7 +665,7 @@ effectIt.effect.each(["missing", "present", "contradictory-status", "native-task
           run_id: runId,
           node_id: hasTask ? nodeId : null,
           turn_item_id: "item:delegate",
-          type: "subagent",
+          type: cardType,
           updated_at: at,
           payload_json: JSON.stringify({
             id: "item:delegate",

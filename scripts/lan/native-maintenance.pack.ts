@@ -72,7 +72,9 @@ export async function buildNativeMaintenance(
       NodeFS.unlinkSync(file.path);
     }
     await build(nativeMaintenanceBundleOptions(root, outDir, identity));
-    const modules = NodeFS.readdirSync(outDir).filter((name) => /\.[cm]?js$/u.test(name));
+    const modules = NodeFS.readdirSync(outDir).filter(
+      (name) => name !== ".native-helper-build.lock",
+    );
     if (modules.length !== 1 || modules[0] !== "native-maintenance.mjs")
       throw new Error("The native maintenance helper must bundle into one self-contained module.");
     const files = modules.map((name) => {

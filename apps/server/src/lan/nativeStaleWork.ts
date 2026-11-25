@@ -250,7 +250,7 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
   );
   const appOwnedCard = db.prepare(
     // A terminal projection alone does not prove an app-owned card has finished.
-    "SELECT 1 FROM orchestration_v2_projection_turn_items WHERE thread_id=? AND type='subagent' AND (status IN ('pending','running','waiting') OR status IS NOT json_extract(payload_json,'$.status')) AND (node_id=? OR json_extract(payload_json,'$.subagentId')=?) AND json_extract(payload_json,'$.origin')='app_owned' LIMIT 1",
+    "SELECT 1 FROM orchestration_v2_projection_turn_items WHERE thread_id=? AND (type='subagent' OR json_extract(payload_json,'$.type')='subagent') AND (status IN ('pending','running','waiting') OR status IS NOT json_extract(payload_json,'$.status')) AND (node_id=? OR json_extract(payload_json,'$.subagentId')=?) AND json_extract(payload_json,'$.origin')='app_owned' LIMIT 1",
   );
   const attemptById = db.prepare(
     "SELECT * FROM orchestration_v2_projection_run_attempts WHERE attempt_id=?",

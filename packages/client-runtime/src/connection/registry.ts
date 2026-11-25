@@ -79,7 +79,11 @@ interface ConnectionRegistrationOptions {
   readonly fleetReplacement?: { readonly previousIdentity: FleetTlsIdentity | undefined };
 }
 
-type ExpectedFleetRoute = { readonly fleetId?: string; readonly fleetTls: FleetTlsIdentity };
+type ExpectedFleetRoute = {
+  readonly fleetId?: string;
+  readonly fleetTls: FleetTlsIdentity;
+  readonly fleetReplacementDeliveryId?: string;
+};
 
 function unsupportedState(
   entry: ConnectionCatalogEntry,
@@ -151,8 +155,8 @@ export class EnvironmentRegistry extends Context.Service<
       | PlatformEnvironmentRemovalError
     >;
     /**
-     * Removing an environment's last route removes the environment, the same as
-     * `remove`.
+     * Removing the last route normally forgets the environment. A guarded Fleet Reset
+     * removes only the reviewed route and keeps the environment's local data.
      */
     readonly removeRoute: (
       environmentId: EnvironmentId,
@@ -642,9 +646,19 @@ export const make = Effect.gen(function* () {
               }),
           ) ||
           (retiring && (profile === undefined || conflictsWithSavedRoute(retained, profile))) ||
-          (!retiring &&
-            unpinnedRenewal &&
-            retained.some((route) => fleetTlsOfRoute(route) !== undefined))
+          (options?.fleetPickup === true &&
+            !retiring &&
+            replacement === undefined &&
+            profile !== undefined &&
+            conflictsWithSavedRoute(
+              unpinnedRenewal
+                ? retained.filter(
+                    (route) => connectionRouteId(route.target) !== profile.connectionId,
+                  )
+                : retained,
+              profile,
+            )) ||
+          (unpinnedRenewal && retained.some((route) => fleetTlsOfRoute(route) !== undefined))
         )
           return yield* new ConnectionBlockedError({
             reason: "configuration",
@@ -692,7 +706,10 @@ export const make = Effect.gen(function* () {
         }
         if (options?.fleetPickup === true) {
           const { unsupportedReason: _reason, serverUpdateRequired: _update, ...rest } = entry;
-          entry = rest;
+          // Reset can remove the last route while keeping the user's saved disabled state.
+          const enabled =
+            previous?.enabled ?? !(yield* storage.listDisabled).includes(environmentId);
+          entry = { ...rest, enabled };
         }
         const persist = registrations.register(persistedRegistration, persistedRoutes(entry));
         const previousIdentity = replacement?.previousIdentity;
@@ -726,7 +743,11 @@ export const make = Effect.gen(function* () {
         yield* Ref.update(persistedEnvironmentIds, (current) =>
           new Set(current).add(environmentId),
         );
-        if (retiring && identity === undefined)
+        if (
+          retiring &&
+          identity === undefined &&
+          retained.every((route) => fleetTlsOfRoute(route) === undefined)
+        )
           yield* (fleetTls.disconnect?.(environmentId) ?? Effect.void).pipe(Effect.ignoreCause);
         yield* installEntryLocked(entry);
         return true;
@@ -993,6 +1014,7 @@ export const make = Effect.gen(function* () {
   /** Callers hold its lease lock. */
   const removeLocked = Effect.fn("EnvironmentRegistry.removeLocked")(function* (
     environmentId: EnvironmentId,
+    removal: "environment" | "fleet-route" = "environment",
   ) {
     if ((yield* Ref.get(platformEnvironmentIds)).has(environmentId)) {
       return yield* new PlatformEnvironmentRemovalError({
@@ -1002,7 +1024,11 @@ export const make = Effect.gen(function* () {
     const entry = yield* getEntry(environmentId);
 
     yield* pullRequestRoutingPermissions.forget(environmentId);
-    yield* registrations.remove(environmentId);
+    if (removal === "fleet-route") {
+      yield* registrations.setRoutes(environmentId, []);
+    } else {
+      yield* registrations.remove(environmentId);
+    }
     yield* Ref.update(persistedEnvironmentIds, (current) => {
       const next = new Set(current);
       next.delete(environmentId);
@@ -1014,20 +1040,22 @@ export const make = Effect.gen(function* () {
       next.delete(environmentId);
       return next;
     });
-    yield* Effect.all(
-      [
-        cache.clear(environmentId).pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("Could not clear cached environment data after removal.", {
-              environmentId,
-              error,
-            }),
+    if (removal === "environment") {
+      yield* Effect.all(
+        [
+          cache.clear(environmentId).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("Could not clear cached environment data after removal.", {
+                environmentId,
+                error,
+              }),
+            ),
           ),
-        ),
-        ownedDataCleanup.clear(environmentId),
-      ],
-      { concurrency: "unbounded", discard: true },
-    );
+          ownedDataCleanup.clear(environmentId),
+        ],
+        { concurrency: "unbounded", discard: true },
+      );
+    }
 
     for (const route of connectionRoutes(entry)) {
       const profile = Option.getOrNull(route.profile);
@@ -1139,13 +1167,25 @@ export const make = Effect.gen(function* () {
         if (
           expectedFleet !== undefined &&
           (profile?._tag !== "BearerConnectionProfile" ||
+            profile.learned === true ||
             profile.fleetId !== expectedFleet.fleetId ||
+            profile.fleetReplacementDeliveryId !== expectedFleet.fleetReplacementDeliveryId ||
             profile.fleetTls === undefined ||
             !sameFleetTlsRoute(profile.fleetTls, expectedFleet.fleetTls))
         )
           return;
         const remaining = routesAfterRemoving(routes, routeId);
-        if (remaining.length === 0) return yield* removeLocked(environmentId);
+        if (expectedFleet !== undefined && remaining.length !== routes.length - 1)
+          return yield* new ConnectionBlockedError({
+            reason: "configuration",
+            detail:
+              "A saved fleet connection was kept because a learned route uses its credential.",
+          });
+        if (remaining.length === 0)
+          return yield* removeLocked(
+            environmentId,
+            expectedFleet === undefined ? "environment" : "fleet-route",
+          );
         yield* replaceRoutesLocked(entry, remaining);
         if (
           expectedFleet !== undefined &&

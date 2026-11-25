@@ -231,7 +231,10 @@ its LAN address to be learned: **Network access** in the desktop app, or the
 [local network](./background-service.md#local-network-access) choice in `t3 up`.
 You can reorder a learned route, but not remove it; it
 goes away with the route it was learned through, or when the machine stops
-reporting that address.
+reporting that address. [Reset fleet links](../operations/lan-machine-links.md#reset-fleet-links)
+keeps a saved fleet connection if a learned route still uses its credential.
+If Reset removes a machine's last saved route, reconnect to the machine to
+continue using its local drafts.
 
 T3 Code connects over the first route that answers. Away from home, a LAN
 address that does not answer is checked briefly and skipped. It is only tried

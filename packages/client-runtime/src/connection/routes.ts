@@ -74,12 +74,20 @@ export function savedFleetIdentity(
   incoming?: FleetTlsIdentity,
 ) {
   if (entry === undefined) return undefined;
-  const identities = connectionRoutes(entry).flatMap((route) => fleetTlsOfRoute(route) ?? []);
-  if (incoming !== undefined) {
-    const exact = identities.filter((identity) => sameFleetTlsIdentity(identity, incoming));
-    if (exact.length === 1) return exact[0];
-  }
-  return identities.length === 1 ? identities[0] : null;
+  const pinned = connectionRoutes(entry).flatMap(({ profile }) => {
+    const saved = Option.getOrUndefined(profile);
+    return saved?._tag === "BearerConnectionProfile" && saved.fleetTls !== undefined
+      ? [{ identity: saved.fleetTls, fleetId: saved.fleetId }]
+      : [];
+  });
+  // D204 lets the gateway verify and replace a sole saved pin, even when the pin changes.
+  if (pinned.length === 1) return pinned[0]!.identity;
+  const exact = pinned.filter(
+    ({ identity }) => incoming !== undefined && sameFleetTlsIdentity(identity, incoming),
+  );
+  const match = exact.length === 1 ? exact[0] : undefined;
+  // With several pins, only a route with known fleet provenance can renew in place.
+  return match?.fleetId === undefined ? null : match.identity;
 }
 
 export function fleetReplacementRoutes(
@@ -100,13 +108,19 @@ export function fleetReplacementRoutes(
       candidate.fleetTls === undefined)
   )
     return null;
-  const retained =
-    entry === undefined
-      ? []
-      : connectionRoutes(entry).filter((route) => {
-          const pin = fleetTlsOfRoute(route);
-          return pin === undefined || current === undefined || !sameFleetTlsRoute(pin, current);
-        });
+  const routes = entry === undefined ? [] : connectionRoutes(entry);
+  const predecessorRoute = routes.find((route) => {
+    const pin = fleetTlsOfRoute(route);
+    return pin !== undefined && current !== undefined && sameFleetTlsRoute(pin, current);
+  });
+  if (current !== undefined && predecessorRoute === undefined) return null;
+  const retained = routes.filter((route) => route !== predecessorRoute);
+  if (
+    predecessorRoute !== undefined &&
+    connectionRouteId(predecessorRoute.target) !== candidate.connectionId &&
+    retained.some((route) => fleetTlsOfRoute(route) !== undefined)
+  )
+    return null;
   return conflictsWithSavedRoute(retained, candidate) ? null : retained;
 }
 

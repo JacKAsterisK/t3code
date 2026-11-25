@@ -1,6 +1,7 @@
 // oxlint-disable t3code/no-untranslated-copy -- T3 Code LAN fleet messages ship English-only alongside fleet setup.
 import { useAtomValue } from "@effect/atom-react";
 import {
+  ConnectionBlockedError,
   connectionRouteId,
   connectionRoutes,
   type ConnectionCatalogEntry,
@@ -59,6 +60,7 @@ const busyAtom = Atom.make(false);
 const pausedAtom = Atom.make(false);
 const deniedAtom = Atom.make(false);
 const isFleetError = Schema.is(LanFleetError);
+const isConnectionBlockedError = Schema.is(ConnectionBlockedError);
 
 const resetFleet = createEnvironmentRpcCommand(connectionAtomRuntime, {
   label: "web:lan-fleet:reset",
@@ -74,7 +76,12 @@ function savedFleetConnections(
   return [...entries].flatMap(([environmentId, entry]) =>
     connectionRoutes(entry).flatMap((route) => {
       const profile = Option.getOrUndefined(route.profile);
-      if (profile?._tag !== "BearerConnectionProfile" || profile.fleetTls === undefined) return [];
+      if (
+        profile?._tag !== "BearerConnectionProfile" ||
+        profile.learned === true ||
+        profile.fleetTls === undefined
+      )
+        return [];
       const expectedFleet =
         profile.fleetId === fleetId
           ? { fleetId, fleetTls: profile.fleetTls }
@@ -87,7 +94,12 @@ function savedFleetConnections(
             {
               environmentId,
               routeId: connectionRouteId(route.target),
-              expectedFleet,
+              expectedFleet: {
+                ...expectedFleet,
+                ...(profile.fleetReplacementDeliveryId === undefined
+                  ? {}
+                  : { fleetReplacementDeliveryId: profile.fleetReplacementDeliveryId }),
+              },
               label: route.target.label,
               address: profile.httpBaseUrl,
             },
@@ -138,14 +150,18 @@ export function useLanFleetReset(environmentId: EnvironmentId) {
           ),
         };
       }
-      let removalFailed = false;
+      let removalError: string | undefined;
       for (const { environmentId, routeId, expectedFleet } of routes) {
         const removed = await remove({ environmentId, routeId, expectedFleet });
-        if (removed._tag !== "Success") removalFailed = true;
+        if (removed._tag === "Success") continue;
+        const failure = squashAtomCommandFailure(removed);
+        removalError ??= isConnectionBlockedError(failure)
+          ? failure.message
+          : "Some saved fleet connections could not be removed.";
       }
       return {
         receipt: result.value,
-        ...(removalFailed ? { error: "Some saved fleet connections could not be removed." } : {}),
+        ...(removalError === undefined ? {} : { error: removalError }),
       };
     };
     return work().finally(() => {

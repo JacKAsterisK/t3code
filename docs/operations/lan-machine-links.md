@@ -439,12 +439,24 @@ and a fleet TLS pin does not block pickup. After pairing succeeds and the deskto
 promotes the new gateway for a pinned delivery, the catalog saves the new route
 and retires the proven old routes and their credentials in one update. A failed
 pairing or catalog write keeps the saved routes and credentials. The environment
-retains its enabled or disabled state.
+retains its enabled or disabled state. An unpinned replacement stops if a TLS
+pin would remain, including one saved during pairing. A successful unpinned
+pickup closes the gateway only after the last fleet TLS pin is gone.
 
-Unpinned routes and pins with no recorded fleet ID survive automatic retirement.
-If the new delivery collides with a retained route, the client keeps that route.
-Editing a saved address clears its fleet ID. An exact TLS pin renewal keeps the
-recorded fleet ID when the delivery omits it.
+D250/D258:
+
+- A route with no fleet provenance (no fleetId and no fleet TLS pin, i.e. a manual route) is never overwritten or retired.
+- A single pinned route without a fleetId follows the 1.0.53 D204 verified replacement exactly. That replacement requires a replace delivery, a saved pin that matches the active gateway, and a staged promotion.
+- A proven old-fleet route (a recorded fleetId that differs, plus a pin) may be retired after a fully successful pairing.
+- 1.0.54 never retires or replaces a route in any case where 1.0.53 would not.
+
+Legacy unpinned shared-folder connections can still renew their credentials in
+place. A replace delivery can omit its fleet ID during a mixed-version rollout.
+If the gateway check fails, the prior route and credential stay in place. If
+several pins remain, only an exact renewal of a route with a recorded fleet ID
+can proceed, at the same saved address. An exact TLS pin renewal keeps the
+recorded fleet ID when the delivery omits it. Editing a saved address clears its
+fleet ID.
 
 Deliveries and owner link requests expire after 24 hours; signed connection
 summaries last ten minutes. Polling stops after three consecutive failures and
@@ -467,8 +479,12 @@ pending codes, and adapter state. Confirm to retire the reviewed items and see
 a receipt. If the list changed during review, request a fresh preview. To remove
 saved connections too, opt in to the displayed routes. Like automatic
 retirement, this cleanup requires a fleet TLS pin. The list includes only pins
-from the current fleet and older pins with no recorded fleet ID. Manual
-connections and manual agent links are excluded.
+from the current fleet and older pins with no recorded fleet ID. Reset keeps
+manual connections, manual agent links and routes added or renewed after the
+preview. If a learned route borrows a listed pin's credential, Reset keeps both
+routes and explains why. Removing the last listed route takes the environment
+out of Connections. Its local drafts, cache and disabled setting are preserved
+for when a fleet route is added again.
 
 Reset invalidates sign-ins approved under retired offers. Before revoking
 sessions, it records which peers need a fresh offer, using the served sessions

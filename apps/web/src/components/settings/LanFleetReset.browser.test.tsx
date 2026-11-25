@@ -16,6 +16,7 @@ import {
 import {
   BearerConnectionProfile,
   BearerConnectionTarget,
+  ConnectionBlockedError,
   PrimaryConnectionTarget,
   type ConnectionCatalogEntry,
 } from "@t3tools/client-runtime/connection";
@@ -35,7 +36,7 @@ const fixtures = vi.hoisted(() => ({
         input: LanFleetResetInput;
       }) => LanFleetResetPreview | LanFleetResetReceipt | LanFleetError
     >(),
-  remove: vi.fn(),
+  remove: vi.fn<(input: unknown) => ConnectionBlockedError | undefined>(),
   useLanFleet: vi.fn(),
   setup: vi.fn<() => LanFleetSetupState>(),
   configure: vi.fn<(input: unknown) => LanFleetSetupState>(),
@@ -89,7 +90,11 @@ vi.mock(import("../../connection/catalog"), async () => {
       catalogValueAtom: Atom.make({ isReady: true, entries: new Map() }),
       removeRoute: {
         label: "remove-route",
-        run: (_registry: unknown, input: unknown) => Effect.sync(() => fixtures.remove(input)),
+        run: (_registry: unknown, input: unknown) =>
+          Effect.suspend(() => {
+            const result = fixtures.remove(input);
+            return result === undefined ? Effect.void : Effect.fail(result);
+          }),
       },
     } as never,
   };
@@ -368,9 +373,16 @@ it("reviews a fleet reset, refuses stale review, and removes saved routes only w
 
   await page.getByRole("button", { name: "Done" }).click();
   await open.click();
+  await expect.element(page.getByText(/Current fleet route/)).toBeVisible();
+  setRoutes([...entries, route("Route added after preview", preview.fleetId, true)]);
+  const detail = "A saved fleet connection was kept because a learned route uses its credential.";
+  fixtures.remove.mockReturnValueOnce(
+    new ConnectionBlockedError({ reason: "configuration", detail }),
+  );
   await include.click();
   await confirm.click();
   await expect.element(page.getByText("Fleet reset complete")).toBeVisible();
+  await expect.element(page.getByRole("alert")).toHaveTextContent(detail);
   expect(fixtures.remove.mock.calls).toEqual([
     [
       {

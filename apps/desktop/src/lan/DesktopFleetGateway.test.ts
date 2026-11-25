@@ -77,6 +77,44 @@ it.live(
     }),
 );
 
+it.live("serves the prior same-origin pin after promoting a cold gateway and failing to save", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      const origin = "https://127.0.0.1:9";
+      const pin = () => {
+        const { certificate, publicKeySha256 } = createFleetTlsCertificate({
+          address: "127.0.0.1",
+          now,
+        });
+        return { origin, certificate, publicKeySha256 };
+      };
+      const previousIdentity = pin();
+      const identity = pin();
+      const environmentId = EnvironmentId.make("fleet-cold-replacement-synthetic");
+      const gateway = yield* DesktopFleetGateway.DesktopFleetGateway;
+      const staged = yield* gateway.prepare({
+        environmentId,
+        identity,
+        retiredIdentities: [previousIdentity],
+        savedRoute: true,
+      });
+      expect(
+        yield* gateway.prepare({ environmentId, identity, savedRoute: true, validateStaged: true }),
+      ).toEqual(staged);
+      // The catalog still points at the previous pin after its failed write.
+      const saved = yield* gateway.prepare({
+        environmentId,
+        identity: previousIdentity,
+        savedRoute: true,
+      });
+      expect(saved.httpBaseUrl).not.toBe(staged.httpBaseUrl);
+      expect(yield* Effect.promise(() => request(saved.httpBaseUrl))).toBe(502);
+      expect(yield* gateway.prepare({ environmentId, identity, savedRoute: true })).toEqual(staged);
+    }).pipe(Effect.provide(DesktopFleetGateway.layer)),
+  ),
+);
+
 it.live("stages a fleet gateway without disrupting the saved route until selection", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -98,15 +136,18 @@ it.live("stages a fleet gateway without disrupting the saved route until selecti
       const gateway = yield* DesktopFleetGateway.DesktopFleetGateway;
       const oldGateway = yield* gateway.prepare({ environmentId, identity: previousIdentity });
 
-      expect(
-        yield* gateway
-          .prepare({
-            environmentId,
-            identity,
-            previousIdentity: { ...previousIdentity, publicKeySha256: "0".repeat(64) },
-          })
-          .pipe(Effect.flip),
-      ).toMatchObject({ reason: "configuration" });
+      for (const savedRoute of [undefined, true] as const) {
+        expect(
+          yield* gateway
+            .prepare({
+              environmentId,
+              identity,
+              previousIdentity: { ...previousIdentity, publicKeySha256: "0".repeat(64) },
+              ...(savedRoute === true ? { savedRoute } : {}),
+            })
+            .pipe(Effect.flip),
+        ).toMatchObject({ reason: "configuration" });
+      }
 
       const hostOnly = { ...previousIdentity, connectHost: "localhost" };
       const failed = yield* gateway.prepare({

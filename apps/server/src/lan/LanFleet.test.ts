@@ -964,6 +964,12 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
           connectedEnvironmentIds: [environmentId],
           pinnedFleetRoutes: [{ environmentId, fleetIds: ["old-fleet"] }],
         };
+        yield* f.sync(f.recipient.service, {
+          mode: "status",
+          connectedEnvironmentIds: [environmentId],
+        });
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+        assert.deepEqual(f.issued, []);
         yield* f.sync(f.recipient.service, { mode: "status", ...stale });
         assert.equal(
           (yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] })).machines[1]?.status,

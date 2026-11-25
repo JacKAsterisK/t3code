@@ -6,6 +6,7 @@ import {
   type AuthSessionId,
   EnvironmentId,
   FleetAccess as FleetAccessLevel,
+  FleetMachineId,
   LanFleetError,
   type LanFleetResetInput,
   LanFleetResetPreview,
@@ -51,6 +52,7 @@ const REQUEST_TTL = Duration.hours(1);
 const PASS_INTERVAL = Duration.minutes(10);
 const LINK_TIMEOUT = Duration.minutes(1);
 const SUBJECT_PREFIX = "lan-fleet-peer-link:";
+const isFleetMachineId = Schema.is(FleetMachineId);
 
 type Level = FleetAccessLevel;
 
@@ -204,8 +206,7 @@ const make = Effect.gen(function* () {
   }).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.provideService(Path.Path, path));
   const state = yield* Ref.make<State>(saved);
 
-  // Updates are applied to the latest state, never a pass's snapshot: a session can be
-  // attributed while a pass runs, and that must never wait for the pass's network calls.
+  // Session attribution can update serving state while a pass links to a peer over HTTP.
   const persist = writeLock.withPermits(1)(
     Ref.get(state).pipe(
       Effect.flatMap((current) => writeFleetJson(stateFile, current)),
@@ -700,12 +701,12 @@ const make = Effect.gen(function* () {
   const previewReset = Effect.fn("FleetPeerLinks.previewReset")(function* (fleetId: string) {
     const current = yield* Ref.get(state);
     const links = yield* peerLinks.fleetLinks;
-    const sessions = (yield* auth.listSessions())
-      .filter(
-        ({ subject }) =>
-          subject.startsWith(SUBJECT_PREFIX) ||
-          subject.startsWith(`${CredentialAttribution.MCP_CLIENT_SUBJECT}:${SUBJECT_PREFIX}`),
-      )
+    const served = (yield* auth.listSessions()).filter(
+      ({ subject }) =>
+        subject.startsWith(SUBJECT_PREFIX) ||
+        subject.startsWith(`${CredentialAttribution.MCP_CLIENT_SUBJECT}:${SUBJECT_PREFIX}`),
+    );
+    const sessions = served
       .map(({ sessionId, subject }) => ({ sessionId, subject }))
       .toSorted((a, b) => (a.sessionId < b.sessionId ? -1 : Number(a.sessionId > b.sessionId)));
     const codes = (yield* auth.listPairingLinks())
@@ -733,18 +734,51 @@ const make = Effect.gen(function* () {
       state: { ...current, linking: sorted(current.linking), serving: sorted(current.serving) },
     });
     const digest = NodeCrypto.createHash("sha256").update(canonical).digest("hex");
-    return { fleetId, items, digest } satisfies LanFleetResetPreview;
+    return { preview: { fleetId, items, digest } satisfies LanFleetResetPreview, served };
   });
 
   const resetLinks = Effect.fn("FleetPeerLinks.resetLinks")(
     function* (fleetId: string, input: LanFleetResetInput) {
-      const preview = yield* previewReset(fleetId).pipe(
+      const { preview, served } = yield* previewReset(fleetId).pipe(
         Effect.mapError(() => new LanFleetError({ reason: "unavailable" })),
       );
       if (input.mode === "preview") return preview;
       if (input.fleetId !== fleetId || input.previewDigest !== preview.digest)
         return yield* new LanFleetError({ reason: "configuration", refusal: "stale-review" });
+      const current = yield* Ref.get(state);
+      const serving = new Map<string, Serving>();
+      for (const [machineId, entry] of Object.entries(current.serving)) {
+        const lastLink = entry.linked ?? entry.sessions.at(-1);
+        if (lastLink !== undefined) {
+          serving.set(machineId, {
+            linked: { deliveryId: lastLink.deliveryId, level: lastLink.level },
+            sessions: [],
+          });
+        }
+      }
+      for (const session of served) {
+        const root = CredentialAttribution.attributionRoot(session.subject) ?? "";
+        const [machineId, deliveryId, extra] = Delivery.fleetCredentialSubjectParts(root)
+          .subject.slice(SUBJECT_PREFIX.length)
+          .split(":");
+        if (!isFleetMachineId(machineId) || !deliveryId || extra !== undefined)
+          return yield* new LanFleetError({
+            reason: "configuration",
+            refusal: "reset-peer-unidentified",
+          });
+        if (!serving.has(machineId)) {
+          serving.set(machineId, {
+            linked: { deliveryId, level: FleetAccessPolicy.credentialAccess(session) },
+            sessions: [],
+          });
+        }
+      }
+      const reset = { ...emptyState, serving: Object.fromEntries(serving) };
       return yield* Effect.gen(function* () {
+        // Record the reoffers before revoking sessions so a failed state write leaves them usable.
+        yield* writeFleetJson(stateFile, reset);
+        yield* Ref.set(state, reset);
+        yield* Queue.offer(requests, undefined);
         let unlinked = 0;
         let revokedSessions = 0;
         let revokedCodes = 0;
@@ -754,21 +788,6 @@ const make = Effect.gen(function* () {
           if (yield* auth.revokeSession(sessionId)) revokedSessions++;
         for (const { id } of preview.items.codes)
           if (yield* auth.revokePairingLink(id)) revokedCodes++;
-        const current = yield* Ref.get(state);
-        // A settled peer still holds its side of the link and needs an unsolicited offer.
-        const serving: Record<string, Serving> = {};
-        for (const [machineId, entry] of Object.entries(current.serving)) {
-          const linked = entry.linked ?? (entry.sessions.length > 0 ? entry.offer : undefined);
-          if (linked !== undefined)
-            serving[machineId] = {
-              linked: { deliveryId: linked.deliveryId, level: linked.level },
-              sessions: [],
-            };
-        }
-        const reset = { ...emptyState, serving };
-        yield* writeFleetJson(stateFile, reset);
-        yield* Ref.set(state, reset);
-        yield* Queue.offer(requests, undefined);
         return {
           fleetId,
           previewDigest: preview.digest,

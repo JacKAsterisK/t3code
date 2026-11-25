@@ -418,6 +418,15 @@ const make = Effect.gen(function* () {
                 }
                 let outgoingExists = yield* fs.exists(outFile);
                 if (
+                  !outgoingExists &&
+                  sent?.deliveryId === EXISTING_CONNECTION &&
+                  peerCatalog !== undefined &&
+                  !recipientConnected
+                ) {
+                  delete journal[`sent:${outgoingKey}`];
+                  sent = undefined;
+                }
+                if (
                   sharedFolder &&
                   recipientReady &&
                   outgoingExists &&

@@ -53,6 +53,7 @@ import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
 import {
   connectionRoutes,
   conflictsWithSavedFleetRoute,
+  fleetDeliveryConnectionId,
   fleetDeliveryRoutes,
   fleetReplacementRoutes,
   fleetTlsOfRoute,
@@ -73,6 +74,14 @@ export interface PairingConnectionInput {
   readonly tls?: FleetTlsIdentity;
   readonly fleetId?: string;
 }
+
+const isFleetPairing = (input: PairingConnectionInput) =>
+  input.fleetId !== undefined ||
+  input.tls !== undefined ||
+  input.replacementDeliveryId !== undefined ||
+  input.skipExisting !== undefined ||
+  input.requireSavedConnection === true ||
+  input.preserveManualConnection === true;
 
 export interface SshConnectionInput {
   readonly target: DesktopSshEnvironmentTarget;
@@ -160,11 +169,7 @@ export const preparePairingRegistration = Effect.fn(
       reason: "configuration",
       detail: "Fleet endpoint identity does not match this delivery.",
     });
-  if (
-    fleetReplacement !== undefined ||
-    input.requireSavedConnection === true ||
-    input.fleetId !== undefined
-  ) {
+  if (isFleetPairing(input)) {
     const environmentId = input.expectedEnvironmentId;
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
     const current =
@@ -177,7 +182,7 @@ export const preparePairingRegistration = Effect.fn(
         reason: "configuration",
         detail: "This saved connection was removed. Add it again to reconnect.",
       });
-    const candidate =
+    const pairingRoute =
       environmentId === undefined
         ? undefined
         : {
@@ -185,14 +190,20 @@ export const preparePairingRegistration = Effect.fn(
             httpBaseUrl: resolved.httpBaseUrl,
             ...(input.tls === undefined ? {} : { fleetTls: input.tls }),
             ...(input.fleetId === undefined ? {} : { fleetId: input.fleetId }),
-            ...(input.replacementDeliveryId === undefined || input.preserveManualConnection === true
+            ...(input.replacementDeliveryId === undefined
               ? {}
               : { fleetReplacementDeliveryId: input.replacementDeliveryId }),
           };
+    const routes = saved === undefined ? [] : connectionRoutes(saved);
+    const candidate =
+      pairingRoute === undefined
+        ? undefined
+        : {
+            ...pairingRoute,
+            connectionId: fleetDeliveryConnectionId(routes, pairingRoute),
+          };
     if (
-      (candidate !== undefined &&
-        saved !== undefined &&
-        conflictsWithSavedFleetRoute(connectionRoutes(saved), candidate)) ||
+      (candidate !== undefined && conflictsWithSavedFleetRoute(routes, candidate)) ||
       (fleetReplacement !== undefined &&
         (candidate === undefined ||
           fleetReplacementRoutes(saved, candidate, fleetReplacement.previousIdentity) === null))
@@ -314,8 +325,18 @@ const registerPairingConnection = Effect.fn(
       ? undefined
       : (yield* SubscriptionRef.get(registry.entries)).get(input.expectedEnvironmentId);
   const { saved, retired } = fleetDeliveryRoutes(current, input.fleetId);
-  if (saved !== undefined && retired.length === 0 && input.skipExisting === true)
-    return saved.target.environmentId;
+  if (saved !== undefined && retired.length === 0 && input.skipExisting === true) {
+    if (input.fleetId === undefined || saved.enabled === false) return saved.target.environmentId;
+    const hasFleetRoute = connectionRoutes(saved).some((route) => {
+      const profile = Option.getOrUndefined(route.profile);
+      return (
+        route.target._tag === "PrimaryConnectionTarget" ||
+        (profile?._tag === "BearerConnectionProfile" &&
+          (profile.fleetId === input.fleetId || profile.fleetTls !== undefined))
+      );
+    });
+    if (hasFleetRoute) return saved.target.environmentId;
+  }
 
   let fleetReplacement: { readonly previousIdentity: FleetTlsIdentity | undefined } | undefined;
   if (isReplacement) {
@@ -328,17 +349,21 @@ const registerPairingConnection = Effect.fn(
         retired.length === 0 &&
         !hasFleetPin &&
         input.preserveManualConnection === true &&
+        input.fleetId === undefined &&
         saved !== undefined
       )
         return saved.target.environmentId;
       // A switch can pair beside remaining manual routes without replacing them.
-      if (hasFleetPin || (input.tls !== undefined && retired.length === 0))
+      if (
+        hasFleetPin ||
+        (input.tls !== undefined && input.fleetId === undefined && retired.length === 0)
+      )
         return yield* new ConnectionBlockedError({
           reason: "configuration",
           detail:
             "There is no single verified fleet route to replace. Existing connections were kept.",
         });
-    } else {
+    } else if (input.tls !== undefined || previousIdentity !== undefined) {
       fleetReplacement = { previousIdentity };
     }
   }
@@ -359,12 +384,13 @@ const registerPairingConnection = Effect.fn(
       environmentId: registration.target.environmentId,
       identity: input.tls,
       savedRoute: true,
+      validateStaged: true,
     });
   }
   yield* registry.register(registration, {
     knownAddressOnly: input.expectedEnvironmentId === undefined,
     enable: true,
-    ...(input.fleetId === undefined ? {} : { retireOldFleet: true }),
+    ...(isFleetPairing(input) ? { fleetDelivery: true } : {}),
     ...(input.requireSavedConnection === true ? { requireSavedConnection: true } : {}),
     ...(fleetReplacement === undefined ? {} : { fleetReplacement }),
   });

@@ -42,7 +42,7 @@ import type {
   PersistedConnectionTarget,
   SupervisorConnectionState,
 } from "./model.ts";
-import { ConnectionBlockedError } from "./model.ts";
+import { BearerConnectionTarget, ConnectionBlockedError } from "./model.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
@@ -59,6 +59,7 @@ import {
   credentialConnectionId,
   entryWithRoutes,
   findRouteToSameAddress,
+  fleetDeliveryConnectionId,
   fleetDeliveryRoutes,
   fleetReplacementRoutes,
   fleetTlsOfRoute,
@@ -75,7 +76,7 @@ interface ConnectionRegistrationOptions {
   readonly enable?: boolean;
   readonly knownAddressOnly?: boolean;
   readonly requireSavedConnection?: boolean;
-  readonly retireOldFleet?: boolean;
+  readonly fleetDelivery?: boolean;
   readonly fleetReplacement?: { readonly previousIdentity: FleetTlsIdentity | undefined };
 }
 
@@ -614,13 +615,17 @@ export const make = Effect.gen(function* () {
             detail: "This saved connection was removed. Add it again to reconnect.",
           });
         const replacement = options?.fleetReplacement;
-        const candidate =
+        const profile =
           registration._tag === "BearerConnectionRegistration" ? registration.profile : undefined;
         const { saved } = fleetDeliveryRoutes(
           previous,
-          options?.retireOldFleet === true ? candidate?.fleetId : undefined,
+          options?.fleetDelivery === true ? profile?.fleetId : undefined,
         );
         const savedRoutes = saved === undefined ? [] : connectionRoutes(saved);
+        const candidate =
+          profile === undefined || options?.fleetDelivery !== true
+            ? profile
+            : { ...profile, connectionId: fleetDeliveryConnectionId(savedRoutes, profile) };
         const retained =
           replacement === undefined
             ? savedRoutes
@@ -634,7 +639,7 @@ export const make = Effect.gen(function* () {
         if (
           retained === null ||
           (candidate !== undefined &&
-            options?.retireOldFleet === true &&
+            options?.fleetDelivery === true &&
             conflictsWithSavedFleetRoute(savedRoutes, candidate)) ||
           (unpinnedRenewal && retained.some((saved) => fleetTlsOfRoute(saved) !== undefined))
         )
@@ -642,7 +647,10 @@ export const make = Effect.gen(function* () {
             reason: "configuration",
             detail: "The saved fleet connection changed before the replacement could be saved.",
           });
-        const sameAddress = findRouteToSameAddress(savedRoutes, registeredRoute);
+        const sameAddress =
+          savedRoutes.find(
+            (route) => connectionRouteId(route.target) === candidate?.connectionId,
+          ) ?? findRouteToSameAddress(savedRoutes, registeredRoute);
         const predecessor =
           sameAddress === undefined ? undefined : Option.getOrUndefined(sameAddress.profile);
         const tls = candidate?.fleetTls;
@@ -653,15 +661,26 @@ export const make = Effect.gen(function* () {
           sameFleetTlsIdentity(predecessor.fleetTls, tls)
             ? predecessor
             : undefined;
+        const inheritedFleetId =
+          registration._tag === "BearerConnectionRegistration" &&
+          registration.profile.fleetId === undefined
+            ? samePin?.fleetId
+            : undefined;
         const persistedRegistration =
           registration._tag === "BearerConnectionRegistration" &&
-          registration.profile.fleetId === undefined &&
-          samePin?.fleetId !== undefined
+          candidate !== undefined &&
+          (candidate.connectionId !== registration.target.connectionId ||
+            inheritedFleetId !== undefined)
             ? new BearerConnectionRegistration({
                 ...registration,
+                target: new BearerConnectionTarget({
+                  ...registration.target,
+                  connectionId: candidate.connectionId,
+                }),
                 profile: new BearerConnectionProfile({
                   ...registration.profile,
-                  fleetId: samePin.fleetId,
+                  connectionId: candidate.connectionId,
+                  ...(inheritedFleetId === undefined ? {} : { fleetId: inheritedFleetId }),
                 }),
               })
             : registration;
@@ -669,7 +688,7 @@ export const make = Effect.gen(function* () {
         const route: ConnectionRoute = { target: entry.target, profile: entry.profile };
         if (previous !== undefined) {
           const existing = retained;
-          const sameAddress = findRouteToSameAddress(existing, route);
+          const sameAddress = findRouteToSameAddress(existing, route, "replace");
           const routes = existing.filter(
             (existing) =>
               existing !== sameAddress ||

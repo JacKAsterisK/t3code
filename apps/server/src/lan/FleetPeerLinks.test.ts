@@ -209,7 +209,7 @@ const makeMachine = (input: {
         ),
       ),
       Layer.provideMerge(ServerSettings.layerTest(input.settings)),
-      Layer.provide(
+      Layer.provideMerge(
         Layer.succeed(FleetContext.FleetContext, {
           load: Ref.get(shareDown).pipe(
             Effect.flatMap((down) =>
@@ -218,7 +218,7 @@ const makeMachine = (input: {
           ),
         }),
       ),
-      Layer.provide(
+      Layer.provideMerge(
         Layer.mock(FleetAccessPolicy.FleetAccess)({
           accessFor: (environmentId) =>
             Ref.get(levels).pipe(
@@ -248,7 +248,7 @@ const makeMachine = (input: {
         }),
       ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-fleet-link-" })),
-      Layer.provide(Layer.succeed(HostProcess.Environment, input.launchEnvironment)),
+      Layer.provideMerge(Layer.succeed(HostProcess.Environment, input.launchEnvironment)),
       Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       Layer.fresh,
       Layer.build,
@@ -596,6 +596,96 @@ it.live(
         expect(yield* callerAccess(fleet)).toBe("full-access");
       }).pipe(Effect.provide(NodeServices.layer)),
     ),
+);
+
+it.live.each([
+  "missing",
+  "unreadable",
+  "dropped offer",
+  "unidentified session",
+  "state write failure",
+] as const)("reoffers or preserves the session when resetting a settled peer with %s", (mode) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+      const { linked, linking } = fleet;
+      yield* round(fleet);
+      const [session] = yield* linked.linkSessions(fleet.cryoFrog);
+      expect(session).toBeDefined();
+      const machineId = fleet.cryoFrog.peer.machineId;
+      const config = Context.get(linked.context, ServerConfig.ServerConfig);
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { stateFile, state } = yield* FleetPeerLinks.loadLinkState({
+        stateDir: config.stateDir,
+        rosterPath: undefined,
+      });
+      const settled = state.serving[machineId]!;
+      expect(settled.linked).toBeDefined();
+      if (mode === "missing") yield* fs.remove(stateFile);
+      else if (mode === "unreadable")
+        yield* fs.writeFileString(stateFile, "invalid synthetic state");
+      else if (mode === "dropped offer")
+        yield* writeFleetJson(stateFile, {
+          ...state,
+          serving: { [machineId]: { sessions: settled.sessions } },
+        });
+      const unidentified =
+        mode === "unidentified session"
+          ? yield* linked.auth.issueSession({
+              subject: "lan-fleet-peer-link:fixture-without-delivery",
+            })
+          : undefined;
+      const adapter = yield* FleetPeerLinks.FleetPeerLinks.pipe(
+        Effect.provide(FleetPeerLinks.layerServices.pipe(Layer.fresh)),
+        Effect.provideContext(linked.context),
+      );
+      const fleetId = "synthetic-fleet";
+      const preview = yield* adapter.resetLinks(fleetId, { mode: "preview" });
+      if (!("digest" in preview)) return yield* Effect.die("Expected fleet reset preview");
+      expect(preview.items.state.serving).toBe(mode === "missing" || mode === "unreadable" ? 0 : 1);
+      expect(preview.items.sessions.map(({ sessionId }) => sessionId).toSorted()).toEqual(
+        [
+          session!.sessionId,
+          ...(unidentified === undefined ? [] : [unidentified.sessionId]),
+        ].toSorted(),
+      );
+      const offer = path.join(
+        fleet.share,
+        Delivery.peerLinkFileNames(fleet.pandaMedic.peer.machineId, machineId).offer,
+      );
+      expect(yield* fs.exists(offer)).toBe(false);
+      const apply = adapter.resetLinks(fleetId, {
+        mode: "apply",
+        fleetId,
+        previewDigest: preview.digest,
+      });
+      if (mode === "unidentified session" || mode === "state write failure") {
+        if (mode === "state write failure") {
+          yield* fs.remove(stateFile);
+          yield* fs.makeDirectory(stateFile);
+        }
+        const result = yield* apply.pipe(Effect.result);
+        expect((yield* linked.auth.listSessions()).map(({ sessionId }) => sessionId)).toContain(
+          session!.sessionId,
+        );
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure:
+            mode === "unidentified session"
+              ? { reason: "configuration", refusal: "reset-peer-unidentified" }
+              : { reason: "unavailable" },
+        });
+        return;
+      }
+      expect(yield* apply).toMatchObject({ revokedSessions: 1 });
+      expect(yield* linked.linkSessions(fleet.cryoFrog)).toEqual([]);
+      yield* linking.adapter.pass;
+      yield* adapter.pass;
+      const fresh = yield* readFleetJson(offer, Delivery.Delivery);
+      expect(fresh.header.deliveryId).not.toBe(settled.linked?.deliveryId);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
 );
 
 it.live("invalidates an approved fleet sign-in during reset and accepts the fresh offer", () =>

@@ -73,6 +73,17 @@ const make = Effect.gen(function* () {
       const slot = saved ?? {};
       let active = slot.active;
       let pending = slot.replacement;
+      const matches = (gateway: Gateway | undefined) =>
+        gateway !== undefined && sameFleetTlsRoute(gateway.identity, input.identity);
+      if (input.validateStaged === true) {
+        const prepared = matches(pending?.gateway)
+          ? pending?.gateway
+          : matches(active)
+            ? active
+            : undefined;
+        if (prepared === undefined) return yield* new LanFleetError({ reason: "configuration" });
+        return { httpBaseUrl: prepared.proxy.httpBaseUrl, wsBaseUrl: prepared.proxy.wsBaseUrl };
+      }
       const predecessors = [
         ...(input.previousIdentity === undefined ? [] : [input.previousIdentity]),
         ...(input.retiredIdentities ?? []),
@@ -96,8 +107,6 @@ const make = Effect.gen(function* () {
         pending = undefined;
         if (retired !== undefined) yield* Effect.promise(() => retired.proxy.close());
       }
-      const matches = (gateway: Gateway | undefined) =>
-        gateway !== undefined && sameFleetTlsRoute(gateway.identity, input.identity);
       const activeMatches = matches(active);
       const pendingMatches = matches(pending?.gateway);
       const staged = previousIdentity !== undefined && !activeMatches;
@@ -106,10 +115,10 @@ const make = Effect.gen(function* () {
         input.savedRoute === true &&
         previousIdentity === undefined &&
         !activeMatches &&
-        active !== undefined
+        (active !== undefined || (pending !== undefined && !pendingMatches))
       ) {
         const alternate = slot.alternate;
-        if (pendingMatches && pending !== undefined) {
+        if (pendingMatches && pending !== undefined && active !== undefined) {
           if (alternate !== undefined) yield* Effect.promise(() => alternate.proxy.close());
           slot.alternate = active;
           slot.active = pending.gateway;
@@ -121,9 +130,10 @@ const make = Effect.gen(function* () {
         }
         if (alternate !== undefined && matches(alternate))
           return { httpBaseUrl: alternate.proxy.httpBaseUrl, wsBaseUrl: alternate.proxy.wsBaseUrl };
+        const committed = active?.identity ?? pending?.previousIdentity;
         if (
-          active.identity.origin === input.identity.origin &&
-          !sameFleetTlsIdentity(active.identity, input.identity)
+          committed?.origin === input.identity.origin &&
+          !sameFleetTlsIdentity(committed, input.identity)
         )
           return yield* new LanFleetError({ reason: "configuration" });
         const next = yield* createGateway(input.identity);
@@ -133,16 +143,14 @@ const make = Effect.gen(function* () {
       }
 
       if (staged) {
+        const conflicts = (identity: FleetTlsIdentity) =>
+          !predecessors.some((predecessor) => sameFleetTlsRoute(identity, predecessor)) &&
+          (input.savedRoute !== true ||
+            (identity.origin === input.identity.origin &&
+              !sameFleetTlsIdentity(identity, input.identity)));
         if (
-          active !== undefined &&
-          !sameFleetTlsRoute(active.identity, previousIdentity) &&
-          input.savedRoute !== true
-        )
-          return yield* new LanFleetError({ reason: "configuration" });
-        if (
-          pending !== undefined &&
-          !sameFleetTlsRoute(pending.previousIdentity, previousIdentity) &&
-          input.savedRoute !== true
+          (active !== undefined && conflicts(active.identity)) ||
+          (pending !== undefined && conflicts(pending.previousIdentity))
         )
           return yield* new LanFleetError({ reason: "configuration" });
       } else if (

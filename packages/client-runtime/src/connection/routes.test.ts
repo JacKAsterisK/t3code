@@ -294,6 +294,29 @@ describe("learned routes", () => {
     expect(
       mergeLearnedRoutes({ entry, activeRoute: RELAY, reported: [], allowInsecure: true }),
     ).toBeNull();
+
+    const fleetEntry = {
+      ...entry,
+      profile: Option.some(
+        new BearerConnectionProfile({
+          ...(profileOf(LAN) as BearerConnectionProfile),
+          fleetId: "synthetic-fleet",
+          fleetReplacementDeliveryId: "synthetic-delivery",
+        }),
+      ),
+    };
+    const routes = mergeLearnedRoutes({
+      entry: fleetEntry,
+      activeRoute: RELAY,
+      reported: [{ httpBaseUrl: "http://192.168.1.10:3773/", kind: "tailnet" }],
+      allowInsecure: true,
+    });
+    expect(routes).toHaveLength(2);
+    expect(profileOf(routes![0]!)).toMatchObject({
+      network: "tailscale",
+      fleetId: "synthetic-fleet",
+      fleetReplacementDeliveryId: "synthetic-delivery",
+    });
   });
 
   it("borrows the paired token when learned over a bearer route", () => {

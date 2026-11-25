@@ -80,39 +80,116 @@ type FleetRouteCandidate = {
   readonly fleetReplacementDeliveryId?: string;
 };
 
+const SEPARATE_FLEET_CONNECTION_PREFIX = "fleet-bearer:";
+
+function isSeparateFleetConnectionId(connectionId: string): boolean {
+  return connectionId.startsWith(SEPARATE_FLEET_CONNECTION_PREFIX);
+}
+
+function sameFleetCandidateAddress(route: ConnectionRoute, candidate: FleetRouteCandidate) {
+  return (
+    routeHttpBaseUrl(route)?.replace(/\/+$/u, "") === candidate.httpBaseUrl.replace(/\/+$/u, "")
+  );
+}
+
+function keepsSeparateFleetCredential(route: ConnectionRoute, candidate: FleetRouteCandidate) {
+  const profile = Option.getOrUndefined(route.profile);
+  return (
+    isSeparateFleetConnectionId(candidate.connectionId) &&
+    connectionRouteId(route.target) !== candidate.connectionId &&
+    profile?._tag === "BearerConnectionProfile" &&
+    profile.fleetTls === undefined
+  );
+}
+
+export function fleetDeliveryConnectionId(
+  routes: ReadonlyArray<ConnectionRoute>,
+  candidate: FleetRouteCandidate,
+): string {
+  if (candidate.fleetId === undefined) {
+    const tls = candidate.fleetTls;
+    const saved =
+      tls === undefined
+        ? undefined
+        : routes.find((route) => {
+            const pin = fleetTlsOfRoute(route);
+            return (
+              isSeparateFleetConnectionId(connectionRouteId(route.target)) &&
+              sameFleetCandidateAddress(route, candidate) &&
+              pin !== undefined &&
+              sameFleetTlsIdentity(pin, tls)
+            );
+          });
+    return saved === undefined ? candidate.connectionId : connectionRouteId(saved.target);
+  }
+
+  const separateId =
+    SEPARATE_FLEET_CONNECTION_PREFIX + JSON.stringify([candidate.fleetId, candidate.connectionId]);
+  const existingFleet = routes.find((route) => {
+    const id = connectionRouteId(route.target);
+    const profile = Option.getOrUndefined(route.profile);
+    return (
+      (id === separateId || id.startsWith(separateId + ":")) &&
+      sameFleetCandidateAddress(route, candidate) &&
+      profile?._tag === "BearerConnectionProfile" &&
+      profile.fleetId === candidate.fleetId
+    );
+  });
+  if (existingFleet !== undefined) return connectionRouteId(existingFleet.target);
+  const needsSeparateId = routes.some((route) => {
+    const id = connectionRouteId(route.target);
+    const profile = Option.getOrUndefined(route.profile);
+    return (
+      (id === candidate.connectionId || sameFleetCandidateAddress(route, candidate)) &&
+      profile?._tag === "BearerConnectionProfile" &&
+      profile.fleetTls === undefined &&
+      (profile.fleetId !== candidate.fleetId || candidate.fleetTls !== undefined)
+    );
+  });
+  if (!needsSeparateId) return candidate.connectionId;
+  const occupied = new Set(routes.map((route) => connectionRouteId(route.target)));
+  let available = separateId;
+  for (let index = 1; occupied.has(available); index++) available = `${separateId}:${index}`;
+  return available;
+}
+
 export function conflictsWithSavedFleetRoute(
   routes: ReadonlyArray<ConnectionRoute>,
   candidate: FleetRouteCandidate,
 ): boolean {
-  return (
-    candidate.fleetId !== undefined &&
-    routes.some((route) => {
-      if (
-        connectionRouteId(route.target) !== candidate.connectionId &&
-        routeHttpBaseUrl(route)?.replace(/\/+$/u, "") !== candidate.httpBaseUrl.replace(/\/+$/u, "")
-      )
-        return false;
-      const profile = Option.getOrUndefined(route.profile);
-      if (profile?._tag !== "BearerConnectionProfile") return true;
-      if (profile.fleetId !== undefined && profile.fleetId !== candidate.fleetId) return true;
-      if (profile.fleetTls !== undefined && candidate.fleetTls !== undefined) {
-        return (
-          profile.fleetId === undefined &&
-          !sameFleetTlsIdentity(profile.fleetTls, candidate.fleetTls)
-        );
-      }
-      // An original fleet can renew its pre-provenance connection at the same address.
+  return routes.some((route) => {
+    if (
+      connectionRouteId(route.target) !== candidate.connectionId &&
+      !sameFleetCandidateAddress(route, candidate)
+    )
+      return false;
+    if (keepsSeparateFleetCredential(route, candidate)) return false;
+    const profile = Option.getOrUndefined(route.profile);
+    if (profile?._tag !== "BearerConnectionProfile") return true;
+    if (
+      profile.fleetId !== undefined &&
+      candidate.fleetId !== undefined &&
+      profile.fleetId !== candidate.fleetId
+    )
+      return true;
+    if (profile.fleetTls !== undefined && candidate.fleetTls !== undefined) {
       return (
-        profile.fleetTls !== undefined ||
-        candidate.fleetTls !== undefined ||
-        candidate.fleetReplacementDeliveryId === undefined ||
-        profile.connectionId !== candidate.connectionId ||
-        profile.learned === true ||
-        profile.authorization !== undefined ||
-        profile.httpBaseUrl.replace(/\/+$/u, "") !== candidate.httpBaseUrl.replace(/\/+$/u, "")
+        profile.fleetId !== candidate.fleetId &&
+        !sameFleetTlsIdentity(profile.fleetTls, candidate.fleetTls)
       );
-    })
-  );
+    }
+    return (
+      profile.fleetId === undefined ||
+      profile.fleetId !== candidate.fleetId ||
+      profile.fleetTls !== undefined ||
+      candidate.fleetTls !== undefined ||
+      candidate.fleetReplacementDeliveryId === undefined ||
+      profile.connectionId !== candidate.connectionId ||
+      profile.learned === true ||
+      profile.authorization !== undefined ||
+      profile.httpBaseUrl.replace(/\/+$/u, "") !== candidate.httpBaseUrl.replace(/\/+$/u, "")
+    );
+  });
 }
 
 export function savedFleetIdentity(
@@ -161,11 +238,11 @@ export function fleetReplacementRoutes(
             (candidate.fleetTls === undefined || !sameFleetTlsIdentity(tls, candidate.fleetTls))
           );
         });
-  const address = candidate.httpBaseUrl.replace(/\/+$/u, "");
   return retained.some(
     (route) =>
       connectionRouteId(route.target) === candidate.connectionId ||
-      routeHttpBaseUrl(route)?.replace(/\/+$/u, "") === address,
+      (sameFleetCandidateAddress(route, candidate) &&
+        !keepsSeparateFleetCredential(route, candidate)),
   )
     ? null
     : retained;
@@ -303,9 +380,21 @@ export function upsertRoute(
 export function findRouteToSameAddress(
   routes: ReadonlyArray<ConnectionRoute>,
   route: ConnectionRoute,
+  mode: "lookup" | "replace" = "lookup",
 ): ConnectionRoute | undefined {
   const key = routeAddressKey(route);
-  return key === null ? undefined : routes.find((existing) => routeAddressKey(existing) === key);
+  const id = connectionRouteId(route.target);
+  return key === null
+    ? undefined
+    : routes.find((existing) => {
+        if (routeAddressKey(existing) !== key) return false;
+        const existingId = connectionRouteId(existing.target);
+        return (
+          mode === "lookup" ||
+          existingId === id ||
+          (!isSeparateFleetConnectionId(existingId) && !isSeparateFleetConnectionId(id))
+        );
+      });
 }
 
 function routeAddressKey(route: ConnectionRoute): string | null {
@@ -551,17 +640,12 @@ function withNetwork(route: ConnectionRoute, tailscale: boolean): ConnectionRout
   const profile = Option.getOrNull(route.profile);
   if (profile?._tag !== "BearerConnectionProfile") return route;
   if ((profile.network === "tailscale") === tailscale) return route;
+  const { network: _network, ...saved } = profile;
   return {
     target: route.target,
     profile: Option.some(
       new BearerConnectionProfile({
-        connectionId: profile.connectionId,
-        environmentId: profile.environmentId,
-        label: profile.label,
-        httpBaseUrl: profile.httpBaseUrl,
-        wsBaseUrl: profile.wsBaseUrl,
-        ...(profile.learned === undefined ? {} : { learned: profile.learned }),
-        ...(profile.authorization === undefined ? {} : { authorization: profile.authorization }),
+        ...saved,
         ...(tailscale ? { network: "tailscale" as const } : {}),
       }),
     ),

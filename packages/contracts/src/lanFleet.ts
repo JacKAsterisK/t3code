@@ -81,6 +81,8 @@ export const FleetTlsGatewayInput = Schema.Struct({
   previousIdentity: Schema.optionalKey(FleetTlsIdentity),
   retiredIdentities: Schema.optionalKey(Schema.Array(FleetTlsIdentity)),
   savedRoute: Schema.optionalKey(Schema.Literal(true)),
+  /** Check that the prepared proxy survived exchange without selecting it before the catalog write. */
+  validateStaged: Schema.optionalKey(Schema.Literal(true)),
 });
 export type FleetTlsGatewayInput = typeof FleetTlsGatewayInput.Type;
 export const FleetTlsGatewayResult = Schema.Struct({
@@ -328,6 +330,8 @@ const FLEET_REFUSAL_MESSAGES: Readonly<Record<string, string>> = {
   "not-owner": "Only the fleet's owner machine can do this.",
   "stale-review":
     "The fleet changed after this list was shown, so it was not saved. Review Machine access again.",
+  "reset-peer-unidentified":
+    "Fleet reset could not identify the machine for a served peer session. Existing links were kept. Review the session in Authorized clients before retrying.",
   "machine-not-enabled":
     "This machine, or one it was asked to link, is not an enabled fleet member in both the roster and the fleet's trust list.",
 };

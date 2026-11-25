@@ -116,7 +116,9 @@ share cannot give, such as while it is unreachable, only waits; it is never
 reported as refused. Machines adopting it at once serialize on the lock, and any
 competing first revisions merge as above. Write it with the checker, which reads
 the roster and authority, refuses once a list exists, and writes only with
-`--write`:
+`--write`. It writes under the same `fleet-access.lock` a list change holds, so it
+and a first save from Settings never both succeed; while that lock is held it asks
+you to run it again:
 
 ```powershell
 node apps/server/scripts/lan-fleet-access-seed.ts \\fileserver\private-share\fleet-roster.json <machineId> <machineId> --write

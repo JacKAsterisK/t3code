@@ -3,12 +3,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import { FleetRoster, LanFleetError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { FleetAuthority } from "../src/lan/FleetAuthority.ts";
-import { FleetAccessSeed, SEED_FILE } from "../src/lan/FleetAccessPolicy.ts";
-import { readFleetJson, writeFleetJson } from "../src/lan/FleetFiles.ts";
+import { FleetAccessSeed, SEED_FILE, writeStartingList } from "../src/lan/FleetAccessPolicy.ts";
+import { readFleetJson } from "../src/lan/FleetFiles.ts";
 
 // node apps/server/scripts/lan-fleet-access-seed.ts <roster.json> <machineId>... [--write]
 // Prints the starting access list that makes the named machines read-only and every other machine,
@@ -28,7 +27,6 @@ NodeRuntime.runMain(
       return yield* refuse(
         "Usage: lan-fleet-access-seed.ts <roster.json> <machineId>... [--write]",
       );
-    const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const roster = path.resolve(rosterArg);
     const root = path.dirname(roster);
@@ -49,12 +47,20 @@ NodeRuntime.runMain(
       );
     yield* Effect.log(yield* encodeSeed(seed));
     if (!write) return;
-    const history = path.join(root, "fleet-access");
-    if ((yield* fs.exists(history)) && (yield* fs.readDirectory(history)).length > 0)
-      return yield* refuse(`${history} already holds a list; machines ignore a starting list now.`);
+    // Under the lock a list change holds, so this and a first save never both succeed.
     const file = path.join(root, SEED_FILE);
-    if (yield* fs.exists(file)) return yield* refuse(`${file} already exists.`);
-    yield* writeFleetJson(file, seed);
+    yield* writeStartingList(root, seed).pipe(
+      Effect.catchTags({
+        LanFleetError: (error) =>
+          refuse(
+            error.reason === "busy"
+              ? "A machine is changing the access list right now; run this again shortly."
+              : error.refusal === "list-exists"
+                ? `${path.join(root, "fleet-access")} already holds a list; machines ignore a starting list now.`
+                : `${file} already exists.`,
+          ),
+      }),
+    );
     yield* Effect.log(`Wrote ${file}.`);
   }).pipe(Effect.provide(NodeServices.layer)),
 );

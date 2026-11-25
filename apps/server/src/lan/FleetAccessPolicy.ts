@@ -80,6 +80,36 @@ export const FleetAccessSeed = Schema.Struct({
 });
 export type FleetAccessSeed = typeof FleetAccessSeed.Type;
 
+/** The share lock every list write holds, the starting-list command's included. */
+export const ACCESS_LOCK = "fleet-access.lock";
+
+/**
+ * Places a starting list beside the roster under the lock a list change holds, so it and a first
+ * save never both succeed. Refused while the lock is held, once any list exists, or over one.
+ */
+export const writeStartingList = Effect.fn("FleetAccess.writeStartingList")(function* (
+  root: string,
+  seed: FleetAccessSeed,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const lock = path.join(root, ACCESS_LOCK);
+  const refused = (refusal: string) => new LanFleetError({ reason: "configuration", refusal });
+  yield* Effect.acquireUseRelease(
+    fs.makeDirectory(lock).pipe(Effect.mapError(() => new LanFleetError({ reason: "busy" }))),
+    () =>
+      Effect.gen(function* () {
+        const history = path.join(root, "fleet-access");
+        if ((yield* fs.exists(history)) && (yield* fs.readDirectory(history)).length > 0)
+          return yield* refused("list-exists");
+        const file = path.join(root, SEED_FILE);
+        if (yield* fs.exists(file)) return yield* refused("seed-exists");
+        yield* writeFleetJson(file, seed);
+      }),
+    () => fs.remove(lock, { recursive: true }).pipe(Effect.ignore),
+  );
+});
+
 /**
  * `fleet-access-ready/<machineId>.json` beside the roster, signed by that machine: it runs LAN
  * 1.0.26 or later, which never cuts a downgraded peer off. A 1.0.25 issuer would revoke a 1.0.24
@@ -1044,7 +1074,7 @@ const make = Effect.fn("FleetAccess.make")(function* (
 
   /** The share lock, cleared first if a crash left it behind. */
   const withShareLock = <A, E>(root: string, use: Effect.Effect<A, E>) => {
-    const lock = path.join(root, "fleet-access.lock");
+    const lock = path.join(root, ACCESS_LOCK);
     const busy = () => new LanFleetError({ reason: "busy" });
     const acquire = Effect.gen(function* () {
       if ((yield* Effect.result(fs.makeDirectory(lock)))._tag === "Success") return;

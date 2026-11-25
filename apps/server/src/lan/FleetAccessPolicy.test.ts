@@ -1254,6 +1254,38 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
     }).pipe(Effect.provide(configLayer)),
   );
 
+  it.effect("writes a starting list only under the share lock a list change holds", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const seed = f.seedOf(f.anvil) as FleetAccessPolicy.FleetAccessSeed;
+      const lock = f.path.join(f.root, FleetAccessPolicy.ACCESS_LOCK);
+      // A first save holds the lock: the seed command waits its turn instead of racing it.
+      yield* f.fs.makeDirectory(lock);
+      const busy = yield* FleetAccessPolicy.writeStartingList(f.root, seed).pipe(Effect.flip);
+      expect(busy).toMatchObject({ reason: "busy" });
+      expect(yield* f.fs.exists(f.seedFile)).toBe(false);
+      yield* f.fs.remove(lock, { recursive: true });
+      // The save that held it published first: no starting list may follow it.
+      const cryo = yield* f.machine();
+      yield* f.change(cryo, f.cryo, 0, []);
+      const late = yield* FleetAccessPolicy.writeStartingList(f.root, seed).pipe(Effect.flip);
+      expect(late).toMatchObject({ refusal: "list-exists" });
+      expect(yield* f.fs.exists(f.seedFile)).toBe(false);
+      expect(yield* f.fs.exists(lock)).toBe(false);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("writes a starting list once on a fleet with no list", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const seed = f.seedOf(f.anvil) as FleetAccessPolicy.FleetAccessSeed;
+      yield* FleetAccessPolicy.writeStartingList(f.root, seed);
+      expect(yield* f.fs.exists(f.seedFile)).toBe(true);
+      const again = yield* FleetAccessPolicy.writeStartingList(f.root, seed).pipe(Effect.flip);
+      expect(again).toMatchObject({ refusal: "seed-exists" });
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("an explicit roster path does not block a verified private-file fleet at startup", () =>
     Effect.gen(function* () {
       const f = yield* fleet();

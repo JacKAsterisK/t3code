@@ -1,4 +1,4 @@
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import {
   resolveThreadWorkingStartedAt,
   type EnvironmentThreadShell,
@@ -6,6 +6,7 @@ import {
 
 export interface MachineActivity {
   readonly threadId: ThreadId;
+  readonly projectId: ProjectId;
   readonly title: string;
   readonly status: "running" | "waiting";
   readonly startedAt: string | null;
@@ -33,6 +34,7 @@ export function groupMachineActivity(
     if (entries.has(thread.id)) continue;
     entries.set(thread.id, {
       threadId: thread.id,
+      projectId: thread.projectId,
       title: thread.title,
       status,
       startedAt: resolveThreadWorkingStartedAt(thread),
@@ -44,4 +46,14 @@ export function groupMachineActivity(
       Array.from(threads.values()),
     ]),
   );
+}
+
+export function hasMachineActivityInScope(
+  environmentId: EnvironmentId,
+  activity: ReadonlyArray<MachineActivity>,
+  scopedProjectKeys: ReadonlySet<string> | null,
+): boolean {
+  return scopedProjectKeys === null
+    ? activity.length > 0
+    : activity.some(({ projectId }) => scopedProjectKeys.has(`${environmentId}:${projectId}`));
 }

@@ -2,10 +2,17 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { formatWorkingDurationLabel } from "@t3tools/client-runtime/state/models";
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { useGT, useMessages } from "gt-react";
-import { memo, useState } from "react";
+import { memo, useId, useRef, useState } from "react";
 
 import { Button } from "../ui/button";
-import { Popover, PopoverClose, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popover";
+import {
+  Popover,
+  PopoverClose,
+  PopoverCreateHandle,
+  PopoverPopup,
+  PopoverTitle,
+  PopoverTrigger,
+} from "../ui/popover";
 import type { MachineActivity } from "./SidebarMachineActivity.logic";
 
 const PAGE_SIZE = 8;
@@ -42,12 +49,28 @@ function MachineActivityPopover({
   const gt = useGT();
   const m = useMessages();
   const [view, setView] = useState<{ openedAt: number; page: number } | null>(null);
-  const setOpen = (open: boolean) => setView(open ? { openedAt: Date.now(), page: 0 } : null);
+  const [popover] = useState(() => PopoverCreateHandle());
+  const triggerId = useId();
+  const popup = useRef<HTMLDivElement>(null);
+  const suppressReturnFocusOpen = useRef(false);
   const title = gt("Active threads on {machine}", { machine: machineLabel });
   const lastPage = Math.floor((activity.length - 1) / PAGE_SIZE);
   const page = Math.min(view?.page ?? 0, lastPage);
   return (
-    <Popover open={view !== null} onOpenChange={setOpen}>
+    <Popover
+      handle={popover}
+      open={view !== null}
+      onOpenChange={(open, { reason }) => {
+        if (
+          !open &&
+          (reason === "escape-key" || reason === "close-press") &&
+          popup.current?.contains(document.activeElement)
+        ) {
+          suppressReturnFocusOpen.current = true;
+        }
+        setView(open ? { openedAt: Date.now(), page: 0 } : null);
+      }}
+    >
       <PopoverTrigger
         aria-label={gt("{count} running or waiting on {machine}", {
           count: activity.length,
@@ -60,14 +83,31 @@ function MachineActivityPopover({
           />
         }
         data-sidebar-action-for={rowId}
+        id={triggerId}
         openOnHover
+        onBlur={() => {
+          suppressReturnFocusOpen.current = false;
+        }}
         onFocus={(event) => {
-          if (view === null && event.currentTarget.matches(":focus-visible")) setOpen(true);
+          if (suppressReturnFocusOpen.current) {
+            suppressReturnFocusOpen.current = false;
+            return;
+          }
+          if (view === null && event.currentTarget.matches(":focus-visible")) {
+            popover.open(triggerId);
+          }
         }}
       >
         {activity.length}
       </PopoverTrigger>
-      <PopoverPopup side="right" align="start" width="md" padding="compact">
+      <PopoverPopup
+        ref={popup}
+        side="right"
+        align="start"
+        width="md"
+        padding="compact"
+        initialFocus={false}
+      >
         {view !== null ? (
           <>
             <PopoverTitle className="mx-1 my-2">{title}</PopoverTitle>

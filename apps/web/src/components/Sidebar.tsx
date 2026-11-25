@@ -308,6 +308,7 @@ import {
 import {
   EMPTY_MACHINE_ACTIVITY,
   groupMachineActivity,
+  hasMachineActivityInScope,
 } from "./sidebar/SidebarMachineActivity.logic";
 import {
   SidebarDragBoundary,
@@ -1571,7 +1572,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             machines: machineEntries,
             // Running children can be hidden under their parent on another machine.
             keepEmpty: (machine) =>
-              (machineActivity?.get(machine.environmentId)?.length ?? 0) > 0 ||
+              hasMachineActivityInScope(
+                machine.environmentId,
+                machineActivity?.get(machine.environmentId) ?? EMPTY_MACHINE_ACTIVITY,
+                scopedProjectKeys,
+              ) ||
               (scopedProjectGroups.length === 0 &&
                 (machine.connection !== "connected" ||
                   !liveMachineShellIds.has(machine.environmentId) ||

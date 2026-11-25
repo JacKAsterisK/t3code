@@ -6891,6 +6891,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           Effect.mapError(controlReadError(childThreadId)),
         ),
       );
+    const owesRemoteDelegatedStop = sql`
+      json_type(payload_json, '$.remoteChild') = 'object'
+      AND (
+        json_type(payload_json, '$.remoteChild.stoppedThere') = 'false'
+        OR (
+          json_extract(payload_json, '$.status') IN ('cancelled', 'interrupted')
+          AND json_type(payload_json, '$.remoteChild.stoppedThere') IS NOT 'true'
+        )
+      )
+    `;
     const hasBusyRuntimeModeDelegation: ProjectionStoreV2Shape["hasBusyRuntimeModeDelegation"] = (
       threadId,
     ) =>
@@ -6899,7 +6909,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           WHERE task.thread_id = ${threadId} AND task.origin = 'app_owned'
             AND (
               task.completion_delivery_state IN ('pending', 'claimed')
-              OR json_type(task.payload_json, '$.remoteChild.stoppedThere') = 'false'
+              OR (${owesRemoteDelegatedStop})
               OR EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_runs AS child_run
                 WHERE child_run.thread_id = task.child_thread_id
@@ -9088,11 +9098,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         AND json_type(payload_json, '$.remoteChild') = 'object'
         AND (
           json_type(payload_json, '$.result') = 'null'
-          OR (
-            json_extract(payload_json, '$.status') IN ('cancelled', 'interrupted')
-            AND json_type(payload_json, '$.remoteChild.stoppedThere') IS NOT 'true'
-          )
-          OR json_type(payload_json, '$.remoteChild.stoppedThere') = 'false'
+          OR (${owesRemoteDelegatedStop})
         )
     `.pipe(
       Effect.map((rows) =>

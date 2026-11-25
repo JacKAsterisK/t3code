@@ -15,7 +15,7 @@ import {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
-import { expect, it } from "@effect/vitest";
+import { expect, it, vi } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -331,7 +331,10 @@ const mcpClient = McpSchema.McpServerClient.of({
  * caller whose modes the test picks. Its local threads never matter here.
  */
 const makeLaptop = Effect.fn("makeLaptop")(function* (
-  supportedModes: Effect.Effect<ReadonlyArray<RuntimeMode> | undefined> = Effect.undefined,
+  supportedModesFor: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ReadonlyArray<RuntimeMode> | undefined> = () => Effect.undefined,
+  providerOnRead?: Effect.Effect<ProviderInstanceId>,
 ) {
   const linking = yield* layerLinkingEnvironment(laptop).pipe(Layer.build);
   const layerHere = Layer.mergeAll(
@@ -357,10 +360,10 @@ const makeLaptop = Effect.fn("makeLaptop")(function* (
     Layer.provide(PeerForwarding.layer),
     Layer.provide(
       Layer.mock(ProviderInstanceRegistry)({
-        getInstance: () =>
+        getInstance: (instanceId) =>
           Effect.succeed({
             snapshot: {
-              getSnapshot: supportedModes.pipe(
+              getSnapshot: supportedModesFor(instanceId).pipe(
                 Effect.map((supportedRuntimeModes) => ({ supportedRuntimeModes })),
               ),
             },
@@ -371,8 +374,8 @@ const makeLaptop = Effect.fn("makeLaptop")(function* (
     Layer.provide(NodeCrypto.layer),
     Layer.provideMerge(
       Layer.mock(ThreadManagement.ThreadManagementService)({
-        getThreadShell: (threadId) =>
-          Effect.succeed(
+        getThreadShell: (threadId) => {
+          const shell =
             threadId === ThreadId.make("thread:laptop-from-desk")
               ? {
                   ...liveThreadShell(threadId, { runtimeMode: "full-access" }),
@@ -390,8 +393,15 @@ const makeLaptop = Effect.fn("makeLaptop")(function* (
                         : threadId === ThreadId.make("thread:laptop-edits")
                           ? { runtimeMode: "auto-accept-edits" }
                           : { runtimeMode: "full-access" },
-                  ),
-          ),
+                  );
+          return providerOnRead === undefined
+            ? Effect.succeed(shell)
+            : Effect.map(providerOnRead, (providerInstanceId) => ({
+                ...shell,
+                providerInstanceId,
+                modelSelection: { ...shell.modelSelection, instanceId: providerInstanceId },
+              }));
+        },
         getProjectThreadRecords: ({ threadId }) =>
           Effect.succeed({
             thread: liveThreadShell(threadId, { runtimeMode: "full-access" }),
@@ -883,6 +893,42 @@ it.effect("brings a repository to a linked environment, only through full access
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("rejects a forwarded mode change if the authenticated provider changed", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const seen = yield* Ref.make<Seen>(nothingSeen);
+      const linkSession = yield* Ref.make("");
+      const receiver = yield* serveBox(seen, linkSession);
+      const reads = yield* Ref.make(0);
+      const original = ProviderInstanceId.make("codex");
+      const replacement = ProviderInstanceId.make("replacement");
+      const sender = yield* makeLaptop(
+        (id) => Effect.succeed(id === original ? ["approval-required"] : ["auto"]),
+        Ref.getAndUpdate(reads, (count) => count + 1).pipe(
+          Effect.map((count) => (count === 0 ? original : replacement)),
+        ),
+      );
+      yield* linkTo(sender.links, receiver, "auto");
+      yield* Ref.set(linkSession, (yield* receiver.linkedSessions)[0]!.sessionId);
+      const peerCall = yield* Effect.acquireRelease(
+        Effect.sync(() => vi.spyOn(sender.peerClient, "call")),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      );
+
+      const refused = yield* sender.call("thread:laptop-auto", "t3_thread_set_runtime_mode", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        expectedRuntimeMode: "auto",
+        runtimeMode: "approval-required",
+      });
+
+      expect(failureOf(refused)).toMatchObject({ code: "parent_not_active" });
+      expect(yield* Ref.get(reads)).toBe(2);
+      expect(peerCall).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("runs any tool that takes a linked environment there", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -890,7 +936,7 @@ it.effect("runs any tool that takes a linked environment there", () =>
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
       const modes = yield* Ref.make<ReadonlyArray<RuntimeMode> | undefined>(undefined);
-      const a = yield* makeLaptop(Ref.get(modes));
+      const a = yield* makeLaptop(() => Ref.get(modes));
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 

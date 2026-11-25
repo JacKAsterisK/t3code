@@ -298,6 +298,8 @@ export function layerWithRegistry<Error>(
     ) => ProjectionStore.ProjectionStoreV2Shape;
     readonly managedPolicy?: ManagedPolicyDocument;
     readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+    /** A fixture that changes settings can supply the instance it also uses outside the harness. */
+    readonly settingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService>;
     /** The instances the ingestor reads snapshots from, such as an endpoint behind a hub. */
     readonly providerInstances?: Partial<
       ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]
@@ -310,8 +312,7 @@ export function layerWithRegistry<Error>(
   | EventSink.EventSinkV2
   | ProviderSessionManager.ProviderSessionManagerV2
   | CommandOutputRecorder.CommandOutputRecorder
-  | ThreadCommandExecutor.ThreadCommandExecutor
-  | ServerSettings.ServerSettingsService,
+  | ThreadCommandExecutor.ThreadCommandExecutor,
   Error | MigrationError | PlatformError.PlatformError | SqlError
 > {
   const layerServerConfig = Layer.effect(
@@ -331,20 +332,22 @@ export function layerWithRegistry<Error>(
   const layerProvidedRegistry = registryLayer.pipe(
     Layer.provide(Layer.merge(layerContinuationRequests, McpProviderSessions.layer)),
   );
-  const layerServerSettings = Layer.unwrap(
-    Effect.map(ManagedPolicy.fromDocument("/test/policy.json", options.managedPolicy), (policy) =>
-      ServerSettings.layerTest(
-        {
-          responseStreamingMode: "turn",
-          ...options.settings,
-          ...(options.continueThreadsAfterServerUpdate === undefined
-            ? {}
-            : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
-        },
-        policy.summary,
+  const layerServerSettings =
+    options.settingsLayer ??
+    Layer.unwrap(
+      Effect.map(ManagedPolicy.fromDocument("/test/policy.json", options.managedPolicy), (policy) =>
+        ServerSettings.layerTest(
+          {
+            responseStreamingMode: "turn",
+            ...options.settings,
+            ...(options.continueThreadsAfterServerUpdate === undefined
+              ? {}
+              : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
+          },
+          policy.summary,
+        ),
       ),
-    ),
-  ).pipe(Layer.orDie);
+    ).pipe(Layer.orDie);
   const layerEffectOutboxProvided = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
   const wrapProjectionStore = options.wrapProjectionStore;
   const layerProjectionStore =
@@ -601,7 +604,6 @@ export function layerWithRegistry<Error>(
     layerContinuationWorkerProvided,
     layerCommandOutputHubProvided,
     ThreadCommandExecutor.layer,
-    layerServerSettings,
   ).pipe(
     Layer.provide(ProviderTurnStartServiceTestkit.layer),
     Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),

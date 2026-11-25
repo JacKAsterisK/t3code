@@ -28,7 +28,12 @@ import * as Option from "effect/Option";
 import { resolveRuntimeMode, runtimeModeRank } from "../mcp/delegatedTaskModes.ts";
 import { assertNotLinked } from "../mcp/linkOrigin.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
-import { readCaller, threadCreationRuntimeLimit, unavailable } from "../mcp/threadAccess.ts";
+import {
+  assertLiveCaller,
+  readCaller,
+  threadCreationRuntimeLimit,
+  unavailable,
+} from "../mcp/threadAccess.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { providerRuntimeMode } from "../orchestration-v2/RuntimePolicy.ts";
@@ -191,13 +196,16 @@ const make = Effect.gen(function* () {
     params: unknown,
     writes: boolean,
   ) {
-    const { caller, limits: callerLimits } = yield* forwardingCaller(scope);
+    const forwarding = yield* forwardingCaller(scope);
+    const { caller, limits: callerLimits } = forwarding;
     let limits = callerLimits;
     const encoded = (yield* Schema.encodeUnknownEffect(parameters as Schema.Encoder<unknown>)(
       params,
     ).pipe(Effect.mapError(unavailable))) as Record<string, unknown>;
     const { environmentId: _target, ...args } = encoded;
     if (toolName === SET_RUNTIME_MODE_TOOL) {
+      // Bind provider capabilities to the same caller snapshot used to authorize the forwarded write.
+      yield* assertLiveCaller(forwarding);
       if (scope.client?.linked === true || caller?.linkOrigin != null) {
         return yield* new OrchestratorMcpFailure({
           code: "forwarding_chain_refused",

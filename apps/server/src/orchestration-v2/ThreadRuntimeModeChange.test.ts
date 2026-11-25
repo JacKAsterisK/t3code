@@ -15,7 +15,7 @@ import {
   type RuntimeMode,
 } from "@t3tools/contracts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
-import { ServerSettingsService } from "../serverSettings.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -44,10 +44,17 @@ const adapter = {
   openSession: () => Effect.die("Runtime-mode management never starts a provider"),
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 
+const testSettings = (enabled: boolean) => ({
+  linkedEnvironmentsEnabled: true,
+  allowAgentFullAccessLaunches: true,
+  ...(enabled ? { allowAgentFullAccessModeChanges: true } : {}),
+});
+
 const testLayer = (
   enabled: boolean,
   withCeiling = false,
   runtimeModes?: ReadonlyArray<RuntimeMode>,
+  settingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService>,
 ) => {
   const databaseLayer = SqlitePersistence.layerMemory;
   return Layer.merge(
@@ -70,11 +77,7 @@ const testLayer = (
                   } as ProviderInstance),
               },
             }),
-        settings: {
-          linkedEnvironmentsEnabled: true,
-          allowAgentFullAccessLaunches: true,
-          ...(enabled ? { allowAgentFullAccessModeChanges: true } : {}),
-        },
+        ...(settingsLayer === undefined ? { settings: testSettings(enabled) } : { settingsLayer }),
         ...(withCeiling
           ? {
               managedPolicy: {
@@ -514,8 +517,12 @@ const addWaitingLink = Effect.fn("RuntimeModeTest.addWaitingLink")(function* () 
 });
 
 const addDelegatedTask = Effect.fn("RuntimeModeTest.addDelegatedTask")(function* (
-  state: "remote-stop" | "pending" | "claimed" | "delivered",
+  state: "pending" | "claimed" | "delivered",
   childThreadId: ThreadId | null = null,
+  remoteStop?: {
+    readonly status: "cancelled" | "interrupted";
+    readonly stoppedThere: boolean | undefined;
+  },
 ) {
   const sink = yield* EventSink.EventSinkV2;
   const now = yield* DateTime.now;
@@ -542,17 +549,20 @@ const addDelegatedTask = Effect.fn("RuntimeModeTest.addDelegatedTask")(function*
           prompt: "",
           title: null,
           model: null,
-          ...(state === "remote-stop"
+          completionDelivery: { state, observedByRunId: null },
+          ...(remoteStop !== undefined
             ? {
                 remoteChild: {
                   threadId: ThreadId.make("thread:remote-child"),
                   environmentId: EnvironmentId.make("other"),
                   label: "Peer",
-                  stoppedThere: false,
+                  ...(remoteStop.stoppedThere === undefined
+                    ? {}
+                    : { stoppedThere: remoteStop.stoppedThere }),
                 },
               }
-            : { completionDelivery: { state, observedByRunId: null } }),
-          status: state === "remote-stop" ? "cancelled" : "completed",
+            : {}),
+          status: remoteStop?.status ?? "completed",
           result: "finished",
           startedAt: now,
           completedAt: now,
@@ -563,7 +573,7 @@ const addDelegatedTask = Effect.fn("RuntimeModeTest.addDelegatedTask")(function*
   });
 });
 
-it.effect.each(["remote-stop", "pending", "claimed"] as const)(
+it.effect.each(["pending", "claimed"] as const)(
   "refuses an idle parent with unfinished delegation (%s)",
   (state) =>
     Effect.gen(function* () {
@@ -574,6 +584,34 @@ it.effect.each(["remote-stop", "pending", "claimed"] as const)(
         "code",
         "thread_busy",
       );
+    }).pipe(Effect.provide(testLayer(true))),
+);
+
+it.effect.each([
+  { status: "cancelled", stoppedThere: undefined },
+  { status: "interrupted", stoppedThere: undefined },
+  { status: "cancelled", stoppedThere: false },
+  { status: "cancelled", stoppedThere: true },
+] as const)(
+  "checks remote stop debt after result delivery ($status, $stoppedThere)",
+  (remoteStop) =>
+    Effect.gen(function* () {
+      yield* seed;
+      yield* addDelegatedTask("delivered", null, remoteStop);
+      const changeMode = change("parent-downgrade", "approval-required", "auto", linkedActor);
+      const acknowledged = remoteStop.stoppedThere === true;
+      if (acknowledged) {
+        yield* changeMode;
+      } else {
+        assert.propertyVal(yield* changeMode.pipe(Effect.flip), "code", "thread_busy");
+      }
+      const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+      const receipt = yield* receipts.getByCommandId(CommandId.make("parent-downgrade"));
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { thread } = yield* orchestrator.getThreadRecords(target, []);
+
+      assert.equal(thread.runtimeMode, acknowledged ? "approval-required" : "auto");
+      assert.equal(receipt._tag, acknowledged ? "Some" : "None");
     }).pipe(Effect.provide(testLayer(true))),
 );
 
@@ -748,10 +786,11 @@ it.effect("refuses a client revoked while the target lock is held", () =>
   }).pipe(Effect.provide(testLayer(true))),
 );
 
-it.effect("refuses a still-authorized linked client if links turn off after admission", () =>
-  Effect.gen(function* () {
+it.effect("refuses a still-authorized linked client if links turn off after admission", () => {
+  const settingsLayer = ServerSettings.layerTest(testSettings(true)).pipe(Layer.orDie);
+  return Effect.gen(function* () {
     yield* seed;
-    const settings = yield* ServerSettingsService;
+    const settings = yield* ServerSettings.ServerSettingsService;
     const locks = yield* ThreadCommandExecutor.ThreadCommandExecutor;
     const holding = yield* Deferred.make<void>();
     const release = yield* Deferred.make<void>();
@@ -774,8 +813,10 @@ it.effect("refuses a still-authorized linked client if links turn off after admi
     assert.equal((yield* receipts.getByCommandId(CommandId.make("links-off")))._tag, "None");
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     assert.equal((yield* orchestrator.getThreadRecords(target, [])).thread.runtimeMode, "auto");
-  }).pipe(Effect.provide(testLayer(true))),
-);
+  }).pipe(
+    Effect.provide(Layer.merge(testLayer(true, false, undefined, settingsLayer), settingsLayer)),
+  );
+});
 
 it.effect.each(["approval-required", "auto"] as const)(
   "refuses a %s request when a card is written after idle inspection",

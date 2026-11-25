@@ -35,7 +35,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import * as FleetContext from "./FleetContext.ts";
 import * as Delivery from "./FleetDelivery.ts";
-import { FLEET_ROSTER_ENV, fleetLocalName } from "./FleetBootstrap.ts";
+import { FLEET_ROSTER_ENV, fleetLocalName, isFleetSwitchRoster } from "./FleetBootstrap.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 import { FleetPeerTrust } from "./FleetPeerHttpClient.ts";
 
@@ -98,6 +98,21 @@ type State = typeof State.Type;
 const emptyState: State = { version: 1, linking: {}, serving: {} };
 const emptyServing: Serving = { sessions: [] };
 
+/**
+ * A switched roster's first state, from the links the previous fleet made: each keeps only which
+ * environment it reached, so every peer still in the fleet links again and a pass forgets the
+ * fleet-made link to one that left. Its tokens and sessions belonged to the previous fleet.
+ */
+export const carriedLinkState = (previous: Pick<State, "linking">): State => ({
+  ...emptyState,
+  linking: Object.fromEntries(
+    Object.entries(previous.linking).map(([machineId, entry]) => [
+      machineId,
+      { environmentId: entry.environmentId },
+    ]),
+  ),
+});
+
 const codePrefix = (machineId: string) => `${SUBJECT_PREFIX}${machineId}:`;
 
 /**
@@ -138,10 +153,22 @@ const make = Effect.gen(function* () {
   const passLock = yield* Semaphore.make(1);
   const writeLock = yield* Semaphore.make(1);
   const requests = yield* Queue.sliding<void>(1);
-  const saved = yield* readFleetJson(stateFile, State).pipe(
-    Effect.provideService(FileSystem.FileSystem, fs),
-    Effect.orElseSucceed(() => emptyState),
+  const readState = (file: string) =>
+    readFleetJson(file, State).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.orElseSucceed(() => emptyState),
+    );
+  const previousStateFile = path.join(
+    serverConfig.stateDir,
+    fleetLocalName("lan-fleet-peer-links.json", undefined),
   );
+  // The first start on a switched roster begins from the links the previous fleet made.
+  const saved =
+    isFleetSwitchRoster(launchEnvironment[FLEET_ROSTER_ENV]) &&
+    previousStateFile !== stateFile &&
+    !(yield* fs.exists(stateFile).pipe(Effect.orElseSucceed(() => true)))
+      ? carriedLinkState(yield* readState(previousStateFile))
+      : yield* readState(stateFile);
   const state = yield* Ref.make<State>(saved);
 
   // Updates are applied to the latest state, never a pass's snapshot: a session can be

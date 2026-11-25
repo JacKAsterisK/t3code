@@ -705,13 +705,28 @@ const make = Effect.fn("FleetAccess.make")(function* (
   const switchedFleet = isFleetSwitchRoster(rosterPath);
   const cacheFile = path.join(config.stateDir, fleetLocalName("lan-fleet-access.json", rosterPath));
   const mutex = yield* Semaphore.make(1);
-  const readCache = (yield* fs.exists(cacheFile).pipe(Effect.orElseSucceed(() => false)))
-    ? yield* readFleetJson(cacheFile, LocalCache).pipe(
-        Effect.provideService(FileSystem.FileSystem, fs),
-        Effect.orElseSucceed(() => undefined),
-      )
-    : undefined;
+  const readCacheFile = Effect.fn("FleetAccess.readCacheFile")(function* (file: string) {
+    return (yield* fs.exists(file).pipe(Effect.orElseSucceed(() => false)))
+      ? yield* readFleetJson(file, LocalCache).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.orElseSucceed(() => undefined),
+        )
+      : undefined;
+  });
+  const readCache = yield* readCacheFile(cacheFile);
   let cache: LocalCache | undefined = readCache;
+  // The lists this machine accepted in the fleet it was in before a rebuild or a roster switch,
+  // read once at startup: a fleet that starts without a list may carry one of them over.
+  const previousCacheFile = path.join(
+    config.stateDir,
+    fleetLocalName("lan-fleet-access.json", undefined),
+  );
+  const previousFleetCaches: ReadonlyArray<LocalCache> = [
+    readCache,
+    switchedFleet && previousCacheFile !== cacheFile
+      ? yield* readCacheFile(previousCacheFile)
+      : undefined,
+  ].filter((value): value is LocalCache => value !== undefined);
   const cachedEntries = (value: LocalCache | undefined) => {
     const unverified = new Set(value?.unverified ?? []);
     return {
@@ -746,6 +761,46 @@ const make = Effect.fn("FleetAccess.make")(function* (
     ...(seed === undefined ? {} : { seed }),
     ...(seedPending === undefined ? {} : { seedPending }),
   });
+  /**
+   * The list a person set on this machine's previous fleet, for a new fleet that has none: only
+   * machines on the new roster keep their entries, and exceptions only between them and while
+   * they apply. Only a machine that list left standard carries it, as it alone may change it.
+   */
+  const carriedList = (input: FleetAccessInput): FleetAccessSnapshot | undefined => {
+    const roster = trustedPeers(input.peers)
+      .filter((peer) => peer.enabled)
+      .map((peer) => peer.machineId);
+    for (const previous of previousFleetCaches) {
+      if (previous.fleetId === input.fleetId || previous.machineId !== input.machineId) continue;
+      const evaluation = evaluateAccess({
+        fleetId: previous.fleetId,
+        accepted: cachedEntries(previous).accepted,
+        candidates: [],
+        peers: [],
+      });
+      const snapshot = evaluation.snapshot;
+      if (
+        snapshot === undefined ||
+        evaluation.revision === 0 ||
+        accessOf(snapshot, input.machineId) !== "standard"
+      )
+        continue;
+      const next: FleetAccessSnapshot = {
+        defaultAccess: snapshot.defaultAccess,
+        machines: normalize(
+          snapshot.machines.filter((machine) => roster.includes(machine.machineId)),
+        ),
+      };
+      const exceptions = exceptionsOf(snapshot, roster)
+        .map((exception) => ({
+          machineId: exception.machineId,
+          standardOn: exception.standardOn.filter((receiver) => exceptionApplies(next, receiver)),
+        }))
+        .filter((exception) => exception.standardOn.length > 0);
+      return { ...next, pairs: replaceExceptions(undefined, exceptions) };
+    }
+    return undefined;
+  };
   const startup =
     cache === undefined
       ? undefined
@@ -1272,6 +1327,7 @@ const make = Effect.fn("FleetAccess.make")(function* (
     input: FleetAccessInput,
     view: View,
     snapshot: FleetAccessSnapshot,
+    source: "seed" | "previous-fleet" = "seed",
   ) {
     const key = input.signingPrivateKey;
     if (
@@ -1282,38 +1338,53 @@ const make = Effect.fn("FleetAccess.make")(function* (
       return view.state;
     return yield* changeUnlocked(
       { ...input, signingPrivateKey: key, expectedRevision: 0, next: snapshot },
-      true,
+      source === "seed",
     ).pipe(
       Effect.tap((adopted) =>
-        Effect.logInfo("Adopted the fleet's starting access list.", {
-          revision: adopted.revision,
-          readOnly: snapshot.machines.map((machine) => machine.machineId),
-        }),
+        Effect.logInfo(
+          source === "seed"
+            ? "Adopted the fleet's starting access list."
+            : "Carried the previous fleet's access list over to this fleet.",
+          {
+            revision: adopted.revision,
+            readOnly: snapshot.machines
+              .filter((machine) => machine.access === "read-only")
+              .map((machine) => machine.machineId),
+          },
+        ),
       ),
       // Once the share holds the list and gives it back, the starting list is spent. Removing it
       // means a later loss of the share's list can never bring it in again.
       Effect.tap(() =>
-        refreshUnlocked(input).pipe(
-          Effect.flatMap((back) =>
-            !back.unavailable &&
-            back.state.revision > 0 &&
-            back.candidates.some((entry) =>
-              back.evaluation.revisions.some((item) => item.digest === entryDigest(entry)),
-            )
-              ? fs.remove(path.join(input.root, SEED_FILE))
-              : Effect.void,
-          ),
-          Effect.catchCause((cause) =>
-            Effect.logWarning(`The spent starting access list (${SEED_FILE}) was not removed.`, {
-              cause,
-            }),
-          ),
-        ),
+        source !== "seed"
+          ? Effect.void
+          : refreshUnlocked(input).pipe(
+              Effect.flatMap((back) =>
+                !back.unavailable &&
+                back.state.revision > 0 &&
+                back.candidates.some((entry) =>
+                  back.evaluation.revisions.some((item) => item.digest === entryDigest(entry)),
+                )
+                  ? fs.remove(path.join(input.root, SEED_FILE))
+                  : Effect.void,
+              ),
+              Effect.catchCause((cause) =>
+                Effect.logWarning(
+                  `The spent starting access list (${SEED_FILE}) was not removed.`,
+                  {
+                    cause,
+                  },
+                ),
+              ),
+            ),
       ),
       Effect.catch((error) =>
-        Effect.logWarning("The fleet's starting access list was not adopted this time.", {
-          reason: error.reason,
-        }).pipe(
+        Effect.logWarning(
+          source === "seed"
+            ? "The fleet's starting access list was not adopted this time."
+            : "The previous fleet's access list was not carried over this time.",
+          { reason: error.reason },
+        ).pipe(
           Effect.andThen(refreshUnlocked(input)),
           Effect.map((fresh) => fresh.state),
         ),
@@ -1334,6 +1405,25 @@ const make = Effect.fn("FleetAccess.make")(function* (
         if (superseded(input, current)) return current;
         const view = yield* refreshUnlocked(input);
         if (view.state.credentialAuthorityReady === false) return view.state;
+        // A fleet with no list, no starting list and no history, such as one just rebuilt or
+        // switched to a new roster, takes the list a person set on the previous fleet.
+        const carried =
+          view.seed._tag === "absent" &&
+          !view.unavailable &&
+          view.state.revision === 0 &&
+          view.evaluation.revisions.length === 0 &&
+          !view.candidates.some((entry) => entry.fleetId === input.fleetId)
+            ? carriedList(input)
+            : undefined;
+        if (carried !== undefined) {
+          // As with a starting list, one that lowers any machine waits until every enabled
+          // machine runs a version that never cuts a lowered peer off.
+          const lowers = trustedPeers(input.peers).some(
+            (peer) => peer.enabled && accessOf(carried, peer.machineId) === "read-only",
+          );
+          if (lowers && !(yield* seedReadiness(input)).ready) return view.state;
+          return yield* adopt(input, view, carried, "previous-fleet");
+        }
         if (view.seed._tag !== "valid") return yield* endorse(input, view);
         return view.readiness?.ready === true
           ? yield* adopt(input, view, view.seed.snapshot)

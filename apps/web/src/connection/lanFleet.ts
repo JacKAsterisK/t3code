@@ -107,11 +107,16 @@ export function useLanFleet() {
     return whileBusy(async () => {
       const result = await updateSetup({ environmentId, input });
       if (result._tag !== "Success") {
+        const failure = squashAtomCommandFailure(result);
         appAtomRegistry.set(
           errorAtom,
-          appAtomRegistry.get(setupAtom)?.sharedFolderTrust === true
-            ? "Fleet setup failed. Check Windows access to BuildShare and the local LAN address."
-            : "Fleet setup was not confirmed. Check the verification code and shared storage; existing keys and trust were kept.",
+          // A refusal or a specific reason says what to fix; only a bare one gets the general hint.
+          isFleetError(failure) &&
+            (failure.refusal !== undefined || failure.reason !== "configuration")
+            ? failure.message
+            : appAtomRegistry.get(setupAtom)?.sharedFolderTrust === true
+              ? "Fleet setup did not complete. Check Windows access to BuildShare, this machine's row in the fleet roster, and the local LAN address."
+              : "Fleet setup was not confirmed. Check the verification code and shared storage; existing keys and trust were kept.",
         );
         return false;
       }
@@ -190,7 +195,7 @@ export function useLanFleet() {
                 delivery.pairingCode,
               ) ??
                 (appAtomRegistry.get(setupAtom)?.sharedFolderTrust === true
-                  ? "The connection could not be confirmed. Check that the other machine is online."
+                  ? "Pairing with the other machine stopped without a reason. Check that it is online and enabled in the fleet roster."
                   : "Pickup is unconfirmed. This delivery is paused for review; sync will not replace or retry its credential."),
             );
             return false;

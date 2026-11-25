@@ -245,6 +245,26 @@ export const LanFleetSetupState = Schema.Struct({
 });
 export type LanFleetSetupState = typeof LanFleetSetupState.Type;
 
+/** What fleet setup tells a person when it refuses, by refusal. Shown as written; no secrets. */
+const FLEET_REFUSAL_MESSAGES: Readonly<Record<string, string>> = {
+  "roster-row-disabled":
+    "The fleet roster has a disabled row for this machine. Enable or remove its row in fleet-roster.json on the shared folder, then try again.",
+  "roster-origin-mismatch":
+    "The fleet roster lists this machine at a different LAN address. Use the address in its roster row, or update that row, then try again.",
+  "roster-row-without-keys":
+    "This machine is already in the fleet, but this install does not have its fleet keys. Remove its roster row on the shared folder, then join again.",
+  "switched-fleet-start":
+    "Only BuildMachine creates the replacement fleet. Join that fleet from this machine instead.",
+  "fleet-exists": "The shared folder already has a fleet. Join it instead of creating a new one.",
+  "fleet-missing":
+    "The shared folder has no fleet yet. Create it on the owner machine first, then join.",
+  "owner-code-mismatch":
+    "The owner verification code does not match this fleet's owner. Check the code on the owner machine.",
+  "not-owner": "Only the fleet's owner machine can do this.",
+  "machine-not-enabled":
+    "This machine, or one it was asked to link, is not an enabled fleet member in both the roster and the fleet's trust list.",
+};
+
 export class LanFleetError extends Schema.TaggedError<LanFleetError>()("LanFleetError", {
   reason: Schema.Literals(["configuration", "unavailable", "busy", "transport"]),
   // Why a change was refused, when it has a clearer message than its reason. A string, so a
@@ -256,6 +276,11 @@ export class LanFleetError extends Schema.TaggedError<LanFleetError>()("LanFleet
       return "An exception only applies on a machine that is itself read-only. Standard access on a standard machine reaches every machine it can change, so choose only read-only machines.";
     if (this.refusal === "exception-unknown-machine")
       return "An exception must name two machines in this fleet. Reload Machine access and choose from its machines.";
+    const refusal =
+      this.refusal !== undefined && Object.hasOwn(FLEET_REFUSAL_MESSAGES, this.refusal)
+        ? FLEET_REFUSAL_MESSAGES[this.refusal]
+        : undefined;
+    if (refusal !== undefined) return refusal;
     if (this.reason === "transport")
       return "The encrypted LAN endpoint could not start. Check that its selected address is local and its port is available; existing keys and connections were preserved.";
     return this.reason === "busy"

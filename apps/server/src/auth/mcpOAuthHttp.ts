@@ -48,10 +48,13 @@ const makeRequestUrls = Effect.fnUntraced(function* (
   publicOrigin: Option.Option<McpOAuth.McpOAuthPublicOrigin["Service"]>,
 ) {
   const request = yield* HttpServerRequest.HttpServerRequest;
-  return McpOAuth.requestUrls(
-    request,
-    Option.isSome(publicOrigin) ? yield* publicOrigin.value.forRequest(request) : undefined,
-  );
+  if (Option.isNone(publicOrigin)) return McpOAuth.requestUrls(request);
+  const origin = yield* publicOrigin.value.forRequest(request);
+  const withheld =
+    origin === undefined && publicOrigin.value.withheldReason !== undefined
+      ? yield* publicOrigin.value.withheldReason(request)
+      : undefined;
+  return McpOAuth.requestUrls(request, origin, withheld);
 });
 type RequestUrls = ReturnType<typeof makeRequestUrls>;
 const decodeAuthorizationRequest = Schema.decodeEffect(AuthMcpAuthorizationRequest);

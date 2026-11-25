@@ -495,6 +495,43 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
       }).pipe(Effect.provide(configLayer)),
   );
 
+  it.effect("names why joining is refused, not only that setup failed", () =>
+    Effect.gen(function* () {
+      // Without shared-folder trust, joining needs the owner code.
+      const f = yield* fixture(false, "inaccessible");
+      const owner = yield* f.start();
+      const wrongCode = yield* f.join("0".repeat(12)).pipe(Effect.flip);
+      assert.equal(wrongCode.refusal, "owner-code-mismatch");
+      const roster = yield* readFleetJson(f.rosterPath, FleetRoster).pipe(
+        Effect.provideService(FileSystem.FileSystem, f.fs),
+      );
+      const withRow = (row: { readonly enabled: boolean; readonly origin: string }) =>
+        writeFleetJson(f.rosterPath, {
+          ...roster,
+          machines: [
+            ...roster.machines,
+            {
+              machineId: "machine-beta-row",
+              environmentId: f.b.environmentId,
+              label: "beta",
+              ...row,
+            },
+          ],
+        }).pipe(Effect.provideService(FileSystem.FileSystem, f.fs));
+      // SPDevMachine's case: a disabled row for this machine left in the roster.
+      yield* withRow({ enabled: false, origin: "https://beta.example.test" });
+      const disabled = yield* f.join(owner.ownerCode!).pipe(Effect.flip);
+      assert.equal(disabled.refusal, "roster-row-disabled");
+      assert.match(disabled.message, /disabled row for this machine/);
+      yield* withRow({ enabled: true, origin: "https://elsewhere.example.test" });
+      assert.equal(
+        (yield* f.join(owner.ownerCode!).pipe(Effect.flip)).refusal,
+        "roster-origin-mismatch",
+      );
+      assert.equal(f.b.record(), undefined);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("never recreates revision one over an established fleet owner", () =>
     Effect.gen(function* () {
       const f = yield* fixture(false, "accessible");

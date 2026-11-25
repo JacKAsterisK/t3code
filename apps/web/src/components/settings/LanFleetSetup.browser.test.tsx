@@ -220,6 +220,50 @@ it("changes one machine's fleet access after confirmation", async () => {
   await expect.element(page.getByText("Make Other machine read only?")).not.toBeInTheDocument();
 });
 
+it("saves the shown access as a fleet's first list without changing any machine", async () => {
+  const { configure } = setup({
+    stage: "active",
+    sharedFolderTrust: true,
+    peers: accessPeers,
+    accessPolicy: {
+      revision: 0,
+      defaultAccess: "standard",
+      machines: [],
+      selfAccess: "standard",
+      canChange: true,
+    },
+  });
+  await using screen = await render(<LanFleetSetup />);
+  await screen.getByRole("button", { name: "Save access list" }).click();
+  expect(configure).toHaveBeenCalledExactlyOnceWith({
+    operation: "access",
+    confirmed: true,
+    revision: 0,
+    defaultAccess: "standard",
+    machines: [],
+  });
+});
+
+it("offers no separate save once a fleet has an access list", async () => {
+  setup({
+    stage: "active",
+    sharedFolderTrust: true,
+    peers: accessPeers,
+    accessPolicy: {
+      revision: 1,
+      defaultAccess: "standard",
+      machines: [],
+      selfAccess: "standard",
+      canChange: true,
+    },
+  });
+  await using screen = await render(<LanFleetSetup />);
+  await expect.element(screen.getByText("Synthetic device · This machine")).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Save access list" }))
+    .not.toBeInTheDocument();
+});
+
 it("locks machine access on a read-only machine", async () => {
   setup({
     stage: "active",

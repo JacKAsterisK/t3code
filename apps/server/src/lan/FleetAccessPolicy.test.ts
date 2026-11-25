@@ -2,7 +2,7 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { FLEET_ROSTER_ENV } from "./FleetBootstrap.ts";
+import { FLEET_ROSTER_ENV, FLEET_SWITCH_ROSTER } from "./FleetBootstrap.ts";
 import { describe, expect, it } from "@effect/vitest";
 import { LanFleetError, ORCHESTRATION_V2_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -175,10 +175,15 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
   const seedFile = path.join(root, FleetAccessPolicy.SEED_FILE);
   const readyDirectory = path.join(root, FleetAccessPolicy.SEED_READY_DIRECTORY);
   /** What a machine on a build that takes replaced credentials writes, signed by `signer`. */
-  const markReady = (self: Machine, signer: Machine = self) => {
+  const markReady = (
+    self: Machine,
+    signer: Machine = self,
+    at: { readonly root: string; readonly fleetId: string } = { root, fleetId: FLEET_ID },
+  ) => {
+    const markerDirectory = path.join(at.root, FleetAccessPolicy.SEED_READY_DIRECTORY);
     const marker = {
       version: 1 as const,
-      fleetId: FLEET_ID,
+      fleetId: at.fleetId,
       machineId: self.peer.machineId,
       createdAt: 0,
     };
@@ -189,9 +194,9 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
       marker.machineId,
       marker.createdAt,
     ]);
-    return fs.makeDirectory(readyDirectory, { recursive: true }).pipe(
+    return fs.makeDirectory(markerDirectory, { recursive: true }).pipe(
       Effect.andThen(
-        writeFleetJson(path.join(readyDirectory, `${self.peer.machineId}.json`), {
+        writeFleetJson(path.join(markerDirectory, `${self.peer.machineId}.json`), {
           ...marker,
           signature: NodeCrypto.sign(null, Buffer.from(data), signer.signingPrivateKey).toString(
             "base64",
@@ -1222,6 +1227,131 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
         );
       }).pipe(Effect.provide(configLayer)),
   );
+
+  /** A fleet with a list, then the same machines on a new fleet behind the switch roster. */
+  const switchedFleet = Effect.fn("FleetAccessPolicyTest.switchedFleet")(function* () {
+    const f = yield* fleet();
+    const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-switched-" });
+    const fleetId = "fleet-after-switch";
+    const stateDirs = new Map<Machine, string>();
+    const stateDirOf = Effect.fn("FleetAccessPolicyTest.stateDirOf")(function* (self: Machine) {
+      const existing = stateDirs.get(self);
+      if (existing !== undefined) return existing;
+      const created = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-state-" });
+      stateDirs.set(self, created);
+      return created;
+    });
+    /** The machine as it ran before the switch, on the previous fleet's share. */
+    const before = (self: Machine) =>
+      stateDirOf(self).pipe(Effect.flatMap((stateDir) => f.machine(stateDir)));
+    /** The same machine restarted on the switch roster: its new fleet's cache is separate. */
+    const after = (self: Machine) =>
+      stateDirOf(self).pipe(
+        Effect.flatMap((stateDir) =>
+          f.machine(stateDir).pipe(
+            Effect.provideService(HostProcess.Environment, {
+              [FLEET_ROSTER_ENV]: FLEET_SWITCH_ROSTER,
+            }),
+          ),
+        ),
+      );
+    const input = (self: Machine, peers: ReadonlyArray<FleetPeer> = f.input(self).peers) => ({
+      ...f.input(self),
+      root,
+      fleetId,
+      peers,
+      credentialAuthorityRevision: 1,
+    });
+    return { f, root, fleetId, before, after, input };
+  });
+
+  it.effect("carries the previous fleet's list to a switched roster that has none", () =>
+    Effect.gen(function* () {
+      const s = yield* switchedFleet();
+      // Tonight's fleet: one list, every machine standard.
+      const old = yield* s.before(s.f.cryo);
+      expect((yield* s.f.change(old, s.f.cryo, 0, [])).revision).toBe(1);
+      // Without a carried list the new fleet would never link: revision 0 links nothing.
+      const switched = yield* s.after(s.f.cryo);
+      const state = yield* switched.refresh(s.input(s.f.cryo));
+      expect(state.revision).toBe(1);
+      expect(state.defaultAccess).toBe("standard");
+      expect(FleetAccessPolicy.fleetLinksApply(state)).toBe(true);
+      // It is on the new share, signed by this machine for the new fleet, so every machine reads it.
+      const written = yield* s.f.fs.readDirectory(s.f.path.join(s.root, "fleet-access"));
+      expect(written).toHaveLength(1);
+      const other = yield* (yield* s.after(s.f.panda)).refresh(s.input(s.f.panda));
+      expect(other.revision).toBe(1);
+      expect(FleetAccessPolicy.fleetLinksApply(other)).toBe(true);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect(
+    "carries only the new roster's machines and exceptions, after every machine is ready",
+    () =>
+      Effect.gen(function* () {
+        const s = yield* switchedFleet();
+        const old = yield* s.before(s.f.cryo);
+        // AnvilToad and SPDevMachine read-only, AnvilToad standard on SPDevMachine.
+        yield* old.change({
+          ...s.f.input(s.f.cryo),
+          expectedRevision: 0,
+          next: {
+            defaultAccess: "standard",
+            machines: [s.f.readOnly(s.f.anvil), s.f.readOnly(s.f.spd)],
+            pairs: FleetAccessPolicy.replaceExceptions(
+              [],
+              [{ machineId: s.f.anvil.peer.machineId, standardOn: [s.f.spd.peer.machineId] }],
+            ),
+          },
+        });
+        // SPDevMachine is not on the new roster.
+        const roster = s.f
+          .input(s.f.cryo)
+          .peers.filter((peer) => peer.machineId !== s.f.spd.peer.machineId);
+        const switched = yield* s.after(s.f.cryo);
+        // Lowering AnvilToad waits until every enabled machine says it takes a replaced credential.
+        expect((yield* switched.refresh(s.input(s.f.cryo, roster))).revision).toBe(0);
+        expect(yield* s.f.fs.exists(s.f.path.join(s.root, "fleet-access"))).toBe(false);
+        for (const machine of [s.f.panda, s.f.anvil])
+          yield* s.f.markReady(machine, machine, { root: s.root, fleetId: s.fleetId });
+        const state = yield* switched.refresh(s.input(s.f.cryo, roster));
+        expect(state.revision).toBe(1);
+        expect(state.machines).toEqual([s.f.readOnly(s.f.anvil)]);
+        expect(state.pairs).toEqual([]);
+        expect(s.f.accessOf(state, s.f.panda)).toBe("standard");
+      }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("never carries a list over for a machine it made read-only, or onto any list", () =>
+    Effect.gen(function* () {
+      const s = yield* switchedFleet();
+      const old = yield* s.before(s.f.cryo);
+      yield* s.f.change(old, s.f.cryo, 0, [s.f.readOnly(s.f.anvil)]);
+      // AnvilToad accepted the list that made it read-only; it may not write it anywhere.
+      yield* (yield* s.before(s.f.anvil)).refresh(s.f.input(s.f.anvil));
+      const anvil = yield* (yield* s.after(s.f.anvil)).refresh(s.input(s.f.anvil));
+      expect(anvil.revision).toBe(0);
+      expect(yield* s.f.fs.exists(s.f.path.join(s.root, "fleet-access"))).toBe(false);
+      // A starting list on the new share decides instead of the previous fleet's list.
+      yield* s.f.fs.writeFileString(
+        s.f.path.join(s.root, FleetAccessPolicy.SEED_FILE),
+        JSON.stringify({
+          version: 1,
+          fleetId: s.fleetId,
+          defaultAccess: "standard",
+          readOnly: [s.f.panda.peer.machineId],
+        }),
+      );
+      const seeded = yield* (yield* s.after(s.f.cryo)).refresh(s.input(s.f.cryo));
+      expect(seeded.revision).toBe(0);
+      expect(seeded.seed).toBe("waiting");
+      // The same fleet never carries its own list onto itself.
+      const same = yield* (yield* s.before(s.f.panda)).refresh(s.f.input(s.f.panda));
+      expect(same.revision).toBe(1);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("an explicit roster path does not block a verified private-file fleet at startup", () =>
     Effect.gen(function* () {
       const f = yield* fleet();

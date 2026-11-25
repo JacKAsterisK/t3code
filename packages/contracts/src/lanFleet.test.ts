@@ -1,7 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
-import { FleetUsersFile } from "./lanFleet.ts";
+import { FleetUsersFile, LanFleetError } from "./lanFleet.ts";
 
 const decodeUsersFile = Schema.decodeUnknownSync(FleetUsersFile);
 
@@ -40,5 +40,15 @@ describe("fleet users file", () => {
     ["another version", { version: 2 }],
   ])("rejects %s", (_label, change) => {
     expect(() => decodeUsersFile({ ...USERS_FILE, ...change })).toThrow();
+  });
+});
+
+describe("fleet refusals", () => {
+  it("names what to fix for a known refusal, and falls back to the reason otherwise", () => {
+    const disabled = new LanFleetError({ reason: "configuration", refusal: "roster-row-disabled" });
+    expect(disabled.message).toMatch(/disabled row for this machine/);
+    const generic = new LanFleetError({ reason: "configuration" }).message;
+    for (const refusal of ["not-a-refusal", "toString", "__proto__", "constructor"])
+      expect(new LanFleetError({ reason: "configuration", refusal }).message).toBe(generic);
   });
 });

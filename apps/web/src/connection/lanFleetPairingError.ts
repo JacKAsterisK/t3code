@@ -2,14 +2,18 @@ import {
   ConnectionBlockedError,
   ConnectionTransientError,
 } from "@t3tools/client-runtime/connection";
+import { LanFleetError } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 const isConnectionFailure = Schema.is(
   Schema.Union([ConnectionBlockedError, ConnectionTransientError]),
 );
+const isFleetError = Schema.is(LanFleetError);
 
 /** Display typed connection detail without including pairing material or raw causes. */
 export function fleetPairingFailureDetail(failure: unknown, pairingCode: string): string | null {
+  // A fleet refusal's message is fixed text chosen by its reason; it carries no input.
+  if (isFleetError(failure)) return failure.message;
   if (!isConnectionFailure(failure)) return null;
   let detail = failure.detail;
   if (pairingCode !== "") {

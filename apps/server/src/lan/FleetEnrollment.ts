@@ -48,6 +48,8 @@ export class FleetEnrollment extends Context.Service<
 
 const isFleetError = Schema.is(LanFleetError);
 const configurationError = () => new LanFleetError({ reason: "configuration" });
+/** A refusal with a reason the person can act on; see LanFleetError's messages. */
+const refused = (refusal: string) => new LanFleetError({ reason: "configuration", refusal });
 const translate = (error: unknown) =>
   isFleetError(error) ? error : new LanFleetError({ reason: "unavailable" });
 
@@ -526,7 +528,7 @@ const make = Effect.gen(function* () {
               input.operation === "start" &&
               hostname.toLowerCase() !== "buildmachine"
             )
-              return yield* configurationError();
+              return yield* refused("switched-fleet-start");
             yield* fs.makeDirectory(current.root, { recursive: true });
             const ownerLock = path.join(current.root, "fleet-authority.lock");
             yield* Effect.acquireUseRelease(
@@ -545,8 +547,10 @@ const make = Effect.gen(function* () {
                     const existing = fresh.roster.machines.find(
                       (machine) => machine.environmentId === descriptor.environmentId,
                     );
-                    if (existing !== undefined && (!existing.enabled || existing.origin !== origin))
-                      return yield* configurationError();
+                    if (existing !== undefined && !existing.enabled)
+                      return yield* refused("roster-row-disabled");
+                    if (existing !== undefined && existing.origin !== origin)
+                      return yield* refused("roster-origin-mismatch");
                     if (
                       input.operation === "start" &&
                       (fresh.record === undefined
@@ -554,14 +558,16 @@ const make = Effect.gen(function* () {
                         : fresh.record.rootPrivateKey === undefined ||
                           (fresh.authority === undefined && fresh.record.lastRevision > 1))
                     )
-                      return yield* configurationError();
+                      return yield* refused("fleet-exists");
+                    if (input.operation === "join" && fresh.authority === undefined)
+                      return yield* refused("fleet-missing");
                     if (
                       input.operation === "join" &&
-                      (fresh.authority === undefined ||
-                        (!fresh.sharedFolderTrust &&
-                          Authority.ownerVerificationCode(fresh.authority) !== input.ownerCode))
+                      fresh.authority !== undefined &&
+                      !fresh.sharedFolderTrust &&
+                      Authority.ownerVerificationCode(fresh.authority) !== input.ownerCode
                     )
-                      return yield* configurationError();
+                      return yield* refused("owner-code-mismatch");
                     if (
                       fresh.record === undefined &&
                       (existing !== undefined ||
@@ -569,7 +575,7 @@ const make = Effect.gen(function* () {
                           (peer) => peer.environmentId === descriptor.environmentId,
                         ))
                     )
-                      return yield* configurationError();
+                      return yield* refused("roster-row-without-keys");
                     const original =
                       fresh.record ??
                       Authority.generateFleetIdentity(
@@ -677,7 +683,7 @@ const make = Effect.gen(function* () {
                           Authority.identityPeer(record, self.label, self.origin),
                         )
                     )
-                      return yield* configurationError();
+                      return yield* refused("machine-not-enabled");
                     // Shared-folder admission already supplies the effective automatic campaign.
                     // Linking validates those peers without requiring the owner or rewriting authority.
                     return;
@@ -688,7 +694,7 @@ const make = Effect.gen(function* () {
                     authority.ownerEnvironmentId !== descriptor.environmentId ||
                     !record.enabled
                   )
-                    return yield* configurationError();
+                    return yield* refused("not-owner");
                   let updated = authority;
                   if (input.operation === "approve") {
                     const request = yield* readFleetJson(

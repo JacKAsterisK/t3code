@@ -456,9 +456,33 @@ access list gives this machine: standard is `full-access`, read-only is
 [when an agent should use the LAN task tools](lan-task-routing.md#when-an-agent-should-use-these-tools).
 
 Links form only once the fleet has a Machine access list, adopted from a starting
-list or saved in Settings. Until then no machine asks for or offers a link, since
-a link would carry each machine's setup access, normally standard. That includes a
-machine with no saved list that finds no `fleet-access` folder on the share.
+list, carried over from the previous fleet, or saved in Settings. Until then no
+machine asks for or offers a link, since a link would carry each machine's setup
+access, normally standard. That includes a machine with no saved list that finds
+no `fleet-access` folder on the share.
+
+A fleet rebuilt or switched to a new roster keeps the list a person set on the old
+one. When the new fleet has no list, no starting list and no history, a standard
+machine that accepted a list on its previous fleet signs that list in as the new
+fleet's revision 1. Only machines on the new roster keep their entries, and only
+exceptions between them that still apply. A carried list that makes any machine
+read-only waits for every enabled machine to mark itself ready, as a starting list
+does. A machine the previous list made read-only never carries it. With no previous
+list, **Machine access** offers **Save access list**, which saves the access it
+shows as revision 1 without changing any machine. Without one of these, the
+switch's credential retirement leaves every machine unlinked: on 2026-11-25 the
+D178 roster switch revoked every peer link and nothing replaced them until a list
+was saved.
+
+On its first start on a switched roster, the link adapter begins from the links
+the previous fleet made, keeping only which machine each reached. Each machine
+still in the fleet links again; the fleet-made link to one that left is forgotten
+on the next pass. Manual links are never touched.
+
+An agent link card made for a fleet peer's forwarded https address while fleet
+links are inactive is refused with the plain-http audience as before, and the
+refusal now says why: the fleet needs a Machine access list. Fleet peers need no
+card once links are active.
 
 The linking machine also holds itself to its own list: it never links above the
 access its accepted list gives it, whatever the destination offers, reading its

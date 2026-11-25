@@ -81,11 +81,14 @@ const MCP_OAUTH_SCOPES = [
 export interface McpOAuthUrls {
   readonly issuer: string;
   readonly resource: string;
+  /** Why this request did not get the address a client may expect here, when that is known. */
+  readonly audienceNote?: string;
 }
 
 export const requestUrls = (
   request: HttpServerRequest.HttpServerRequest,
   publicOrigin?: string,
+  audienceNote?: string,
 ): McpOAuthUrls => {
   const origin =
     publicOrigin ??
@@ -93,7 +96,11 @@ export const requestUrls = (
       onNone: () => "http://localhost",
       onSome: (url) => url.origin,
     });
-  return { issuer: origin, resource: `${origin}/mcp` };
+  return {
+    issuer: origin,
+    resource: `${origin}/mcp`,
+    ...(audienceNote === undefined ? {} : { audienceNote }),
+  };
 };
 
 /**
@@ -104,6 +111,13 @@ export class McpOAuthPublicOrigin extends Context.Service<
   McpOAuthPublicOrigin,
   {
     readonly forRequest: (
+      request: HttpServerRequest.HttpServerRequest,
+    ) => Effect.Effect<string | undefined>;
+    /**
+     * For a request `forRequest` gives no origin although its front would, why not; shown with a
+     * refused token audience so the person can fix the cause. Never changes what is accepted.
+     */
+    readonly withheldReason?: (
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<string | undefined>;
   }
@@ -476,7 +490,12 @@ const make = Effect.gen(function* () {
       return yield* fail("invalid_request", "PKCE with code_challenge_method=S256 is required.");
     }
     if (!sameResource(urls, request.resource)) {
-      return yield* fail("invalid_target", `This server only issues tokens for ${urls.resource}.`);
+      return yield* fail(
+        "invalid_target",
+        `This server only issues tokens for ${urls.resource}.${
+          urls.audienceNote === undefined ? "" : ` ${urls.audienceNote}`
+        }`,
+      );
     }
     if (
       (request.task_only !== undefined && request.task_only !== "true") ||

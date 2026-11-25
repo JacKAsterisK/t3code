@@ -6,6 +6,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { NodeHttpServer } from "@effect/platform-node";
 import {
   type AuthMcpClientAccess,
+  EnvironmentId,
   EnvironmentHttpApi,
   type FleetAccess as FleetAccessLevel,
   LanFleetError,
@@ -1184,3 +1185,29 @@ it.live(
       }),
     ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
+
+it("starts a switched roster from the previous fleet's links, without their spent tokens", () => {
+  const panda = EnvironmentId.make("environment-panda");
+  const departed = EnvironmentId.make("environment-departed");
+  const carried = FleetPeerLinks.carriedLinkState({
+    linking: {
+      "machine-panda": {
+        environmentId: panda,
+        link: { access: "full-access", deliveryId: "spent", linkedAt: "2026-11-24T06:38:18.485Z" },
+        consumedDeliveryId: "spent",
+        request: { requestId: "old-request", expiresAt: 0 },
+      },
+      "machine-departed": { environmentId: departed, lastError: "unreachable" },
+    },
+  });
+  // Nothing about the previous links survives but where they went: each is due again, and a pass
+  // forgets the fleet-made link to a machine that is not on the new roster.
+  expect(carried).toEqual({
+    version: 1,
+    linking: {
+      "machine-panda": { environmentId: panda },
+      "machine-departed": { environmentId: departed },
+    },
+    serving: {},
+  });
+});

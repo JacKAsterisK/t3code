@@ -1,5 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
+import { connectionRoutes } from "@t3tools/client-runtime/connection";
 import { fleetPairingFailureDetail } from "./lanFleetPairingError";
+import * as Option from "effect/Option";
 import {
   LanFleetError,
   WS_METHODS,
@@ -139,6 +141,15 @@ export function useLanFleet() {
             mode,
             sendMachineIds: remaining === 100 ? sendMachineIds : [],
             connectedEnvironmentIds: [...current.entries.keys()],
+            completedReplacementDeliveryIds: [...current.entries.values()]
+              .flatMap(connectionRoutes)
+              .flatMap(({ profile }) => {
+                const saved = Option.getOrNull(profile);
+                return saved?._tag === "BearerConnectionProfile"
+                  ? (saved.fleetReplacementDeliveryId ?? [])
+                  : [];
+              })
+              .slice(0, 1000),
           },
         });
         if (result._tag !== "Success") {
@@ -165,6 +176,7 @@ export function useLanFleet() {
             expectedEnvironmentId: delivery.environmentId,
             // A replacement swaps the saved credential, such as after a fleet access change.
             skipExisting: delivery.replace !== true,
+            ...(delivery.replace === true ? { replacementDeliveryId: delivery.deliveryId } : {}),
             ...(delivery.preserveManualConnection === true
               ? { preserveManualConnection: true }
               : {}),

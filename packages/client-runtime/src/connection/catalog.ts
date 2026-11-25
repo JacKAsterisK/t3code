@@ -34,6 +34,7 @@ export class BearerConnectionProfile extends Schema.TaggedClass<BearerConnection
      */
     network: Schema.optionalKey(Schema.Literal("tailscale")),
     fleetTls: Schema.optionalKey(FleetTlsIdentity),
+    fleetReplacementDeliveryId: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(128))),
   },
 ) {}
 

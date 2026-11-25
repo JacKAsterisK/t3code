@@ -4,7 +4,11 @@ import {
   isSharedAddressSpaceHost,
   isTailnetHost,
 } from "@t3tools/shared/hostClassification";
-import type { DesktopSshEnvironmentTarget } from "@t3tools/contracts";
+import {
+  sameFleetTlsIdentity,
+  type DesktopSshEnvironmentTarget,
+  type FleetTlsIdentity,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 
 import {
@@ -42,6 +46,44 @@ export function connectionRouteId(target: ConnectionTarget): string {
 export function fleetTlsOfRoute(route: ConnectionRoute) {
   const profile = Option.getOrNull(route.profile);
   return profile?._tag === "BearerConnectionProfile" ? profile.fleetTls : undefined;
+}
+
+export function savedFleetIdentity(entry: ConnectionCatalogEntry | undefined) {
+  if (entry === undefined) return undefined;
+  const identities = connectionRoutes(entry).flatMap((route) => fleetTlsOfRoute(route) ?? []);
+  return identities.length === 1 ? identities[0] : null;
+}
+
+export function fleetReplacementRoutes(
+  entry: ConnectionCatalogEntry | undefined,
+  candidate: {
+    readonly connectionId: string;
+    readonly httpBaseUrl: string;
+    readonly fleetTls?: FleetTlsIdentity;
+  },
+  predecessor: FleetTlsIdentity | undefined,
+): ReadonlyArray<ConnectionRoute> | null {
+  const current = savedFleetIdentity(entry);
+  if (current === null || (current === undefined) !== (predecessor === undefined)) return null;
+  if (
+    current !== undefined &&
+    (predecessor === undefined ||
+      !sameFleetTlsIdentity(current, predecessor) ||
+      candidate.fleetTls === undefined)
+  )
+    return null;
+  const retained =
+    entry === undefined
+      ? []
+      : connectionRoutes(entry).filter((route) => fleetTlsOfRoute(route) === undefined);
+  const address = candidate.httpBaseUrl.replace(/\/+$/u, "");
+  return retained.some(
+    (route) =>
+      connectionRouteId(route.target) === candidate.connectionId ||
+      routeHttpBaseUrl(route)?.replace(/\/+$/u, "") === address,
+  )
+    ? null
+    : retained;
 }
 
 export function connectionRoutes(entry: ConnectionCatalogEntry): ReadonlyArray<ConnectionRoute> {

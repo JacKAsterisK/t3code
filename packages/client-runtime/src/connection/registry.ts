@@ -1,6 +1,6 @@
 import { msg } from "gt-i18n";
 import { translatableDetail } from "../errors/translatable.ts";
-import { EnvironmentId, sameFleetTlsIdentity, type FleetTlsIdentity } from "@t3tools/contracts";
+import { EnvironmentId, type FleetTlsIdentity } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -51,7 +51,7 @@ import {
   credentialConnectionId,
   entryWithRoutes,
   findRouteToSameAddress,
-  fleetTlsOfRoute,
+  fleetReplacementRoutes,
   hasSavedBearerRoute,
   mergeLearnedRoutes,
   routesAfterRemoving,
@@ -63,7 +63,7 @@ const isSshConnectionProfile = Schema.is(SshConnectionProfile);
 
 interface ConnectionRegistrationOptions {
   readonly knownAddressOnly?: boolean;
-  readonly fleetReplacement?: { readonly previousIdentity?: FleetTlsIdentity };
+  readonly fleetReplacement?: { readonly previousIdentity: FleetTlsIdentity | undefined };
 }
 
 function unsupportedState(
@@ -590,40 +590,23 @@ export const make = Effect.gen(function* () {
         }
         const previous = (yield* SubscriptionRef.get(entries)).get(environmentId);
         let entry = registered;
-        if (previous !== undefined) {
-          const fleetReplacement = options?.fleetReplacement;
-          const oldIdentity = fleetReplacement?.previousIdentity;
-          const newIdentity = fleetTlsOfRoute(route);
-          const existing = connectionRoutes(previous).filter((saved) => {
-            const savedIdentity = fleetTlsOfRoute(saved);
-            return (
-              oldIdentity === undefined ||
-              newIdentity === undefined ||
-              savedIdentity === undefined ||
-              !sameFleetTlsIdentity(savedIdentity, oldIdentity)
-            );
+        const replacement = options?.fleetReplacement;
+        const retained =
+          replacement === undefined
+            ? previous === undefined
+              ? []
+              : connectionRoutes(previous)
+            : registration._tag === "BearerConnectionRegistration"
+              ? fleetReplacementRoutes(previous, registration.profile, replacement.previousIdentity)
+              : null;
+        if (retained === null)
+          return yield* new ConnectionBlockedError({
+            reason: "configuration",
+            detail: "The saved fleet connection changed before the replacement could be saved.",
           });
+        if (previous !== undefined) {
+          const existing = retained;
           const sameAddress = findRouteToSameAddress(existing, route);
-          if (fleetReplacement !== undefined) {
-            const sameId = existing.find(
-              (saved) => connectionRouteId(saved.target) === connectionRouteId(route.target),
-            );
-            const mayReplace = (saved: ConnectionRoute | undefined) => {
-              if (saved === undefined) return true;
-              const savedIdentity = fleetTlsOfRoute(saved);
-              return (
-                savedIdentity !== undefined &&
-                newIdentity !== undefined &&
-                sameFleetTlsIdentity(savedIdentity, newIdentity)
-              );
-            };
-            if (!mayReplace(sameAddress) || !mayReplace(sameId))
-              return yield* new ConnectionBlockedError({
-                reason: "configuration",
-                detail:
-                  "A saved connection at this address changed. Refresh fleet setup to review it.",
-              });
-          }
           const routes = existing.filter(
             (existing) =>
               existing !== sameAddress ||

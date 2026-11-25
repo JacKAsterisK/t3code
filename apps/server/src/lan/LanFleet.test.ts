@@ -487,15 +487,30 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
         const replacement = yield* f.sync(f.recipient.service, connected);
         assert.equal(replacement.incoming.length, 1);
         assert.equal(replacement.incoming[0]?.replace, true);
-        // A saved connection is not proof of pickup while the replacement grant is unspent.
-        yield* TestClock.adjust("1 second");
+        const deliveryId = replacement.incoming[0]!.deliveryId;
+        const receiptPath = f.path.join(
+          f.deliveryDirectory,
+          `${Delivery.deliveryFileName("alpha", "beta")}.receipt.json`,
+        );
+        const oldReceipt = yield* f.fs.readFileString(receiptPath);
+        const completed = { ...connected, completedReplacementDeliveryIds: [deliveryId] };
+
+        // Neither an expired sender catalog nor an existing saved ID proves pickup.
+        yield* TestClock.adjust("11 minutes");
+        yield* f.sync(f.recipient.service, completed);
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
         yield* f.sync(f.sender.service);
         assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+        yield* f.sync(f.recipient.service, completed);
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
 
         f.consume("alpha");
         yield* TestClock.adjust("1 second");
         yield* f.sync(f.sender.service);
         assert.equal((yield* f.sync(f.recipient.service, connected)).incoming.length, 0);
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
+        yield* f.sync(f.recipient.service, completed);
+        assert.notEqual(yield* f.fs.readFileString(receiptPath), oldReceipt);
         assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
         assert.deepEqual(f.issued, ["alpha", "alpha"]);
         assert.deepEqual(f.revoked, ["session-synthetic-1"]);

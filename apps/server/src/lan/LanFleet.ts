@@ -737,19 +737,21 @@ const make = Effect.gen(function* () {
                     sharedFolder &&
                     peerCatalog?.availableDeliveryIds?.includes(delivery.header.deliveryId) ===
                       true;
-                  // The sender only offers a new grant to a connected machine to replace its credential.
-                  const replacement =
-                    grantAvailable &&
-                    ((received?.status === "connected" &&
+                  const connected = input.connectedEnvironmentIds.includes(peer.environmentId);
+                  const replacementOffer =
+                    (received?.status === "connected" &&
                       received.deliveryId !== delivery.header.deliveryId) ||
-                      (config.credentialScope !== undefined &&
-                        received === undefined &&
-                        input.connectedEnvironmentIds.includes(peer.environmentId)));
-                  // A grant that follows an unspent replacement, such as one that lapsed while
-                  // this machine was offline, still replaces.
+                    (config.credentialScope !== undefined && received === undefined && connected);
+                  const replacement = grantAvailable && replacementOffer;
+                  // A following grant still replaces if the previous pickup was unfinished.
                   const replacing =
-                    replacement ||
+                    replacementOffer ||
                     (received?.replacing === true && received.status === "connecting");
+                  const replacementSaved =
+                    peerCatalog?.availableDeliveryIds !== undefined &&
+                    !grantAvailable &&
+                    input.completedReplacementDeliveryIds?.includes(delivery.header.deliveryId) ===
+                      true;
                   if (
                     delivery.header.expiresAt > now &&
                     (received === undefined ||
@@ -766,11 +768,7 @@ const make = Effect.gen(function* () {
                     if (payload === undefined) {
                       rejectedDeliveryIds.add(delivery.header.deliveryId);
                       status = "uncertain";
-                    } else if (
-                      input.connectedEnvironmentIds.includes(peer.environmentId) &&
-                      // A saved connection proves nothing until the replacement grant is spent.
-                      !(replacing && grantAvailable)
-                    ) {
+                    } else if (connected && (!replacing || replacementSaved)) {
                       yield* writeFleetJson(
                         path.join(config.deliveryDirectory, `${incomingKey}.receipt.json`),
                         Delivery.makeReceipt(delivery, config),

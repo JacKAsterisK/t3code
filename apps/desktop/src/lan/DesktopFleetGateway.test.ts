@@ -77,7 +77,7 @@ it.live(
     }),
 );
 
-it.live("replaces a fleet gateway only when the previous pin matches", () =>
+it.live("stages a fleet gateway without disrupting the saved route until selection", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const now = DateTime.toEpochMillis(yield* DateTime.now);
@@ -108,12 +108,32 @@ it.live("replaces a fleet gateway only when the previous pin matches", () =>
           .pipe(Effect.flip),
       ).toMatchObject({ reason: "configuration" });
 
-      const replaced = yield* gateway.prepare({ environmentId, identity, previousIdentity });
-      expect(replaced.httpBaseUrl).not.toBe(oldGateway.httpBaseUrl);
+      const failed = yield* gateway.prepare({ environmentId, identity, previousIdentity });
+      expect(failed.httpBaseUrl).not.toBe(oldGateway.httpBaseUrl);
+      expect(yield* gateway.prepare({ environmentId, identity: previousIdentity })).toEqual(
+        oldGateway,
+      );
+      expect(yield* Effect.promise(() => request(oldGateway.httpBaseUrl))).toBe(502);
+
+      const retry = createFleetTlsCertificate({ address: "127.0.0.1", now });
+      const retryIdentity = {
+        origin,
+        certificate: retry.certificate,
+        publicKeySha256: retry.publicKeySha256,
+      };
+      const staged = yield* gateway.prepare({
+        environmentId,
+        identity: retryIdentity,
+        previousIdentity,
+      });
+      expect(staged.httpBaseUrl).not.toBe(oldGateway.httpBaseUrl);
+      yield* Effect.promise(() =>
+        expect(request(failed.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
+      );
+      expect(yield* gateway.prepare({ environmentId, identity: retryIdentity })).toEqual(staged);
       yield* Effect.promise(() =>
         expect(request(oldGateway.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
       );
-      expect(yield* gateway.prepare({ environmentId, identity })).toEqual(replaced);
     }).pipe(Effect.provide(DesktopFleetGateway.layer)),
   ),
 );

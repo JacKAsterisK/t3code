@@ -14,9 +14,12 @@ export function fleetPairingFailureDetail(failure: unknown, pairingCode: string)
   }
   return (
     detail
-      .replace(/\bBearer\s+[^\s,;]+/giu, "Bearer [redacted]")
-      .replace(/(https?:\/\/)[^/@\s]+@/giu, "$1[redacted]@")
-      .replace(/([?&](?:token|access_token|pairingCode|code)=)[^&\s]+/giu, "$1[redacted]")
+      .replace(/\b(Bearer|DPoP)\s+[^\s,;]+/giu, "$1 [redacted]")
+      .replace(/((?:https?|wss?):\/\/)[^/@\s]+@/giu, "$1[redacted]@")
+      .replace(
+        /([?&](?:token|access_token|refresh_token|pairingCode|code)=)[^&\s]+/giu,
+        "$1[redacted]",
+      )
       .replace(/\s+/gu, " ")
       .trim()
       .slice(0, 400) || null

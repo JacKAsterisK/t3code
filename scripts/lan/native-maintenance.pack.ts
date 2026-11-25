@@ -34,13 +34,11 @@ export const nativeMaintenanceBundleOptions = (
   dts: false,
   clean: false,
   define: lanBuildDefines(identity),
+  // Like the offline home-repair helper, this ships as one standalone module.
+  outputOptions: { codeSplitting: false },
   deps: {
-    alwaysBundle: [
-      /^effect(?:\/|$)/,
-      /^@effect\/platform-node(?:-shared)?(?:\/|$)/,
-      /^@t3tools\/(?:contracts|shared)(?:\/|$)/,
-    ],
-    onlyBundle: ["effect", "@effect/platform-node", "@effect/platform-node-shared"],
+    alwaysBundle: [/.*/],
+    onlyBundle: [/.*/],
   },
 });
 
@@ -74,17 +72,17 @@ export async function buildNativeMaintenance(
       NodeFS.unlinkSync(file.path);
     }
     await build(nativeMaintenanceBundleOptions(root, outDir, identity));
-    const files = NodeFS.readdirSync(outDir)
-      .filter((name) => name.endsWith(".mjs"))
-      .sort()
-      .map((name) => {
-        const bytes = NodeFS.readFileSync(NodePath.join(outDir, name));
-        return {
-          name,
-          bytes: bytes.length,
-          sha256: NodeCrypto.createHash("sha256").update(bytes).digest("hex"),
-        };
-      });
+    const modules = NodeFS.readdirSync(outDir).filter((name) => /\.[cm]?js$/u.test(name));
+    if (modules.length !== 1 || modules[0] !== "native-maintenance.mjs")
+      throw new Error("The native maintenance helper must bundle into one self-contained module.");
+    const files = modules.map((name) => {
+      const bytes = NodeFS.readFileSync(NodePath.join(outDir, name));
+      return {
+        name,
+        bytes: bytes.length,
+        sha256: NodeCrypto.createHash("sha256").update(bytes).digest("hex"),
+      };
+    });
     NodeFS.writeFileSync(
       NodePath.join(outDir, "manifest.json"),
       JSON.stringify(

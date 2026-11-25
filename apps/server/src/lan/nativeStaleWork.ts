@@ -249,7 +249,8 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
     "SELECT * FROM orchestration_v2_projection_subagents WHERE subagent_id=?",
   );
   const appOwnedCard = db.prepare(
-    "SELECT 1 FROM orchestration_v2_projection_turn_items WHERE thread_id=? AND type='subagent' AND status IN ('pending','running','waiting') AND (node_id=? OR json_extract(payload_json,'$.subagentId')=?) AND json_extract(payload_json,'$.origin')='app_owned' LIMIT 1",
+    // A terminal projection alone does not prove an app-owned card has finished.
+    "SELECT 1 FROM orchestration_v2_projection_turn_items WHERE thread_id=? AND type='subagent' AND (status IN ('pending','running','waiting') OR status IS NOT json_extract(payload_json,'$.status')) AND (node_id=? OR json_extract(payload_json,'$.subagentId')=?) AND json_extract(payload_json,'$.origin')='app_owned' LIMIT 1",
   );
   const attemptById = db.prepare(
     "SELECT * FROM orchestration_v2_projection_run_attempts WHERE attempt_id=?",
@@ -444,7 +445,9 @@ export function staleNativeProjectionClassifier(db: NodeSqlite.DatabaseSync, now
         );
       case "orchestration_v2_projection_subagents":
         return (
+          typeof row.subagent_id === "string" &&
           value.id === row.subagent_id &&
+          !appOwnedCard.get(threadId, row.subagent_id, row.subagent_id) &&
           value.origin === "provider_native" &&
           row.origin === "provider_native" &&
           value.remoteChild == null &&
@@ -601,6 +604,7 @@ export function staleApprovalMaySettle(db: NodeSqlite.DatabaseSync) {
     const request = requestById.get(value.requestId);
     const node = nodeById.get(row.node_id);
     const turnId = row.provider_turn_id;
+    const providerThreadId = row.provider_thread_id;
     if (
       request === undefined ||
       node === undefined ||
@@ -611,6 +615,10 @@ export function staleApprovalMaySettle(db: NodeSqlite.DatabaseSync) {
       value.providerTurnId !== turnId ||
       request.provider_turn_id !== turnId ||
       node.provider_turn_id !== turnId ||
+      typeof providerThreadId !== "string" ||
+      providerThreadId.length === 0 ||
+      value.providerThreadId !== providerThreadId ||
+      node.provider_thread_id !== providerThreadId ||
       request.thread_id !== row.thread_id ||
       request.node_id !== row.node_id ||
       node.thread_id !== row.thread_id ||
@@ -620,6 +628,10 @@ export function staleApprovalMaySettle(db: NodeSqlite.DatabaseSync) {
       return false;
     const requestValue = JSON.parse(request.payload_json) as Record<string, unknown>;
     const nodeValue = JSON.parse(node.payload_json) as Record<string, unknown>;
-    return requestValue.providerTurnId === turnId && nodeValue.providerTurnId === turnId;
+    return (
+      requestValue.providerTurnId === turnId &&
+      nodeValue.providerTurnId === turnId &&
+      nodeValue.providerThreadId === providerThreadId
+    );
   };
 }

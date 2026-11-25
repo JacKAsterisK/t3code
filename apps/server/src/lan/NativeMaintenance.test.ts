@@ -569,9 +569,9 @@ effectIt.effect.each([false, true])(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-effectIt.effect.each([false, true])(
-  "keeps an app-owned delegation out of automatic settlement with task row=%s",
-  (hasTask) =>
+effectIt.effect.each(["missing", "present", "contradictory-status", "native-task-row"] as const)(
+  "keeps an app-owned delegation out of automatic settlement with %s ownership evidence",
+  (fixtureCase) =>
     Effect.gen(function* () {
       const { dbPath, request, insert } = yield* fixture;
       const at = isoAtMs(hostNowMs() - 3 * 86400000);
@@ -579,6 +579,9 @@ effectIt.effect.each([false, true])(
       const runId = "run:delegate-parent";
       const nodeId = "node:delegate";
       const childThreadId = "thread:delegate-child";
+      const hasTask = fixtureCase === "present" || fixtureCase === "native-task-row";
+      const taskOrigin = fixtureCase === "native-task-row" ? "provider_native" : "app_owned";
+      const taskParentId = "node:native-parent";
       yield* insert("orchestration_v2_projection_runs", "interrupted", {
         thread_id: threadId,
         run_id: runId,
@@ -590,19 +593,36 @@ effectIt.effect.each([false, true])(
           completedAt: at,
         }),
       });
+      if (fixtureCase === "native-task-row") {
+        yield* insert("orchestration_v2_projection_nodes", "completed", {
+          thread_id: threadId,
+          run_id: runId,
+          node_id: taskParentId,
+          kind: "tool",
+          payload_json: JSON.stringify({
+            id: taskParentId,
+            threadId,
+            runId,
+            status: "completed",
+            runtimeRequestId: null,
+          }),
+        });
+      }
       if (hasTask)
         yield* insert("orchestration_v2_projection_subagents", "running", {
           thread_id: threadId,
           run_id: runId,
           subagent_id: nodeId,
-          origin: "app_owned",
-          child_thread_id: childThreadId,
+          origin: taskOrigin,
+          child_thread_id: taskOrigin === "app_owned" ? childThreadId : null,
+          updated_at: at,
           payload_json: JSON.stringify({
             id: nodeId,
             threadId,
             runId,
-            origin: "app_owned",
-            childThreadId,
+            origin: taskOrigin,
+            parentNodeId: taskParentId,
+            childThreadId: taskOrigin === "app_owned" ? childThreadId : null,
             status: "running",
             updatedAt: at,
           }),
@@ -627,32 +647,39 @@ effectIt.effect.each([false, true])(
           }),
         });
       }
-      yield* insert("orchestration_v2_projection_turn_items", "running", {
-        thread_id: threadId,
-        run_id: runId,
-        node_id: hasTask ? nodeId : null,
-        turn_item_id: "item:delegate",
-        type: "subagent",
-        updated_at: at,
-        payload_json: JSON.stringify({
-          id: "item:delegate",
-          threadId,
-          runId,
-          nodeId: hasTask ? nodeId : null,
+      yield* insert(
+        "orchestration_v2_projection_turn_items",
+        fixtureCase === "contradictory-status" ? "completed" : "running",
+        {
+          thread_id: threadId,
+          run_id: runId,
+          node_id: hasTask ? nodeId : null,
+          turn_item_id: "item:delegate",
           type: "subagent",
-          origin: "app_owned",
-          subagentId: nodeId,
-          childThreadId,
-          status: "running",
-        }),
-      });
+          updated_at: at,
+          payload_json: JSON.stringify({
+            id: "item:delegate",
+            threadId,
+            runId,
+            nodeId: hasTask ? nodeId : null,
+            type: "subagent",
+            origin: "app_owned",
+            subagentId: nodeId,
+            childThreadId,
+            status: "running",
+          }),
+        },
+      );
       const before = yield* unfinishedWorkAt(
         dbPath,
         { ...request, operation: "inspect-unfinished-work" },
         identity,
       );
-      assert.isAtLeast(before.blocking.backgroundAgents, 3);
       assert.deepEqual(before.staleWork, {});
+      const blockingIds = before.threads.flatMap((thread) =>
+        thread.items.filter((item) => item.blocking).map((item) => item.id),
+      );
+      assert.includeMembers(blockingIds, [nodeId, "node:delegated-leaf"]);
       const after = yield* unfinishedWorkAt(
         dbPath,
         {
@@ -1029,6 +1056,7 @@ effectIt.effect.each([
   "cancelled-linked-receipt",
   "cancelled-foreign-provider-turn",
   "cancelled-foreign-provider-turn-linked-node",
+  "cancelled-foreign-provider-thread-linked-node",
 ] as const)("checks real approval work independently of a %s approval item", (fixtureCase) =>
   Effect.gen(function* () {
     const { dbPath, insert, request } = yield* fixtureAtMigration(
@@ -1044,6 +1072,7 @@ effectIt.effect.each([
       ? null
       : isoAtMs(now - 30000);
     const cancelled = fixtureCase.startsWith("cancelled-");
+    const foreignProviderThread = fixtureCase === "cancelled-foreign-provider-thread-linked-node";
     const runStatus = completedAt === null ? "waiting" : cancelled ? "interrupted" : "completed";
     const linkedRequest = [
       "missing-receipt",
@@ -1087,7 +1116,9 @@ effectIt.effect.each([
         requestId,
         updatedAt,
         ...(cancelled && {
-          providerThreadId: "provider-thread:codex",
+          providerThreadId: foreignProviderThread
+            ? "provider-thread:other"
+            : "provider-thread:codex",
           providerTurnId: "provider-turn:codex",
         }),
         ...(fixtureCase === "item-delivery-array"
@@ -1133,7 +1164,9 @@ effectIt.effect.each([
           provider_turn_id: "provider-turn:codex",
         }),
         // The real node.updated projection writer does not populate runtime_request_id.
-        ...(!cancelled || fixtureCase === "cancelled-foreign-provider-turn-linked-node"
+        ...(!cancelled ||
+        foreignProviderThread ||
+        fixtureCase === "cancelled-foreign-provider-turn-linked-node"
           ? { runtime_request_id: requestId }
           : {}),
         payload_json: JSON.stringify({
@@ -1296,6 +1329,7 @@ effectIt.effect.each([
         "linked-terminal",
         "cancelled-null-node-column",
         "cancelled-foreign-provider-turn-linked-node",
+        "cancelled-foreign-provider-thread-linked-node",
       ].includes(fixtureCase)
     ) {
       assert.equal(observed.backgroundAgents, 0);
@@ -1313,6 +1347,7 @@ effectIt.effect.each([
       const verified = yield* verify;
       assert.equal(verified.workGeneration, observed.workGeneration);
       if (
+        foreignProviderThread ||
         fixtureCase === "cancelled-foreign-provider-turn-linked-node" ||
         fixtureCase === "cancelled-null-node-column" ||
         fixtureCase === "orphan"
@@ -1341,6 +1376,20 @@ effectIt.effect.each([
           );
           assert.isTrue("cancelled" in after && after.cancelled.events === 0);
           assert.equal(after.workGeneration, review.workGeneration);
+          if (foreignProviderThread) {
+            const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+            try {
+              const retained = db
+                .prepare(
+                  "SELECT status, provider_thread_id FROM orchestration_v2_projection_turn_items WHERE turn_item_id = ?",
+                )
+                .get(itemId);
+              assert.equal(retained?.status, "waiting");
+              assert.equal(retained?.provider_thread_id, "provider-thread:codex");
+            } finally {
+              db.close();
+            }
+          }
         }
       }
     } else {

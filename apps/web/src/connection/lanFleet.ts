@@ -155,9 +155,10 @@ export function useLanFleetReset(environmentId: EnvironmentId) {
         const removed = await remove({ environmentId, routeId, expectedFleet });
         if (removed._tag === "Success") continue;
         const failure = squashAtomCommandFailure(removed);
-        removalError ??= isConnectionBlockedError(failure)
-          ? failure.message
-          : "Some saved fleet connections could not be removed.";
+        if (removalError === undefined)
+          removalError = isConnectionBlockedError(failure)
+            ? failure.message
+            : "Some saved fleet connections could not be removed.";
       }
       return {
         receipt: result.value,

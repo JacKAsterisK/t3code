@@ -69,7 +69,11 @@ The list fails closed:
   accepted a list behaves as before one was saved. Changes are refused until it
   can read the list.
 - A change holds `fleet-access.lock` for a moment. A lock older than two minutes
-  was left by a crash, and the next change clears it.
+  was left by a crash, and the next change clears it. The lock names its holder
+  (`owner.json`), and every write under it checks it still holds it first, so a
+  holder that stalled past two minutes and lost the lock writes nothing. The
+  starting-list command also checks right after its write and takes the file back
+  if it lost the lock meanwhile. A holder only ever removes a lock it still holds.
 
 A fleet with no list yet can start from `fleet-access-seed.json` beside the
 roster, which names the machines that start read-only:

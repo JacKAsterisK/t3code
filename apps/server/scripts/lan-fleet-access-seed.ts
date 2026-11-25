@@ -54,7 +54,7 @@ NodeRuntime.runMain(
         LanFleetError: (error) =>
           refuse(
             error.reason === "busy"
-              ? "A machine is changing the access list right now; run this again shortly."
+              ? "A machine is changing the access list, or took the lock while this ran. Check Machine access before running this again."
               : error.refusal === "list-exists"
                 ? `${path.join(root, "fleet-access")} already holds a list; machines ignore a starting list now.`
                 : `${file} already exists.`,

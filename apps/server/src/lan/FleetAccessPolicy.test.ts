@@ -1286,6 +1286,111 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
     }).pipe(Effect.provide(configLayer)),
   );
 
+  /** As a server clearing a lock it judged stale would: the lock now names someone else. */
+  const reclaim = (f: Effect.Success<ReturnType<typeof fleet>>) =>
+    f.fs.writeFileString(
+      f.path.join(f.root, FleetAccessPolicy.ACCESS_LOCK, "owner.json"),
+      JSON.stringify({ token: "reclaimer" }) + "\n",
+    );
+
+  it.effect("takes back a starting list written while its lock was reclaimed", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const seed = f.seedOf(f.anvil) as FleetAccessPolicy.FleetAccessSeed;
+      // The command stalls past the stale limit just as its write lands.
+      const stalled: FileSystem.FileSystem = {
+        ...f.fs,
+        rename: (from, to) =>
+          f.fs
+            .rename(from, to)
+            .pipe(Effect.andThen(to === f.seedFile ? reclaim(f).pipe(Effect.orDie) : Effect.void)),
+      };
+      const refused = yield* FleetAccessPolicy.writeStartingList(f.root, seed).pipe(
+        Effect.provideService(FileSystem.FileSystem, stalled),
+        Effect.flip,
+      );
+      expect(refused).toMatchObject({ reason: "busy" });
+      expect(yield* f.fs.exists(f.seedFile)).toBe(false);
+      // The reclaimer's lock stays theirs.
+      expect(
+        yield* f.fs.readFileString(
+          f.path.join(f.root, FleetAccessPolicy.ACCESS_LOCK, "owner.json"),
+        ),
+      ).toContain("reclaimer");
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("writes no starting list once its lock was reclaimed before the write", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const seed = f.seedOf(f.anvil) as FleetAccessPolicy.FleetAccessSeed;
+      // The command stalls after its checks, before it writes.
+      const stalled: FileSystem.FileSystem = {
+        ...f.fs,
+        exists: (file) =>
+          f.fs
+            .exists(file)
+            .pipe(
+              Effect.tap(() => (file === f.seedFile ? reclaim(f).pipe(Effect.orDie) : Effect.void)),
+            ),
+      };
+      const refused = yield* FleetAccessPolicy.writeStartingList(f.root, seed).pipe(
+        Effect.provideService(FileSystem.FileSystem, stalled),
+        Effect.flip,
+      );
+      expect(refused).toMatchObject({ reason: "busy" });
+      expect(yield* f.fs.exists(f.seedFile)).toBe(false);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("publishes nothing once a change's lock was reclaimed while it read the share", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const stateDir = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-state-" });
+      // The save stalls past the stale limit while it reads, under the lock.
+      const stalled: FileSystem.FileSystem = {
+        ...f.fs,
+        exists: (file) =>
+          f.fs.exists(file).pipe(
+            Effect.tap(() =>
+              file === f.seedFile
+                ? f.fs.exists(f.path.join(f.root, FleetAccessPolicy.ACCESS_LOCK)).pipe(
+                    Effect.flatMap((held) => (held ? reclaim(f) : Effect.void)),
+                    Effect.orDie,
+                  )
+                : Effect.void,
+            ),
+          ),
+      };
+      const cryo = yield* f
+        .machine(stateDir)
+        .pipe(Effect.provideService(FileSystem.FileSystem, stalled));
+      const refused = yield* f.change(cryo, f.cryo, 0, []).pipe(Effect.flip);
+      expect(refused.reason).toBe("busy");
+      expect(yield* f.fs.exists(f.directory)).toBe(false);
+      expect(
+        yield* f.fs.readFileString(
+          f.path.join(f.root, FleetAccessPolicy.ACCESS_LOCK, "owner.json"),
+        ),
+      ).toContain("reclaimer");
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("releases a lock it still holds after a write", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      yield* FleetAccessPolicy.writeStartingList(
+        f.root,
+        f.seedOf(f.anvil) as FleetAccessPolicy.FleetAccessSeed,
+      );
+      expect(yield* f.fs.exists(f.path.join(f.root, FleetAccessPolicy.ACCESS_LOCK))).toBe(false);
+      const cryo = yield* f.machine();
+      yield* f.fs.remove(f.seedFile);
+      expect((yield* f.change(cryo, f.cryo, 0, [])).revision).toBe(1);
+      expect(yield* f.fs.exists(f.path.join(f.root, FleetAccessPolicy.ACCESS_LOCK))).toBe(false);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("an explicit roster path does not block a verified private-file fleet at startup", () =>
     Effect.gen(function* () {
       const f = yield* fleet();

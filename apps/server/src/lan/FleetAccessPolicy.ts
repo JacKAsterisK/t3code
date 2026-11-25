@@ -82,10 +82,52 @@ export type FleetAccessSeed = typeof FleetAccessSeed.Type;
 
 /** The share lock every list write holds, the starting-list command's included. */
 export const ACCESS_LOCK = "fleet-access.lock";
+/** Inside the lock: the token of whoever holds it now. A stale-lock reclaim replaces it. */
+const ACCESS_LOCK_OWNER = "owner.json";
+const AccessLockOwner = Schema.Struct({ token: Schema.String });
+
+/** Creates the lock and names this holder in it; fails if the lock is there. */
+const createAccessLock = Effect.fn("FleetAccess.createAccessLock")(function* (lock: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fs.makeDirectory(lock);
+  const token = NodeCrypto.randomUUID();
+  // The directory was just created by this holder alone, so the file is this holder's to write.
+  yield* writeFleetJson(path.join(lock, ACCESS_LOCK_OWNER), { token });
+  return token;
+});
+
+/**
+ * Whether this holder still holds the lock: a holder that stalled past the stale limit may have
+ * had it reclaimed. Every write under the lock asks right before it, and a seed right after.
+ */
+const ownsAccessLock = Effect.fn("FleetAccess.ownsAccessLock")(function* (
+  root: string,
+  token: string,
+) {
+  const path = yield* Path.Path;
+  const owner = yield* readFleetJson(
+    path.join(root, ACCESS_LOCK, ACCESS_LOCK_OWNER),
+    AccessLockOwner,
+  ).pipe(Effect.option);
+  return owner._tag === "Some" && owner.value.token === token;
+});
+
+/** Removes the lock only while this holder holds it, so a reclaimer's lock is never released. */
+const releaseAccessLock = Effect.fn("FleetAccess.releaseAccessLock")(function* (
+  root: string,
+  token: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  if (yield* ownsAccessLock(root, token))
+    yield* fs.remove(path.join(root, ACCESS_LOCK), { recursive: true });
+});
 
 /**
  * Places a starting list beside the roster under the lock a list change holds, so it and a first
- * save never both succeed. Refused while the lock is held, once any list exists, or over one.
+ * save never both succeed: refused while the lock is held, once any list exists, over one, or if
+ * the lock was reclaimed around its write, in which case the file it wrote is taken back.
  */
 export const writeStartingList = Effect.fn("FleetAccess.writeStartingList")(function* (
   root: string,
@@ -94,19 +136,27 @@ export const writeStartingList = Effect.fn("FleetAccess.writeStartingList")(func
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const lock = path.join(root, ACCESS_LOCK);
+  const busy = () => new LanFleetError({ reason: "busy" });
   const refused = (refusal: string) => new LanFleetError({ reason: "configuration", refusal });
   yield* Effect.acquireUseRelease(
-    fs.makeDirectory(lock).pipe(Effect.mapError(() => new LanFleetError({ reason: "busy" }))),
-    () =>
+    createAccessLock(lock).pipe(Effect.mapError(busy)),
+    (token) =>
       Effect.gen(function* () {
         const history = path.join(root, "fleet-access");
         if ((yield* fs.exists(history)) && (yield* fs.readDirectory(history)).length > 0)
           return yield* refused("list-exists");
         const file = path.join(root, SEED_FILE);
         if (yield* fs.exists(file)) return yield* refused("seed-exists");
+        if (!(yield* ownsAccessLock(root, token))) return yield* busy();
         yield* writeFleetJson(file, seed);
+        // Reclaimed while it wrote: a first save may have been checked without it, so the
+        // starting list goes, and the command says it did not take.
+        if (!(yield* ownsAccessLock(root, token))) {
+          yield* fs.remove(file, { force: true });
+          return yield* busy();
+        }
       }),
-    () => fs.remove(lock, { recursive: true }).pipe(Effect.ignore),
+    (token) => releaseAccessLock(root, token).pipe(Effect.ignore),
   );
 });
 
@@ -1073,11 +1123,16 @@ const make = Effect.fn("FleetAccess.make")(function* (
   type View = Effect.Success<ReturnType<typeof refreshUnlocked>>;
 
   /** The share lock, cleared first if a crash left it behind. */
-  const withShareLock = <A, E>(root: string, use: Effect.Effect<A, E>) => {
+  const withShareLock = <A, E>(root: string, use: (token: string) => Effect.Effect<A, E>) => {
     const lock = path.join(root, ACCESS_LOCK);
     const busy = () => new LanFleetError({ reason: "busy" });
+    const create = createAccessLock(lock).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(Path.Path, path),
+    );
     const acquire = Effect.gen(function* () {
-      if ((yield* Effect.result(fs.makeDirectory(lock)))._tag === "Success") return;
+      const first = yield* Effect.result(create);
+      if (first._tag === "Success") return first.success;
       const now = yield* Clock.currentTimeMillis;
       const stale = yield* fs.stat(lock).pipe(
         Effect.map((info) =>
@@ -1094,14 +1149,25 @@ const make = Effect.fn("FleetAccess.make")(function* (
       const aside = `${lock}.stale-${NodeCrypto.randomUUID()}`;
       yield* fs.rename(lock, aside).pipe(Effect.mapError(busy));
       yield* fs.remove(aside, { recursive: true }).pipe(Effect.ignore);
-      yield* fs.makeDirectory(lock).pipe(Effect.mapError(busy));
+      return yield* create.pipe(Effect.mapError(busy));
     });
-    return Effect.acquireUseRelease(
-      acquire,
-      () => use,
-      () => fs.remove(lock, { recursive: true }).pipe(Effect.ignore),
+    return Effect.acquireUseRelease(acquire, use, (token) =>
+      releaseAccessLock(root, token).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, path),
+        Effect.ignore,
+      ),
     );
   };
+  /** Refused as busy unless this change still holds the lock it took. */
+  const stillHolds = (root: string, token: string) =>
+    ownsAccessLock(root, token).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(Path.Path, path),
+      Effect.flatMap((owns) =>
+        owns ? Effect.void : Effect.fail(new LanFleetError({ reason: "busy" })),
+      ),
+    );
 
   /** Signs `next` as this machine after every head it may follow, and writes it to the share. */
   const publish = Effect.fn("FleetAccess.publish")(
@@ -1203,11 +1269,11 @@ const make = Effect.fn("FleetAccess.make")(function* (
       )
     )
       return view.state;
-    return yield* withShareLock(
-      input.root,
+    return yield* withShareLock(input.root, (token) =>
       Effect.gen(function* () {
         const fresh = yield* refreshUnlocked(input);
         if (fresh.evaluation.snapshot === undefined) return fresh.state;
+        yield* stillHolds(input.root, token);
         yield* publish({ ...input, signingPrivateKey: key }, fresh, fresh.evaluation.snapshot);
         return (yield* refreshUnlocked(input)).state;
       }),
@@ -1224,8 +1290,7 @@ const make = Effect.fn("FleetAccess.make")(function* (
     input: Parameters<FleetAccess["Service"]["change"]>[0],
     adoptingSeed = false,
   ) =>
-    withShareLock(
-      input.root,
+    withShareLock(input.root, (token) =>
       Effect.gen(function* () {
         const view = yield* refreshUnlocked(input);
         if (view.unavailable) return yield* new LanFleetError({ reason: "unavailable" });
@@ -1280,6 +1345,9 @@ const make = Effect.fn("FleetAccess.make")(function* (
           sameSnapshot(current, next)
         )
           return view.state;
+        // A change that stalled past the stale limit may have lost the lock to a reclaim; what it
+        // read is then no longer what holds.
+        yield* stillHolds(input.root, token);
         const entry = yield* publish(input, view, next);
         const written = yield* refreshUnlocked(input);
         // A competing head that restricts more still applies; report it rather than succeed.

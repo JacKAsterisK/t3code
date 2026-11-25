@@ -66,6 +66,9 @@ export const sameFleetTlsIdentity = (left: FleetTlsIdentity, right: FleetTlsIden
   left.publicKeySha256 === right.publicKeySha256 &&
   left.certificate === right.certificate;
 
+export const sameFleetTlsRoute = (left: FleetTlsIdentity, right: FleetTlsIdentity) =>
+  sameFleetTlsIdentity(left, right) && left.connectHost === right.connectHost;
+
 export const FleetTlsGatewayInput = Schema.Struct({
   environmentId: EnvironmentId,
   identity: FleetTlsIdentity,
@@ -118,6 +121,7 @@ export const LanFleetSyncResult = Schema.Struct({
       // The sender replaced a credential this machine already holds, such as after an access change.
       replace: Schema.optionalKey(Schema.Boolean),
       preserveManualConnection: Schema.optionalKey(Schema.Literal(true)),
+      requireSavedConnection: Schema.optionalKey(Schema.Literal(true)),
     }),
   ),
 });

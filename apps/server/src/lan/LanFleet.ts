@@ -741,7 +741,7 @@ const make = Effect.gen(function* () {
                   const replacementOffer =
                     (received?.status === "connected" &&
                       received.deliveryId !== delivery.header.deliveryId) ||
-                    (config.credentialScope !== undefined && received === undefined && connected);
+                    (sharedFolder && received === undefined && connected);
                   const replacement = grantAvailable && replacementOffer;
                   // A following grant still replaces if the previous pickup was unfinished.
                   const replacing =
@@ -796,7 +796,8 @@ const make = Effect.gen(function* () {
                       // Renewing a connection already accepted is no new trust decision, so a
                       // client collects it whether or not automatic pickup is on.
                       (input.mode === "manual" ||
-                        (input.mode === "automatic" && (config.autoPickup || replacing)))
+                        (input.mode === "automatic" &&
+                          (config.autoPickup || (replacing && connected))))
                     ) {
                       journal[`received:${incomingKey}`] = {
                         deliveryId: delivery.header.deliveryId,
@@ -826,6 +827,9 @@ const make = Effect.gen(function* () {
                         pairingCode: payload.credential,
                         ...(tls === undefined ? {} : { tls }),
                         ...(replacing ? { replace: true } : {}),
+                        ...(replacing && input.mode === "automatic" && !config.autoPickup
+                          ? { requireSavedConnection: true }
+                          : {}),
                         ...(replacing && config.credentialScope !== undefined
                           ? { preserveManualConnection: true }
                           : {}),

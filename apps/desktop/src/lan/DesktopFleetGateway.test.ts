@@ -108,7 +108,12 @@ it.live("stages a fleet gateway without disrupting the saved route until selecti
           .pipe(Effect.flip),
       ).toMatchObject({ reason: "configuration" });
 
-      const failed = yield* gateway.prepare({ environmentId, identity, previousIdentity });
+      const hostOnly = { ...previousIdentity, connectHost: "localhost" };
+      const failed = yield* gateway.prepare({
+        environmentId,
+        identity: hostOnly,
+        previousIdentity,
+      });
       expect(failed.httpBaseUrl).not.toBe(oldGateway.httpBaseUrl);
       expect(yield* gateway.prepare({ environmentId, identity: previousIdentity })).toEqual(
         oldGateway,
@@ -121,18 +126,24 @@ it.live("stages a fleet gateway without disrupting the saved route until selecti
         certificate: retry.certificate,
         publicKeySha256: retry.publicKeySha256,
       };
-      const staged = yield* gateway.prepare({
-        environmentId,
-        identity: retryIdentity,
-        previousIdentity,
-      });
-      expect(staged.httpBaseUrl).not.toBe(oldGateway.httpBaseUrl);
+      const savedStage = yield* gateway.prepare({ environmentId, identity, previousIdentity });
+      expect(savedStage.httpBaseUrl).not.toBe(oldGateway.httpBaseUrl);
       yield* Effect.promise(() =>
         expect(request(failed.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
       );
-      expect(yield* gateway.prepare({ environmentId, identity: retryIdentity })).toEqual(staged);
+      // The prior replacement is saved, but a manual route was selected before the next rotation.
+      const staged = yield* gateway.prepare({
+        environmentId,
+        identity: retryIdentity,
+        previousIdentity: identity,
+      });
+      expect(yield* gateway.prepare({ environmentId, identity })).toEqual(savedStage);
       yield* Effect.promise(() =>
         expect(request(oldGateway.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
+      );
+      expect(yield* gateway.prepare({ environmentId, identity: retryIdentity })).toEqual(staged);
+      yield* Effect.promise(() =>
+        expect(request(savedStage.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
       );
     }).pipe(Effect.provide(DesktopFleetGateway.layer)),
   ),

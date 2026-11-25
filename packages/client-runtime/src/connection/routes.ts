@@ -5,7 +5,7 @@ import {
   isTailnetHost,
 } from "@t3tools/shared/hostClassification";
 import {
-  sameFleetTlsIdentity,
+  sameFleetTlsRoute,
   type DesktopSshEnvironmentTarget,
   type FleetTlsIdentity,
 } from "@t3tools/contracts";
@@ -68,7 +68,7 @@ export function fleetReplacementRoutes(
   if (
     current !== undefined &&
     (predecessor === undefined ||
-      !sameFleetTlsIdentity(current, predecessor) ||
+      !sameFleetTlsRoute(current, predecessor) ||
       candidate.fleetTls === undefined)
   )
     return null;

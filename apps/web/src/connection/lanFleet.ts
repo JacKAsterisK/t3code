@@ -177,6 +177,7 @@ export function useLanFleet() {
             // A replacement swaps the saved credential, such as after a fleet access change.
             skipExisting: delivery.replace !== true,
             ...(delivery.replace === true ? { replacementDeliveryId: delivery.deliveryId } : {}),
+            ...(delivery.requireSavedConnection === true ? { requireSavedConnection: true } : {}),
             ...(delivery.preserveManualConnection === true
               ? { preserveManualConnection: true }
               : {}),

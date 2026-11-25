@@ -63,6 +63,7 @@ const isSshConnectionProfile = Schema.is(SshConnectionProfile);
 
 interface ConnectionRegistrationOptions {
   readonly knownAddressOnly?: boolean;
+  readonly requireSavedConnection?: boolean;
   readonly fleetReplacement?: { readonly previousIdentity: FleetTlsIdentity | undefined };
 }
 
@@ -589,6 +590,11 @@ export const make = Effect.gen(function* () {
           yield* assertKnownAddress(route);
         }
         const previous = (yield* SubscriptionRef.get(entries)).get(environmentId);
+        if (options?.requireSavedConnection === true && previous === undefined)
+          return yield* new ConnectionBlockedError({
+            reason: "configuration",
+            detail: "This saved connection was removed. Add it again to reconnect.",
+          });
         let entry = registered;
         const replacement = options?.fleetReplacement;
         const retained =

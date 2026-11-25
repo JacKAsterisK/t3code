@@ -443,6 +443,7 @@ describe("connection onboarding", () => {
 
         expect(prepared).toEqual([
           { environmentId: PAIRED_ENVIRONMENT_ID, identity: tls, previousIdentity },
+          ...(failExchange ? [] : [{ environmentId: PAIRED_ENVIRONMENT_ID, identity: tls }]),
         ]);
         const saved = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID)!;
         expect(connectionRoutes(saved).map(routeHttpBaseUrl)).toEqual(
@@ -476,6 +477,50 @@ describe("connection onboarding", () => {
       );
     },
   );
+
+  it.effect("renews an unpinned connection from an original fleet", () => {
+    const registered: unknown[] = [];
+    return Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      yield* registerSavedEnvironment();
+      expect(
+        yield* onboarding.registerPairing({
+          ...PAIRING_INPUT,
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          replacementDeliveryId: "synthetic-renewal",
+          requireSavedConnection: true,
+        }),
+      ).toBe(PAIRED_ENVIRONMENT_ID);
+      expect(registered.at(-1)).toMatchObject({
+        target: { connectionId: PAIRED_PROFILE.connectionId },
+        profile: { fleetReplacementDeliveryId: "synthetic-renewal" },
+        credential: { token: "bearer-token" },
+      });
+      const saved = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID)!;
+      expect(connectionRoutes(saved)).toHaveLength(1);
+    }).pipe(Effect.provide(layerPairingOnboarding(undefined, [], undefined, registered)));
+  });
+
+  it.effect("leaves an unspent automatic renewal when the environment was forgotten", () => {
+    const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+    return Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      expect(
+        yield* onboarding
+          .registerPairing({
+            ...PAIRING_INPUT,
+            expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+            replacementDeliveryId: "synthetic-renewal",
+            requireSavedConnection: true,
+          })
+          .pipe(Effect.flip),
+      ).toMatchObject({ reason: "configuration" });
+      expect(calls).toEqual([]);
+      expect((yield* SubscriptionRef.get(registry.entries)).has(PAIRED_ENVIRONMENT_ID)).toBe(false);
+    }).pipe(Effect.provide(layerPairingOnboarding(undefined, calls)));
+  });
 
   it.effect.each(["ambiguous", "manual-collision", "predecessor-removed"] as const)(
     "keeps existing routes on a fleet replacement conflict (%s)",

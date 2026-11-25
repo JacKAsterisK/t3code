@@ -3,6 +3,7 @@ import {
   FleetTlsGatewayResult,
   LanFleetError,
   sameFleetTlsIdentity,
+  sameFleetTlsRoute,
   type FleetTlsIdentity,
 } from "@t3tools/contracts";
 import { startFleetProxy, type FleetProxy } from "@t3tools/shared/fleetTlsProxy";
@@ -50,36 +51,47 @@ const make = Effect.gen(function* () {
       if (saved === undefined && gateways.size >= 100)
         return yield* new LanFleetError({ reason: "unavailable" });
       const slot = saved ?? {};
-      const active = slot.active;
-      const pending = slot.replacement;
+      let active = slot.active;
+      let pending = slot.replacement;
+      const previousIdentity = input.previousIdentity;
+      // A later saved predecessor can confirm a stage even if the resolver chose a manual route.
+      if (
+        previousIdentity !== undefined &&
+        pending !== undefined &&
+        sameFleetTlsRoute(previousIdentity, pending.gateway.identity)
+      ) {
+        const retired = active;
+        active = pending.gateway;
+        slot.active = active;
+        delete slot.replacement;
+        pending = undefined;
+        if (retired !== undefined) yield* Effect.promise(() => retired.proxy.close());
+      }
       const matches = (gateway: Gateway | undefined) =>
-        gateway !== undefined && sameFleetTlsIdentity(gateway.identity, input.identity);
+        gateway !== undefined && sameFleetTlsRoute(gateway.identity, input.identity);
       const activeMatches = matches(active);
       const pendingMatches = matches(pending?.gateway);
-      const previousIdentity = input.previousIdentity;
       const staged = previousIdentity !== undefined && !activeMatches;
 
       if (staged) {
-        if (active !== undefined && !sameFleetTlsIdentity(active.identity, previousIdentity))
+        if (active !== undefined && !sameFleetTlsRoute(active.identity, previousIdentity))
           return yield* new LanFleetError({ reason: "configuration" });
-        if (
-          pending !== undefined &&
-          !sameFleetTlsIdentity(pending.previousIdentity, previousIdentity)
-        )
+        if (pending !== undefined && !sameFleetTlsRoute(pending.previousIdentity, previousIdentity))
           return yield* new LanFleetError({ reason: "configuration" });
       } else if (
         !activeMatches &&
         !pendingMatches &&
-        (active !== undefined ||
-          (pending !== undefined &&
-            !sameFleetTlsIdentity(pending.previousIdentity, input.identity)))
+        (active !== undefined
+          ? !sameFleetTlsIdentity(active.identity, input.identity)
+          : pending !== undefined &&
+            !sameFleetTlsIdentity(pending.previousIdentity, input.identity))
       ) {
         return yield* new LanFleetError({ reason: "configuration" });
       }
 
       const reusable = activeMatches ? active : pendingMatches ? pending?.gateway : undefined;
       let next = reusable;
-      if (next === undefined || next.identity.connectHost !== input.identity.connectHost) {
+      if (next === undefined) {
         const now = DateTime.toEpochMillis(yield* DateTime.now);
         const proxy = yield* Effect.tryPromise({
           try: () =>

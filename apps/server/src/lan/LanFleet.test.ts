@@ -464,7 +464,7 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
     "replaces a connected peer's credential when its fleet access changes, with no approval",
     () =>
       Effect.gen(function* () {
-        const f = yield* setup(true, false, true);
+        const f = yield* setup(false, false, true);
         f.setPolicy({ revision: 1 });
         const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
         yield* f.sync(f.recipient.service, { mode: "status" });
@@ -484,15 +484,23 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
           f.issuedScopes.at(-1),
           FleetAccessPolicy.fleetCredentialScopes("read-only"),
         );
-        const replacement = yield* f.sync(f.recipient.service, connected);
+        assert.equal(
+          (yield* f.sync(f.recipient.service, { mode: "automatic" })).incoming.length,
+          0,
+        );
+        const replacement = yield* f.sync(f.recipient.service, { ...connected, mode: "automatic" });
         assert.equal(replacement.incoming.length, 1);
         assert.equal(replacement.incoming[0]?.replace, true);
+        assert.equal(replacement.incoming[0]?.requireSavedConnection, true);
         const deliveryId = replacement.incoming[0]!.deliveryId;
         const receiptPath = f.path.join(
           f.deliveryDirectory,
           `${Delivery.deliveryFileName("alpha", "beta")}.receipt.json`,
         );
         const oldReceipt = yield* f.fs.readFileString(receiptPath);
+        yield* f.fs.remove(f.path.join(f.recipient.stateDir, "lan-fleet-state.json"));
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
         const completed = { ...connected, completedReplacementDeliveryIds: [deliveryId] };
 
         // Neither an expired sender catalog nor an existing saved ID proves pickup.

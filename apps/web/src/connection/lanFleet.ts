@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { fleetPairingFailureDetail } from "./lanFleetPairingError";
 import {
   LanFleetError,
   WS_METHODS,
@@ -171,9 +172,13 @@ export function useLanFleet() {
           if (connected._tag !== "Success") {
             appAtomRegistry.set(
               errorAtom,
-              appAtomRegistry.get(setupAtom)?.sharedFolderTrust === true
-                ? "The connection could not be confirmed. Check that the other machine is online."
-                : "Pickup is unconfirmed. This delivery is paused for review; sync will not replace or retry its credential.",
+              fleetPairingFailureDetail(
+                squashAtomCommandFailure(connected),
+                delivery.pairingCode,
+              ) ??
+                (appAtomRegistry.get(setupAtom)?.sharedFolderTrust === true
+                  ? "The connection could not be confirmed. Check that the other machine is online."
+                  : "Pickup is unconfirmed. This delivery is paused for review; sync will not replace or retry its credential."),
             );
             return false;
           }

@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   type AuthEnvironmentScope,
   type FleetTlsIdentity,
+  type FleetTlsGatewayInput,
   ORCHESTRATION_PROTOCOL_VERSION,
 } from "@t3tools/contracts";
 import { assert, describe, expect, it } from "@effect/vitest";
@@ -171,10 +172,14 @@ function layerPairingOnboarding(
   calls: Array<{ readonly url: string; readonly init: RequestInit }> = [],
   provision?: ClientCapabilities.SshEnvironmentGateway["Service"]["provision"],
   registered: unknown[] = [],
+  fleetGateway?: ClientCapabilities.FleetTlsGateway["Service"],
 ) {
   const dependencies = Layer.mergeAll(
     layerClientPresentation,
     layerPairingHttp(calls, options),
+    fleetGateway === undefined
+      ? Layer.empty
+      : Layer.succeed(ClientCapabilities.FleetTlsGateway, fleetGateway),
     Layer.mock(Persistence.ConnectionTargetStore)({
       list: Effect.succeed([]),
       listDisabled: Effect.succeed([]),
@@ -393,6 +398,79 @@ describe("connection onboarding", () => {
       expect(entries.get(PAIRED_ENVIRONMENT_ID)?.enabled).toBe(true);
     }).pipe(Effect.provide(layerPairingOnboarding(undefined, [], undefined, registered)));
   });
+  it.effect.each([false, true])(
+    "reconciles a verified replacement and keeps manual routes (pairing failure: %s)",
+    (failExchange) => {
+      const previousIdentity = {
+        origin: "https://remote.example.test",
+        certificate: "old-public-certificate",
+        publicKeySha256: "a".repeat(64),
+      };
+      const tls = {
+        origin: "https://new-fleet.example.test",
+        certificate: "new-public-certificate",
+        publicKeySha256: "b".repeat(64),
+      };
+      const manualProfile = new BearerConnectionProfile({
+        ...PAIRED_PROFILE,
+        connectionId: "bearer:environment-paired:https://manual.example.test",
+        httpBaseUrl: "https://manual.example.test/",
+        wsBaseUrl: "wss://manual.example.test/",
+      });
+      const prepared: FleetTlsGatewayInput[] = [];
+      return Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        yield* registerSavedEnvironment(previousIdentity);
+        yield* registry.register(
+          new BearerConnectionRegistration({
+            target: new BearerConnectionTarget({
+              environmentId: PAIRED_ENVIRONMENT_ID,
+              connectionId: manualProfile.connectionId,
+              label: "Manual",
+            }),
+            profile: manualProfile,
+            credential: new BearerConnectionCredential({ token: "manual-token" }),
+          }),
+        );
+        const pair = onboarding.registerPairing({
+          host: tls.origin,
+          pairingCode: "synthetic-replacement",
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          preserveManualConnection: true,
+          tls,
+        });
+        if (failExchange) yield* Effect.flip(pair);
+        else expect(yield* pair).toBe(PAIRED_ENVIRONMENT_ID);
+
+        expect(prepared).toEqual([
+          { environmentId: PAIRED_ENVIRONMENT_ID, identity: tls, previousIdentity },
+        ]);
+        const saved = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID)!;
+        expect(connectionRoutes(saved).map(routeHttpBaseUrl)).toEqual(
+          expect.arrayContaining([
+            manualProfile.httpBaseUrl,
+            failExchange ? PAIRED_PROFILE.httpBaseUrl : `${tls.origin}/`,
+          ]),
+        );
+        expect(connectionRoutes(saved)).toHaveLength(2);
+      }).pipe(
+        Effect.provide(
+          layerPairingOnboarding({ failExchange }, [], undefined, [], {
+            prepare: (input) =>
+              Effect.sync(() => {
+                prepared.push(input);
+                return {
+                  httpBaseUrl: "http://127.0.0.1:41001/",
+                  wsBaseUrl: "ws://127.0.0.1:41001/",
+                };
+              }),
+          }),
+        ),
+      );
+    },
+  );
+
   it.effect("prepares a persisted bearer registration from pairing details", () =>
     Effect.gen(function* () {
       const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];

@@ -1,6 +1,6 @@
 import { msg } from "gt-i18n";
 import { translatableDetail } from "../errors/translatable.ts";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, sameFleetTlsIdentity, type FleetTlsIdentity } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -51,6 +51,7 @@ import {
   credentialConnectionId,
   entryWithRoutes,
   findRouteToSameAddress,
+  fleetTlsOfRoute,
   hasSavedBearerRoute,
   mergeLearnedRoutes,
   routesAfterRemoving,
@@ -59,6 +60,11 @@ import {
 } from "./routes.ts";
 
 const isSshConnectionProfile = Schema.is(SshConnectionProfile);
+
+interface ConnectionRegistrationOptions {
+  readonly knownAddressOnly?: boolean;
+  readonly fleetReplacement?: { readonly previousIdentity?: FleetTlsIdentity };
+}
 
 function unsupportedState(
   entry: ConnectionCatalogEntry,
@@ -108,7 +114,7 @@ export class EnvironmentRegistry extends Context.Service<
      */
     readonly register: (
       registration: ConnectionRegistration,
-      options?: { readonly knownAddressOnly?: boolean },
+      options?: ConnectionRegistrationOptions,
     ) => Effect.Effect<boolean, Persistence.ConnectionPersistenceError | ConnectionBlockedError>;
     /**
      * Fails when the route would add a new address to a saved user environment. Pairing that does
@@ -568,7 +574,7 @@ export const make = Effect.gen(function* () {
 
   const register = Effect.fn("EnvironmentRegistry.register")(function* (
     registration: ConnectionRegistration,
-    options?: { readonly knownAddressOnly?: boolean },
+    options?: ConnectionRegistrationOptions,
   ) {
     const registered = connectionRegistrationCatalogEntry(registration);
     const environmentId = registered.target.environmentId;
@@ -585,8 +591,39 @@ export const make = Effect.gen(function* () {
         const previous = (yield* SubscriptionRef.get(entries)).get(environmentId);
         let entry = registered;
         if (previous !== undefined) {
-          const existing = connectionRoutes(previous);
+          const fleetReplacement = options?.fleetReplacement;
+          const oldIdentity = fleetReplacement?.previousIdentity;
+          const newIdentity = fleetTlsOfRoute(route);
+          const existing = connectionRoutes(previous).filter((saved) => {
+            const savedIdentity = fleetTlsOfRoute(saved);
+            return (
+              oldIdentity === undefined ||
+              newIdentity === undefined ||
+              savedIdentity === undefined ||
+              !sameFleetTlsIdentity(savedIdentity, oldIdentity)
+            );
+          });
           const sameAddress = findRouteToSameAddress(existing, route);
+          if (fleetReplacement !== undefined) {
+            const sameId = existing.find(
+              (saved) => connectionRouteId(saved.target) === connectionRouteId(route.target),
+            );
+            const mayReplace = (saved: ConnectionRoute | undefined) => {
+              if (saved === undefined) return true;
+              const savedIdentity = fleetTlsOfRoute(saved);
+              return (
+                savedIdentity !== undefined &&
+                newIdentity !== undefined &&
+                sameFleetTlsIdentity(savedIdentity, newIdentity)
+              );
+            };
+            if (!mayReplace(sameAddress) || !mayReplace(sameId))
+              return yield* new ConnectionBlockedError({
+                reason: "configuration",
+                detail:
+                  "A saved connection at this address changed. Refresh fleet setup to review it.",
+              });
+          }
           const routes = existing.filter(
             (existing) =>
               existing !== sameAddress ||

@@ -1,9 +1,10 @@
 import { msg } from "gt-i18n";
 import { detailFromError, translatableDetail } from "../errors/translatable.ts";
-import type {
-  DesktopSshEnvironmentTarget,
-  EnvironmentId,
-  FleetTlsIdentity,
+import {
+  sameFleetTlsIdentity,
+  type DesktopSshEnvironmentTarget,
+  type EnvironmentId,
+  type FleetTlsIdentity,
 } from "@t3tools/contracts";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import * as Clock from "effect/Clock";
@@ -48,7 +49,7 @@ import {
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentRegistry from "./registry.ts";
 import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
-import { connectionRoutes, routeEntry, sshTargetKey } from "./routes.ts";
+import { connectionRoutes, fleetTlsOfRoute, routeEntry, sshTargetKey } from "./routes.ts";
 
 export interface PairingConnectionInput {
   readonly pairingUrl?: string;
@@ -131,7 +132,7 @@ function differentMachineError(label: string) {
 
 export const preparePairingRegistration = Effect.fn(
   "clientRuntime.connection.onboarding.preparePairingRegistration",
-)(function* (input: PairingConnectionInput) {
+)(function* (input: PairingConnectionInput, previousIdentity?: FleetTlsIdentity) {
   const resolved = yield* resolvePairingTarget(input);
   if (
     input.tls !== undefined &&
@@ -149,6 +150,7 @@ export const preparePairingRegistration = Effect.fn(
       : yield* gateway.prepare({
           environmentId: input.expectedEnvironmentId!,
           identity: input.tls,
+          ...(previousIdentity === undefined ? {} : { previousIdentity }),
         });
   const target = { ...resolved, ...protectedEndpoint };
   const presentation = yield* ClientCapabilities.ClientPresentation;
@@ -233,26 +235,37 @@ const registerPairingConnection = Effect.fn(
   "clientRuntime.connection.onboarding.registerPairingConnection",
 )(function* (input: PairingConnectionInput) {
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  let previousIdentity: FleetTlsIdentity | undefined;
+  const replacementTls = input.preserveManualConnection === true ? input.tls : undefined;
   if (
     input.expectedEnvironmentId !== undefined &&
     (input.skipExisting === true || input.preserveManualConnection === true)
   ) {
     const saved = (yield* SubscriptionRef.get(registry.entries)).get(input.expectedEnvironmentId);
-    if (
-      saved !== undefined &&
-      (input.skipExisting === true ||
-        !connectionRoutes(saved).some(
-          ({ profile }) =>
-            Option.isSome(profile) &&
-            profile.value._tag === "BearerConnectionProfile" &&
-            profile.value.fleetTls !== undefined,
-        ))
-    )
-      return input.expectedEnvironmentId;
+    if (saved !== undefined) {
+      const savedRoutes = connectionRoutes(saved);
+      const oldFleetIdentity = savedRoutes
+        .map(fleetTlsOfRoute)
+        .find((identity) => identity !== undefined);
+      if (input.skipExisting === true || oldFleetIdentity === undefined)
+        return input.expectedEnvironmentId;
+      if (replacementTls !== undefined && !sameFleetTlsIdentity(oldFleetIdentity, replacementTls)) {
+        previousIdentity = oldFleetIdentity;
+      }
+    }
   }
-  const registration = yield* preparePairingRegistration(input);
+  const registration = yield* preparePairingRegistration(input, previousIdentity);
   const knownAddressOnly = input.expectedEnvironmentId === undefined;
-  if (!(yield* registry.register(registration, { knownAddressOnly }))) {
+  if (
+    !(yield* registry.register(registration, {
+      knownAddressOnly,
+      ...(replacementTls === undefined
+        ? {}
+        : {
+            fleetReplacement: previousIdentity === undefined ? {} : { previousIdentity },
+          }),
+    }))
+  ) {
     return registration.target.environmentId;
   }
   yield* registry.setCompatibility(registration.target.environmentId, null);

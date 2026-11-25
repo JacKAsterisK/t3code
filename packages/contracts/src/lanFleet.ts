@@ -60,9 +60,17 @@ export const FleetTlsIdentity = Schema.Struct({
   connectHost: Schema.optionalKey(FleetConnectHost),
 });
 export type FleetTlsIdentity = typeof FleetTlsIdentity.Type;
+
+export const sameFleetTlsIdentity = (left: FleetTlsIdentity, right: FleetTlsIdentity) =>
+  left.origin === right.origin &&
+  left.publicKeySha256 === right.publicKeySha256 &&
+  left.certificate === right.certificate;
+
 export const FleetTlsGatewayInput = Schema.Struct({
   environmentId: EnvironmentId,
   identity: FleetTlsIdentity,
+  /** Only a verified replacement can name the precise gateway it supersedes. */
+  previousIdentity: Schema.optionalKey(FleetTlsIdentity),
 });
 export type FleetTlsGatewayInput = typeof FleetTlsGatewayInput.Type;
 export const FleetTlsGatewayResult = Schema.Struct({

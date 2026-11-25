@@ -1,4 +1,10 @@
-import { FleetTlsGatewayInput, FleetTlsGatewayResult, LanFleetError } from "@t3tools/contracts";
+import {
+  FleetTlsGatewayInput,
+  FleetTlsGatewayResult,
+  LanFleetError,
+  sameFleetTlsIdentity,
+  type FleetTlsIdentity,
+} from "@t3tools/contracts";
 import { startFleetProxy, type FleetProxy } from "@t3tools/shared/fleetTlsProxy";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -17,10 +23,7 @@ export class DesktopFleetGateway extends Context.Service<
 >()("@t3tools/desktop/lan/DesktopFleetGateway") {}
 
 const make = Effect.gen(function* () {
-  const gateways = new Map<
-    string,
-    { identity: string; connectHost: string | undefined; proxy: FleetProxy }
-  >();
+  const gateways = new Map<string, { identity: FleetTlsIdentity; proxy: FleetProxy }>();
   const mutex = yield* Semaphore.make(1);
   yield* Effect.addFinalizer(() =>
     Effect.promise(async () => {
@@ -30,12 +33,16 @@ const make = Effect.gen(function* () {
   );
   const prepare = Effect.fn("DesktopFleetGateway.prepare")(
     function* (input: FleetTlsGatewayInput) {
-      const identity = `${input.identity.origin}\n${input.identity.publicKeySha256}\n${input.identity.certificate}`;
       const existing = gateways.get(input.environmentId);
       if (existing !== undefined) {
-        if (existing.identity !== identity)
+        const sameIdentity = sameFleetTlsIdentity(existing.identity, input.identity);
+        if (
+          !sameIdentity &&
+          (input.previousIdentity === undefined ||
+            !sameFleetTlsIdentity(existing.identity, input.previousIdentity))
+        )
           return yield* new LanFleetError({ reason: "configuration" });
-        if (existing.connectHost === input.identity.connectHost)
+        if (sameIdentity && existing.identity.connectHost === input.identity.connectHost)
           return { httpBaseUrl: existing.proxy.httpBaseUrl, wsBaseUrl: existing.proxy.wsBaseUrl };
       }
       if (existing === undefined && gateways.size >= 100)
@@ -51,11 +58,7 @@ const make = Effect.gen(function* () {
         catch: () => new LanFleetError({ reason: "configuration" }),
       });
       if (existing !== undefined) yield* Effect.promise(() => existing.proxy.close());
-      gateways.set(input.environmentId, {
-        identity,
-        connectHost: input.identity.connectHost,
-        proxy,
-      });
+      gateways.set(input.environmentId, { identity: input.identity, proxy });
       return { httpBaseUrl: proxy.httpBaseUrl, wsBaseUrl: proxy.wsBaseUrl };
     },
     Effect.uninterruptible,

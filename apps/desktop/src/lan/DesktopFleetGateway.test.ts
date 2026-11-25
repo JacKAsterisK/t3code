@@ -76,3 +76,44 @@ it.live(
       );
     }),
 );
+
+it.live("replaces a fleet gateway only when the previous pin matches", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      const prior = createFleetTlsCertificate({ address: "127.0.0.1", now });
+      const next = createFleetTlsCertificate({ address: "127.0.0.1", now });
+      const origin = "https://127.0.0.1:9";
+      const previousIdentity = {
+        origin,
+        certificate: prior.certificate,
+        publicKeySha256: prior.publicKeySha256,
+      };
+      const identity = {
+        origin,
+        certificate: next.certificate,
+        publicKeySha256: next.publicKeySha256,
+      };
+      const environmentId = EnvironmentId.make("fleet-replacement-synthetic");
+      const gateway = yield* DesktopFleetGateway.DesktopFleetGateway;
+      const oldGateway = yield* gateway.prepare({ environmentId, identity: previousIdentity });
+
+      expect(
+        yield* gateway
+          .prepare({
+            environmentId,
+            identity,
+            previousIdentity: { ...previousIdentity, publicKeySha256: "0".repeat(64) },
+          })
+          .pipe(Effect.flip),
+      ).toMatchObject({ reason: "configuration" });
+
+      const replaced = yield* gateway.prepare({ environmentId, identity, previousIdentity });
+      expect(replaced.httpBaseUrl).not.toBe(oldGateway.httpBaseUrl);
+      yield* Effect.promise(() =>
+        expect(request(oldGateway.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
+      );
+      expect(yield* gateway.prepare({ environmentId, identity })).toEqual(replaced);
+    }).pipe(Effect.provide(DesktopFleetGateway.layer)),
+  ),
+);

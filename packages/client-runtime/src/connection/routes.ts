@@ -39,6 +39,11 @@ export function connectionRouteId(target: ConnectionTarget): string {
   }
 }
 
+export function fleetTlsOfRoute(route: ConnectionRoute) {
+  const profile = Option.getOrNull(route.profile);
+  return profile?._tag === "BearerConnectionProfile" ? profile.fleetTls : undefined;
+}
+
 export function connectionRoutes(entry: ConnectionCatalogEntry): ReadonlyArray<ConnectionRoute> {
   return [{ target: entry.target, profile: entry.profile }, ...(entry.alternateRoutes ?? [])];
 }

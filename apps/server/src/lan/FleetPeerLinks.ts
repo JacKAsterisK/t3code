@@ -51,14 +51,6 @@ const REQUEST_TTL = Duration.hours(1);
 const PASS_INTERVAL = Duration.minutes(10);
 const LINK_TIMEOUT = Duration.minutes(1);
 const SUBJECT_PREFIX = "lan-fleet-peer-link:";
-const encodeResetItems = Schema.encodeEffect(
-  Schema.fromJsonString(
-    Schema.Struct({
-      fleetId: LanFleetResetPreview.fields.fleetId,
-      items: LanFleetResetPreview.fields.items,
-    }),
-  ),
-);
 
 type Level = FleetAccessLevel;
 
@@ -107,6 +99,15 @@ const State = Schema.Struct({
   serving: Schema.Record(Schema.String, Serving),
 });
 type State = typeof State.Type;
+const encodeResetItems = Schema.encodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      fleetId: LanFleetResetPreview.fields.fleetId,
+      items: LanFleetResetPreview.fields.items,
+      state: State,
+    }),
+  ),
+);
 const emptyState: State = { version: 1, linking: {}, serving: {} };
 const emptyServing: Serving = { sessions: [] };
 
@@ -178,8 +179,7 @@ export class FleetPeerLinks extends Context.Service<
     readonly requestPass: Effect.Effect<void>;
     /** Runs requested passes until interrupted. */
     readonly run: Effect.Effect<never>;
-    /** Records which fleet peer a new peer-link session belongs to; false when it could not. */
-    readonly sessionIssued: McpOAuth.McpPeerLinkSessionObserver["Service"]["sessionIssued"];
+    readonly issueSession: McpOAuth.McpPeerLinkSessionObserver["Service"]["issueSession"];
   }
 >()("t3/lan/FleetPeerLinks") {}
 
@@ -677,7 +677,7 @@ const make = Effect.gen(function* () {
       yield* forEachPeer(
         fleet.peers,
         ({ peer }) => peer.machineId,
-        ({ peer }) => serve(fleet, peer, now, active),
+        ({ peer }) => resetLock.withPermits(1)(serve(fleet, peer, now, active)),
       );
       if (!(yield* peerLinks.enabled)) return;
       yield* forEachPeer(
@@ -721,7 +721,17 @@ const make = Effect.gen(function* () {
         serving: Object.keys(current.serving).length,
       },
     };
-    const canonical = yield* encodeResetItems({ fleetId, items });
+    const sorted = <A>(entries: Readonly<Record<string, A>>) =>
+      Object.fromEntries(
+        Object.keys(entries)
+          .sort()
+          .map((key) => [key, entries[key]!]),
+      );
+    const canonical = yield* encodeResetItems({
+      fleetId,
+      items,
+      state: { ...current, linking: sorted(current.linking), serving: sorted(current.serving) },
+    });
     const digest = NodeCrypto.createHash("sha256").update(canonical).digest("hex");
     return { fleetId, items, digest } satisfies LanFleetResetPreview;
   });
@@ -744,9 +754,21 @@ const make = Effect.gen(function* () {
           if (yield* auth.revokeSession(sessionId)) revokedSessions++;
         for (const { id } of preview.items.codes)
           if (yield* auth.revokePairingLink(id)) revokedCodes++;
-        // Keep an empty file so a switched roster cannot carry old state in again.
-        yield* writeFleetJson(stateFile, emptyState);
-        yield* Ref.set(state, emptyState);
+        const current = yield* Ref.get(state);
+        // A settled peer still holds its side of the link and needs an unsolicited offer.
+        const serving: Record<string, Serving> = {};
+        for (const [machineId, entry] of Object.entries(current.serving)) {
+          const linked = entry.linked ?? (entry.sessions.length > 0 ? entry.offer : undefined);
+          if (linked !== undefined)
+            serving[machineId] = {
+              linked: { deliveryId: linked.deliveryId, level: linked.level },
+              sessions: [],
+            };
+        }
+        const reset = { ...emptyState, serving };
+        yield* writeFleetJson(stateFile, reset);
+        yield* Ref.set(state, reset);
+        yield* Queue.offer(requests, undefined);
         return {
           fleetId,
           previewDigest: preview.digest,
@@ -760,50 +782,55 @@ const make = Effect.gen(function* () {
         Effect.mapError(() => new LanFleetError({ reason: "unavailable" })),
       );
     },
-    (effect) => passLock.withPermits(1)(resetLock.withPermits(1)(effect)),
+    (effect, _fleetId, input) =>
+      input.mode === "preview"
+        ? passLock.withPermits(1)(resetLock.withPermits(1)(effect))
+        : passLock
+            .withPermitsIfAvailable(1)(resetLock.withPermits(1)(effect))
+            .pipe(
+              Effect.flatMap((result) =>
+                Effect.fromOption(result).pipe(
+                  Effect.mapError(() => new LanFleetError({ reason: "busy" })),
+                ),
+              ),
+            ),
     Effect.provideService(FileSystem.FileSystem, fs),
   );
 
-  const sessionIssued: FleetPeerLinks["Service"]["sessionIssued"] = ({ subject, sessionId }) => {
-    if (!subject.startsWith(SUBJECT_PREFIX)) return Effect.succeed(true);
+  const issueSession: FleetPeerLinks["Service"]["issueSession"] = (subject, issue) => {
+    if (!subject.startsWith(SUBJECT_PREFIX)) return issue;
     const [machineId, deliveryId] = subject.slice(SUBJECT_PREFIX.length).split(":");
-    if (machineId === undefined || deliveryId === undefined) return Effect.succeed(false);
-    // A peer that still has the adapter on is refused here while this machine has it off.
-    return adapterSetting.pipe(
-      Effect.flatMap((enabled) =>
-        Option.isSome(enabled) && enabled.value
-          ? resetLock.withPermits(1)(recordSession(machineId, deliveryId, sessionId))
-          : Effect.succeed(false),
-      ),
+    if (machineId === undefined || deliveryId === undefined) return Effect.undefined;
+    return resetLock.withPermits(1)(
+      Effect.gen(function* () {
+        const enabled = yield* adapterSetting;
+        if (Option.isNone(enabled) || !enabled.value) return undefined;
+        const offer = (yield* Ref.get(state)).serving[machineId]?.offer;
+        if (offer?.deliveryId !== deliveryId) return undefined;
+        const issued = yield* issue;
+        const recorded = yield* updateServing(machineId, (current) => ({
+          ...current,
+          sessions: [
+            ...current.sessions,
+            { sessionId: issued.sessionId, deliveryId, level: offer.level },
+          ],
+        })).pipe(Effect.result);
+        if (recorded._tag === "Success") return issued;
+        yield* auth.revokeSession(issued.sessionId).pipe(Effect.ignore);
+        yield* Effect.logWarning("A fleet peer link session could not be recorded.", {
+          cause: recorded.failure,
+        });
+        return undefined;
+      }).pipe(Effect.uninterruptible),
     );
   };
-  const recordSession = (machineId: string, deliveryId: string, sessionId: string) =>
-    updateServing(machineId, (current) => ({
-      ...current,
-      sessions: [
-        ...current.sessions,
-        {
-          sessionId,
-          deliveryId,
-          // A code this machine no longer tracks is treated as the widest, so narrowing replaces it.
-          level: current.offer?.deliveryId === deliveryId ? current.offer.level : "standard",
-        },
-      ],
-    })).pipe(
-      Effect.as(true),
-      Effect.catchCause((cause) =>
-        Effect.logWarning("A fleet peer link session could not be recorded.", { cause }).pipe(
-          Effect.as(false),
-        ),
-      ),
-    );
 
   return FleetPeerLinks.of({
     pass,
     resetLinks,
     requestPass: Queue.offer(requests, undefined).pipe(Effect.asVoid),
     run: Queue.take(requests).pipe(Effect.andThen(pass), Effect.forever),
-    sessionIssued,
+    issueSession,
   });
 });
 
@@ -855,7 +882,7 @@ const layerSessionObserver = Layer.effect(
   McpOAuth.McpPeerLinkSessionObserver,
   FleetPeerLinks.pipe(
     Effect.map((links) =>
-      McpOAuth.McpPeerLinkSessionObserver.of({ sessionIssued: links.sessionIssued }),
+      McpOAuth.McpPeerLinkSessionObserver.of({ issueSession: links.issueSession }),
     ),
   ),
 );

@@ -74,11 +74,11 @@ function savedFleetConnections(
   return [...entries].flatMap(([environmentId, entry]) =>
     connectionRoutes(entry).flatMap((route) => {
       const profile = Option.getOrUndefined(route.profile);
-      if (profile?._tag !== "BearerConnectionProfile") return [];
+      if (profile?._tag !== "BearerConnectionProfile" || profile.fleetTls === undefined) return [];
       const expectedFleet =
         profile.fleetId === fleetId
-          ? { fleetId }
-          : profile.fleetId === undefined && profile.fleetTls !== undefined
+          ? { fleetId, fleetTls: profile.fleetTls }
+          : profile.fleetId === undefined
             ? { fleetTls: profile.fleetTls }
             : undefined;
       return expectedFleet === undefined
@@ -98,7 +98,6 @@ function savedFleetConnections(
 
 export function useLanFleetReset(environmentId: EnvironmentId) {
   const allowed = useAtomValue(resetFleet.permissionAtom(environmentId));
-  const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const run = useAtomCommand(resetFleet, { reportFailure: false });
   const remove = useAtomCommand(environmentCatalog.removeRoute, { reportFailure: false });
   const reset = async (
@@ -123,13 +122,20 @@ export function useLanFleetReset(environmentId: EnvironmentId) {
       if (result._tag !== "Success") {
         const failure = squashAtomCommandFailure(result);
         return {
-          error: isFleetError(failure) ? failure.message : "Reset fleet links could not complete.",
+          error: isFleetError(failure)
+            ? failure.refusal === "stale-review"
+              ? "Fleet links changed. Review the current list before resetting."
+              : failure.message
+            : "Reset fleet links could not complete.",
         };
       }
       if ("digest" in result.value) {
         return {
           preview: result.value,
-          routes: savedFleetConnections(catalog.entries, result.value.fleetId),
+          routes: savedFleetConnections(
+            appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries,
+            result.value.fleetId,
+          ),
         };
       }
       let removalFailed = false;
@@ -244,6 +250,17 @@ export function useLanFleet() {
             mode,
             sendMachineIds: remaining === 100 ? sendMachineIds : [],
             connectedEnvironmentIds: [...current.entries.keys()],
+            pinnedFleetRoutes: [...current.entries].flatMap(([environmentId, entry]) => {
+              const fleetIds = connectionRoutes(entry).map(({ profile }) => {
+                const saved = Option.getOrUndefined(profile);
+                return saved?._tag === "BearerConnectionProfile" && saved.fleetTls !== undefined
+                  ? saved.fleetId
+                  : undefined;
+              });
+              return fleetIds.every((fleetId) => fleetId !== undefined)
+                ? [{ environmentId, fleetIds: [...new Set(fleetIds)] }]
+                : [];
+            }),
             completedReplacementDeliveryIds: [...current.entries.values()]
               .flatMap(connectionRoutes)
               .flatMap(({ profile }) => {

@@ -59,6 +59,7 @@ export function fleetDeliveryRoutes(
     const saved = Option.getOrUndefined(profile);
     return (
       saved?._tag === "BearerConnectionProfile" &&
+      saved.fleetTls !== undefined &&
       saved.fleetId !== undefined &&
       saved.fleetId !== fleetId
     );
@@ -76,6 +77,7 @@ type FleetRouteCandidate = {
   readonly httpBaseUrl: string;
   readonly fleetTls?: FleetTlsIdentity;
   readonly fleetId?: string;
+  readonly fleetReplacementDeliveryId?: string;
 };
 
 export function conflictsWithSavedFleetRoute(
@@ -92,20 +94,38 @@ export function conflictsWithSavedFleetRoute(
         return false;
       const profile = Option.getOrUndefined(route.profile);
       if (profile?._tag !== "BearerConnectionProfile") return true;
-      if (profile.fleetId !== undefined) return profile.fleetId !== candidate.fleetId;
+      if (profile.fleetId !== undefined && profile.fleetId !== candidate.fleetId) return true;
+      if (profile.fleetTls !== undefined && candidate.fleetTls !== undefined) {
+        return (
+          profile.fleetId === undefined &&
+          !sameFleetTlsIdentity(profile.fleetTls, candidate.fleetTls)
+        );
+      }
+      // An original fleet can renew its pre-provenance connection at the same address.
       return (
-        profile.fleetTls === undefined ||
-        candidate.fleetTls === undefined ||
-        !sameFleetTlsIdentity(profile.fleetTls, candidate.fleetTls)
+        profile.fleetTls !== undefined ||
+        candidate.fleetTls !== undefined ||
+        candidate.fleetReplacementDeliveryId === undefined ||
+        profile.connectionId !== candidate.connectionId ||
+        profile.learned === true ||
+        profile.authorization !== undefined ||
+        profile.httpBaseUrl.replace(/\/+$/u, "") !== candidate.httpBaseUrl.replace(/\/+$/u, "")
       );
     })
   );
 }
 
-export function savedFleetIdentity(entry: ConnectionCatalogEntry | undefined) {
+export function savedFleetIdentity(
+  entry: ConnectionCatalogEntry | undefined,
+  candidate?: FleetTlsIdentity,
+) {
   if (entry === undefined) return undefined;
   const identities = connectionRoutes(entry).flatMap((route) => fleetTlsOfRoute(route) ?? []);
-  return identities.length === 1 ? identities[0] : null;
+  if (identities.length === 1) return identities[0];
+  if (identities.length === 0) return null;
+  if (candidate === undefined) return null;
+  const exact = identities.filter((identity) => sameFleetTlsIdentity(identity, candidate));
+  return exact.length === 1 ? exact[0]! : null;
 }
 
 export function fleetReplacementRoutes(
@@ -113,7 +133,7 @@ export function fleetReplacementRoutes(
   candidate: FleetRouteCandidate,
   predecessor: FleetTlsIdentity | undefined,
 ): ReadonlyArray<ConnectionRoute> | null {
-  const current = savedFleetIdentity(entry);
+  const current = savedFleetIdentity(entry, candidate.fleetTls);
   if (current === null || (current === undefined) !== (predecessor === undefined)) return null;
   if (
     current !== undefined &&
@@ -127,13 +147,17 @@ export function fleetReplacementRoutes(
       ? []
       : connectionRoutes(entry).filter((route) => {
           const tls = fleetTlsOfRoute(route);
-          if (tls === undefined) return true;
+          if (
+            tls === undefined ||
+            predecessor === undefined ||
+            !sameFleetTlsRoute(tls, predecessor)
+          )
+            return true;
           const profile = Option.getOrUndefined(route.profile);
           // A legacy pin proves membership in this fleet only when the delivery presents the same identity.
           return (
-            candidate.fleetId !== undefined &&
             profile?._tag === "BearerConnectionProfile" &&
-            profile.fleetId === undefined &&
+            (candidate.fleetId === undefined) !== (profile.fleetId === undefined) &&
             (candidate.fleetTls === undefined || !sameFleetTlsIdentity(tls, candidate.fleetTls))
           );
         });

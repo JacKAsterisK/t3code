@@ -80,6 +80,7 @@ export const FleetTlsGatewayInput = Schema.Struct({
   /** Only a verified replacement can name the precise gateway it supersedes. */
   previousIdentity: Schema.optionalKey(FleetTlsIdentity),
   retiredIdentities: Schema.optionalKey(Schema.Array(FleetTlsIdentity)),
+  savedRoute: Schema.optionalKey(Schema.Literal(true)),
 });
 export type FleetTlsGatewayInput = typeof FleetTlsGatewayInput.Type;
 export const FleetTlsGatewayResult = Schema.Struct({
@@ -91,6 +92,14 @@ export type FleetTlsGatewayResult = typeof FleetTlsGatewayResult.Type;
 export const LanFleetSyncInput = Schema.Struct({
   mode: Schema.Literals(["status", "manual", "automatic"]),
   connectedEnvironmentIds: Schema.Array(EnvironmentId).check(Schema.isMaxLength(1000)),
+  pinnedFleetRoutes: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        environmentId: EnvironmentId,
+        fleetIds: Schema.Array(Schema.String).check(Schema.isMaxLength(1000)),
+      }),
+    ).check(Schema.isMaxLength(1000)),
+  ),
   completedReplacementDeliveryIds: Schema.optionalKey(
     Schema.Array(Schema.String.check(Schema.isMaxLength(128))).check(Schema.isMaxLength(1000)),
   ),

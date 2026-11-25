@@ -128,8 +128,12 @@ export function registerConnectionInCatalog(
   document: ConnectionCatalogDocument,
   registration: ConnectionRegistration,
   routes: ReadonlyArray<PersistedConnectionTarget> = [registration.target],
+  enable?: boolean,
 ): ConnectionCatalogDocument {
-  const next = setRoutesInCatalog(document, registration.target.environmentId, routes);
+  const environmentId = registration.target.environmentId;
+  const withRoutes = setRoutesInCatalog(document, environmentId, routes);
+  const next =
+    enable === true ? setConnectionEnabledInCatalog(withRoutes, environmentId, true) : withRoutes;
 
   switch (registration._tag) {
     case "RelayConnectionRegistration":

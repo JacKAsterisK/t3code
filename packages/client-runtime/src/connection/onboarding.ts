@@ -1,6 +1,7 @@
 import { msg } from "gt-i18n";
 import { detailFromError, translatableDetail } from "../errors/translatable.ts";
 import {
+  sameFleetTlsIdentity,
   sameFleetTlsRoute,
   type DesktopSshEnvironmentTarget,
   type EnvironmentId,
@@ -184,6 +185,9 @@ export const preparePairingRegistration = Effect.fn(
             httpBaseUrl: resolved.httpBaseUrl,
             ...(input.tls === undefined ? {} : { fleetTls: input.tls }),
             ...(input.fleetId === undefined ? {} : { fleetId: input.fleetId }),
+            ...(input.replacementDeliveryId === undefined || input.preserveManualConnection === true
+              ? {}
+              : { fleetReplacementDeliveryId: input.replacementDeliveryId }),
           };
     if (
       (candidate !== undefined &&
@@ -211,6 +215,10 @@ export const preparePairingRegistration = Effect.fn(
             ? {}
             : { previousIdentity }),
           ...(retiredIdentities.length === 0 ? {} : { retiredIdentities }),
+          ...(retiredIdentities.length > 0 ||
+          (previousIdentity !== undefined && sameFleetTlsIdentity(input.tls, previousIdentity))
+            ? { savedRoute: true as const }
+            : {}),
         });
   const target = { ...resolved, ...protectedEndpoint };
   const presentation = yield* ClientCapabilities.ClientPresentation;
@@ -311,7 +319,7 @@ const registerPairingConnection = Effect.fn(
 
   let fleetReplacement: { readonly previousIdentity: FleetTlsIdentity | undefined } | undefined;
   if (isReplacement) {
-    const previousIdentity = savedFleetIdentity(saved);
+    const previousIdentity = savedFleetIdentity(saved, input.tls);
     if (previousIdentity === null) {
       const hasFleetPin =
         saved !== undefined &&
@@ -340,31 +348,26 @@ const registerPairingConnection = Effect.fn(
     fleetReplacement,
     retiredIdentities,
   );
-  const knownAddressOnly = input.expectedEnvironmentId === undefined;
   if (
-    !(yield* registry.register(registration, {
-      knownAddressOnly,
-      ...(input.fleetId === undefined ? {} : { retireOldFleet: true }),
-      ...(input.requireSavedConnection === true ? { requireSavedConnection: true } : {}),
-      ...(fleetReplacement === undefined ? {} : { fleetReplacement }),
-    }))
-  ) {
-    return registration.target.environmentId;
-  }
-  if (
-    (fleetReplacement?.previousIdentity !== undefined || retiredIdentities.length > 0) &&
-    input.tls !== undefined
+    input.tls !== undefined &&
+    (retiredIdentities.length > 0 ||
+      (fleetReplacement?.previousIdentity !== undefined &&
+        !sameFleetTlsRoute(fleetReplacement.previousIdentity, input.tls)))
   ) {
     const gateway = yield* ClientCapabilities.FleetTlsGateway;
     yield* gateway.prepare({
       environmentId: registration.target.environmentId,
       identity: input.tls,
+      savedRoute: true,
     });
   }
-  yield* registry.setCompatibility(registration.target.environmentId, null);
-  yield* registry
-    .setEnabled(registration.target.environmentId, true)
-    .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }));
+  yield* registry.register(registration, {
+    knownAddressOnly: input.expectedEnvironmentId === undefined,
+    enable: true,
+    ...(input.fleetId === undefined ? {} : { retireOldFleet: true }),
+    ...(input.requireSavedConnection === true ? { requireSavedConnection: true } : {}),
+    ...(fleetReplacement === undefined ? {} : { fleetReplacement }),
+  });
   return registration.target.environmentId;
 });
 
@@ -480,9 +483,10 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       label,
       httpBaseUrl,
       wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
-      ...(entry.profile.value.fleetId === undefined
-        ? {}
-        : { fleetId: entry.profile.value.fleetId }),
+      ...(httpBaseUrl === entry.profile.value.httpBaseUrl &&
+      entry.profile.value.fleetId !== undefined
+        ? { fleetId: entry.profile.value.fleetId }
+        : {}),
     }),
     credential: credential.value,
   });

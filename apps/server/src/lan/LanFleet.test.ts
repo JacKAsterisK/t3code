@@ -46,6 +46,7 @@ const setup = Effect.fn("FleetTest.setup")(function* (
   tls = false,
   credentialScope?: string,
   fleetId?: string,
+  managed = sharedFolder,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -101,7 +102,7 @@ const setup = Effect.fn("FleetTest.setup")(function* (
       encryptionPrivateKey: identity.encryptionPrivateKey,
       signingPrivateKey: identity.signingPrivateKey,
       peers: [a.peer, b.peer],
-      ...(sharedFolder ? { managed: true } : {}),
+      ...(managed ? { managed: true } : {}),
       ...(credentialScope === undefined ? {} : { credentialScope }),
     };
     const privateFile = path.join(stateDir, "lan-fleet-private.json");
@@ -949,6 +950,43 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
         );
         assert.notInclude(raw, "synthetic-pairing-code");
         assert.notInclude(raw, "PRIVATE KEY");
+      }).pipe(Effect.provide(testConfig)),
+  );
+
+  it.effect(
+    "owner-approved delivery is collected before a previous-fleet route counts as connected",
+    () =>
+      Effect.gen(function* () {
+        const fleetId = "new-fleet";
+        const f = yield* setup(true, false, false, true, fleetId, fleetId, true);
+        const environmentId = f.a.peer.environmentId;
+        const stale = {
+          connectedEnvironmentIds: [environmentId],
+          pinnedFleetRoutes: [{ environmentId, fleetIds: ["old-fleet"] }],
+        };
+        yield* f.sync(f.recipient.service, { mode: "status", ...stale });
+        assert.equal(
+          (yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] })).machines[1]?.status,
+          "pending",
+        );
+        assert.deepEqual(f.issued, ["alpha"]);
+        assert.equal((yield* f.sync(f.recipient.service, stale)).incoming[0]?.fleetId, fleetId);
+        assert.equal((yield* f.sync(f.recipient.service, stale)).machines[0]?.status, "uncertain");
+        const receipt = f.path.join(
+          f.deliveryDirectory,
+          `${Delivery.deliveryFileName("alpha", "beta")}.receipt.json`,
+        );
+        assert.equal(yield* f.fs.exists(receipt), false);
+        f.consume("alpha");
+        yield* f.sync(f.recipient.service, {
+          connectedEnvironmentIds: [environmentId],
+          pinnedFleetRoutes: [{ environmentId, fleetIds: [fleetId] }],
+        });
+        assert.equal(yield* f.fs.exists(receipt), true);
+        assert.equal(
+          (yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] })).machines[1]?.status,
+          "connected",
+        );
       }).pipe(Effect.provide(testConfig)),
   );
 

@@ -124,16 +124,15 @@ export class McpOAuthPublicOrigin extends Context.Service<
 >()("t3/auth/McpOAuth/McpOAuthPublicOrigin") {}
 
 /**
- * Optional: told which pairing code's subject each new peer-link session came from, so the
- * code's issuer can revoke that session later. A session it could not record is refused.
+ * Fleet peer-link issuance is guarded by the offer that approved it and the reset lock.
  */
 export class McpPeerLinkSessionObserver extends Context.Service<
   McpPeerLinkSessionObserver,
   {
-    readonly sessionIssued: (input: {
-      readonly subject: string;
-      readonly sessionId: AuthSessionId;
-    }) => Effect.Effect<boolean>;
+    readonly issueSession: <A extends { readonly sessionId: AuthSessionId }, E>(
+      subject: string,
+      issue: Effect.Effect<A, E>,
+    ) => Effect.Effect<A | undefined, E>;
   }
 >()("t3/auth/McpOAuth/McpPeerLinkSessionObserver") {}
 
@@ -793,7 +792,7 @@ const make = Effect.gen(function* () {
             Effect.mapError(() => fail("invalid_grant", "The task grant could not be issued.")),
           );
       }
-      const issued = yield* environmentAuth
+      const issue = environmentAuth
         .issueMcpClientSession({
           label: pending.clientName,
           approvals: pending.approvals,
@@ -814,18 +813,13 @@ const make = Effect.gen(function* () {
             ),
           ),
         );
-      if (
-        pending.peerLink &&
-        pending.approvalSubject !== undefined &&
-        Option.isSome(sessionObserver) &&
-        !(yield* sessionObserver.value.sessionIssued({
-          subject: pending.approvalSubject,
-          sessionId: issued.sessionId,
-        }))
-      ) {
-        yield* environmentAuth.revokeSession(issued.sessionId).pipe(Effect.ignore);
+      const issued = yield* pending.peerLink &&
+      pending.approvalSubject !== undefined &&
+      Option.isSome(sessionObserver)
+        ? sessionObserver.value.issueSession(pending.approvalSubject, issue)
+        : issue;
+      if (issued === undefined)
         return yield* fail("invalid_grant", "The session could not be issued.");
-      }
       return {
         access_token: issued.token,
         token_type: "Bearer",

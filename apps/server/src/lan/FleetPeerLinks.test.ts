@@ -10,6 +10,7 @@ import {
   EnvironmentHttpApi,
   type FleetAccess as FleetAccessLevel,
   LanFleetError,
+  MCP_PEER_LINK_SOFTWARE_ID,
   type LanFleetResetPreview,
   mcpClientScopes,
   OrchestratorMcpFailure,
@@ -29,12 +30,14 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import { Tool, Toolkit } from "effect/ai";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
@@ -64,7 +67,7 @@ import * as FleetCredentialAccess from "./FleetCredentialAccess.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import { syntheticFleetPeer } from "./FleetDelivery.fixtures.ts";
 import { FLEET_SWITCH_ROSTER } from "./FleetBootstrap.ts";
-import { writeFleetJson } from "./FleetFiles.ts";
+import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 import * as FleetMcpOrigin from "./FleetMcpOrigin.ts";
 import * as FleetPeerHttpClient from "./FleetPeerHttpClient.ts";
 import * as FleetPeerLinks from "./FleetPeerLinks.ts";
@@ -312,7 +315,7 @@ const serveBehindFleetEndpoint = (machine: Machine) =>
     ).pipe(
       Layer.provide(
         Layer.succeed(McpOAuth.McpPeerLinkSessionObserver, {
-          sessionIssued: machine.adapter.sessionIssued,
+          issueSession: machine.adapter.issueSession,
         }),
       ),
       Layer.provide(Layer.succeedContext(machine.context)),
@@ -471,9 +474,11 @@ it.live(
         const fleetSubject = "lan-fleet-peer-link:cryofrog:fixture";
         const manualId = EnvironmentId.make("manual-target");
         const outgoingId = EnvironmentId.make("fleet-target");
+        const unknownId = EnvironmentId.make("unknown-target");
         yield* sql`INSERT INTO peer_environment_links(environment_id, secret_name, label, urls_json, access, linked_at, expires_at, provenance, fleet_machine_id)
       VALUES (${manualId}, 'manual-secret', 'Manual peer', '[]', 'read-only', '1970-01-01T00:00:00.000Z', '2100-01-01T00:00:00.000Z', 'manual', NULL),
-      (${outgoingId}, 'fleet-secret', 'Fleet peer', '[]', 'read-only', '1970-01-01T00:00:00.000Z', '2100-01-01T00:00:00.000Z', 'fleet', 'synthetic-peer')`;
+      (${outgoingId}, 'fleet-secret', 'Fleet peer', '[]', 'read-only', '1970-01-01T00:00:00.000Z', '2100-01-01T00:00:00.000Z', 'fleet', 'synthetic-peer'),
+      (${unknownId}, 'unknown-secret', 'Unknown peer', '[]', 'read-only', '1970-01-01T00:00:00.000Z', '2100-01-01T00:00:00.000Z', 'unknown', NULL)`;
         const pending = yield* linked.auth.createPairingLink({ subject: fleetSubject });
         const manualCode = yield* linked.auth.createPairingLink({ subject: "manual-fixture" });
         const manualSession = yield* linked.auth.issueSession({
@@ -568,6 +573,7 @@ it.live(
         expect(yield* fs.exists(lock)).toBe(false);
         expect(Option.isNone(yield* linked.links.get(outgoingId))).toBe(true);
         expect(Option.isSome(yield* linked.links.get(manualId))).toBe(true);
+        expect(Option.isSome(yield* linked.links.get(unknownId))).toBe(true);
         expect((yield* linked.auth.listPairingLinks()).map(({ id }) => id)).toEqual([
           manualCode.id,
         ]);
@@ -580,14 +586,107 @@ it.live(
             stateDir: config.stateDir,
             rosterPath: undefined,
           })).state,
-        ).toEqual({ version: 1, linking: {}, serving: {} });
+        ).toMatchObject({ version: 1, linking: {} });
         expect(yield* fs.readFileString(journal)).toBe(journalBefore);
         expect(yield* shareSnapshot(fleet.share)).toEqual(shareBefore);
         expect(Option.isSome(yield* linking.links.get(fleet.pandaMedic.peer.environmentId))).toBe(
           true,
         );
+        yield* round(fleet);
+        expect(yield* callerAccess(fleet)).toBe("full-access");
       }).pipe(Effect.provide(NodeServices.layer)),
     ),
+);
+
+it.live("invalidates an approved fleet sign-in during reset and accepts the fresh offer", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+      const { linked, linking } = fleet;
+      yield* linking.adapter.pass;
+      yield* linked.adapter.pass;
+      const path = yield* Path.Path;
+      const file = Delivery.peerLinkFileNames(
+        fleet.pandaMedic.peer.machineId,
+        fleet.cryoFrog.peer.machineId,
+      ).offer;
+      const sealed = yield* readFleetJson(path.join(fleet.share, file), Delivery.Delivery);
+      const config = (yield* Ref.get(linking.fleet))!.config;
+      const offer = Delivery.openDelivery(
+        sealed,
+        config,
+        fleet.pandaPeer,
+        fleet.cryoFrog.peer,
+        DateTime.toEpochMillis(yield* DateTime.now),
+        "peer-link",
+      );
+      const services = yield* McpOAuth.layer.pipe(
+        Layer.provide(
+          Layer.succeed(McpOAuth.McpPeerLinkSessionObserver, {
+            issueSession: linked.adapter.issueSession,
+          }),
+        ),
+        Layer.build,
+        Effect.provideContext(linked.context),
+      );
+      const oauth = Context.get(services, McpOAuth.McpOAuth);
+      const issuer = fleet.endpoint.origin;
+      const resource = issuer + "/mcp";
+      const urls = { issuer, resource };
+      const verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+      const redirectUri = "http://localhost:51234/callback";
+      const client = yield* oauth.register({
+        software_id: MCP_PEER_LINK_SOFTWARE_ID,
+        redirect_uris: [redirectUri],
+      });
+      const request = HttpServerRequest.fromWeb(new Request(issuer));
+      const authorization = yield* oauth.validateAuthorization({
+        urls,
+        request: {
+          response_type: "code",
+          client_id: client.clientId,
+          redirect_uri: redirectUri,
+          code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+          code_challenge_method: "S256",
+          resource,
+        },
+      });
+      const approved = yield* oauth.approve({
+        authorization,
+        request,
+        decision: { _tag: "pairing-code", access: "full-access", code: offer.credential },
+      });
+      const fleetId = "synthetic-fleet";
+      const preview = yield* linked.adapter.resetLinks(fleetId, { mode: "preview" });
+      if (!("digest" in preview)) return yield* Effect.die("Expected fleet reset preview");
+      yield* linked.adapter.resetLinks(fleetId, {
+        mode: "apply",
+        fleetId,
+        previewDigest: preview.digest,
+      });
+      const exchange = yield* oauth
+        .exchangeCode({
+          request,
+          urls,
+          token: {
+            grant_type: "authorization_code",
+            code: Redacted.make(new URL(approved).searchParams.get("code")!),
+            client_id: client.clientId,
+            redirect_uri: redirectUri,
+            code_verifier: Redacted.make(verifier),
+            resource,
+          },
+        })
+        .pipe(Effect.result);
+      expect(exchange._tag).toBe("Failure");
+      if (exchange._tag === "Failure") expect(exchange.failure.error).toBe("invalid_grant");
+      expect(yield* linked.auth.listSessions()).toEqual([]);
+      const after = yield* linked.adapter.resetLinks(fleetId, { mode: "preview" });
+      expect(after).toMatchObject({ items: { sessions: [], state: { serving: 0 } } });
+      yield* round(fleet);
+      expect(yield* callerAccess(fleet)).toBe("full-access");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
 );
 
 it.live(

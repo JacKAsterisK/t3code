@@ -149,6 +149,13 @@ it.live("stages a fleet gateway without disrupting the saved route until selecti
       yield* Effect.promise(() =>
         expect(request(savedStage.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
       );
+      const restored = yield* gateway.prepare({
+        environmentId,
+        identity: { ...previousIdentity, origin: "https://127.0.0.1:10" },
+        savedRoute: true,
+      });
+      expect(yield* Effect.promise(() => request(restored.httpBaseUrl))).toBe(502);
+      expect(yield* gateway.prepare({ environmentId, identity: retryIdentity })).toEqual(staged);
     }).pipe(Effect.provide(DesktopFleetGateway.layer)),
   ),
 );

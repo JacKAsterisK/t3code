@@ -173,6 +173,7 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
         : yield* gateway.prepare({
             environmentId: target.environmentId,
             identity: profile.fleetTls,
+            savedRoute: true,
           });
     const authorized =
       credential._tag === "DpopConnectionCredential"

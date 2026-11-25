@@ -294,6 +294,17 @@ const make = Effect.gen(function* () {
               sendMachineIds: [],
               connectedEnvironmentIds: published?.connectedEnvironmentIds ?? [],
             };
+      const fleetId = config.fleetId;
+      const oldFleetOnly = new Set(
+        fleetId === undefined
+          ? []
+          : (input.pinnedFleetRoutes ?? []).flatMap(({ environmentId, fleetIds }) =>
+              fleetIds.length > 0 && !fleetIds.includes(fleetId) ? [environmentId] : [],
+            ),
+      );
+      const connectedEnvironmentIds = input.connectedEnvironmentIds.filter(
+        (id) => !oldFleetOnly.has(id),
+      );
       const trusted = (machine: FleetRoster["machines"][number]) =>
         config.peers.find(
           (peer) =>
@@ -389,7 +400,7 @@ const make = Effect.gen(function* () {
                 let sent = journal[`sent:${outgoingKey}`];
                 let recipientReady = !config.managed;
                 let recipientConnected =
-                  !config.managed && input.connectedEnvironmentIds.includes(peer.environmentId);
+                  !config.managed && connectedEnvironmentIds.includes(peer.environmentId);
                 let peerCatalog: typeof Delivery.FleetCatalog.Type | undefined;
                 if (config.managed) {
                   const catalogFile = path.join(
@@ -786,7 +797,7 @@ const make = Effect.gen(function* () {
                     delivery.header.deliveryId,
                   );
                   const grantAvailable = sharedFolder && grantOffered === true;
-                  const connected = input.connectedEnvironmentIds.includes(peer.environmentId);
+                  const connected = connectedEnvironmentIds.includes(peer.environmentId);
                   const replacementOffer =
                     (received?.status === "connected" &&
                       received.deliveryId !== delivery.header.deliveryId) ||
@@ -888,7 +899,7 @@ const make = Effect.gen(function* () {
                     }
                     if (
                       received?.status === "connecting" &&
-                      !input.connectedEnvironmentIds.includes(peer.environmentId)
+                      !connectedEnvironmentIds.includes(peer.environmentId)
                     )
                       status = "uncertain";
                   }
@@ -903,7 +914,7 @@ const make = Effect.gen(function* () {
                 Delivery.makeFleetCatalog(
                   config,
                   self,
-                  input.connectedEnvironmentIds,
+                  connectedEnvironmentIds,
                   now,
                   sharedFolder ? [...availableDeliveryIds] : undefined,
                   sharedFolder ? connectHost : undefined,

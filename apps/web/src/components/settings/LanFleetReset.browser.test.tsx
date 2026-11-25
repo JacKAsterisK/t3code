@@ -1,4 +1,6 @@
-import { AtomRegistry } from "effect/reactivity";
+import type { Atom } from "effect/reactivity";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { environmentCatalog } from "../../connection/catalog";
 import {
   AuthSessionId,
   EnvironmentId,
@@ -23,7 +25,6 @@ import { render } from "../../../test/render";
 import { LanFleetSettings } from "./LanFleetSettings";
 
 const fixtures = vi.hoisted(() => ({
-  entries: new Map<EnvironmentId, ConnectionCatalogEntry>(),
   reset:
     vi.fn<
       (request: {
@@ -64,7 +65,7 @@ vi.mock(import("../../connection/catalog"), async () => {
   const Effect = await import("effect/Effect");
   return {
     environmentCatalog: {
-      catalogValueAtom: Atom.make(() => ({ isReady: true, entries: fixtures.entries })),
+      catalogValueAtom: Atom.make({ isReady: true, entries: new Map() }),
       removeRoute: {
         label: "remove-route",
         run: (_registry: unknown, input: unknown) => Effect.sync(() => fixtures.remove(input)),
@@ -139,13 +140,21 @@ function setup() {
     };
   };
   const entries = [
-    route("Current fleet route", fleetId),
+    route("Current fleet route", fleetId, true),
+    route("Unpinned current route", fleetId),
     route("Legacy pin route", undefined, true),
     route("Manual route"),
     route("Other fleet route", "other-fleet", true),
   ];
-  const registry = AtomRegistry.make();
-  fixtures.entries = new Map(entries.map((entry) => [entry.target.environmentId, entry]));
+  const registry = appAtomRegistry;
+  const setRoutes = (routes: ReadonlyArray<ConnectionCatalogEntry>) => {
+    const atom = environmentCatalog.catalogValueAtom;
+    registry.set(atom as Atom.Writable<Atom.Type<typeof atom>>, {
+      ...registry.get(atom),
+      entries: new Map(routes.map((entry) => [entry.target.environmentId, entry])),
+    });
+  };
+  setRoutes(entries);
   fixtures.useLanFleet.mockReturnValue({
     environmentId,
     allowed: true,
@@ -155,15 +164,18 @@ function setup() {
   });
   fixtures.reset.mockReset();
   fixtures.remove.mockReset();
-  return { environmentId, preview, receipt, registry };
+  return { environmentId, preview, receipt, registry, setRoutes, entries, route };
 }
 
 it("reviews a fleet reset, refuses stale review, and removes saved routes only when included", async () => {
-  const { environmentId, preview, receipt, registry } = setup();
+  const { environmentId, preview, receipt, registry, setRoutes, entries, route } = setup();
   const newPreview = { ...preview, digest: "b".repeat(64) };
   const stale = new LanFleetError({ reason: "configuration", refusal: "stale-review" });
   fixtures.reset
-    .mockReturnValueOnce(preview)
+    .mockImplementationOnce(() => {
+      setRoutes([...entries, route("Route added during preview", preview.fleetId, true)]);
+      return preview;
+    })
     .mockReturnValueOnce(stale)
     .mockReturnValueOnce(newPreview)
     .mockReturnValueOnce({ ...receipt, previewDigest: newPreview.digest })
@@ -184,8 +196,11 @@ it("reviews a fleet reset, refuses stale review, and removes saved routes only w
   await expect.element(page.getByText(/Pending code fixture-code/)).toBeVisible();
   await expect.element(page.getByText(/1 outgoing and 2 serving/)).toBeVisible();
   await expect.element(page.getByText(/Current fleet route/)).toBeVisible();
+  await expect.element(page.getByText(/Route added during preview/)).toBeVisible();
   await expect.element(page.getByText(/Legacy pin route/)).toBeVisible();
-  await expect.element(page.getByText(/Manual route|Other fleet route/)).not.toBeInTheDocument();
+  await expect
+    .element(page.getByText(/Manual route|Other fleet route|Unpinned current route/))
+    .not.toBeInTheDocument();
   await expect.element(include).not.toBeChecked();
   expect(fixtures.reset).toHaveBeenCalledExactlyOnceWith({
     environmentId,
@@ -194,7 +209,9 @@ it("reviews a fleet reset, refuses stale review, and removes saved routes only w
 
   await include.click();
   await confirm.click();
-  await expect.element(page.getByRole("alert")).toHaveTextContent(stale.message);
+  await expect
+    .element(page.getByRole("alert"))
+    .toHaveTextContent("Fleet links changed. Review the current list before resetting.");
   expect(fixtures.reset).toHaveBeenNthCalledWith(2, {
     environmentId,
     input: {
@@ -205,6 +222,7 @@ it("reviews a fleet reset, refuses stale review, and removes saved routes only w
   });
   expect(fixtures.remove).not.toHaveBeenCalled();
 
+  setRoutes(entries);
   await page.getByRole("button", { name: "Review again" }).click();
   await expect.element(include).not.toBeChecked();
   await confirm.click();
@@ -229,7 +247,10 @@ it("reviews a fleet reset, refuses stale review, and removes saved routes only w
       {
         environmentId: "current-fleet-route",
         routeId: "route-current-fleet-route",
-        expectedFleet: { fleetId: preview.fleetId },
+        expectedFleet: {
+          fleetId: preview.fleetId,
+          fleetTls: expect.objectContaining({ origin: "https://current-fleet-route.example.test" }),
+        },
       },
     ],
     [

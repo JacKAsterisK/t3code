@@ -434,11 +434,18 @@ Each delivery is claimed once; uncertain exchanges pause for review instead of
 rotating credentials or replaying enrollment.
 
 When a delivery names a different fleet from a saved route to the same machine,
-the desktop can pair using the new delivery. Once it saves the new credential,
-it removes the routes and credentials proven to belong to the previous fleet.
-Manual routes and older fleet pins without a recorded fleet ID stay saved.
-A legacy pin that matches the delivery's exact TLS identity can renew as part
-of the current fleet. A failed pairing keeps every route.
+the desktop can pair using the new delivery. A route needs both a recorded
+fleet ID and a fleet TLS pin to qualify for automatic retirement. The desktop
+prepares the gateway and saves the enabled connection and new credential in
+the same catalog update that removes proven old-fleet routes and credentials.
+Failed pairing leaves saved routes and credentials in place. A hand-edited
+address loses its fleet ID and stays saved.
+
+Old fleet pins without a recorded fleet ID stay saved. An exact TLS match can
+renew beside other saved pins, and an exact-pin renewal preserves a recorded
+fleet ID when the delivery omits it. An original fleet can renew an older
+unpinned connection at its saved address. A saved environment with only proven
+old-fleet routes does not count as connected for fleet delivery or acknowledgment.
 
 Deliveries and owner link requests expire after 24 hours; signed connection
 summaries last ten minutes. Polling stops after three consecutive failures and
@@ -462,8 +469,16 @@ a receipt. If the list changed during review, request a fresh preview. You can
 also include the listed saved connections from this fleet or older connections
 with a fleet TLS pin. Manual connections and manual agent links are excluded.
 
-The next fleet pass can rebuild agent links. The reset works on local state only.
-Keep shared files and the desktop connection delivery journal for sync and recovery.
+Only pinned saved routes from this fleet and older pins with no recorded fleet
+ID are eligible for optional removal. Review the list again if the saved route
+or the server preview changes.
+
+Reset invalidates sign-ins approved under retired offers. It keeps enough local
+state to send fresh offers to peers that still hold their side of a link, so
+those peers can reconnect on the next fleet pass. If an agent link pass is
+already running, wait for it to finish and confirm again. Reset itself changes
+local state only. Keep shared files and the desktop connection delivery journal
+for sync and recovery.
 
 ## Share locks: why no fencing
 

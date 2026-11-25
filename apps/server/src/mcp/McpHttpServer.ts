@@ -396,6 +396,20 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
         linkedEnvironments,
         agentEventsEnabled,
         origin,
+        ...(limited.client === undefined || Option.isNone(clients)
+          ? {}
+          : {
+              recheckClient: clients.value.authenticate(request).pipe(
+                Effect.map((current) => {
+                  if (current === undefined) return undefined;
+                  const narrowed = withModeLimit(current, request);
+                  return narrowed === undefined
+                    ? undefined
+                    : McpInvocationContext.withRuntimeModeCeiling(narrowed, runtimeModeCeiling)
+                        .client;
+                }),
+              ),
+            }),
         ...(forge === undefined ? {} : { forge }),
       },
       request.headers,

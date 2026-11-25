@@ -1,5 +1,6 @@
 import * as ApprovalAdministration from "./approvals/ApprovalAdministration.ts";
 import * as ApprovalPeerAccess from "./auth/ApprovalPeerAccess.ts";
+import { ThreadCreationOrigin } from "./orchestration-v2/ThreadRuntimeModeChange.ts";
 import { ApprovalAdministrationError } from "@t3tools/contracts";
 import { AuthApprovalPermissionError } from "@t3tools/contracts";
 import * as ApprovalAuthority from "./auth/ApprovalAuthority.ts";
@@ -1660,6 +1661,18 @@ export const layerWsRpc = (
             Effect.map((owner) => owner !== undefined),
             Effect.orElseSucceed(() => false),
           );
+      const ownerThreadCreationOrigin = canManageAgentFullAccessModeChanges.pipe(
+        Effect.flatMap((owner) =>
+          owner
+            ? serverEnvironment.getEnvironmentId.pipe(
+                Effect.map((environmentId) => ({
+                  kind: "owner-local" as const,
+                  environmentId,
+                })),
+              )
+            : Effect.undefined,
+        ),
+      );
       const lanFleet = yield* LanFleet.LanFleet;
       const sourceControlDiscovery = yield* SourceControlDiscovery.SourceControlDiscovery;
       const secretCheck = yield* SecretCheck.SecretCheck;
@@ -2162,6 +2175,14 @@ export const layerWsRpc = (
                       )
                   ).pipe(
                     Effect.provide(intakeContext),
+                    Effect.provideServiceEffect(
+                      ThreadCreationOrigin,
+                      command.type === "thread.create" ||
+                        command.type === "thread.fork" ||
+                        command.type === "delegated_task.request"
+                        ? ownerThreadCreationOrigin
+                        : Effect.undefined,
+                    ),
                     Effect.provideService(ApprovalAuditActor, {
                       kind: "user",
                       principalId: `session:${currentSessionId}`,
@@ -2375,6 +2396,7 @@ export const layerWsRpc = (
                         }),
                       ),
                       Effect.provide(intakeContext),
+                      Effect.provideServiceEffect(ThreadCreationOrigin, ownerThreadCreationOrigin),
                     ),
                 )
                 .pipe(

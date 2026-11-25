@@ -168,6 +168,8 @@ export interface McpInvocationScope {
    * see the URL they were configured with, so links they must fetch carry it. Unset in-process.
    */
   readonly origin?: string | undefined;
+  /** Refresh authenticated client access for operations that can wait behind a command lock. */
+  readonly recheckClient?: Effect.Effect<McpClientCaller | undefined>;
   /** False when the calling thread's project is on no forge T3 reads; `/mcp` reads it per request. */
   readonly forge?: boolean;
 }

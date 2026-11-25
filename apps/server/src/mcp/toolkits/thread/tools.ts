@@ -167,7 +167,7 @@ const ThreadConfigureTool = Tool.make("t3_thread_configure", {
 const ThreadSetRuntimeModeTool = Tool.make("t3_thread_set_runtime_mode", {
   ...commandTool,
   description:
-    "Set an idle thread's runtime mode. Read its mode with t3_thread_configure and pass it as expectedRuntimeMode. Linked calls can keep or lower the mode within their approved access. Raising an Auto thread to Full access requires the owner's separate setting and a local Auto or Full access calling thread.",
+    "Set an idle thread's runtime mode. Read its mode with t3_thread_configure and pass it as expectedRuntimeMode. Linked calls can keep or lower the mode within their approved access. Raising an Auto thread to Full access requires the owner's separate setting and verified local owner ancestry for both threads. Older threads cannot be raised by this tool.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: ThreadId,

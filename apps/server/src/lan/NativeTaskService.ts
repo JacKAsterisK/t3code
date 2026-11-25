@@ -1,3 +1,4 @@
+import { ThreadCreationOrigin } from "../orchestration-v2/ThreadRuntimeModeChange.ts";
 import {
   CommandId,
   MessageId,
@@ -290,7 +291,10 @@ const make = Effect.gen(function* () {
           createdBy: "agent",
           creationSource: "mcp",
         })
-        .pipe(Effect.mapError(unavailable));
+        .pipe(
+          Effect.provideService(ThreadCreationOrigin, { kind: "task-grant" }),
+          Effect.mapError(unavailable),
+        );
       const run = result.projection.runs.find((run) => run.userMessageId === messageId);
       return {
         threadId: result.threadId,

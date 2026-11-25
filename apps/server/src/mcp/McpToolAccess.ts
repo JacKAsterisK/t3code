@@ -382,7 +382,7 @@ export const setsThreadRuntimeMode = <P extends RuntimeModeChangeInput, A, E, R>
   declare(
     (params: P) =>
       Effect.gen(function* () {
-        const { scope, limits } = yield* writingCaller;
+        const { scope } = yield* writingCaller;
         const { client, thread } = scope;
         if (client?.linked === true) yield* refuseLinkedModeIncrease(params);
         const caller =
@@ -397,8 +397,20 @@ export const setsThreadRuntimeMode = <P extends RuntimeModeChangeInput, A, E, R>
               ? undefined
               : {
                   kind: "client" as const,
-                  limits,
-                  fenced: client.linked === true && client.access !== "full-access",
+                  revalidate: (scope.recheckClient ?? Effect.undefined).pipe(
+                    Effect.map((current) =>
+                      current !== undefined &&
+                      current.sessionId === client.sessionId &&
+                      current.linked === client.linked &&
+                      current.access !== "read-only" &&
+                      current.taskOnly !== true
+                        ? {
+                            limits: McpInvocationContext.clientModeCeiling(current),
+                            fenced: current.linked === true && current.access !== "full-access",
+                          }
+                        : undefined,
+                    ),
+                  ),
                   actor: {
                     kind: client.linked === true ? ("linked-client" as const) : ("client" as const),
                     sessionId: client.sessionId,

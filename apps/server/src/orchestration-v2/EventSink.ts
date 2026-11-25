@@ -59,6 +59,11 @@ export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>
   }
 }
 
+export class EventSinkThreadChanged extends Schema.TaggedError<EventSinkThreadChanged>()(
+  "EventSinkThreadChanged",
+  { threadId: ThreadId },
+) {}
+
 export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamError>()(
   "EventSinkStreamError",
   {
@@ -212,6 +217,7 @@ export interface EventSinkV2Shape {
   >;
   readonly commitCommand: (input: {
     readonly approvalGuard?: ApprovalGuard;
+    readonly expectedThreadSequence?: number;
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
     readonly commandType: string;
@@ -830,6 +836,13 @@ const layerBase: Layer.Layer<
         const result = yield* commitThenPublish(
           [input.threadId, ...projectedThreadIds(input.events)],
           Effect.gen(function* () {
+            if (
+              input.expectedThreadSequence !== undefined &&
+              (yield* eventStore.latestSequence({ threadId: input.threadId })) !==
+                input.expectedThreadSequence
+            ) {
+              return yield* new EventSinkThreadChanged({ threadId: input.threadId });
+            }
             const reserved = yield* commandReceipts.insertIfAbsent({
               commandId: input.commandId,
               threadId: input.threadId,

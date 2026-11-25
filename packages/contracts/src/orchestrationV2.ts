@@ -185,6 +185,27 @@ export const OrchestrationV2RuntimeModeEscalation = Schema.Struct({
 });
 export type OrchestrationV2RuntimeModeEscalation = typeof OrchestrationV2RuntimeModeEscalation.Type;
 
+export const OrchestrationV2LaunchProvenance = Schema.Struct({
+  kind: Schema.Literals([
+    "owner-local",
+    "owner-descendant",
+    "linked",
+    "task-grant",
+    "outside-oauth",
+    "unknown",
+  ]),
+  environmentId: Schema.optionalKey(EnvironmentId),
+});
+export type OrchestrationV2LaunchProvenance = typeof OrchestrationV2LaunchProvenance.Type;
+
+export function inheritThreadLaunchProvenance(
+  parent: OrchestrationV2LaunchProvenance | undefined,
+): OrchestrationV2LaunchProvenance {
+  return parent?.kind === "owner-local"
+    ? { ...parent, kind: "owner-descendant" }
+    : (parent ?? { kind: "unknown" });
+}
+
 export const OrchestrationV2RuntimeModeChange = Schema.Struct({
   actor: Schema.Union([
     Schema.Struct({ kind: Schema.Literal("thread"), ...OrchestrationV2LinkedSender.fields }),
@@ -550,6 +571,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
   runtimeModeEscalation: Schema.optional(OrchestrationV2RuntimeModeEscalation),
+  launchProvenance: Schema.optionalKey(OrchestrationV2LaunchProvenance),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([

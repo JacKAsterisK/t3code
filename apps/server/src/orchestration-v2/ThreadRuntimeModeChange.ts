@@ -1,13 +1,31 @@
 import {
   type EnvironmentId,
+  type OrchestrationV2LaunchProvenance,
   type OrchestrationV2RuntimeModeChange,
   type ProviderInstanceId,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type { DispatchModes } from "./DispatchModeLimit.ts";
+
+// Only authenticated server entry points can stamp an origin for a new thread.
+export const ThreadCreationOrigin = Context.Reference<OrchestrationV2LaunchProvenance | undefined>(
+  "t3/orchestration-v2/ThreadCreationOrigin",
+  { defaultValue: () => undefined },
+);
+
+export function isOwnerLocalLaunch(
+  provenance: OrchestrationV2LaunchProvenance | undefined,
+  environmentId: EnvironmentId,
+): boolean {
+  return (
+    provenance?.environmentId === environmentId &&
+    (provenance.kind === "owner-local" || provenance.kind === "owner-descendant")
+  );
+}
 
 type ClientActor = Extract<
   OrchestrationV2RuntimeModeChange["actor"],
@@ -27,8 +45,9 @@ export const ThreadRuntimeModeChange = Context.Reference<
         | {
             readonly kind: "client";
             readonly actor: ClientActor;
-            readonly limits: DispatchModes;
-            readonly fenced: boolean;
+            readonly revalidate: Effect.Effect<
+              { readonly limits: DispatchModes; readonly fenced: boolean } | undefined
+            >;
           };
     }
   | undefined

@@ -2,11 +2,15 @@ import {
   ConnectionBlockedError,
   ConnectionTransientError,
 } from "@t3tools/client-runtime/connection";
+import * as Schema from "effect/Schema";
+
+const isConnectionFailure = Schema.is(
+  Schema.Union([ConnectionBlockedError, ConnectionTransientError]),
+);
 
 /** Display typed connection detail without including pairing material or raw causes. */
 export function fleetPairingFailureDetail(failure: unknown, pairingCode: string): string | null {
-  if (!(failure instanceof ConnectionBlockedError || failure instanceof ConnectionTransientError))
-    return null;
+  if (!isConnectionFailure(failure)) return null;
   let detail = failure.detail;
   if (pairingCode !== "") {
     detail = detail.replaceAll(pairingCode, "[redacted]");

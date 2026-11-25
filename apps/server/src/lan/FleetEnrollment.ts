@@ -508,6 +508,7 @@ const make = Effect.gen(function* () {
                 member: current.member,
                 signingPrivateKey: record.signingPrivateKey,
                 expectedRevision: input.revision,
+                ...(input.requireNoStartingList === true ? { requireNoStartingList: true } : {}),
                 next: {
                   defaultAccess: input.defaultAccess,
                   machines: input.machines,

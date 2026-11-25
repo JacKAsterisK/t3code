@@ -686,6 +686,8 @@ export class FleetAccess extends Context.Service<
         readonly signingPrivateKey: string;
         readonly expectedRevision: number;
         readonly next: FleetAccessSnapshot;
+        /** Refused if, under the lock, the share holds a starting list the person did not see. */
+        readonly requireNoStartingList?: boolean;
       },
     ) => Effect.Effect<FleetAccessState, LanFleetError>;
   }
@@ -1198,6 +1200,8 @@ const make = Effect.fn("FleetAccess.make")(function* (
         const view = yield* refreshUnlocked(input);
         if (view.unavailable) return yield* new LanFleetError({ reason: "unavailable" });
         if (view.state.revision !== input.expectedRevision) return yield* configurationError();
+        if (input.requireNoStartingList === true && view.seed._tag !== "absent")
+          return yield* new LanFleetError({ reason: "configuration", refusal: "stale-review" });
         // Every marker is read again under the lock, right before revision 1 is written.
         if (
           adoptingSeed &&

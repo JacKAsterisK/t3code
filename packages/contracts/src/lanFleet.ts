@@ -188,6 +188,8 @@ export const LanFleetSetupInput = Schema.Union([
     exceptions: Schema.optionalKey(
       Schema.Array(FleetAccessException).check(Schema.isMaxLength(100)),
     ),
+    // Saves the first list as shown with no starting list: refused if one has appeared since.
+    requireNoStartingList: Schema.optionalKey(Schema.Literal(true)),
   }),
   Schema.Struct({
     operation: Schema.Literal("transport"),
@@ -265,6 +267,8 @@ const FLEET_REFUSAL_MESSAGES: Readonly<Record<string, string>> = {
   "owner-code-mismatch":
     "The owner verification code does not match this fleet's owner. Check the code on the owner machine.",
   "not-owner": "Only the fleet's owner machine can do this.",
+  "stale-review":
+    "The fleet changed after this list was shown, so it was not saved. Review Machine access again.",
   "machine-not-enabled":
     "This machine, or one it was asked to link, is not an enabled fleet member in both the roster and the fleet's trust list.",
 };

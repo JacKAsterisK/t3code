@@ -1222,6 +1222,38 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
         );
       }).pipe(Effect.provide(configLayer)),
   );
+  it.effect("refuses a first save shown without a starting list once one has appeared", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const cryo = yield* f.machine();
+      // Shown with no starting list; one restricting AnvilToad arrives before the click.
+      expect((yield* cryo.refresh(f.input(f.cryo))).seed).toBeUndefined();
+      yield* f.writeSeed(f.seedOf(f.anvil));
+      const refused = yield* cryo
+        .change({
+          ...f.input(f.cryo),
+          expectedRevision: 0,
+          requireNoStartingList: true,
+          next: { defaultAccess: "standard", machines: [] },
+        })
+        .pipe(Effect.flip);
+      expect(refused.refusal).toBe("stale-review");
+      const after = yield* cryo.refresh(f.input(f.cryo));
+      expect(after.revision).toBe(0);
+      expect(after.seed).toBe("waiting");
+      expect(yield* f.fs.exists(f.directory)).toBe(false);
+      // With no starting list, the same save goes through.
+      yield* f.fs.remove(f.seedFile);
+      const saved = yield* cryo.change({
+        ...f.input(f.cryo),
+        expectedRevision: 0,
+        requireNoStartingList: true,
+        next: { defaultAccess: "standard", machines: [] },
+      });
+      expect(saved.revision).toBe(1);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("an explicit roster path does not block a verified private-file fleet at startup", () =>
     Effect.gen(function* () {
       const f = yield* fleet();

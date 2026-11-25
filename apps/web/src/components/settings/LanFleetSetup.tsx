@@ -492,6 +492,7 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
                   revision: 0,
                   defaultAccess: policy.defaultAccess,
                   machines: policy.machines,
+                  requireNoStartingList: true,
                 })
               }
             >

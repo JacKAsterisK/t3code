@@ -241,6 +241,7 @@ it("saves the shown access as a fleet's first list without changing any machine"
     revision: 0,
     defaultAccess: "standard",
     machines: [],
+    requireNoStartingList: true,
   });
 });
 

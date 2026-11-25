@@ -465,8 +465,9 @@ Use **Settings → Connections → LAN machine links → Reset fleet links** on 
 machine you want to reset. Review its fleet-made agent links, sessions it served,
 pending codes, and adapter state. Confirm to retire the reviewed items and see
 a receipt. If the list changed during review, request a fresh preview. To remove
-saved connections too, opt in to the displayed routes. The list includes pinned
-routes from this fleet and older pins with no recorded fleet ID. Manual
+saved connections too, opt in to the displayed routes. Like automatic
+retirement, this cleanup requires a fleet TLS pin. The list includes only pins
+from the current fleet and older pins with no recorded fleet ID. Manual
 connections and manual agent links are excluded.
 
 Reset invalidates sign-ins approved under retired offers. Before revoking

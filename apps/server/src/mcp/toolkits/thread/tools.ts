@@ -164,6 +164,23 @@ const ThreadConfigureTool = Tool.make("t3_thread_configure", {
   success: Schema.Union([threadConfiguration, OrchestrationV2DispatchCommandResult]),
 }).annotate(Tool.Destructive, true);
 
+const ThreadSetRuntimeModeTool = Tool.make("t3_thread_set_runtime_mode", {
+  ...commandTool,
+  description:
+    "Set an idle thread's runtime mode. Read its mode with t3_thread_configure and pass it as expectedRuntimeMode. Linked calls can keep or lower the mode within their approved access. Raising an Auto thread to Full access requires the owner's separate setting and a local Auto or Full access calling thread.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: ThreadId,
+    expectedRuntimeMode: RuntimeMode,
+    runtimeMode: RuntimeMode,
+  }),
+  success: Schema.Struct({
+    ...OrchestrationV2DispatchCommandResult.fields,
+    threadId: ThreadId,
+    runtimeMode: RuntimeMode,
+  }),
+}).annotate(Tool.Destructive, true);
+
 const ThreadTransferTool = Tool.make("t3_thread_transfer", {
   ...commandTool,
   description:
@@ -258,6 +275,7 @@ export const ThreadToolkit = Toolkit.make(
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadConfigureTool,
+  ThreadSetRuntimeModeTool,
   ThreadTransferTool,
   ThreadOrganizeTool,
   PendingRequestTool,

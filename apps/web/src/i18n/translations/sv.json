@@ -8204,6 +8204,8 @@
   "2f015e6d5459dce9": "Uppdatera till {version}",
   "19f0fee16e878755": "Allow Auto threads to start Full access threads",
   "7a52c38d21003f7f": "Lets Auto threads explicitly start Full access agents on this environment. Linked launches also require this setting on the other environment and a Full access link.",
+  "f11b2223d3e9b9ca": "Låt lokala agenter ändra trådar från Auto till full åtkomst",
+  "8ea849c187a185e3": "Lokala agenter i Auto eller med full åtkomst kan ändra en inaktiv Auto-tråd till full åtkomst. Länkade miljöer får inte den här behörigheten.",
   "8ebba639f92932c3": "Låter andra enheter öppna den här datorns lokala servrar: webbläsarflikar som läses in på enheten, Öppna på den här enheten och portvidarebefordran. Av: webbläsarflikar strömmas från den här datorn.",
   "1c5266bf18d0ed24": "Tillåt förhandsgranskningstunneln",
   "a0e93cca71d0417e": "Auktoriserade klienter",

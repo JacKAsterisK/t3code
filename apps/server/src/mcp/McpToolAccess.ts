@@ -1,5 +1,6 @@
 import * as ApprovalAuthority from "../auth/ApprovalAuthority.ts";
 import {
+  isRuntimeModeAbove,
   type EnvironmentId,
   type OrchestrationV2LinkOrigin,
   OrchestratorMcpEnvironmentTarget,
@@ -25,6 +26,7 @@ import {
   DispatchModeLimit,
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
+import { ThreadRuntimeModeChange } from "../orchestration-v2/ThreadRuntimeModeChange.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import {
@@ -357,6 +359,82 @@ export const writesThreadFromAuto = <
       ...limits,
       runtimeMode: autoThreadFullAccessLimit(scope, limits.runtimeMode, caller),
     }),
+  );
+
+type RuntimeModeChangeInput = {
+  readonly runtimeMode: RuntimeMode;
+  readonly expectedRuntimeMode: RuntimeMode;
+};
+
+const refuseLinkedModeIncrease = (input: RuntimeModeChangeInput) =>
+  isRuntimeModeAbove(input.runtimeMode, input.expectedRuntimeMode)
+    ? Effect.fail(
+        new OrchestratorMcpFailure({
+          code: "runtime_mode_escalation_denied",
+          message: "Linked calls may keep or lower a thread's runtime mode.",
+        }),
+      )
+    : Effect.void;
+
+export const setsThreadRuntimeMode = <P extends RuntimeModeChangeInput, A, E, R>(
+  handle: (params: P) => Effect.Effect<A, E, R>,
+) =>
+  declare(
+    (params: P) =>
+      Effect.gen(function* () {
+        const { scope, limits } = yield* writingCaller;
+        const { client, thread } = scope;
+        if (client?.linked === true) yield* refuseLinkedModeIncrease(params);
+        const caller =
+          thread !== undefined && client?.linked !== true
+            ? {
+                kind: "thread" as const,
+                environmentId: scope.environmentId,
+                threadId: thread.threadId,
+                providerInstanceId: thread.providerInstanceId,
+              }
+            : client === undefined
+              ? undefined
+              : {
+                  kind: "client" as const,
+                  limits,
+                  fenced: client.linked === true && client.access !== "full-access",
+                  actor: {
+                    kind: client.linked === true ? ("linked-client" as const) : ("client" as const),
+                    sessionId: client.sessionId,
+                    label: client.label,
+                  },
+                };
+        if (caller === undefined) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "Changing runtime mode requires an authenticated caller.",
+          });
+        }
+        return yield* handle(params).pipe(
+          Effect.provideService(ThreadRuntimeModeChange, {
+            expectedRuntimeMode: params.expectedRuntimeMode,
+            caller,
+          }),
+        );
+      }),
+    (params: P) =>
+      writingCaller.pipe(
+        Effect.flatMap(({ scope, limits }) => {
+          if (scope.client?.linked === true) {
+            return Effect.fail(
+              new OrchestratorMcpFailure({
+                code: "forwarding_chain_refused",
+                message: "Runtime-mode changes support one linked hop.",
+              }),
+            );
+          }
+          return refuseLinkedModeIncrease(params).pipe(
+            Effect.andThen(resolveRuntimeMode(limits.runtimeMode, params.expectedRuntimeMode)),
+          );
+        }),
+      ),
+    always,
   );
 
 const escalationDenied = (refusal: DispatchModeRefusal) =>

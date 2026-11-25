@@ -8206,6 +8206,8 @@
   "2f015e6d5459dce9": "Update to {version}",
   "19f0fee16e878755": "Allow Auto threads to start Full access threads",
   "7a52c38d21003f7f": "Lets Auto threads explicitly start Full access agents on this environment. Linked launches also require this setting on the other environment and a Full access link.",
+  "f11b2223d3e9b9ca": "Allow local agents to change Auto threads to Full access",
+  "8ea849c187a185e3": "Lets local Auto and Full access agent threads move an idle Auto thread to Full access. This does not grant linked environments the same permission.",
   "8ebba639f92932c3": "Lets other devices open this machine's local servers: browser tabs loaded on the device, Open on this device, and port forwarding. Off: browser tabs stream from this machine.",
   "1c5266bf18d0ed24": "Allow the preview tunnel",
   "a0e93cca71d0417e": "Authorized clients",

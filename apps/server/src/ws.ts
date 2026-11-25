@@ -1,4 +1,5 @@
 import * as ApprovalAdministration from "./approvals/ApprovalAdministration.ts";
+import * as ApprovalPeerAccess from "./auth/ApprovalPeerAccess.ts";
 import { ApprovalAdministrationError } from "@t3tools/contracts";
 import { AuthApprovalPermissionError } from "@t3tools/contracts";
 import * as ApprovalAuthority from "./auth/ApprovalAuthority.ts";
@@ -1652,6 +1653,13 @@ export const layerWsRpc = (
         ApprovalAdministration.ApprovalAdministration,
       );
       const approvalAuthority = yield* Effect.serviceOption(ApprovalAuthority.ApprovalAuthority);
+      const approvalPeers = yield* Effect.serviceOption(ApprovalPeerAccess.ApprovalPeerAccess);
+      const canManageAgentFullAccessModeChanges = Option.isNone(approvalPeers)
+        ? Effect.succeed(false)
+        : approvalPeers.value.owner(currentSessionId).pipe(
+            Effect.map((owner) => owner !== undefined),
+            Effect.orElseSucceed(() => false),
+          );
       const lanFleet = yield* LanFleet.LanFleet;
       const sourceControlDiscovery = yield* SourceControlDiscovery.SourceControlDiscovery;
       const secretCheck = yield* SecretCheck.SecretCheck;
@@ -2016,6 +2024,7 @@ export const layerWsRpc = (
             otlpLogsEnabled: config.otlpLogsUrl !== undefined,
           },
           settings,
+          canManageAgentFullAccessModeChanges: yield* canManageAgentFullAccessModeChanges,
           ...(serverSettings.managedPolicy === undefined
             ? {}
             : { managedPolicy: serverSettings.managedPolicy }),
@@ -2889,6 +2898,16 @@ export const layerWsRpc = (
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {
+            if (
+              patch.allowAgentFullAccessModeChanges !== undefined &&
+              !(yield* canManageAgentFullAccessModeChanges)
+            ) {
+              return yield* new EnvironmentAuthorizationError({
+                requiredScope: AuthAccessWriteScope,
+                message:
+                  "Only the environment owner can change the permission to raise an agent thread to Full access.",
+              });
+            }
             const deviceHosts = patch.deviceHosts
               ? yield* remoteSshDeviceHosts(patch.deviceHosts).pipe(
                   Effect.provide(deviceHostContext),

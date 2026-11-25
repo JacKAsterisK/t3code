@@ -899,6 +899,26 @@ it.effect("runs any tool that takes a linked environment there", () =>
         { beforePosition: Number.MAX_SAFE_INTEGER, limit: 10, view: "messages" },
       ]);
 
+      const raised = yield* a.call("thread:laptop-full", "t3_thread_set_runtime_mode", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        expectedRuntimeMode: "auto",
+        runtimeMode: "full-access",
+      });
+      expect(failureOf(raised)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+      const lowered = yield* a.call("thread:laptop-full", "t3_thread_set_runtime_mode", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        expectedRuntimeMode: "auto",
+        runtimeMode: "approval-required",
+      });
+      expect(lowered.isError).toBe(false);
+      expect(lowered.structuredContent).toMatchObject({
+        threadId: boxThread,
+        runtimeMode: "approval-required",
+      });
+      expect((yield* Ref.get(seen)).stops).toContain("thread.runtime-mode.set " + boxThread);
+
       // This environment's own id keeps the call here.
       const own = yield* a.call("thread:laptop-full", "t3_thread_configure", {
         environmentId: laptop.environmentId,

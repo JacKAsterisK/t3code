@@ -1430,6 +1430,26 @@ function ConnectionsSettingsContent({
                 }
               />
             ) : null}
+            {accessServerConfig?.canManageAgentFullAccessModeChanges !== undefined ? (
+              <SettingsRow
+                title={gt("Allow local agents to change Auto threads to Full access")}
+                description={gt(
+                  "Lets local Auto and Full access agent threads move an idle Auto thread to Full access. This does not grant linked environments the same permission.",
+                )}
+                control={
+                  <Switch
+                    checked={accessServerConfig.settings.allowAgentFullAccessModeChanges === true}
+                    disabled={
+                      !canWriteAccess || !accessServerConfig.canManageAgentFullAccessModeChanges
+                    }
+                    aria-label={gt("Allow local agents to change Auto threads to Full access")}
+                    onCheckedChange={(enabled) =>
+                      void updateAccessSettings({ allowAgentFullAccessModeChanges: enabled })
+                    }
+                  />
+                }
+              />
+            ) : null}
             {accessServerConfig?.environment.capabilities.previewTunnelSetting ? (
               <SettingsRow
                 title={searchableSetting("preview-tunnel").title}

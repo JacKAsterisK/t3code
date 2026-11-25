@@ -185,6 +185,21 @@ export const OrchestrationV2RuntimeModeEscalation = Schema.Struct({
 });
 export type OrchestrationV2RuntimeModeEscalation = typeof OrchestrationV2RuntimeModeEscalation.Type;
 
+export const OrchestrationV2RuntimeModeChange = Schema.Struct({
+  actor: Schema.Union([
+    Schema.Struct({ kind: Schema.Literal("thread"), ...OrchestrationV2LinkedSender.fields }),
+    Schema.Struct({
+      kind: Schema.Literals(["client", "linked-client"]),
+      sessionId: TrimmedNonEmptyString,
+      label: Schema.String,
+    }),
+  ]),
+  from: RuntimeMode,
+  to: RuntimeMode,
+  reason: Schema.Literals(["within-caller-limit", "local-owner-policy"]),
+});
+export type OrchestrationV2RuntimeModeChange = typeof OrchestrationV2RuntimeModeChange.Type;
+
 export const OrchestrationV2NativeRefStrength = Schema.Literals(["strong", "weak", "none"]);
 export type OrchestrationV2NativeRefStrength = typeof OrchestrationV2NativeRefStrength.Type;
 
@@ -2029,6 +2044,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     message: Schema.String,
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
     mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
+    runtimeModeChange: Schema.optional(OrchestrationV2RuntimeModeChange),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2925,6 +2941,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     message: Schema.String,
     level: Schema.optional(OrchestrationV2SystemNoticeLevel),
     mcpSignIn: Schema.optional(OrchestrationV2McpSignIn),
+    runtimeModeChange: Schema.optional(OrchestrationV2RuntimeModeChange),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,

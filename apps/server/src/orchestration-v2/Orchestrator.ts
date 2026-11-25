@@ -84,6 +84,8 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ProviderInteractionMode,
   isRuntimeModeAbove,
+  linkOriginIsFenced,
+  type OrchestrationV2RuntimeModeChange,
   resolveProviderInstanceEnabled,
   resolveProjectProviderInstanceEnabled,
   type ProviderSessionId,
@@ -183,6 +185,10 @@ import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from 
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import {
+  ThreadRuntimeModeChange,
+  ThreadRuntimeModeChangeError,
+} from "./ThreadRuntimeModeChange.ts";
+import {
   DispatchModeLimit,
   exceededDispatchModeLimit,
   narrowToCeiling,
@@ -215,6 +221,7 @@ import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { ProviderSwitchServiceV2 } from "./ProviderSwitchService.ts";
 import { isAutomaticCompletionRun, queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
 import { isRuntimePolicyAboveCeilingError, RuntimePolicyV2 } from "./RuntimePolicy.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import {
   endOrphanedNativeSubagent,
   endRunlessRootTurns,
@@ -412,6 +419,7 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorThreadAboveModeLimitError,
   OrchestratorProviderSelectionBusyError,
   OrchestratorRuntimeModeAboveCeilingError,
+  ThreadRuntimeModeChangeError,
 ]);
 export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
 
@@ -1728,6 +1736,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
+  const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
   const providerSessions = yield* ProviderSessionManagerV2;
   const providerSwitchService = yield* ProviderSwitchServiceV2;
@@ -1867,12 +1876,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const sessionHasBackgroundWork = Effect.fn("Orchestrator.sessionHasBackgroundWork")(function* (
     detaching: OrchestrationV2ThreadProjection["providerSessions"][number],
     providerThreads: OrchestrationV2ThreadProjection["providerThreads"],
+    failClosed = false,
   ) {
-    const session = yield* providerSessions
-      .get(detaching.id)
-      .pipe(Effect.orElseSucceed(() => Option.none()));
-    if (Option.isNone(session)) return false;
-    const runtime = session.value;
+    const session = yield* providerSessions.get(detaching.id).pipe(Effect.result);
+    if (Result.isFailure(session)) return failClosed;
+    if (Option.isNone(session.success)) return false;
+    const runtime = session.success.value;
     const probes =
       !detaching.capabilities.sessions.supportsMultipleProviderThreadsPerSession &&
       runtime.hasPendingBackgroundWork !== undefined
@@ -4480,6 +4489,158 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return decided.success;
   });
 
+  const authorizeMcpRuntimeMode = Effect.fn("orchestrationV2.authorizeMcpRuntimeMode")(function* (
+    command: Extract<OrchestrationV2Command, { type: "thread.runtime-mode.set" }>,
+    thread: OrchestrationV2AppThread,
+    change: NonNullable<typeof ThreadRuntimeModeChange.Service>,
+    allowElevation: boolean,
+  ): Effect.fn.Return<OrchestrationV2RuntimeModeChange, OrchestratorV2Error> {
+    const { runtimeMode } = command;
+    const from = thread.runtimeMode;
+    if (change.expectedRuntimeMode !== from) {
+      return yield* new ThreadRuntimeModeChangeError({
+        code: "mode_changed",
+        message: "The thread's runtime mode changed. Read it again before retrying.",
+      });
+    }
+    const caller = change.caller;
+    let actor: OrchestrationV2RuntimeModeChange["actor"];
+    let limits: {
+      readonly runtimeMode: RuntimeMode;
+      readonly interactionMode: ProviderInteractionMode;
+    };
+    let sameEnvironmentAgent = false;
+    let fencedSessionId: string | undefined;
+    if (caller.kind === "thread") {
+      const shell = yield* projectionStore
+        .getThreadShell(caller.threadId)
+        .pipe(mapDispatchError(command));
+      if (
+        shell === null ||
+        shell.deletedAt !== null ||
+        shell.archivedAt !== null ||
+        shell.providerInstanceId !== caller.providerInstanceId ||
+        (shell.activeRunId === null &&
+          !hasPendingBackgroundSubagent(shell.pendingBackgroundTasks, caller.providerInstanceId))
+      ) {
+        return yield* new ThreadRuntimeModeChangeError({
+          code: "capability_denied",
+          message: "The calling agent no longer has live thread access.",
+        });
+      }
+      if (shell.id === thread.id) {
+        return yield* new ThreadRuntimeModeChangeError({
+          code: "thread_busy",
+          message:
+            "The calling thread has work in progress. Change its runtime mode after it is idle.",
+        });
+      }
+      actor = {
+        kind: "thread",
+        environmentId: caller.environmentId,
+        threadId: shell.id,
+        title: shell.title,
+      };
+      limits = shell;
+      sameEnvironmentAgent =
+        shell.linkOrigin == null &&
+        (shell.delegatedFrom == null || shell.delegatedFrom.environmentId === caller.environmentId);
+      fencedSessionId =
+        shell.linkOrigin != null && linkOriginIsFenced(shell.linkOrigin)
+          ? shell.linkOrigin.sessionId
+          : undefined;
+    } else {
+      ({ actor, limits } = caller);
+      if (caller.fenced) fencedSessionId = caller.actor.sessionId;
+    }
+    if (fencedSessionId !== undefined && thread.linkOrigin?.sessionId !== fencedSessionId) {
+      return yield* new ThreadRuntimeModeChangeError({
+        code: "capability_denied",
+        message: "The target thread belongs to a different link.",
+      });
+    }
+    if (
+      exceededDispatchModeLimit({ ...limits, runtimeMode: "full-access" }, thread) === "interaction"
+    ) {
+      return yield* new ThreadRuntimeModeChangeError({
+        code: "interaction_mode_escalation_denied",
+        message: "The target thread's interaction mode is above the caller's approved access.",
+      });
+    }
+    const upward = isRuntimeModeAbove(runtimeMode, from);
+    const elevated =
+      upward &&
+      allowElevation &&
+      sameEnvironmentAgent &&
+      thread.linkOrigin == null &&
+      caller.kind === "thread" &&
+      (thread.delegatedFrom == null ||
+        thread.delegatedFrom.environmentId === caller.environmentId) &&
+      from === "auto" &&
+      runtimeMode === "full-access" &&
+      !isRuntimeModeAbove("auto", limits.runtimeMode);
+    if (
+      (upward && !elevated) ||
+      isRuntimeModeAbove(from, limits.runtimeMode) ||
+      (!elevated && isRuntimeModeAbove(runtimeMode, limits.runtimeMode))
+    ) {
+      return yield* new ThreadRuntimeModeChangeError({
+        code: "runtime_mode_escalation_denied",
+        message:
+          "The caller cannot make this runtime-mode change. Raising an Auto thread to Full access requires the local owner setting and a local Auto or Full access agent.",
+      });
+    }
+    return {
+      actor,
+      from,
+      to: runtimeMode,
+      reason: elevated ? "local-owner-policy" : "within-caller-limit",
+    };
+  });
+
+  const assertMcpRuntimeModeIdle = Effect.fn("orchestrationV2.assertMcpRuntimeModeIdle")(function* (
+    command: Extract<OrchestrationV2Command, { type: "thread.runtime-mode.set" }>,
+    providerContext: NonNullable<
+      Effect.Success<ReturnType<typeof projectionStore.getThreadProviderContext>>
+    >,
+  ) {
+    const { threadId } = command;
+    const shell = yield* projectionStore.getThreadShell(threadId).pipe(mapDispatchError(command));
+    const { runs, runtimeRequests, providerTurns, providerThreads, subagents } =
+      yield* loadProjectionForCommand(
+        command,
+        ["runs", "runtimeRequests", "providerTurns", "providerThreads", "subagents"],
+        {
+          runStatuses: ["preparing", "queued", "starting", "running", "waiting"],
+          runtimeRequestStatuses: ["pending"],
+        },
+      );
+    const busy = new ThreadRuntimeModeChangeError({
+      code: "thread_busy",
+      message:
+        "The thread has active, waiting, queued, or background work. Wait for it to become idle and retry.",
+    });
+    if (
+      shell === null ||
+      shell.activeRunId !== null ||
+      (shell.pendingBackgroundTasks?.length ?? 0) > 0 ||
+      runs.length > 0 ||
+      runtimeRequests.length > 0 ||
+      providerTurns.some((turn) => turn.status === "pending" || turn.status === "running") ||
+      subagents.some((task) => isOrchestrationV2WorkActive(task.status))
+    )
+      return yield* busy;
+    for (const session of providerContext.providerSessions) {
+      if (session.status === "stopped" || session.status === "error") continue;
+      if (
+        session.status !== "ready" ||
+        (yield* sessionHasBackgroundWork(session, providerThreads, true))
+      ) {
+        return yield* busy;
+      }
+    }
+  });
+
   const dispatchThreadMutation = Effect.fn("orchestrationV2.dispatch.threadMutation")(function* (
     command: Extract<
       OrchestrationV2ServerCommand,
@@ -4831,6 +4992,52 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           )
           .pipe(mapDispatchError(command))
       : null;
+    const modeChange =
+      command.type === "thread.runtime-mode.set" ? yield* ThreadRuntimeModeChange : undefined;
+    let modeAudit: OrchestrationV2RuntimeModeChange | undefined;
+    if (command.type === "thread.runtime-mode.set" && modeChange !== undefined) {
+      const allowElevation =
+        isRuntimeModeAbove(command.runtimeMode, thread.runtimeMode) &&
+        (yield* serverSettings.getSettings.pipe(mapDispatchError(command)))
+          .allowAgentFullAccessModeChanges;
+      modeAudit = yield* authorizeMcpRuntimeMode(command, thread, modeChange, allowElevation);
+      yield* assertMcpRuntimeModeIdle(command, providerContext!);
+      if (isProviderNativeSubagentThread(thread)) {
+        return yield* new ThreadRuntimeModeChangeError({
+          code: "capability_denied",
+          message: "A provider-native subagent uses the runtime mode of its parent session.",
+        });
+      }
+      if (
+        runtimeModeCeiling !== undefined &&
+        isRuntimeModeAbove(command.runtimeMode, runtimeModeCeiling.maxRuntimeMode)
+      ) {
+        return yield* new OrchestratorRuntimeModeAboveCeilingError({
+          commandId: command.commandId,
+          threadId: thread.id,
+          refused: "mode",
+          runtimeMode: command.runtimeMode,
+          ...runtimeModeCeiling,
+        });
+      }
+      yield* providerAdapters.get(thread.providerInstanceId).pipe(mapDispatchError(command));
+      const instance = yield* providerInstances.getInstance(thread.providerInstanceId);
+      const supportedModes =
+        instance === undefined
+          ? undefined
+          : (yield* instance.snapshot.getSnapshot).supportedRuntimeModes;
+      if (
+        supportedModes !== undefined &&
+        supportedModes.length > 0 &&
+        !supportedModes.includes(command.runtimeMode)
+      ) {
+        return yield* new ThreadRuntimeModeChangeError({
+          code: "unsupported_runtime_mode",
+          message: "The thread's provider does not support the requested runtime mode.",
+        });
+      }
+      if (thread.runtimeMode === command.runtimeMode) return;
+    }
     const providerSwitchPlan =
       command.type === "thread.model-selection.set" || command.type === "provider.switch"
         ? yield* Effect.gen(function* () {
@@ -5689,6 +5896,46 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       occurredAt: now,
       payload: updatedThread,
     });
+    if (modeAudit !== undefined) {
+      const actor =
+        modeAudit.actor.kind === "thread" ? modeAudit.actor.title : modeAudit.actor.label;
+      const authority =
+        modeAudit.reason === "local-owner-policy" ? " under the local owner policy" : "";
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "turn-item.updated",
+        threadId: thread.id,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make("turn-item:runtime-mode:" + command.commandId),
+          threadId: thread.id,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: yield* nextTurnItemOrdinal({ thread }),
+          type: "system_notice",
+          status: "completed",
+          title: "Runtime mode changed",
+          message:
+            actor +
+            " changed the runtime mode from " +
+            modeAudit.from +
+            " to " +
+            modeAudit.to +
+            authority +
+            ".",
+          runtimeModeChange: modeAudit,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        },
+      });
+    }
     // Archiving ends the guest share, so its waiting files go too.
     yield* releaseGuestAttachments(command, thread.guestShare, updatedThread.guestShare, effects);
 
@@ -16513,6 +16760,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
     }
 
+    const modeChange =
+      command.type === "thread.runtime-mode.set" ? yield* ThreadRuntimeModeChange : undefined;
     const plan = yield* dispatchOnce(command, sideChatIds).pipe(
       Effect.tap((planned) => refuseAboveRuntimeModeCeiling(command, planned.events)),
       Effect.filterOrFail(
@@ -16520,6 +16769,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           planned.events.length > 0 ||
           isUnobservedAcknowledgement(command) ||
           command.type === "thread.background-work.settle" ||
+          modeChange !== undefined ||
           // A stale visit changes no read state.
           command.type === "thread.visit" ||
           // A read can answer a watch again before a push's reopen lands; nothing is left to clear.
@@ -16544,6 +16794,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         Effect.gen(function* () {
           // Refusals depend on modes the user can change; a recorded rejection would block the retry.
           if (
+            modeChange !== undefined ||
             cause._tag === "OrchestratorThreadAboveModeLimitError" ||
             cause._tag === "OrchestratorRuntimeModeAboveCeilingError"
           ) {
@@ -16668,7 +16919,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       } satisfies OrchestratorV2DispatchResult;
     }
     const acceptedAt = plan.events.at(-1)?.occurredAt ?? (yield* DateTime.now);
-    const committed = yield* eventSink
+    const commit = eventSink
       .commitCommand({
         ...("approvalGuard" in command ? { approvalGuard: command.approvalGuard } : {}),
         commandId: command.commandId,
@@ -16707,6 +16958,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
 
+    const committed = yield* command.type === "thread.runtime-mode.set" && modeChange !== undefined
+      ? serverSettings
+          .withSettingsSnapshot((settings) =>
+            projectionStore.getThread(command.threadId).pipe(
+              mapDispatchError(command),
+              Effect.flatMap((thread) =>
+                authorizeMcpRuntimeMode(
+                  command,
+                  thread,
+                  modeChange,
+                  settings.allowAgentFullAccessModeChanges,
+                ),
+              ),
+              Effect.andThen(commit),
+            ),
+          )
+          .pipe(
+            Effect.catchTags({
+              ServerSettingsError: (cause) => mapDispatchError(command)(Effect.fail(cause)),
+            }),
+          )
+      : commit;
     if (committed.receipt.status === "rejected") {
       return yield* new OrchestratorCommandPreviouslyRejectedError({
         commandId: command.commandId,
@@ -17668,6 +17941,7 @@ export const layer: Layer.Layer<
   | IdAllocator.IdAllocatorV2
   | ProjectStore.ProjectStoreV2
   | ProviderAdapterRegistryV2
+  | ProviderInstanceRegistry.ProviderInstanceRegistry
   | ProviderSessionManagerV2
   | ProviderSwitchServiceV2
   | ProjectionStoreV2

@@ -122,19 +122,21 @@ export const unavailable = () =>
 export const dispatchFailure = (
   error: OrchestratorV2Error | ThreadManagement.ThreadManagementProviderInstanceDisabledError,
 ) =>
-  error._tag === "ThreadManagementProviderInstanceDisabledError" ||
-  error._tag === "OrchestratorRuntimeModeAboveCeilingError" ||
-  error._tag === "OrchestratorProviderSelectionBusyError"
-    ? new OrchestratorMcpFailure({ code: "invalid_request", message: error.message })
-    : (error._tag === "OrchestratorDispatchError" ||
-          error._tag === "OrchestratorCommandRejectedError") &&
-        typeof error.cause === "string" &&
-        error.cause.length > 0
-      ? new OrchestratorMcpFailure({
-          code: "orchestration_error",
-          message: Array.from(error.cause).slice(0, 1000).join(""),
-        })
-      : unavailable();
+  error._tag === "ThreadRuntimeModeChangeError"
+    ? new OrchestratorMcpFailure({ code: error.code, message: error.message })
+    : error._tag === "ThreadManagementProviderInstanceDisabledError" ||
+        error._tag === "OrchestratorRuntimeModeAboveCeilingError" ||
+        error._tag === "OrchestratorProviderSelectionBusyError"
+      ? new OrchestratorMcpFailure({ code: "invalid_request", message: error.message })
+      : (error._tag === "OrchestratorDispatchError" ||
+            error._tag === "OrchestratorCommandRejectedError") &&
+          typeof error.cause === "string" &&
+          error.cause.length > 0
+        ? new OrchestratorMcpFailure({
+            code: "orchestration_error",
+            message: Array.from(error.cause).slice(0, 1000).join(""),
+          })
+        : unavailable();
 
 export interface CallerLimits {
   readonly runtimeMode: RuntimeMode;

@@ -8198,6 +8198,8 @@
   "2f015e6d5459dce9": "Actualizar a {version}",
   "19f0fee16e878755": "Allow Auto threads to start Full access threads",
   "7a52c38d21003f7f": "Lets Auto threads explicitly start Full access agents on this environment. Linked launches also require this setting on the other environment and a Full access link.",
+  "f11b2223d3e9b9ca": "Permitir a agentes locales cambiar hilos en Auto a acceso total",
+  "8ea849c187a185e3": "Los agentes locales en Auto o con acceso total pueden cambiar un hilo inactivo en Auto a acceso total. Este permiso no se concede a los entornos vinculados.",
   "8ebba639f92932c3": "Permite que otros dispositivos abran los servidores locales de esta máquina: pestañas del navegador cargadas en el dispositivo, Abrir en este dispositivo y reenvío de puertos. Desactivado: las pestañas del navegador se transmiten desde esta máquina.",
   "1c5266bf18d0ed24": "Permitir el túnel de vista previa",
   "a0e93cca71d0417e": "Clientes autorizados",

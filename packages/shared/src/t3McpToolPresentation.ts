@@ -386,6 +386,10 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "thread-configuration",
   ),
   t3_thread_configure: tool(["Use", "Using", "Used", "thread model settings"], "thread-configure"),
+  t3_thread_set_runtime_mode: tool(
+    ["Change", "Changing", "Changed", "thread runtime mode"],
+    "thread-configure",
+  ),
   t3_thread_transfer: tool(["Use", "Using", "Used", "thread transfers"], "thread-fork"),
   t3_thread_fork: tool(["Fork", "Forking", "Requested a fork of", "this thread"], "thread-fork"),
   t3_thread_merge_back: tool(

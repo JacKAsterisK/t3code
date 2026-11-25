@@ -245,6 +245,19 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       }),
     ),
   ),
+  t3_thread_set_runtime_mode: McpToolAccess.setsThreadRuntimeMode((input) =>
+    dispatch(input.threadId, (common) => ({
+      ...common,
+      type: "thread.runtime-mode.set",
+      runtimeMode: input.runtimeMode,
+    })).pipe(
+      Effect.map((result) => ({
+        ...result,
+        threadId: input.threadId,
+        runtimeMode: input.runtimeMode,
+      })),
+    ),
+  ),
   t3_pending_request: McpToolAccess.either(
     (input) => input.action !== "respond",
     McpToolAccess.reads((input) =>

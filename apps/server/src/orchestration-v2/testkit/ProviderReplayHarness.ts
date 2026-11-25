@@ -297,6 +297,7 @@ export function layerWithRegistry<Error>(
       store: ProjectionStore.ProjectionStoreV2Shape,
     ) => ProjectionStore.ProjectionStoreV2Shape;
     readonly managedPolicy?: ManagedPolicyDocument;
+    readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
     /** The instances the ingestor reads snapshots from, such as an endpoint behind a hub. */
     readonly providerInstances?: Partial<
       ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]
@@ -334,6 +335,7 @@ export function layerWithRegistry<Error>(
       ServerSettings.layerTest(
         {
           responseStreamingMode: "turn",
+          ...options.settings,
           ...(options.continueThreadsAfterServerUpdate === undefined
             ? {}
             : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
@@ -370,12 +372,13 @@ export function layerWithRegistry<Error>(
   const layerCommandReceiptStoreProvided = CommandReceiptStore.layer.pipe(
     Layer.provide(layerDatabase),
   );
+  const layerProviderInstances = Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)(
+    options.providerInstances ?? { getInstance: () => Effect.undefined },
+  );
   const layerProviderEventIngestorProvided = ProviderEventIngestor.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)(
-          options.providerInstances ?? { getInstance: () => Effect.undefined },
-        ),
+        layerProviderInstances,
         layerStores,
         layerEventSinkProvided,
         IdAllocator.layer,
@@ -531,6 +534,7 @@ export function layerWithRegistry<Error>(
         layerContextHandoffServiceProvided,
         layerPersistence,
         layerProvidedRegistry,
+        layerProviderInstances,
         layerContinuationRequests,
         layerRuntime,
         layerProviderSessionManagerProvided,

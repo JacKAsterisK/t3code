@@ -1,6 +1,8 @@
+import * as ApprovalPeerAccess from "./auth/ApprovalPeerAccess.ts";
 import * as FleetAccessPolicy from "./lan/FleetAccessPolicy.ts";
 import {
   AuthAccessWriteScope,
+  AuthSettingsWriteScope,
   AuthEnvironmentMaintainScope,
   AuthProvidersManageScope,
   type AuthEnvironmentScope,
@@ -2594,6 +2596,95 @@ it.effect("refuses fleet administration to a connection that may not administer 
     yield* request("allowed");
     assert.isTrue(Exit.isSuccess(yield* Queue.take(exits)));
     assert.equal(configured, 1);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
+    ),
+    Effect.scoped,
+  ),
+);
+
+it.effect("requires owner authority even on a WebSocket with settings and access write", () =>
+  Effect.gen(function* () {
+    const exits = yield* Queue.unbounded<Exit.Exit<unknown, unknown>>();
+    const scopes: ReadonlyArray<AuthEnvironmentScope> = [
+      AuthOrchestrationReadScope,
+      AuthOrchestrationOperateScope,
+      AuthSettingsWriteScope,
+      AuthAccessWriteScope,
+    ];
+    let owner = false;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const update = WsRpcGroup.requests.get(WS_METHODS.serverUpdateSettings)!;
+    const server = yield* RpcServer.makeNoSerialization(RpcGroup.make(update), {
+      ...WS_RPC_SERVER_OPTIONS,
+      onFromServer: (response) =>
+        response._tag === "Exit"
+          ? Queue.offer(exits, response.exit as Exit.Exit<unknown, unknown>)
+          : Effect.void,
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          RpcAuthorization.layer(scopes),
+          layerWsRpc(
+            {
+              sessionId: AuthSessionId.make("settings-test"),
+              subject: "settings-test",
+              method: "bearer-access-token",
+              scopes,
+            },
+            {},
+            yield* ServerBrowser.ServerBrowser,
+            () => Effect.void,
+            { secretReferences: true },
+            Effect.succeed(scopes),
+          ).pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                layerUnusedConfigRpcServices,
+                Layer.mock(LanFleet.LanFleet)({}),
+                Layer.mock(ApprovalPeerAccess.ApprovalPeerAccess)({
+                  owner: () =>
+                    Effect.sync(() => (owner ? { subject: "settings-test" } : undefined)),
+                }),
+                Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+                Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+                Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+                Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+                Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+                Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+                  scratchRoot: Effect.succeedNone,
+                  namedProjectsRoot: process.cwd(),
+                }),
+                Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+                Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+                Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    const request = (id: string) =>
+      server.write(0, {
+        _tag: "Request",
+        id: RpcMessage.RequestId(id),
+        tag: WS_METHODS.serverUpdateSettings,
+        payload: { patch: { allowAgentFullAccessModeChanges: true } },
+        headers: Headers.empty,
+      });
+    yield* request("refused");
+    const refused = yield* Queue.take(exits);
+    assert.isTrue(Exit.isFailure(refused));
+    assert.equal((yield* settings.getSettings).allowAgentFullAccessModeChanges, false);
+    owner = true;
+    yield* request("allowed");
+    assert.isTrue(Exit.isSuccess(yield* Queue.take(exits)));
+    assert.equal((yield* settings.getSettings).allowAgentFullAccessModeChanges, true);
   }).pipe(
     Effect.provide(
       Layer.mergeAll(

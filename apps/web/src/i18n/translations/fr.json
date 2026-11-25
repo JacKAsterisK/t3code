@@ -8199,6 +8199,8 @@
   "2f015e6d5459dce9": "Mettre à jour vers {version}",
   "19f0fee16e878755": "Allow Auto threads to start Full access threads",
   "7a52c38d21003f7f": "Lets Auto threads explicitly start Full access agents on this environment. Linked launches also require this setting on the other environment and a Full access link.",
+  "f11b2223d3e9b9ca": "Autoriser les agents locaux à passer les fils Auto en accès complet",
+  "8ea849c187a185e3": "Les agents locaux en mode Auto ou en accès complet peuvent passer un fil Auto inactif en accès complet. Cette autorisation ne concerne pas les environnements liés.",
   "8ebba639f92932c3": "Permet à d’autres appareils d’ouvrir les serveurs locaux de cette machine : onglets de navigateur chargés sur l’appareil, Ouvrir sur cet appareil et redirection de ports. Désactivé : les onglets du navigateur sont diffusés depuis cette machine.",
   "1c5266bf18d0ed24": "Autoriser le tunnel d’aperçu",
   "a0e93cca71d0417e": "Clients autorisés",

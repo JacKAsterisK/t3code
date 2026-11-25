@@ -1428,6 +1428,9 @@ export const ServerSettings = Schema.Struct({
   allowAgentFullAccessLaunches: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
+  allowAgentFullAccessModeChanges: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   /** Lets clients reach this machine's loopback ports over `/api/preview/tunnel`. */
   enablePreviewTunnel: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
@@ -1914,6 +1917,7 @@ export const ServerSettingsPatch = Schema.Struct({
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   keepAwakeWhileAgentsWork: Schema.optionalKey(Schema.Boolean),
   allowAgentFullAccessLaunches: Schema.optionalKey(Schema.Boolean),
+  allowAgentFullAccessModeChanges: Schema.optionalKey(Schema.Boolean),
   requireConnectDeviceApproval: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   enablePreviewTunnel: Schema.optionalKey(Schema.Boolean),
@@ -2069,6 +2073,7 @@ export function requiredScopesForServerSettingsPatch(
     if (value === undefined) continue;
     if (
       key === "allowAgentFullAccessLaunches" ||
+      key === "allowAgentFullAccessModeChanges" ||
       key === "requireConnectDeviceApproval" ||
       key === "enablePreviewTunnel"
     ) {

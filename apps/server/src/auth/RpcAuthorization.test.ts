@@ -568,6 +568,11 @@ describe("settings mutation authorization", () => {
             patch: { allowAgentFullAccessLaunches: true },
           }).pipe(Effect.flip),
         ).toMatchObject({ requiredPermission: AuthAccessWriteScope });
+        expect(
+          yield* client[WS_METHODS.serverUpdateSettings]({
+            patch: { allowAgentFullAccessModeChanges: true },
+          }).pipe(Effect.flip),
+        ).toMatchObject({ requiredPermission: AuthAccessWriteScope });
         // A reference names any secret the store holds, and the host entry names where it goes.
         expect(
           yield* client[WS_METHODS.serverUpdateSettings]({

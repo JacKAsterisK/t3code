@@ -724,6 +724,7 @@ export const ServerConfig = Schema.Struct({
   directEndpoints: Schema.optionalKey(ForwardCompatibleArray(ServerDirectEndpoint)),
   observability: ServerObservability,
   settings: ServerSettings,
+  canManageAgentFullAccessModeChanges: Schema.optionalKey(Schema.Boolean),
   /** Present when an administrator's policy file manages this environment. */
   managedPolicy: Schema.optionalKey(ManagedPolicySummary),
   shellResumeCompletionMarker: Schema.optionalKey(Schema.Boolean),

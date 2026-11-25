@@ -8161,6 +8161,8 @@
   "2f015e6d5459dce9": "{version}(으)로 업데이트",
   "19f0fee16e878755": "Allow Auto threads to start Full access threads",
   "7a52c38d21003f7f": "Lets Auto threads explicitly start Full access agents on this environment. Linked launches also require this setting on the other environment and a Full access link.",
+  "f11b2223d3e9b9ca": "로컬 에이전트가 Auto 스레드를 전체 액세스로 변경하도록 허용",
+  "8ea849c187a185e3": "이 환경의 Auto 또는 전체 액세스 에이전트는 유휴 Auto 스레드를 전체 액세스로 변경할 수 있습니다. 연결된 환경에는 이 권한이 부여되지 않습니다.",
   "8ebba639f92932c3": "다른 기기에서 이 컴퓨터의 로컬 서버를 열 수 있게 합니다: 기기에서 불러오는 브라우저 탭, 이 기기에서 열기, 포트 포워딩. 끄면 브라우저 탭이 이 컴퓨터에서 스트리밍됩니다.",
   "1c5266bf18d0ed24": "미리보기 터널 허용",
   "a0e93cca71d0417e": "승인된 클라이언트",

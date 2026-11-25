@@ -2216,65 +2216,70 @@ describe("EnvironmentRegistry routes", () => {
     publicKeySha256: "c".repeat(64),
   };
 
-  it.effect("fleet Reset keeps an unlisted learned alias and the pin it borrows", () =>
-    Effect.gen(function* () {
-      const learnedOrigin = "https://learned.example.test";
-      const learned = new BearerConnectionTarget({
-        ...LAN_TARGET,
-        connectionId:
-          "learned:" +
-          LAN_TARGET.environmentId +
-          ":" +
-          learnedOrigin +
-          "@" +
-          LAN_TARGET.connectionId,
-      });
-      const manual = new BearerConnectionTarget({ ...LAN_TARGET, connectionId: "manual-route" });
-      const before = [LAN_TARGET, learned, manual];
-      const harness = yield* makeHarness(
-        before,
-        [
-          new BearerConnectionProfile({ ...LAN_PROFILE, fleetTls: resetPin }),
-          new BearerConnectionProfile({
-            ...LAN_PROFILE,
-            connectionId: learned.connectionId,
-            httpBaseUrl: learnedOrigin,
-            wsBaseUrl: "wss://learned.example.test",
-            learned: true,
-          }),
-          new BearerConnectionProfile({
-            ...LAN_PROFILE,
-            connectionId: manual.connectionId,
-            httpBaseUrl: "https://manual.example.test",
-            wsBaseUrl: "wss://manual.example.test",
-          }),
-        ],
-        [[LAN_TARGET.connectionId, BEARER_CREDENTIAL]],
-      );
-      yield* Effect.gen(function* () {
-        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-        const outcome = yield* Effect.exit(
-          registry.removeRoute(LAN_TARGET.environmentId, LAN_TARGET.connectionId, {
-            fleetTls: resetPin,
-          }),
+  it.effect.each([true, undefined] as const)(
+    "fleet Reset keeps an unlisted alias and the pin it borrows (learned flag: %s)",
+    (learnedFlag) =>
+      Effect.gen(function* () {
+        const learnedOrigin = "https://learned.example.test";
+        const learned = new BearerConnectionTarget({
+          ...LAN_TARGET,
+          connectionId:
+            "learned:" +
+            LAN_TARGET.environmentId +
+            ":" +
+            learnedOrigin +
+            "@" +
+            LAN_TARGET.connectionId,
+        });
+        const manual = new BearerConnectionTarget({
+          ...LAN_TARGET,
+          connectionId: "manual-route",
+        });
+        const before = [LAN_TARGET, learned, manual];
+        const harness = yield* makeHarness(
+          before,
+          [
+            new BearerConnectionProfile({ ...LAN_PROFILE, fleetTls: resetPin }),
+            new BearerConnectionProfile({
+              ...LAN_PROFILE,
+              connectionId: learned.connectionId,
+              httpBaseUrl: learnedOrigin,
+              wsBaseUrl: "wss://learned.example.test",
+              ...(learnedFlag === undefined ? {} : { learned: learnedFlag }),
+            }),
+            new BearerConnectionProfile({
+              ...LAN_PROFILE,
+              connectionId: manual.connectionId,
+              httpBaseUrl: "https://manual.example.test",
+              wsBaseUrl: "wss://manual.example.test",
+            }),
+          ],
+          [[LAN_TARGET.connectionId, BEARER_CREDENTIAL]],
         );
-        expect(yield* Ref.get(harness.storedTargets)).toEqual(before);
-        expect((yield* Ref.get(harness.storedCredentials)).get(LAN_TARGET.connectionId)).toEqual(
-          BEARER_CREDENTIAL,
-        );
-        expect(Exit.isFailure(outcome)).toBe(true);
-        if (Exit.isFailure(outcome)) {
-          expect(outcome.cause.reasons).toContainEqual(
-            expect.objectContaining({
-              error: expect.objectContaining({
-                detail:
-                  "A saved fleet connection was kept because a learned route uses its credential.",
-              }),
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          const outcome = yield* Effect.exit(
+            registry.removeRoute(LAN_TARGET.environmentId, LAN_TARGET.connectionId, {
+              fleetTls: resetPin,
             }),
           );
-        }
-      }).pipe(Effect.provide(harness.layer), Effect.scoped);
-    }),
+          expect(yield* Ref.get(harness.storedTargets)).toEqual(before);
+          expect((yield* Ref.get(harness.storedCredentials)).get(LAN_TARGET.connectionId)).toEqual(
+            BEARER_CREDENTIAL,
+          );
+          expect(Exit.isFailure(outcome)).toBe(true);
+          if (Exit.isFailure(outcome)) {
+            expect(outcome.cause.reasons).toContainEqual(
+              expect.objectContaining({
+                error: expect.objectContaining({
+                  detail:
+                    "A saved fleet connection was kept because a learned route uses its credential.",
+                }),
+              }),
+            );
+          }
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
   );
 
   it.effect("fleet Reset leaves an unsent draft and cache after removing the last route", () =>

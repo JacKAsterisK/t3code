@@ -58,7 +58,7 @@ function isOldFleetPin(route: ConnectionRoute, fleetId: string): boolean {
   );
 }
 
-function borrowsCredentialFrom(route: ConnectionRoute, connectionId: string): boolean {
+export function borrowsCredentialFrom(route: ConnectionRoute, connectionId: string): boolean {
   return (
     route.target._tag === "BearerConnectionTarget" &&
     route.target.connectionId !== connectionId &&

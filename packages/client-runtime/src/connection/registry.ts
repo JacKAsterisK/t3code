@@ -53,6 +53,7 @@ import {
 } from "./pullRequestRoutingPermissions.ts";
 import {
   RELAY_ROUTE_ID,
+  borrowsCredentialFrom,
   connectionRouteId,
   conflictsWithSavedRoute,
   connectionRoutes,
@@ -1167,13 +1168,18 @@ export const make = Effect.gen(function* () {
             !sameFleetTlsRoute(profile.fleetTls, expectedFleet.fleetTls))
         )
           return;
-        const remaining = routesAfterRemoving(routes, routeId);
-        if (expectedFleet !== undefined && remaining.length !== routes.length - 1)
+        // Any saved route resolving its credential through this pin keeps it,
+        // whether or not its profile carries the learned flag.
+        if (
+          expectedFleet !== undefined &&
+          routes.some((alias) => borrowsCredentialFrom(alias, routeId))
+        )
           return yield* new ConnectionBlockedError({
             reason: "configuration",
             detail:
               "A saved fleet connection was kept because a learned route uses its credential.",
           });
+        const remaining = routesAfterRemoving(routes, routeId);
         if (remaining.length === 0)
           return yield* removeLocked(
             environmentId,

@@ -456,30 +456,17 @@ access list gives this machine: standard is `full-access`, read-only is
 [when an agent should use the LAN task tools](lan-task-routing.md#when-an-agent-should-use-these-tools).
 
 Links form only once the fleet has a Machine access list, adopted from a starting
-list, carried over from the previous fleet, or saved in Settings. Until then no
-machine asks for or offers a link, since a link would carry each machine's setup
-access, normally standard. That includes a machine with no saved list that finds
-no `fleet-access` folder on the share.
+list or saved in Settings. Until then no machine asks for or offers a link, since
+a link would carry each machine's setup access, normally standard. That includes a
+machine with no saved list that finds no `fleet-access` folder on the share.
 
 A fleet rebuilt or switched to a new roster never takes a list on its own; a person
-saves the first one. When the new fleet has no list, no starting list and no
-history, **Machine access** on each enrolled machine whose roster row is enabled
-offers **Carry over access list**: the list that machine had on its previous fleet,
-read as it read that list (restrictions it could not verify still apply). Every
-machine's entry is kept, including machines not enrolled yet. Exceptions are kept
-only between machines of the new fleet, and only where they apply. Settings names
-every grant the save would make: each machine's level, entries for machines not
-here yet, the level for machines added later, and each exception with its
-receivers. A machine that list made read-only offers nothing, and nothing older is
-ever offered instead, even when the previous fleet's archive
-(`lan-fleet-access.previous.json`, written before a new fleet replaces the cache)
-cannot be read. The save names the fleet it was shown for. Under the share lock it
-must still be exactly the current proposal, with no starting list or list since;
-otherwise it is refused and Machine access asks for a fresh review. **Save access
-list** saves the access shown instead, when it leaves a machine standard. Without
-either, the switch's credential retirement leaves every machine unlinked: on
-2026-11-25 the D178 roster switch revoked every peer link, and nothing replaced
-them until a list was saved.
+saves the first one. With no list and no starting list, **Machine access** offers
+**Save access list**, which saves the access it shows as revision 1 without
+changing any machine, when that leaves a machine standard. Without it, the switch's
+credential retirement leaves every machine unlinked: on 2026-11-25 the D178 roster
+switch revoked every peer link, and nothing replaced them until a list was saved.
+Carrying the previous fleet's list over is planned separately.
 
 On its first start on a switched roster, the link adapter begins from the links
 the previous fleet made, keeping only which machine each reached. Each machine

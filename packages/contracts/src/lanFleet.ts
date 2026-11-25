@@ -188,10 +188,6 @@ export const LanFleetSetupInput = Schema.Union([
     exceptions: Schema.optionalKey(
       Schema.Array(FleetAccessException).check(Schema.isMaxLength(100)),
     ),
-    // Saves the carry proposal shown for this fleet: refused unless it still is that proposal.
-    carry: Schema.optionalKey(
-      Schema.Struct({ fleetId: Schema.String.check(Schema.isMaxLength(256)) }),
-    ),
   }),
   Schema.Struct({
     operation: Schema.Literal("transport"),
@@ -234,17 +230,6 @@ export const LanFleetSetupState = Schema.Struct({
       seed: Schema.optionalKey(Schema.Literals(["waiting", "invalid"])),
       // While it waits for every enabled machine to run LAN 1.0.26 or later: those not confirmed.
       seedPending: Schema.optionalKey(Schema.Struct({ machineIds: Schema.Array(FleetMachineId) })),
-      // With no list and no starting list: the list this machine had on its previous fleet, for a
-      // person to save as this fleet's first. Never saved on its own.
-      carryProposal: Schema.optionalKey(
-        Schema.Struct({
-          // The fleet it would be saved to; the save names it, so it never reaches another.
-          fleetId: Schema.String,
-          defaultAccess: FleetAccess,
-          machines: Schema.Array(FleetMachineAccess),
-          exceptions: Schema.Array(FleetAccessException),
-        }),
-      ),
     }),
   ),
   peers: Schema.Array(
@@ -280,8 +265,6 @@ const FLEET_REFUSAL_MESSAGES: Readonly<Record<string, string>> = {
   "owner-code-mismatch":
     "The owner verification code does not match this fleet's owner. Check the code on the owner machine.",
   "not-owner": "Only the fleet's owner machine can do this.",
-  "stale-review":
-    "The fleet changed after this list was shown, so it was not saved. Review Machine access again.",
   "machine-not-enabled":
     "This machine, or one it was asked to link, is not an enabled fleet member in both the roster and the fleet's trust list.",
 };

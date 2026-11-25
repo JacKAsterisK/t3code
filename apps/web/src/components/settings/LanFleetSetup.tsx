@@ -418,41 +418,6 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
   const disabled = fleet.busy || !fleet.allowed || !policy.canChange;
   // The server refuses a list that leaves no machine standard, so only offer one it would save.
   const savableAsShown = machines.some((peer) => accessOf(peer.machineId) === "standard");
-  // What the previous fleet's list would bring, named so the person sees it before saving it.
-  const carry = policy.carryProposal;
-  // Every grant the save would make, as it would make it: each machine here, each entry for one
-  // not here yet, the default and every exception with its receivers.
-  const levelName = (access: FleetAccess) => (access === "read-only" ? "read only" : "standard");
-  // A label another machine shares is not enough to tell who gains access; its ID goes with it.
-  const carryName = (machineId: string) => {
-    const label = labelOf(machineId);
-    return setup.peers.some((peer) => peer.machineId !== machineId && peer.label === label)
-      ? `${label} (${machineId})`
-      : label;
-  };
-  const carryLines =
-    carry === undefined
-      ? []
-      : [
-          ...machines.map(
-            (peer) =>
-              `${carryName(peer.machineId)}: ${levelName(
-                carry.machines.find((machine) => machine.machineId === peer.machineId)?.access ??
-                  carry.defaultAccess,
-              )}`,
-          ),
-          ...carry.machines
-            .filter((machine) => !machines.some((peer) => peer.machineId === machine.machineId))
-            .map(
-              (machine) =>
-                `${machine.machineId} (not an approved machine here): ${levelName(machine.access)}`,
-            ),
-          `Machines added later: ${levelName(carry.defaultAccess)}`,
-          ...carry.exceptions.map(
-            (exception) =>
-              `${carryName(exception.machineId)} standard on ${exception.standardOn.map(carryName).join(", ")}`,
-          ),
-        ];
   const select = (label: string, value: FleetAccess, machineId: string | null) => (
     <div className="w-36 shrink-0">
       <Select
@@ -508,69 +473,31 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
           place.
         </p>
       ) : policy.revision === 0 && policy.seed === undefined ? (
-        <div className="space-y-2">
+        <div className="flex items-center justify-between gap-3">
           <p className="text-xs text-muted-foreground">
-            Machines link to each other once this fleet has an access list.
+            Machines link to each other once this fleet has an access list.{" "}
+            {savableAsShown
+              ? "Save the access shown here as the list, or change a machine's access to save one."
+              : "Give at least one machine standard access to save one."}
           </p>
-          {carry === undefined ? null : (
-            <div className="flex items-start justify-between gap-3">
-              <div className="space-y-1 text-xs text-muted-foreground">
-                <p>This machine's previous fleet had this access list. Carrying it over saves:</p>
-                <ul className="list-disc pl-4">
-                  {carryLines.map((line, index) => (
-                    // Lines may repeat; their order is fixed for a given proposal.
-                    // oxlint-disable-next-line react/no-array-index-key -- the list is rebuilt whole, never reordered
-                    <li key={index}>{line}</li>
-                  ))}
-                </ul>
-              </div>
-              <Button
-                size="compact"
-                variant="outline"
-                disabled={disabled}
-                onClick={() =>
-                  void fleet.configure({
-                    operation: "access",
-                    confirmed: true,
-                    revision: 0,
-                    defaultAccess: carry.defaultAccess,
-                    machines: carry.machines,
-                    exceptions: carry.exceptions,
-                    carry: { fleetId: carry.fleetId },
-                  })
-                }
-              >
-                Carry over access list
-              </Button>
-            </div>
-          )}
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-xs text-muted-foreground">
-              {!savableAsShown
-                ? "Give at least one machine standard access to save one."
-                : carry === undefined
-                  ? "Save the access shown below as the list, or change a machine's access to save one."
-                  : "Or save the access shown below instead, or change a machine's access to save one."}
-            </p>
-            {savableAsShown ? (
-              <Button
-                size="compact"
-                variant="outline"
-                disabled={disabled}
-                onClick={() =>
-                  void fleet.configure({
-                    operation: "access",
-                    confirmed: true,
-                    revision: 0,
-                    defaultAccess: policy.defaultAccess,
-                    machines: policy.machines,
-                  })
-                }
-              >
-                Save access list
-              </Button>
-            ) : null}
-          </div>
+          {savableAsShown ? (
+            <Button
+              size="compact"
+              variant="outline"
+              disabled={disabled}
+              onClick={() =>
+                void fleet.configure({
+                  operation: "access",
+                  confirmed: true,
+                  revision: 0,
+                  defaultAccess: policy.defaultAccess,
+                  machines: policy.machines,
+                })
+              }
+            >
+              Save access list
+            </Button>
+          ) : null}
         </div>
       ) : policy.seed === "invalid" ? (
         <p className="text-xs text-destructive">

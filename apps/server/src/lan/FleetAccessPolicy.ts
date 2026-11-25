@@ -596,11 +596,6 @@ export interface FleetAccessState {
    * later: those not confirmed yet, however long they take.
    */
   readonly seedPending?: { readonly machineIds: ReadonlyArray<string> };
-  /**
-   * No list exists yet and the share holds no starting list: the list this machine had on its
-   * previous fleet, offered for a person to save as the first. Never saved on its own.
-   */
-  readonly carryProposal?: FleetAccessSnapshot;
 }
 
 /** A machine's own level in the list, before any exception. */
@@ -691,8 +686,6 @@ export class FleetAccess extends Context.Service<
         readonly signingPrivateKey: string;
         readonly expectedRevision: number;
         readonly next: FleetAccessSnapshot;
-        /** Saves this machine's carry proposal: refused unless, under the lock, it still is that. */
-        readonly carry?: boolean;
       },
     ) => Effect.Effect<FleetAccessState, LanFleetError>;
   }
@@ -712,47 +705,13 @@ const make = Effect.fn("FleetAccess.make")(function* (
   const switchedFleet = isFleetSwitchRoster(rosterPath);
   const cacheFile = path.join(config.stateDir, fleetLocalName("lan-fleet-access.json", rosterPath));
   const mutex = yield* Semaphore.make(1);
-  const readCacheFile = Effect.fn("FleetAccess.readCacheFile")(function* (file: string) {
-    return (yield* fs.exists(file).pipe(Effect.orElseSucceed(() => false)))
-      ? yield* readFleetJson(file, LocalCache).pipe(
-          Effect.provideService(FileSystem.FileSystem, fs),
-          Effect.orElseSucceed(() => undefined),
-        )
-      : undefined;
-  });
-  const readCache = yield* readCacheFile(cacheFile);
+  const readCache = (yield* fs.exists(cacheFile).pipe(Effect.orElseSucceed(() => false)))
+    ? yield* readFleetJson(cacheFile, LocalCache).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.orElseSucceed(() => undefined),
+      )
+    : undefined;
   let cache: LocalCache | undefined = readCache;
-  // The cache of the fleet this machine was in before, kept in its own file before a new fleet's
-  // first read replaces the cache, so a restart cannot lose it. On a switch roster's first start,
-  // the pre-switch cache is that fleet.
-  const previousFleetFile = path.join(
-    config.stateDir,
-    fleetLocalName("lan-fleet-access.previous.json", rosterPath),
-  );
-  const preSwitchCacheFile = path.join(
-    config.stateDir,
-    fleetLocalName("lan-fleet-access.json", undefined),
-  );
-  // An archive that exists but cannot be read stands for a fleet that may have narrowed this
-  // machine: nothing older is ever read in its place. The pre-switch cache counts only on a switch
-  // roster's very first start, before it has any cache or archive of its own.
-  // Existence decides, not a successful read: a cache file that cannot be read is no first start.
-  const archived = yield* fs.exists(previousFleetFile).pipe(Effect.orElseSucceed(() => true));
-  const cached = yield* fs.exists(cacheFile).pipe(Effect.orElseSucceed(() => true));
-  // A cache that exists but cannot be read may be the fleet that narrowed this machine, so its
-  // previous fleet is unknown: nothing is offered, and the archive is cleared before it is replaced.
-  const unreadableCache = cached && readCache === undefined;
-  let previousFleet: LocalCache | undefined = unreadableCache
-    ? undefined
-    : archived
-      ? yield* readCacheFile(previousFleetFile)
-      : switchedFleet && !cached && preSwitchCacheFile !== cacheFile
-        ? yield* readCacheFile(preSwitchCacheFile)
-        : undefined;
-  // The pre-switch list is archived before the switch roster's first cache is written, so a
-  // restart before anyone saves still offers it.
-  let previousArchived = archived || previousFleet === undefined;
-  let archiveCleared = !unreadableCache;
   const cachedEntries = (value: LocalCache | undefined) => {
     const unverified = new Set(value?.unverified ?? []);
     return {
@@ -787,46 +746,6 @@ const make = Effect.fn("FleetAccess.make")(function* (
     ...(seed === undefined ? {} : { seed }),
     ...(seedPending === undefined ? {} : { seedPending }),
   });
-  /**
-   * The list this machine had on its previous fleet only, read as startup reads it, for a person
-   * to save first: every machine entry kept, exceptions only within this fleet and where they
-   * apply. A machine that list made read-only proposes nothing.
-   */
-  const carryProposal = (input: FleetAccessInput): FleetAccessSnapshot | undefined => {
-    const previous = cache !== undefined && cache.fleetId !== input.fleetId ? cache : previousFleet;
-    if (
-      previous === undefined ||
-      previous.fleetId === input.fleetId ||
-      previous.machineId !== input.machineId
-    )
-      return undefined;
-    const { accepted, kept } = cachedEntries(previous);
-    const evaluation = evaluateAccess({
-      fleetId: previous.fleetId,
-      accepted,
-      candidates: kept,
-      peers: [],
-    });
-    const snapshot = evaluation.snapshot;
-    if (
-      snapshot === undefined ||
-      evaluation.revision === 0 ||
-      accessOf(snapshot, input.machineId) !== "standard"
-    )
-      return undefined;
-    const fleetMachines = trustedPeers(input.peers).map((peer) => peer.machineId);
-    const next: FleetAccessSnapshot = {
-      defaultAccess: snapshot.defaultAccess,
-      machines: normalize(snapshot.machines),
-    };
-    const exceptions = exceptionsOf(snapshot, fleetMachines)
-      .map((exception) => ({
-        machineId: exception.machineId,
-        standardOn: exception.standardOn.filter((receiver) => exceptionApplies(next, receiver)),
-      }))
-      .filter((exception) => exception.standardOn.length > 0);
-    return { ...next, pairs: replaceExceptions(undefined, exceptions) };
-  };
   const startup =
     cache === undefined
       ? undefined
@@ -1049,75 +968,16 @@ const make = Effect.fn("FleetAccess.make")(function* (
           .map((item) => item.digest),
         member: input.member,
       };
-      // A new fleet replaces the cache. The previous fleet's is kept in its own file first, as
-      // what this machine proposes the new fleet saves; until that is kept, the cache stays.
-      // A cache another machine identity wrote is no previous fleet of this one; any older archive
-      // goes with it, so nothing from before it is ever proposed.
-      const foreign =
-        cache !== undefined &&
-        cache.fleetId !== input.fleetId &&
-        cache.machineId !== input.machineId;
-      const previousKept = foreign
-        ? yield* fs.remove(previousFleetFile, { force: true }).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                previousFleet = undefined;
-              }),
-            ),
-            Effect.as(true),
-            Effect.orElseSucceed(() => false),
-          )
-        : cache === undefined && !archiveCleared
-          ? yield* fs.remove(previousFleetFile, { force: true }).pipe(
-              Effect.tap(() =>
-                Effect.sync(() => {
-                  archiveCleared = true;
-                }),
-              ),
-              Effect.as(true),
-              Effect.orElseSucceed(() => false),
-            )
-          : cache === undefined
-            ? previousArchived ||
-              previousFleet === undefined ||
-              (yield* writeFleetJson(previousFleetFile, previousFleet).pipe(
-                Effect.tap(() =>
-                  Effect.sync(() => {
-                    previousArchived = true;
-                  }),
-                ),
-                Effect.as(true),
-                Effect.catch((cause) =>
-                  Effect.logWarning("The previous fleet's access list could not be kept.", {
-                    cause,
-                  }).pipe(Effect.as(false)),
-                ),
-              ))
-            : cache.fleetId === input.fleetId ||
-              (yield* writeFleetJson(previousFleetFile, cache).pipe(
-                Effect.tap(() =>
-                  Effect.sync(() => {
-                    previousFleet = cache;
-                  }),
-                ),
-                Effect.as(true),
-                Effect.catch((cause) =>
-                  Effect.logWarning("The previous fleet's access list could not be kept.", {
-                    cause,
-                  }).pipe(Effect.as(false)),
-                ),
-              ));
       const persisted =
         JSON.stringify(next) === JSON.stringify(cache) ||
-        (previousKept &&
-          (yield* writeFleetJson(cacheFile, next).pipe(
-            Effect.as(true),
-            Effect.catch((cause) =>
-              Effect.logWarning("Fleet access policy cache could not be saved.", { cause }).pipe(
-                Effect.as(false),
-              ),
+        (yield* writeFleetJson(cacheFile, next).pipe(
+          Effect.as(true),
+          Effect.catch((cause) =>
+            Effect.logWarning("Fleet access policy cache could not be saved.", { cause }).pipe(
+              Effect.as(false),
             ),
-          )));
+          ),
+        ));
       if (persisted) cache = next;
       // Any history here or on the share, even history that cannot be followed, is a list.
       const listed =
@@ -1126,14 +986,7 @@ const make = Effect.fn("FleetAccess.make")(function* (
         candidates.some((entry) => entry.fleetId === input.fleetId);
       const seed: SeedRead = listed ? { _tag: "absent" } : yield* readSeed(input);
       const readiness = seed._tag === "valid" ? yield* seedReadiness(input) : undefined;
-      // Offered only where a person could save it as the first list: none, no starting list, and
-      // a share that answered.
-      const proposal =
-        !listed && seed._tag === "absent" && !unavailable && input.member
-          ? carryProposal(input)
-          : undefined;
       const updated = {
-        ...(proposal === undefined ? {} : { carryProposal: proposal }),
         ...stateOf(
           next,
           evaluation,
@@ -1345,14 +1198,6 @@ const make = Effect.fn("FleetAccess.make")(function* (
         const view = yield* refreshUnlocked(input);
         if (view.unavailable) return yield* new LanFleetError({ reason: "unavailable" });
         if (view.state.revision !== input.expectedRevision) return yield* configurationError();
-        // A person confirmed the proposal shown; a starting list, another fleet or a changed
-        // previous list since then ends that review.
-        if (
-          input.carry === true &&
-          (view.state.carryProposal === undefined ||
-            !sameSnapshot(view.state.carryProposal, input.next))
-        )
-          return yield* new LanFleetError({ reason: "configuration", refusal: "stale-review" });
         // Every marker is read again under the lock, right before revision 1 is written.
         if (
           adoptingSeed &&

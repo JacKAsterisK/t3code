@@ -425,6 +425,7 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         });
         const member = yield* f.b.enrollment.resolve;
         assert.equal(member?.credentialScope, authority.fleetId);
+        assert.equal(member?.fleetId, authority.fleetId);
         assert.equal(f.b.record()?.environmentId, f.b.environmentId);
         assert.equal((yield* f.b.enrollment.status).stage, "active");
         assert.equal((yield* f.a.enrollment.status).owner, true);
@@ -1122,8 +1123,6 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         );
         assert.equal(raw.peers.length, 1);
         assert.equal((yield* f.b.enrollment.resolve)?.peers.length, 2);
-        assert.equal((yield* f.b.enrollment.resolve)?.fleetId, raw.fleetId);
-        assert.equal(yield* f.b.enrollment.savedFleetId, raw.fleetId);
         assert.equal(
           (yield* f.a.enrollment.status).peers.find(
             (peer) => peer.environmentId === f.b.environmentId,
@@ -1745,77 +1744,6 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
         assert.equal(yield* f.b.enrollment.resolve, null);
         assert.deepEqual(f.issued, []);
       }).pipe(Effect.provide(configLayer)),
-  );
-
-  it.effect("re-arms an acknowledged delivery through the Link both ways action", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      const owner = yield* f.start();
-      const pending = yield* f.join(owner.ownerCode!);
-      const machineId = f.b.record()!.machineId;
-      yield* f.approve(machineId, pending.deviceCode!);
-      const ownerSync = (
-        connectedEnvironmentIds: ReadonlyArray<EnvironmentId>,
-        completedDeliveryIds: ReadonlyArray<string> = [],
-      ) =>
-        f.a.links.sync({
-          mode: "manual",
-          sendMachineIds: [],
-          connectedEnvironmentIds,
-          completedDeliveryIds,
-        });
-      const linkBothWays = Effect.fn("FleetEnrollmentTest.linkBothWays")(function* (
-        saved: ReadonlyArray<EnvironmentId>,
-        completed: ReadonlyArray<string> = [],
-      ) {
-        yield* f.a.links.configure({ operation: "link", confirmed: true, machineIds: [machineId] });
-        return yield* ownerSync(saved, completed);
-      });
-      const recipientSync = (
-        connectedEnvironmentIds: ReadonlyArray<EnvironmentId>,
-        completedDeliveryIds: ReadonlyArray<string> = [],
-      ) =>
-        f.b.links.sync({
-          mode: "automatic",
-          sendMachineIds: [],
-          connectedEnvironmentIds,
-          completedDeliveryIds,
-        });
-      yield* recipientSync([]);
-      const firstOwner = yield* linkBothWays([]);
-      const first = (yield* recipientSync([])).incoming[0]!;
-      const reciprocal = firstOwner.incoming[0] ?? (yield* ownerSync([])).incoming[0]!;
-      yield* ownerSync([f.b.environmentId], [reciprocal.deliveryId]);
-      yield* recipientSync([f.a.environmentId], [first.deliveryId]);
-      assert.equal(
-        (yield* ownerSync([f.b.environmentId], [reciprocal.deliveryId])).machines[1]?.status,
-        "connected",
-      );
-
-      yield* recipientSync([]);
-      yield* TestClock.adjust("1 second");
-      assert.equal(
-        (yield* ownerSync([f.b.environmentId], [reciprocal.deliveryId])).machines[1]?.status,
-        "connected",
-      );
-      assert.equal(
-        (yield* linkBothWays([f.b.environmentId], [reciprocal.deliveryId])).machines[1]?.status,
-        "pending",
-      );
-      const resent = (yield* recipientSync([])).incoming[0];
-      assert.isDefined(resent);
-      assert.notEqual(resent.deliveryId, first.deliveryId);
-      assert.deepEqual(f.issued.map(({ issuer }) => issuer).sort(), ["alpha", "alpha", "beta"]);
-      assert.equal(
-        (yield* ownerSync([f.b.environmentId], [reciprocal.deliveryId])).machines[1]?.status,
-        "pending",
-      );
-      yield* recipientSync([f.a.environmentId], [resent.deliveryId]);
-      assert.equal(
-        (yield* ownerSync([f.b.environmentId], [reciprocal.deliveryId])).machines[1]?.status,
-        "connected",
-      );
-    }).pipe(Effect.provide(configLayer)),
   );
 
   it.effect(

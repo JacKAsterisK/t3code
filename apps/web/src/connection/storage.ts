@@ -771,11 +771,9 @@ export const layer = Layer.effectContext(
     });
     const registrationStore = Persistence.ConnectionRegistrationStore.of({
       register: Effect.fn("Persistence.ConnectionRegistrationStore.register")(
-        function (registration, routes, enable) {
+        function (registration, routes) {
           return catalog
-            .update((document) =>
-              registerConnectionInCatalog(document, registration, routes, enable),
-            )
+            .update((document) => registerConnectionInCatalog(document, registration, routes))
             .pipe(Effect.mapError((cause) => persistenceError("register-connection", cause)));
         },
       ),

@@ -42,7 +42,7 @@ import type {
   PersistedConnectionTarget,
   SupervisorConnectionState,
 } from "./model.ts";
-import { BearerConnectionTarget, ConnectionBlockedError } from "./model.ts";
+import { ConnectionBlockedError } from "./model.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
@@ -54,19 +54,17 @@ import {
 import {
   RELAY_ROUTE_ID,
   connectionRouteId,
+  conflictsWithSavedRoute,
   connectionRoutes,
-  conflictsWithSavedFleetRoute,
+  credentialConnectionId,
   entryWithRoutes,
   findRouteToSameAddress,
-  fleetDeliveryConnectionId,
-  fleetDeliveryRoutes,
   fleetReplacementRoutes,
   fleetTlsOfRoute,
   hasSavedBearerRoute,
   mergeLearnedRoutes,
-  isLegacyBorrowedRoute,
-  manualPairingConnectionId,
   routesAfterRemoving,
+  splitOldFleetRoutes,
   upsertRoute,
   type ReportedEndpoint,
 } from "./routes.ts";
@@ -74,15 +72,14 @@ import {
 const isSshConnectionProfile = Schema.is(SshConnectionProfile);
 
 interface ConnectionRegistrationOptions {
-  readonly enable?: boolean;
   readonly knownAddressOnly?: boolean;
   readonly requireSavedConnection?: boolean;
-  readonly fleetDelivery?: boolean;
-  readonly manualPairing?: boolean;
+  readonly fleetPickup?: boolean;
+  readonly retiredIdentities?: ReadonlyArray<FleetTlsIdentity>;
   readonly fleetReplacement?: { readonly previousIdentity: FleetTlsIdentity | undefined };
 }
 
-type ExpectedFleetRoute = { readonly fleetId?: string; readonly fleetTls?: FleetTlsIdentity };
+type ExpectedFleetRoute = { readonly fleetId?: string; readonly fleetTls: FleetTlsIdentity };
 
 function unsupportedState(
   entry: ConnectionCatalogEntry,
@@ -275,10 +272,7 @@ export const make = Effect.gen(function* () {
           const id = connectionRouteId(route.target);
           if (seen.has(id)) return false;
           seen.add(id);
-          return (
-            !isLegacyBorrowedRoute(route) &&
-            !(id.startsWith("learned:") && Option.isNone(route.profile))
-          );
+          return !(id.startsWith("learned:") && Option.isNone(route.profile));
         });
         const routes = usable.length > 0 ? usable : loaded.slice(0, 1);
         const first = routes[0]!;
@@ -619,90 +613,73 @@ export const make = Effect.gen(function* () {
             reason: "configuration",
             detail: "This saved connection was removed. Add it again to reconnect.",
           });
-        const replacement = options?.fleetReplacement;
         const profile =
           registration._tag === "BearerConnectionRegistration" ? registration.profile : undefined;
-        const { saved } = fleetDeliveryRoutes(
+        const { saved, retired } = splitOldFleetRoutes(
           previous,
-          options?.fleetDelivery === true ? profile?.fleetId : undefined,
+          options?.fleetPickup === true ? profile?.fleetId : undefined,
         );
+        const retirement = options?.retiredIdentities ?? [];
+        const retiring = retirement.length > 0;
         const savedRoutes = saved === undefined ? [] : connectionRoutes(saved);
-        const candidate =
-          profile === undefined
-            ? undefined
-            : {
-                ...profile,
-                connectionId:
-                  options?.fleetDelivery === true
-                    ? fleetDeliveryConnectionId(savedRoutes, profile)
-                    : options?.manualPairing === true
-                      ? manualPairingConnectionId(savedRoutes, profile)
-                      : profile.connectionId,
-              };
+        const replacement = options?.fleetReplacement;
         const retained =
           replacement === undefined
             ? savedRoutes
-            : candidate === undefined
+            : profile === undefined
               ? null
-              : fleetReplacementRoutes(saved, candidate, replacement.previousIdentity);
+              : fleetReplacementRoutes(saved, profile, replacement.previousIdentity);
         const unpinnedRenewal =
-          registration._tag === "BearerConnectionRegistration" &&
-          registration.profile.fleetReplacementDeliveryId !== undefined &&
-          registration.profile.fleetTls === undefined;
+          profile?.fleetReplacementDeliveryId !== undefined && profile.fleetTls === undefined;
         if (
           retained === null ||
-          (candidate !== undefined &&
-            options?.fleetDelivery === true &&
-            conflictsWithSavedFleetRoute(savedRoutes, candidate, replacement?.previousIdentity)) ||
-          (unpinnedRenewal && retained.some((saved) => fleetTlsOfRoute(saved) !== undefined))
+          retired.length !== retirement.length ||
+          retired.some(
+            (route) =>
+              !retirement.some((identity) => {
+                const pin = fleetTlsOfRoute(route);
+                return pin !== undefined && sameFleetTlsRoute(pin, identity);
+              }),
+          ) ||
+          (retiring && (profile === undefined || conflictsWithSavedRoute(retained, profile))) ||
+          (!retiring &&
+            unpinnedRenewal &&
+            retained.some((route) => fleetTlsOfRoute(route) !== undefined))
         )
           return yield* new ConnectionBlockedError({
             reason: "configuration",
             detail: "The saved fleet connection changed before the replacement could be saved.",
           });
-        const sameAddress =
-          savedRoutes.find(
-            (route) => connectionRouteId(route.target) === candidate?.connectionId,
-          ) ?? findRouteToSameAddress(savedRoutes, registeredRoute);
+        const identity = profile?.fleetTls;
         const predecessor =
-          sameAddress === undefined ? undefined : Option.getOrUndefined(sameAddress.profile);
-        const tls = candidate?.fleetTls;
-        const samePin =
-          tls !== undefined &&
-          predecessor?._tag === "BearerConnectionProfile" &&
-          predecessor.fleetTls !== undefined &&
-          sameFleetTlsIdentity(predecessor.fleetTls, tls)
-            ? predecessor
-            : undefined;
-        const inheritedFleetId =
-          registration._tag === "BearerConnectionRegistration" &&
-          registration.profile.fleetId === undefined
-            ? samePin?.fleetId
-            : undefined;
+          identity === undefined
+            ? undefined
+            : savedRoutes
+                .map((route) => Option.getOrUndefined(route.profile))
+                .find(
+                  (item) =>
+                    item?._tag === "BearerConnectionProfile" &&
+                    item.fleetTls !== undefined &&
+                    sameFleetTlsIdentity(item.fleetTls, identity),
+                );
         const persistedRegistration =
           registration._tag === "BearerConnectionRegistration" &&
-          candidate !== undefined &&
-          (candidate.connectionId !== registration.target.connectionId ||
-            inheritedFleetId !== undefined)
+          profile?.fleetId === undefined &&
+          predecessor?._tag === "BearerConnectionProfile" &&
+          predecessor.fleetId !== undefined
             ? new BearerConnectionRegistration({
                 ...registration,
-                target: new BearerConnectionTarget({
-                  ...registration.target,
-                  connectionId: candidate.connectionId,
-                }),
                 profile: new BearerConnectionProfile({
                   ...registration.profile,
-                  connectionId: candidate.connectionId,
-                  ...(inheritedFleetId === undefined ? {} : { fleetId: inheritedFleetId }),
+                  fleetId: predecessor.fleetId,
                 }),
               })
             : registration;
         let entry = connectionRegistrationCatalogEntry(persistedRegistration);
         const route: ConnectionRoute = { target: entry.target, profile: entry.profile };
         if (previous !== undefined) {
-          const existing = retained.filter((route) => !isLegacyBorrowedRoute(route));
-          const sameAddress = findRouteToSameAddress(existing, route, "replace");
-          const routes = existing.filter(
+          const sameAddress = retiring ? undefined : findRouteToSameAddress(retained, route);
+          const routes = retained.filter(
             (existing) =>
               existing !== sameAddress ||
               connectionRouteId(existing.target) === connectionRouteId(route.target),
@@ -713,27 +690,50 @@ export const make = Effect.gen(function* () {
           }
           entry = next.entry;
         }
-        if (options?.enable === true) {
+        if (options?.fleetPickup === true) {
           const { unsupportedReason: _reason, serverUpdateRequired: _update, ...rest } = entry;
-          entry = { ...rest, enabled: true };
+          entry = rest;
         }
-        yield* registrations.register(
-          persistedRegistration,
-          persistedRoutes(entry),
-          options?.enable,
-        );
+        const persist = registrations.register(persistedRegistration, persistedRoutes(entry));
+        const previousIdentity = replacement?.previousIdentity;
+        if (
+          identity !== undefined &&
+          (retiring ||
+            (previousIdentity !== undefined && !sameFleetTlsRoute(previousIdentity, identity)))
+        ) {
+          const endpoint = { environmentId, identity };
+          yield* Effect.acquireUseRelease(
+            fleetTls
+              .prepare({ ...endpoint, stagedReplacement: "promote" })
+              .pipe(
+                Effect.mapError(
+                  (error) =>
+                    new ConnectionBlockedError({ reason: "configuration", detail: error.message }),
+                ),
+              ),
+            () => persist,
+            (_, exit) =>
+              fleetTls
+                .prepare({
+                  ...endpoint,
+                  stagedReplacement: Exit.isSuccess(exit) ? "finish" : "rollback",
+                })
+                .pipe(Effect.ignoreCause),
+          );
+        } else {
+          yield* persist;
+        }
         yield* Ref.update(persistedEnvironmentIds, (current) =>
           new Set(current).add(environmentId),
         );
+        if (retiring && identity === undefined)
+          yield* (fleetTls.disconnect?.(environmentId) ?? Effect.void).pipe(Effect.ignoreCause);
         yield* installEntryLocked(entry);
-        if (
-          previous !== undefined &&
-          connectionRoutes(previous).some((route) => fleetTlsOfRoute(route) !== undefined) &&
-          connectionRoutes(entry).every((route) => fleetTlsOfRoute(route) === undefined)
-        )
-          yield* (fleetTls.disconnect?.(environmentId) ?? Effect.void).pipe(Effect.ignore);
         return true;
-      }),
+      }).pipe((save) =>
+        // Gateway promotion and the catalog commit must settle together even if pickup is cancelled.
+        options?.fleetPickup === true ? Effect.uninterruptible(save) : save,
+      ),
     );
   });
 
@@ -878,7 +878,8 @@ export const make = Effect.gen(function* () {
                 yield* SubscriptionRef.updateSome(scope.supervisor.prepared, (current) =>
                   Option.isSome(current) &&
                   current.value.target._tag === "BearerConnectionTarget" &&
-                  current.value.target.connectionId === registration.target.connectionId &&
+                  credentialConnectionId(current.value.target.connectionId) ===
+                    registration.target.connectionId &&
                   current.value.httpAuthorization?._tag === "Bearer" &&
                   current.value.httpAuthorization.token !== token
                     ? Option.some(
@@ -1058,7 +1059,8 @@ export const make = Effect.gen(function* () {
     typeof globalThis.location === "undefined" || globalThis.location.protocol !== "https:";
 
   /**
-   * T3 Connect learns alternate endpoints using its own authorization, without changing routing trust.
+   * Learned routes reuse the active route's credential, so they do not revoke pull request routing
+   * trust the way a newly paired address does.
    */
   const learnRoutes = Effect.fn("EnvironmentRegistry.learnRoutes")(function* (input: {
     readonly environmentId: EnvironmentId;
@@ -1138,7 +1140,6 @@ export const make = Effect.gen(function* () {
           expectedFleet !== undefined &&
           (profile?._tag !== "BearerConnectionProfile" ||
             profile.fleetId !== expectedFleet.fleetId ||
-            expectedFleet.fleetTls === undefined ||
             profile.fleetTls === undefined ||
             !sameFleetTlsRoute(profile.fleetTls, expectedFleet.fleetTls))
         )
@@ -1147,6 +1148,7 @@ export const make = Effect.gen(function* () {
         if (remaining.length === 0) return yield* removeLocked(environmentId);
         yield* replaceRoutesLocked(entry, remaining);
         if (
+          expectedFleet !== undefined &&
           profile?._tag === "BearerConnectionProfile" &&
           profile.fleetTls !== undefined &&
           remaining.every((route) => fleetTlsOfRoute(route) === undefined)

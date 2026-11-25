@@ -3,7 +3,6 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   connectionRouteId,
   connectionRoutes,
-  isFleetBearerProfile,
   type ConnectionCatalogEntry,
 } from "@t3tools/client-runtime/connection";
 import { fleetPairingFailureDetail } from "./lanFleetPairingError";
@@ -245,42 +244,31 @@ export function useLanFleet() {
       for (let remaining = 100; remaining > 0; remaining--) {
         const current = appAtomRegistry.get(environmentCatalog.catalogValueAtom);
         if (!current.isReady) return false;
-        const fleetProfiles = [...current.entries].flatMap(([environmentId, entry]) => {
-          const profiles = connectionRoutes(entry).flatMap(({ profile, target }) =>
-            target._tag === "BearerConnectionTarget" &&
-            Option.isSome(profile) &&
-            profile.value._tag === "BearerConnectionProfile" &&
-            profile.value.connectionId === target.connectionId &&
-            isFleetBearerProfile(profile.value)
-              ? [profile.value]
-              : [],
-          );
-          return profiles.length > 0 ? [{ environmentId, profiles, enabled: entry.enabled }] : [];
-        });
         const result = await sync({
           environmentId,
           input: {
             mode,
             sendMachineIds: remaining === 100 ? sendMachineIds : [],
             connectedEnvironmentIds: [...current.entries.keys()],
-            fleetConnectedEnvironmentIds: fleetProfiles.map(({ environmentId }) => environmentId),
-            pinnedFleetRoutes: fleetProfiles.flatMap(({ environmentId, profiles }) => {
-              const fleetIds = profiles.map((profile) => profile.fleetId);
-              return fleetIds.every((fleetId) => fleetId !== undefined)
-                ? [{ environmentId, fleetIds: [...new Set(fleetIds)] }]
-                : [];
+            pinnedFleetRoutes: [...current.entries].flatMap(([environmentId, entry]) => {
+              const fleetIds = connectionRoutes(entry).flatMap(({ profile }) => {
+                const saved = Option.getOrUndefined(profile);
+                return saved?._tag === "BearerConnectionProfile" && saved.fleetTls !== undefined
+                  ? (saved.fleetId ?? [])
+                  : [];
+              });
+              return fleetIds.length === 0
+                ? []
+                : [{ environmentId, fleetIds: [...new Set(fleetIds)] }];
             }),
-            completedDeliveryIds: fleetProfiles
-              .flatMap(({ enabled, profiles }) =>
-                enabled ? profiles.flatMap((profile) => profile.fleetDeliveryId ?? []) : [],
-              )
-              .slice(0, 1000),
-            completedReplacementDeliveryIds: fleetProfiles
-              .flatMap(({ enabled, profiles }) =>
-                enabled
-                  ? profiles.flatMap((profile) => profile.fleetReplacementDeliveryId ?? [])
-                  : [],
-              )
+            completedReplacementDeliveryIds: [...current.entries.values()]
+              .flatMap(connectionRoutes)
+              .flatMap(({ profile }) => {
+                const saved = Option.getOrNull(profile);
+                return saved?._tag === "BearerConnectionProfile"
+                  ? (saved.fleetReplacementDeliveryId ?? [])
+                  : [];
+              })
               .slice(0, 1000),
           },
         });
@@ -307,7 +295,8 @@ export function useLanFleet() {
             ...(delivery.tls === undefined ? {} : { tls: delivery.tls }),
             ...(delivery.fleetId === undefined ? {} : { fleetId: delivery.fleetId }),
             expectedEnvironmentId: delivery.environmentId,
-            deliveryId: delivery.deliveryId,
+            // A replacement swaps the saved credential, such as after a fleet access change.
+            skipExisting: delivery.replace !== true,
             ...(delivery.replace === true ? { replacementDeliveryId: delivery.deliveryId } : {}),
             ...(delivery.requireSavedConnection === true ? { requireSavedConnection: true } : {}),
             ...(delivery.preserveManualConnection === true

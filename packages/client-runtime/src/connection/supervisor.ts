@@ -37,7 +37,6 @@ import {
   connectionRouteId,
   connectionRouteKind,
   connectionRoutes,
-  usableRoutes,
   type ConnectionRouteKind,
   entryWithRoutes,
   insertRoute,
@@ -326,7 +325,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   // Learned routes arrive while a session is live, so the route list is read
   // fresh by each attempt and check instead of being fixed at creation.
   const currentEntry = yield* Ref.make(entry);
-  const currentRoutes = Ref.get(currentEntry).pipe(Effect.map(usableRoutes));
+  const currentRoutes = Ref.get(currentEntry).pipe(Effect.map(connectionRoutes));
   const preferredRouteId = yield* Ref.make(Option.none<string>());
   const routeCooldowns = yield* Ref.make<ReadonlyMap<string, bigint>>(new Map());
   // Outlives sessions so a reconnect shows a refusal seen earlier; a route leaves once it connects.
@@ -399,7 +398,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     const now = yield* Clock.monotonicTimeNanos;
     const cooldowns = yield* Ref.get(routeCooldowns);
     const silent = yield* Ref.get(silentRoutes);
-    const better = usableRoutes(latest)
+    const better = connectionRoutes(latest)
       .slice(0, current)
       .filter((route) => {
         const id = connectionRouteId(route.target);

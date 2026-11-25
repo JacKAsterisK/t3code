@@ -433,49 +433,18 @@ normal importer verifies the destination environment before exchanging its code.
 Each delivery is claimed once; uncertain exchanges pause for review instead of
 rotating credentials or replaying enrollment.
 
-When a delivery names a different fleet from a saved route to the same machine,
-the desktop can pair using the new delivery. A recorded fleet ID identifies a
-route that qualifies for automatic retirement. For a pinned delivery, the desktop
-stages the gateway before saving the enabled connection and new credential.
-The catalog saves them and retires proven old-fleet routes in one update.
-The desktop selects the staged gateway when it connects using the saved route.
-If preparation or the catalog write fails, the previous saved routes and their
-credentials remain available. A hand-edited address loses its fleet ID and
-stays saved.
+A saved connection records its fleet ID when the pairing delivery includes one.
+If a delivery arrives for a different fleet, a route with both an older fleet ID
+and a fleet TLS pin does not block pickup. After pairing succeeds and the desktop
+promotes the new gateway for a pinned delivery, the catalog saves the new route
+and retires the proven old routes and their credentials in one update. A failed
+pairing or catalog write keeps the saved routes and credentials. The environment
+retains its enabled or disabled state.
 
-Old fleet pins without a recorded fleet ID stay saved. An exact TLS match can
-renew beside other saved pins, and an exact-pin renewal preserves a recorded
-fleet ID when the delivery omits it. When a delivery identifies its fleet and
-the saved route has neither a fleet ID nor a pin, the desktop saves the fleet
-credential under a separate connection ID even when the manual route uses the
-same address. This also applies if the manual route is added during pickup.
-Later deliveries reuse that fleet connection ID, including when the fleet adds
-its first pin. You can also pair a manual route after the fleet route is saved.
-Each route keeps its own ID, address, and credential. At a shared address the
-client prefers the fleet route when both are reachable and uses the desktop
-gateway for a pinned route.
-
-The connection ID is also the credential key. An alternate address for a
-bearer connection needs its own pairing. Older learned addresses that shared a
-paired credential are skipped. T3 Connect can still discover alternate addresses
-using its own authorization. Reusing a fleet credential key requires ownership
-proved by the saved fleet ID or an exact TLS pin. A fleet ID allows the client
-to allocate a spare ID when a manual route occupies the default one. An incoming
-delivery with neither a fleet ID nor an exact saved pin cannot reuse that
-credential or allocate a separate fleet route there. A different certificate or
-public key at the same pinned address requires a verified replacement of the
-saved pin. If pickup cannot establish which route to renew or replace, you may
-need to pair again.
-
-A manual route or a route from a different fleet cannot confirm a fleet
-delivery. The recipient acknowledges the exact offer after the pairing exchange
-finishes and the new route and its credential are saved. When a fresh signed
-report shows that a recipient no longer has the fleet connection, **Link both
-ways** starts a new owner-approved campaign and re-arms an acknowledged or
-expired offer. The new offer stays pending until its pickup is acknowledged.
-A receipt expires with its offer. A current signed report can still confirm
-an existing fleet connection. A desktop that reports only environment IDs
-cannot acknowledge a new offer.
+Unpinned routes and pins with no recorded fleet ID survive automatic retirement.
+If the new delivery collides with a retained route, the client keeps that route.
+Editing a saved address clears its fleet ID. An exact TLS pin renewal keeps the
+recorded fleet ID when the delivery omits it.
 
 Deliveries and owner link requests expire after 24 hours; signed connection
 summaries last ten minutes. Polling stops after three consecutive failures and
@@ -495,13 +464,10 @@ operation, not an automatic key rotation.
 Use **Settings → Connections → LAN machine links → Reset fleet links** on the
 machine you want to reset. Review its fleet-made agent links, sessions it served,
 pending codes, and adapter state. Confirm to retire the reviewed items and see
-a receipt. If the list changed during review, request a fresh preview. You can
-also include the listed saved connections from this fleet or older connections
-with a fleet TLS pin. Manual connections and manual agent links are excluded.
-
-Only pinned saved routes from this fleet and older pins with no recorded fleet
-ID are eligible for optional removal. Review the list again if the saved route
-or the server preview changes.
+a receipt. If the list changed during review, request a fresh preview. To remove
+saved connections too, opt in to the displayed routes. The list includes pinned
+routes from this fleet and older pins with no recorded fleet ID. Manual
+connections and manual agent links are excluded.
 
 Reset invalidates sign-ins approved under retired offers. Before revoking
 sessions, it records which peers need a fresh offer, using the served sessions

@@ -49,7 +49,7 @@ export function fleetTlsOfRoute(route: ConnectionRoute) {
   return profile?._tag === "BearerConnectionProfile" ? profile.fleetTls : undefined;
 }
 
-export function fleetDeliveryRoutes(
+export function splitOldFleetRoutes(
   entry: ConnectionCatalogEntry | undefined,
   fleetId: string | undefined,
 ) {
@@ -59,194 +59,36 @@ export function fleetDeliveryRoutes(
     const saved = Option.getOrUndefined(profile);
     return (
       saved?._tag === "BearerConnectionProfile" &&
+      saved.fleetTls !== undefined &&
       saved.fleetId !== undefined &&
       saved.fleetId !== fleetId
     );
   });
   if (retired.length === 0) return { saved: entry, retired };
-  const retained = retired.reduce(
-    (routes, route) => routesAfterRemoving(routes, connectionRouteId(route.target)),
-    routes,
-  );
-  return { retired, saved: retained.length === 0 ? undefined : entryWithRoutes(entry, retained) };
-}
-
-type FleetRouteCandidate = {
-  readonly connectionId: string;
-  readonly httpBaseUrl: string;
-  readonly fleetTls?: FleetTlsIdentity;
-  readonly fleetId?: string;
-  readonly fleetDeliveryId?: string;
-  readonly fleetReplacementDeliveryId?: string;
-};
-
-const SEPARATE_FLEET_CONNECTION_PREFIX = "fleet-bearer:";
-const SEPARATE_MANUAL_CONNECTION_PREFIX = "manual-bearer:";
-
-export function isFleetBearerProfile(profile: BearerConnectionProfile): boolean {
-  return (
-    profile.fleetId !== undefined ||
-    profile.fleetTls !== undefined ||
-    profile.fleetDeliveryId !== undefined
-  );
-}
-
-export function manualPairingConnectionId(
-  routes: ReadonlyArray<ConnectionRoute>,
-  candidate: BearerConnectionProfile,
-): string {
-  const id = candidate.connectionId;
-  const alternateId = SEPARATE_MANUAL_CONNECTION_PREFIX + id;
-  const existing = routes.find((route) => {
-    const existingId = connectionRouteId(route.target);
-    const profile = Option.getOrUndefined(route.profile);
-    return (
-      (existingId === alternateId || existingId.startsWith(alternateId + ":")) &&
-      sameFleetCandidateAddress(route, candidate) &&
-      profile?._tag === "BearerConnectionProfile" &&
-      !isFleetBearerProfile(profile)
-    );
-  });
-  if (existing !== undefined) return connectionRouteId(existing.target);
-  const collision = routes.some((route) => {
-    const profile = Option.getOrUndefined(route.profile);
-    return (
-      connectionRouteId(route.target) === id &&
-      profile?._tag === "BearerConnectionProfile" &&
-      isFleetBearerProfile(profile)
-    );
-  });
-  return collision ? availableRouteId(routes, alternateId) : id;
-}
-
-function availableRouteId(routes: ReadonlyArray<ConnectionRoute>, base: string): string {
-  const occupied = new Set(routes.map((route) => connectionRouteId(route.target)));
-  let available = base;
-  for (let index = 1; occupied.has(available); index++) available = `${base}:${index}`;
-  return available;
-}
-
-function sameFleetCandidateAddress(route: ConnectionRoute, candidate: FleetRouteCandidate) {
-  return (
-    routeHttpBaseUrl(route)?.replace(/\/+$/u, "") === candidate.httpBaseUrl.replace(/\/+$/u, "")
-  );
-}
-
-function keepsSeparateFleetCredential(route: ConnectionRoute, candidate: FleetRouteCandidate) {
-  const profile = Option.getOrUndefined(route.profile);
-  return (
-    (candidate.fleetId !== undefined || candidate.fleetTls !== undefined) &&
-    connectionRouteId(route.target) !== candidate.connectionId &&
-    profile?._tag === "BearerConnectionProfile" &&
-    !isFleetBearerProfile(profile)
-  );
-}
-
-function canRenewUnpinnedFleetRoute(route: ConnectionRoute, candidate: FleetRouteCandidate) {
-  const profile = Option.getOrUndefined(route.profile);
-  return (
-    profile?._tag === "BearerConnectionProfile" &&
-    profile.fleetId !== undefined &&
-    profile.fleetId === candidate.fleetId &&
-    profile.fleetTls === undefined &&
-    (candidate.fleetTls !== undefined ||
-      candidate.fleetDeliveryId !== undefined ||
-      candidate.fleetReplacementDeliveryId !== undefined) &&
-    profile.connectionId === candidate.connectionId &&
-    connectionRouteId(route.target) === candidate.connectionId &&
-    profile.learned !== true &&
-    profile.authorization === undefined &&
-    sameFleetCandidateAddress(route, candidate)
-  );
-}
-
-export function fleetDeliveryConnectionId(
-  routes: ReadonlyArray<ConnectionRoute>,
-  candidate: FleetRouteCandidate,
-): string {
-  const existingFleet = routes.find((route) => {
-    const profile = Option.getOrUndefined(route.profile);
-    if (
-      profile?._tag !== "BearerConnectionProfile" ||
-      profile.learned === true ||
-      !sameFleetCandidateAddress(route, candidate)
-    )
-      return false;
-    if (candidate.fleetId !== undefined && profile.fleetId === candidate.fleetId) return true;
-    return (
-      (candidate.fleetId === undefined || profile.fleetId === undefined) &&
-      candidate.fleetTls !== undefined &&
-      profile.fleetTls !== undefined &&
-      sameFleetTlsIdentity(profile.fleetTls, candidate.fleetTls)
-    );
-  });
-  if (existingFleet !== undefined) return connectionRouteId(existingFleet.target);
-  if (candidate.fleetId === undefined) return candidate.connectionId;
-  const separateId =
-    SEPARATE_FLEET_CONNECTION_PREFIX + JSON.stringify([candidate.fleetId, candidate.connectionId]);
-  const needsSeparateId = routes.some((route) => {
-    const id = connectionRouteId(route.target);
-    const profile = Option.getOrUndefined(route.profile);
-    return (
-      (id === candidate.connectionId || sameFleetCandidateAddress(route, candidate)) &&
-      profile?._tag === "BearerConnectionProfile" &&
-      profile.fleetTls === undefined &&
-      profile.fleetId !== candidate.fleetId
-    );
-  });
-  if (!needsSeparateId) return candidate.connectionId;
-  return availableRouteId(routes, separateId);
-}
-
-export function conflictsWithSavedFleetRoute(
-  routes: ReadonlyArray<ConnectionRoute>,
-  candidate: FleetRouteCandidate,
-  predecessor?: FleetTlsIdentity,
-): boolean {
-  return routes.some((route) => {
-    if (
-      connectionRouteId(route.target) !== candidate.connectionId &&
-      !sameFleetCandidateAddress(route, candidate)
-    )
-      return false;
-    if (keepsSeparateFleetCredential(route, candidate)) return false;
-    const profile = Option.getOrUndefined(route.profile);
-    if (profile?._tag !== "BearerConnectionProfile" || !sameFleetCandidateAddress(route, candidate))
-      return true;
-    if (
-      profile.fleetId !== undefined &&
-      candidate.fleetId !== undefined &&
-      profile.fleetId !== candidate.fleetId
-    )
-      return true;
-    if (profile.fleetTls !== undefined && candidate.fleetTls !== undefined) {
-      return (
-        !sameFleetTlsIdentity(profile.fleetTls, candidate.fleetTls) &&
-        (profile.fleetId !== candidate.fleetId ||
-          predecessor === undefined ||
-          !sameFleetTlsRoute(profile.fleetTls, predecessor))
-      );
-    }
-    return !canRenewUnpinnedFleetRoute(route, candidate);
-  });
+  const retained = routes.filter((route) => !retired.includes(route));
+  return { saved: retained.length === 0 ? undefined : entryWithRoutes(entry, retained), retired };
 }
 
 export function savedFleetIdentity(
   entry: ConnectionCatalogEntry | undefined,
-  candidate?: FleetTlsIdentity,
+  incoming?: FleetTlsIdentity,
 ) {
   if (entry === undefined) return undefined;
   const identities = connectionRoutes(entry).flatMap((route) => fleetTlsOfRoute(route) ?? []);
-  if (identities.length === 1) return identities[0];
-  if (identities.length === 0) return undefined;
-  if (candidate === undefined) return null;
-  const exact = identities.filter((identity) => sameFleetTlsIdentity(identity, candidate));
-  return exact.length === 1 ? exact[0]! : null;
+  if (incoming !== undefined) {
+    const exact = identities.filter((identity) => sameFleetTlsIdentity(identity, incoming));
+    if (exact.length === 1) return exact[0];
+  }
+  return identities.length === 1 ? identities[0] : null;
 }
 
 export function fleetReplacementRoutes(
   entry: ConnectionCatalogEntry | undefined,
-  candidate: FleetRouteCandidate,
+  candidate: {
+    readonly connectionId: string;
+    readonly httpBaseUrl: string;
+    readonly fleetTls?: FleetTlsIdentity;
+  },
   predecessor: FleetTlsIdentity | undefined,
 ): ReadonlyArray<ConnectionRoute> | null {
   const current = savedFleetIdentity(entry, candidate.fleetTls);
@@ -262,30 +104,22 @@ export function fleetReplacementRoutes(
     entry === undefined
       ? []
       : connectionRoutes(entry).filter((route) => {
-          const tls = fleetTlsOfRoute(route);
-          if (
-            tls === undefined ||
-            predecessor === undefined ||
-            !sameFleetTlsRoute(tls, predecessor)
-          )
-            return true;
-          const profile = Option.getOrUndefined(route.profile);
-          // A legacy pin proves membership in this fleet only when the delivery presents the same identity.
-          return (
-            profile?._tag === "BearerConnectionProfile" &&
-            (candidate.fleetId === undefined) !== (profile.fleetId === undefined) &&
-            (candidate.fleetTls === undefined || !sameFleetTlsIdentity(tls, candidate.fleetTls))
-          );
+          const pin = fleetTlsOfRoute(route);
+          return pin === undefined || current === undefined || !sameFleetTlsRoute(pin, current);
         });
-  return retained.some(
+  return conflictsWithSavedRoute(retained, candidate) ? null : retained;
+}
+
+export function conflictsWithSavedRoute(
+  routes: ReadonlyArray<ConnectionRoute>,
+  candidate: { readonly connectionId: string; readonly httpBaseUrl: string },
+): boolean {
+  const address = candidate.httpBaseUrl.replace(/\/+$/u, "");
+  return routes.some(
     (route) =>
-      !canRenewUnpinnedFleetRoute(route, candidate) &&
-      (connectionRouteId(route.target) === candidate.connectionId ||
-        (sameFleetCandidateAddress(route, candidate) &&
-          !keepsSeparateFleetCredential(route, candidate))),
-  )
-    ? null
-    : retained;
+      connectionRouteId(route.target) === candidate.connectionId ||
+      routeHttpBaseUrl(route)?.replace(/\/+$/u, "") === address,
+  );
 }
 
 export function connectionRoutes(entry: ConnectionCatalogEntry): ReadonlyArray<ConnectionRoute> {
@@ -420,29 +254,9 @@ export function upsertRoute(
 export function findRouteToSameAddress(
   routes: ReadonlyArray<ConnectionRoute>,
   route: ConnectionRoute,
-  mode: "lookup" | "replace" = "lookup",
 ): ConnectionRoute | undefined {
   const key = routeAddressKey(route);
-  const id = connectionRouteId(route.target);
-  return key === null
-    ? undefined
-    : routes.find((existing) => {
-        if (routeAddressKey(existing) !== key) return false;
-        const existingId = connectionRouteId(existing.target);
-        if (mode === "lookup" || existingId === id) return true;
-        const existingProfile = Option.getOrUndefined(existing.profile);
-        const candidateProfile = Option.getOrUndefined(route.profile);
-        return (
-          !(
-            existingProfile?._tag === "BearerConnectionProfile" &&
-            isFleetBearerProfile(existingProfile)
-          ) &&
-          !(
-            candidateProfile?._tag === "BearerConnectionProfile" &&
-            isFleetBearerProfile(candidateProfile)
-          )
-        );
-      });
+  return key === null ? undefined : routes.find((existing) => routeAddressKey(existing) === key);
 }
 
 function routeAddressKey(route: ConnectionRoute): string | null {
@@ -546,7 +360,10 @@ export function mergeLearnedRoutes(input: {
       activeProfile.authorization === "t3-connect")
       ? ("t3-connect" as const)
       : undefined;
-
+  const sharedCredential =
+    authorization === undefined && active._tag === "BearerConnectionTarget"
+      ? credentialConnectionId(active.connectionId)
+      : undefined;
   const reported = new Map<string, URL>();
   const tailscaleOrigins = new Set<string>();
   for (const endpoint of input.reported) {
@@ -580,16 +397,27 @@ export function mergeLearnedRoutes(input: {
       ];
     }
     if (url === null || !reported.has(normalized(url)) || known.has(normalized(url))) return [];
-    if (isLegacyBorrowedRoute(route)) return [];
+    if (sendsTokenInClear(saved, route, tailscaleOrigins.has(normalized(url)))) return [];
     known.add(normalized(url));
     return [withNetwork(route, tailscaleOrigins.has(normalized(url)))];
   });
   let next: ReadonlyArray<ConnectionRoute> = kept;
   for (const url of reported.values()) {
     if (known.has(url.origin)) continue;
-    if (authorization === undefined) continue;
+    if (
+      url.protocol === "http:" &&
+      sharedCredential !== undefined &&
+      !tailscaleOrigins.has(url.origin) &&
+      !tokenAllowsPlainHttp(saved, sharedCredential)
+    ) {
+      continue;
+    }
     const httpBaseUrl = `${url.origin}/`;
-    const connectionId = `learned:${entry.target.environmentId}:${url.origin}`;
+    const connectionId = learnedConnectionId(
+      entry.target.environmentId,
+      url.origin,
+      sharedCredential,
+    );
     next = insertRoute(next, {
       target: new BearerConnectionTarget({
         environmentId: entry.target.environmentId,
@@ -604,7 +432,7 @@ export function mergeLearnedRoutes(input: {
           httpBaseUrl,
           wsBaseUrl: `${url.protocol === "https:" ? "wss:" : "ws:"}//${url.host}/`,
           learned: true,
-          authorization,
+          ...(authorization === undefined ? {} : { authorization }),
           ...(tailscaleOrigins.has(url.origin) ? { network: "tailscale" as const } : {}),
         }),
       ),
@@ -620,34 +448,49 @@ export function mergeLearnedRoutes(input: {
   return signature(saved) === signature(next) ? null : next;
 }
 
-export function isLegacyBorrowedRoute(route: ConnectionRoute): boolean {
-  const id = connectionRouteId(route.target);
-  const prefix = `learned:${route.target.environmentId}:`;
-  return id.startsWith(prefix) && id.indexOf("@", prefix.length) !== -1;
+// A paired token goes to a plain HTTP address outside the tailnet only when
+// it was paired that way, so a token paired over HTTPS, loopback, or the
+// tailnet keeps to the transports it was issued for.
+function tokenAllowsPlainHttp(
+  routes: ReadonlyArray<ConnectionRoute>,
+  credentialId: string,
+): boolean {
+  const credentialRoute = routes.find((route) => connectionRouteId(route.target) === credentialId);
+  return (
+    credentialRoute !== undefined &&
+    routeHttpBaseUrl(credentialRoute)?.startsWith("http:") === true &&
+    (connectionRouteKind(credentialRoute) === "lan" ||
+      connectionRouteKind(credentialRoute) === "public")
+  );
 }
 
-export function usableRoutes(entry: ConnectionCatalogEntry): ReadonlyArray<ConnectionRoute> {
-  const saved = connectionRoutes(entry).filter((route) => !isLegacyBorrowedRoute(route));
-  const routes = [...saved];
-  for (const route of saved) {
-    const profile = Option.getOrUndefined(route.profile);
-    if (profile?._tag !== "BearerConnectionProfile" || !isFleetBearerProfile(profile)) continue;
-    const index = routes.indexOf(route);
-    const address = routeAddressKey(route);
-    const manual = routes.findIndex((other) => {
-      const profile = Option.getOrUndefined(other.profile);
-      return (
-        profile?._tag === "BearerConnectionProfile" &&
-        !isFleetBearerProfile(profile) &&
-        routeAddressKey(other) === address
-      );
-    });
-    if (manual !== -1 && manual < index) {
-      routes.splice(index, 1);
-      routes.splice(manual, 0, route);
-    }
+/**
+ * Whether connecting over `route` would send a paired token over plain HTTP
+ * that it wasn't paired over. Checked against the token the route borrows,
+ * so a route learned before this rule existed is refused too.
+ */
+export function sendsTokenInClear(
+  routes: ReadonlyArray<ConnectionRoute>,
+  route: ConnectionRoute,
+  tailscale?: boolean,
+): boolean {
+  const profile = Option.getOrNull(route.profile);
+  if (profile?._tag !== "BearerConnectionProfile" || profile.authorization === "t3-connect") {
+    return false;
   }
-  return routes;
+  if ((tailscale ?? profile.network === "tailscale") || !profile.httpBaseUrl.startsWith("http:")) {
+    return false;
+  }
+  const credentialId = credentialConnectionId(connectionRouteId(route.target));
+  return (
+    credentialId !== connectionRouteId(route.target) && !tokenAllowsPlainHttp(routes, credentialId)
+  );
+}
+
+/** Routes a connect may use: none sends a paired token over plain HTTP it wasn't paired over. */
+export function usableRoutes(entry: ConnectionCatalogEntry): ReadonlyArray<ConnectionRoute> {
+  const routes = connectionRoutes(entry);
+  return routes.filter((route) => !sendsTokenInClear(routes, route));
 }
 
 export interface ReportedEndpoint {
@@ -659,16 +502,39 @@ function withNetwork(route: ConnectionRoute, tailscale: boolean): ConnectionRout
   const profile = Option.getOrNull(route.profile);
   if (profile?._tag !== "BearerConnectionProfile") return route;
   if ((profile.network === "tailscale") === tailscale) return route;
-  const { network: _network, ...saved } = profile;
   return {
     target: route.target,
     profile: Option.some(
       new BearerConnectionProfile({
-        ...saved,
+        connectionId: profile.connectionId,
+        environmentId: profile.environmentId,
+        label: profile.label,
+        httpBaseUrl: profile.httpBaseUrl,
+        wsBaseUrl: profile.wsBaseUrl,
+        ...(profile.learned === undefined ? {} : { learned: profile.learned }),
+        ...(profile.authorization === undefined ? {} : { authorization: profile.authorization }),
+        ...(profile.fleetId === undefined ? {} : { fleetId: profile.fleetId }),
         ...(tailscale ? { network: "tailscale" as const } : {}),
       }),
     ),
   };
+}
+
+function learnedConnectionId(
+  environmentId: string,
+  origin: string,
+  sharedCredential: string | undefined,
+): string {
+  return sharedCredential === undefined
+    ? `learned:${environmentId}:${origin}`
+    : `learned:${environmentId}:${origin}@${sharedCredential}`;
+}
+
+export function credentialConnectionId(connectionId: string): string {
+  const at = connectionId.indexOf("@");
+  return connectionId.startsWith("learned:") && at !== -1
+    ? connectionId.slice(at + 1)
+    : connectionId;
 }
 
 export function isLearned(route: ConnectionRoute): boolean {
@@ -677,7 +543,10 @@ export function isLearned(route: ConnectionRoute): boolean {
 }
 
 /**
- * Removing T3 Connect also removes routes learned through it.
+ * A learned route borrows the credential of the route it was learned over, so
+ * it cannot outlive that route: removing T3 Connect also removes routes learned
+ * through it, and removing a paired address removes routes that borrow its
+ * token.
  */
 export function routesAfterRemoving(
   routes: ReadonlyArray<ConnectionRoute>,
@@ -692,7 +561,7 @@ export function routesAfterRemoving(
     if (profile?._tag === "BearerConnectionProfile" && profile.authorization === "t3-connect") {
       return removed.target._tag !== "RelayConnectionTarget";
     }
-    return !isLegacyBorrowedRoute(route);
+    return credentialConnectionId(connectionRouteId(route.target)) !== removedId;
   });
 }
 

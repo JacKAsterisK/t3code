@@ -195,10 +195,10 @@ function setup() {
   return { environmentId, preview, receipt, registry, setRoutes, entries, route };
 }
 
-it("Link both ways configures the owner campaign and syncs with fleet route evidence", async () => {
+it("Link both ways reports saved environments including legacy unpinned fleet routes", async () => {
   const { environmentId, registry, route, setRoutes } = setup();
   const manual = route("Manual connection");
-  const savedFleet = route("Existing fleet connection", "synthetic-fleet");
+  const savedFleet = route("Legacy unpinned fleet connection");
   const peer = {
     machineId: "fixture-peer",
     environmentId: manual.target.environmentId,
@@ -279,10 +279,16 @@ it("Link both ways configures the owner campaign and syncs with fleet route evid
       expect.objectContaining({
         mode: "manual",
         sendMachineIds: [],
-        fleetConnectedEnvironmentIds: [savedFleet.target.environmentId],
-        completedDeliveryIds: [],
+        connectedEnvironmentIds: [
+          environmentId,
+          manual.target.environmentId,
+          savedFleet.target.environmentId,
+        ],
+        pinnedFleetRoutes: [],
+        completedReplacementDeliveryIds: [],
       }),
     );
+    expect(fixtures.sync.mock.lastCall?.[0]).not.toHaveProperty("fleetConnectedEnvironmentIds");
   } finally {
     vi.unstubAllGlobals();
   }

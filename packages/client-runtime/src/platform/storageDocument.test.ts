@@ -414,9 +414,8 @@ describe("ConnectionCatalogDocument", () => {
       setConnectionEnabledInCatalog(old, ENVIRONMENT_ID, false),
       new BearerConnectionRegistration({ target, profile, credential }),
       [target],
-      true,
     );
-    expect(saved.disabledEnvironmentIds).toEqual([]);
+    expect(saved.disabledEnvironmentIds).toEqual([ENVIRONMENT_ID]);
     expect(saved.targets).toEqual([target]);
     expect(saved.profiles).toEqual([profile]);
     expect(saved.credentials).toEqual([{ connectionId: target.connectionId, credential }]);

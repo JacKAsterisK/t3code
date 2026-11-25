@@ -19,15 +19,13 @@ import type {
 import { ConnectionTransientError } from "./model.ts";
 import { isHostCredentialRefusal } from "./errors.ts";
 import * as ConnectionResolver from "./resolver.ts";
-import * as ClientCapabilities from "../platform/capabilities.ts";
 import {
   connectionRouteId,
   connectionRoutes,
-  fleetTlsOfRoute,
   routeEntry,
   routeHttpBaseUrl,
   routeKeepsItsHost,
-  isLegacyBorrowedRoute,
+  sendsTokenInClear,
   usableRoutes,
 } from "./routes.ts";
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
@@ -184,7 +182,6 @@ export const make = Effect.gen(function* () {
   const sessions = yield* RpcSession.RpcSessionFactory;
   const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
   const httpClient = yield* HttpClient.HttpClient;
-  const fleetTls = yield* ClientCapabilities.FleetTlsGateway;
 
   // The descriptor is public, so this sends no credential to whatever
   // answers at a saved LAN address on a different network.
@@ -209,22 +206,15 @@ export const make = Effect.gen(function* () {
       Effect.provideService(HttpClient.HttpClient, httpClient),
     );
 
-  const checkRoute = Effect.fn("ConnectionDriver.checkRoute")(function* (
-    entry: ConnectionCatalogEntry,
-    route: ConnectionRoute,
-  ) {
+  const checkRoute = (entry: ConnectionCatalogEntry, route: ConnectionRoute) => {
     const httpBaseUrl = routeHttpBaseUrl(route);
-    if (httpBaseUrl === null) return "unchecked" as const;
-    yield* Effect.annotateCurrentSpan({ "connection.target.kind": route.target._tag });
-    const identity = fleetTlsOfRoute(route);
-    const environmentId = entry.target.environmentId;
-    if (identity === undefined)
-      return yield* checkDescriptor(httpBaseUrl, environmentId, routeKeepsItsHost(route));
-    return yield* fleetTls.prepare({ environmentId, identity, savedRoute: true }).pipe(
-      Effect.flatMap((endpoint) => checkDescriptor(endpoint.httpBaseUrl, environmentId, true)),
-      Effect.orElseSucceed(() => "silent" as const),
+    if (httpBaseUrl === null) return Effect.succeed<RouteCheck>("unchecked");
+    return checkDescriptor(httpBaseUrl, entry.target.environmentId, routeKeepsItsHost(route)).pipe(
+      Effect.withSpan("ConnectionDriver.checkRoute", {
+        attributes: { "connection.target.kind": route.target._tag },
+      }),
     );
-  });
+  };
 
   const checkHost = (prepared: PreparedConnection) =>
     checkDescriptor(
@@ -282,7 +272,9 @@ export const make = Effect.gen(function* () {
 
   const preflight = (entry: ConnectionCatalogEntry, route: ConnectionRoute) =>
     preflightRoute(
-      isLegacyBorrowedRoute(route) ? Effect.succeed("silent" as const) : checkRoute(entry, route),
+      sendsTokenInClear(connectionRoutes(entry), route)
+        ? Effect.succeed("silent" as const)
+        : checkRoute(entry, route),
       resolver.prepare(routeEntry(entry, route)),
     ).pipe(Effect.withSpan("ConnectionDriver.preflight"));
 

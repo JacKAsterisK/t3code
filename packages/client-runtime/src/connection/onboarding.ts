@@ -1,7 +1,6 @@
 import { msg } from "gt-i18n";
 import { detailFromError, translatableDetail } from "../errors/translatable.ts";
 import {
-  sameFleetTlsIdentity,
   sameFleetTlsRoute,
   type DesktopSshEnvironmentTarget,
   type EnvironmentId,
@@ -51,14 +50,13 @@ import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentRegistry from "./registry.ts";
 import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
 import {
+  conflictsWithSavedRoute,
   connectionRoutes,
-  conflictsWithSavedFleetRoute,
-  fleetDeliveryConnectionId,
-  fleetDeliveryRoutes,
   fleetReplacementRoutes,
   fleetTlsOfRoute,
   routeEntry,
   savedFleetIdentity,
+  splitOldFleetRoutes,
   sshTargetKey,
 } from "./routes.ts";
 
@@ -69,21 +67,11 @@ export interface PairingConnectionInput {
   readonly expectedEnvironmentId?: EnvironmentId;
   readonly skipExisting?: boolean;
   readonly preserveManualConnection?: boolean;
-  readonly deliveryId?: string;
   readonly replacementDeliveryId?: string;
   readonly requireSavedConnection?: boolean;
   readonly tls?: FleetTlsIdentity;
   readonly fleetId?: string;
 }
-
-const isFleetPairing = (input: PairingConnectionInput) =>
-  input.fleetId !== undefined ||
-  input.tls !== undefined ||
-  input.deliveryId !== undefined ||
-  input.replacementDeliveryId !== undefined ||
-  input.skipExisting !== undefined ||
-  input.requireSavedConnection === true ||
-  input.preserveManualConnection === true;
 
 export interface SshConnectionInput {
   readonly target: DesktopSshEnvironmentTarget;
@@ -171,46 +159,38 @@ export const preparePairingRegistration = Effect.fn(
       reason: "configuration",
       detail: "Fleet endpoint identity does not match this delivery.",
     });
-  if (isFleetPairing(input)) {
+  if (
+    fleetReplacement !== undefined ||
+    retiredIdentities.length > 0 ||
+    input.requireSavedConnection === true
+  ) {
     const environmentId = input.expectedEnvironmentId;
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
     const current =
       environmentId === undefined
         ? undefined
         : (yield* SubscriptionRef.get(registry.entries)).get(environmentId);
-    const { saved } = fleetDeliveryRoutes(current, input.fleetId);
     if (input.requireSavedConnection === true && current === undefined)
       return yield* new ConnectionBlockedError({
         reason: "configuration",
         detail: "This saved connection was removed. Add it again to reconnect.",
       });
-    const pairingRoute =
+    const { saved } = splitOldFleetRoutes(current, input.fleetId);
+    const candidate =
       environmentId === undefined
         ? undefined
         : {
             connectionId: bearerConnectionId(environmentId, resolved.httpBaseUrl),
             httpBaseUrl: resolved.httpBaseUrl,
             ...(input.tls === undefined ? {} : { fleetTls: input.tls }),
-            ...(input.fleetId === undefined ? {} : { fleetId: input.fleetId }),
-            ...(input.deliveryId === undefined ? {} : { fleetDeliveryId: input.deliveryId }),
-            ...(input.replacementDeliveryId === undefined
-              ? {}
-              : { fleetReplacementDeliveryId: input.replacementDeliveryId }),
-          };
-    const routes = saved === undefined ? [] : connectionRoutes(saved);
-    const candidate =
-      pairingRoute === undefined
-        ? undefined
-        : {
-            ...pairingRoute,
-            connectionId: fleetDeliveryConnectionId(routes, pairingRoute),
           };
     if (
-      (candidate !== undefined &&
-        conflictsWithSavedFleetRoute(routes, candidate, fleetReplacement?.previousIdentity)) ||
-      (fleetReplacement !== undefined &&
-        (candidate === undefined ||
-          fleetReplacementRoutes(saved, candidate, fleetReplacement.previousIdentity) === null))
+      retiredIdentities.length > 0
+        ? candidate === undefined ||
+          (saved !== undefined && conflictsWithSavedRoute(connectionRoutes(saved), candidate))
+        : fleetReplacement !== undefined &&
+          (candidate === undefined ||
+            fleetReplacementRoutes(saved, candidate, fleetReplacement.previousIdentity) === null)
     )
       return yield* new ConnectionBlockedError({
         reason: "configuration",
@@ -230,10 +210,6 @@ export const preparePairingRegistration = Effect.fn(
             ? {}
             : { previousIdentity }),
           ...(retiredIdentities.length === 0 ? {} : { retiredIdentities }),
-          ...(retiredIdentities.length > 0 ||
-          (previousIdentity !== undefined && sameFleetTlsIdentity(input.tls, previousIdentity))
-            ? { savedRoute: true as const }
-            : {}),
         });
   const target = { ...resolved, ...protectedEndpoint };
   const presentation = yield* ClientCapabilities.ClientPresentation;
@@ -262,7 +238,6 @@ export const preparePairingRegistration = Effect.fn(
       wsBaseUrl: resolved.wsBaseUrl,
       ...(input.tls === undefined ? {} : { fleetTls: input.tls }),
       ...(input.fleetId === undefined ? {} : { fleetId: input.fleetId }),
-      ...(input.deliveryId === undefined ? {} : { fleetDeliveryId: input.deliveryId }),
       ...(input.replacementDeliveryId === undefined
         ? {}
         : { fleetReplacementDeliveryId: input.replacementDeliveryId }),
@@ -329,43 +304,32 @@ const registerPairingConnection = Effect.fn(
     input.expectedEnvironmentId === undefined
       ? undefined
       : (yield* SubscriptionRef.get(registry.entries)).get(input.expectedEnvironmentId);
-  const { saved, retired } = fleetDeliveryRoutes(current, input.fleetId);
-  if (
-    saved !== undefined &&
-    retired.length === 0 &&
-    input.skipExisting === true &&
-    input.deliveryId === undefined
-  ) {
-    if (input.fleetId === undefined || saved.enabled === false) return saved.target.environmentId;
-    const hasFleetRoute = connectionRoutes(saved).some((route) => {
-      const profile = Option.getOrUndefined(route.profile);
-      return (
-        route.target._tag === "PrimaryConnectionTarget" ||
-        (profile?._tag === "BearerConnectionProfile" &&
-          (profile.fleetTls !== undefined ||
-            (input.tls === undefined && profile.fleetId === input.fleetId)))
-      );
-    });
-    if (hasFleetRoute) return saved.target.environmentId;
-  }
+  const { saved, retired } = splitOldFleetRoutes(current, input.fleetId);
+  if (retired.length === 0 && saved !== undefined && input.skipExisting === true)
+    return saved.target.environmentId;
+  const fleetPickup =
+    input.skipExisting !== undefined ||
+    isReplacement ||
+    input.tls !== undefined ||
+    input.fleetId !== undefined;
 
   let fleetReplacement: { readonly previousIdentity: FleetTlsIdentity | undefined } | undefined;
-  if (isReplacement) {
+  if (isReplacement && retired.length === 0) {
     const previousIdentity = savedFleetIdentity(saved, input.tls);
-    if (
-      previousIdentity === undefined &&
-      saved !== undefined &&
-      input.preserveManualConnection === true &&
-      input.fleetId === undefined
-    )
-      return saved.target.environmentId;
-    if (previousIdentity === null)
-      return yield* new ConnectionBlockedError({
-        reason: "configuration",
-        detail:
-          "There is no single verified fleet route to replace. Existing connections were kept.",
-      });
-    if (input.tls !== undefined || previousIdentity !== undefined) {
+    if (previousIdentity === null) {
+      const hasFleetPin =
+        saved !== undefined &&
+        connectionRoutes(saved).some((route) => fleetTlsOfRoute(route) !== undefined);
+      if (!hasFleetPin && input.preserveManualConnection === true && saved !== undefined)
+        return saved.target.environmentId;
+      // Original fleets can renew an unpinned credential without retiring a saved route.
+      if (hasFleetPin || input.tls !== undefined)
+        return yield* new ConnectionBlockedError({
+          reason: "configuration",
+          detail:
+            "There is no single verified fleet route to replace. Existing connections were kept.",
+        });
+    } else {
       fleetReplacement = { previousIdentity };
     }
   }
@@ -375,32 +339,23 @@ const registerPairingConnection = Effect.fn(
     fleetReplacement,
     retiredIdentities,
   );
+  const knownAddressOnly = input.expectedEnvironmentId === undefined;
   if (
-    input.tls !== undefined &&
-    (retiredIdentities.length > 0 ||
-      (fleetReplacement?.previousIdentity !== undefined &&
-        !sameFleetTlsRoute(fleetReplacement.previousIdentity, input.tls)))
+    !(yield* registry.register(registration, {
+      knownAddressOnly,
+      ...(fleetPickup ? { fleetPickup: true } : {}),
+      ...(retiredIdentities.length === 0 ? {} : { retiredIdentities }),
+      ...(input.requireSavedConnection === true ? { requireSavedConnection: true } : {}),
+      ...(fleetReplacement === undefined ? {} : { fleetReplacement }),
+    }))
   ) {
-    const gateway = yield* ClientCapabilities.FleetTlsGateway;
-    yield* gateway.prepare({
-      environmentId: registration.target.environmentId,
-      identity: input.tls,
-      savedRoute: true,
-      validateStaged: true,
-    });
+    return registration.target.environmentId;
   }
-  const registered = yield* registry.register(registration, {
-    knownAddressOnly: input.expectedEnvironmentId === undefined,
-    enable: true,
-    ...(isFleetPairing(input) ? { fleetDelivery: true } : { manualPairing: true }),
-    ...(input.requireSavedConnection === true ? { requireSavedConnection: true } : {}),
-    ...(fleetReplacement === undefined ? {} : { fleetReplacement }),
-  });
-  if (!registered && input.deliveryId !== undefined)
-    return yield* new ConnectionBlockedError({
-      reason: "configuration",
-      detail: "This fleet connection could not be saved.",
-    });
+  if (fleetPickup) return registration.target.environmentId;
+  yield* registry.setCompatibility(registration.target.environmentId, null);
+  yield* registry
+    .setEnabled(registration.target.environmentId, true)
+    .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }));
   return registration.target.environmentId;
 });
 
@@ -519,10 +474,6 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       ...(httpBaseUrl === entry.profile.value.httpBaseUrl &&
       entry.profile.value.fleetId !== undefined
         ? { fleetId: entry.profile.value.fleetId }
-        : {}),
-      ...(httpBaseUrl === entry.profile.value.httpBaseUrl &&
-      entry.profile.value.fleetDeliveryId !== undefined
-        ? { fleetDeliveryId: entry.profile.value.fleetDeliveryId }
         : {}),
     }),
     credential: credential.value,

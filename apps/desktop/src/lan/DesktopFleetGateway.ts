@@ -30,15 +30,15 @@ interface Gateway {
 
 interface GatewaySlot {
   active?: Gateway;
-  alternate?: Gateway;
   replacement?: { previousIdentity: FleetTlsIdentity; gateway: Gateway };
+  promotion?: { previous?: Gateway };
 }
 
 const closeSlot = (slot: GatewaySlot) =>
   Promise.all([
     slot.active?.proxy.close(),
-    slot.alternate?.proxy.close(),
     slot.replacement?.gateway.proxy.close(),
+    slot.promotion?.previous?.proxy.close(),
   ]);
 
 const make = Effect.gen(function* () {
@@ -50,21 +50,6 @@ const make = Effect.gen(function* () {
       gateways.clear();
     }),
   );
-  const createGateway = Effect.fn("DesktopFleetGateway.createGateway")(function* (
-    identity: FleetTlsIdentity,
-  ) {
-    const now = DateTime.toEpochMillis(yield* DateTime.now);
-    const proxy = yield* Effect.tryPromise({
-      try: () =>
-        startFleetProxy({
-          listen: { address: "127.0.0.1", port: 0 },
-          target: identity.origin + "/",
-          peerTls: { identity, now },
-        }),
-      catch: () => new LanFleetError({ reason: "configuration" }),
-    });
-    return { identity, proxy };
-  });
   const prepare = Effect.fn("DesktopFleetGateway.prepare")(
     function* (input: FleetTlsGatewayInput) {
       const saved = gateways.get(input.environmentId);
@@ -75,25 +60,54 @@ const make = Effect.gen(function* () {
       let pending = slot.replacement;
       const matches = (gateway: Gateway | undefined) =>
         gateway !== undefined && sameFleetTlsRoute(gateway.identity, input.identity);
-      if (input.validateStaged === true) {
-        const prepared = matches(pending?.gateway)
-          ? pending?.gateway
-          : matches(active)
-            ? active
-            : undefined;
-        if (prepared === undefined) return yield* new LanFleetError({ reason: "configuration" });
-        return { httpBaseUrl: prepared.proxy.httpBaseUrl, wsBaseUrl: prepared.proxy.wsBaseUrl };
+      const endpoint = ({ proxy }: Gateway) => ({
+        httpBaseUrl: proxy.httpBaseUrl,
+        wsBaseUrl: proxy.wsBaseUrl,
+      });
+      if (input.stagedReplacement === "promote") {
+        if (
+          slot.promotion === undefined &&
+          active !== undefined &&
+          matches(active) &&
+          pending === undefined
+        )
+          return endpoint(active);
+        if (slot.promotion !== undefined || pending === undefined || !matches(pending.gateway))
+          return yield* new LanFleetError({ reason: "configuration" });
+        slot.promotion = active === undefined ? {} : { previous: active };
+        slot.active = pending.gateway;
+        delete slot.replacement;
+        return endpoint(pending.gateway);
       }
-      const predecessors = [
-        ...(input.previousIdentity === undefined ? [] : [input.previousIdentity]),
-        ...(input.retiredIdentities ?? []),
-      ];
+      if (input.stagedReplacement !== undefined) {
+        if (slot.promotion === undefined || active === undefined || !matches(active))
+          return yield* new LanFleetError({ reason: "configuration" });
+        const previous = slot.promotion.previous;
+        delete slot.promotion;
+        if (input.stagedReplacement === "rollback") {
+          if (previous === undefined) gateways.delete(input.environmentId);
+          else slot.active = previous;
+          const retiredProxy = active.proxy;
+          yield* Effect.promise(() => retiredProxy.close());
+        } else if (previous !== undefined) {
+          yield* Effect.promise(() => previous.proxy.close());
+        }
+        return endpoint(active);
+      }
+      if (slot.promotion !== undefined) {
+        const prepared = matches(active) ? active : slot.promotion.previous;
+        if (prepared === undefined || !matches(prepared))
+          return yield* new LanFleetError({ reason: "configuration" });
+        return endpoint(prepared);
+      }
+      const retired = input.retiredIdentities;
+      const current = active?.identity ?? pending?.previousIdentity;
       const previousIdentity =
-        predecessors.find(
-          (identity) =>
-            (pending !== undefined && sameFleetTlsRoute(identity, pending.gateway.identity)) ||
-            (active !== undefined && sameFleetTlsRoute(identity, active.identity)),
-        ) ?? predecessors[0];
+        input.previousIdentity ??
+        retired?.find(
+          (identity) => current !== undefined && sameFleetTlsRoute(identity, current),
+        ) ??
+        retired?.[0];
       // A later saved predecessor can confirm a stage even if the resolver chose a manual route.
       if (
         previousIdentity !== undefined &&
@@ -111,47 +125,10 @@ const make = Effect.gen(function* () {
       const pendingMatches = matches(pending?.gateway);
       const staged = previousIdentity !== undefined && !activeMatches;
 
-      if (
-        input.savedRoute === true &&
-        previousIdentity === undefined &&
-        !activeMatches &&
-        (active !== undefined || (pending !== undefined && !pendingMatches))
-      ) {
-        const alternate = slot.alternate;
-        if (pendingMatches && pending !== undefined && active !== undefined) {
-          if (alternate !== undefined) yield* Effect.promise(() => alternate.proxy.close());
-          slot.alternate = active;
-          slot.active = pending.gateway;
-          delete slot.replacement;
-          return {
-            httpBaseUrl: pending.gateway.proxy.httpBaseUrl,
-            wsBaseUrl: pending.gateway.proxy.wsBaseUrl,
-          };
-        }
-        if (alternate !== undefined && matches(alternate))
-          return { httpBaseUrl: alternate.proxy.httpBaseUrl, wsBaseUrl: alternate.proxy.wsBaseUrl };
-        const committed = active?.identity ?? pending?.previousIdentity;
-        if (
-          committed?.origin === input.identity.origin &&
-          !sameFleetTlsIdentity(committed, input.identity)
-        )
-          return yield* new LanFleetError({ reason: "configuration" });
-        const next = yield* createGateway(input.identity);
-        if (alternate !== undefined) yield* Effect.promise(() => alternate.proxy.close());
-        slot.alternate = next;
-        return { httpBaseUrl: next.proxy.httpBaseUrl, wsBaseUrl: next.proxy.wsBaseUrl };
-      }
-
       if (staged) {
-        const conflicts = (identity: FleetTlsIdentity) =>
-          !predecessors.some((predecessor) => sameFleetTlsRoute(identity, predecessor)) &&
-          (input.savedRoute !== true ||
-            (identity.origin === input.identity.origin &&
-              !sameFleetTlsIdentity(identity, input.identity)));
-        if (
-          (active !== undefined && conflicts(active.identity)) ||
-          (pending !== undefined && conflicts(pending.previousIdentity))
-        )
+        if (active !== undefined && !sameFleetTlsRoute(active.identity, previousIdentity))
+          return yield* new LanFleetError({ reason: "configuration" });
+        if (pending !== undefined && !sameFleetTlsRoute(pending.previousIdentity, previousIdentity))
           return yield* new LanFleetError({ reason: "configuration" });
       } else if (
         !activeMatches &&
@@ -165,7 +142,20 @@ const make = Effect.gen(function* () {
       }
 
       const reusable = activeMatches ? active : pendingMatches ? pending?.gateway : undefined;
-      const next = reusable ?? (yield* createGateway(input.identity));
+      let next = reusable;
+      if (next === undefined) {
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        const proxy = yield* Effect.tryPromise({
+          try: () =>
+            startFleetProxy({
+              listen: { address: "127.0.0.1", port: 0 },
+              target: `${input.identity.origin}/`,
+              peerTls: { identity: input.identity, now },
+            }),
+          catch: () => new LanFleetError({ reason: "configuration" }),
+        });
+        next = { identity: input.identity, proxy };
+      }
 
       if (staged) {
         if (pending !== undefined && pending.gateway !== next)
@@ -174,7 +164,7 @@ const make = Effect.gen(function* () {
       } else {
         if (active !== undefined && active !== next)
           yield* Effect.promise(() => active.proxy.close());
-        // Older clients select a replacement without the saved-route flag.
+        // The resolver selects the new pin without a predecessor only after it is saved.
         if (pendingMatches && pending !== undefined) {
           if (pending.gateway !== next) yield* Effect.promise(() => pending.gateway.proxy.close());
           delete slot.replacement;

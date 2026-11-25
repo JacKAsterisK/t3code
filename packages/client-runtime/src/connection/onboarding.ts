@@ -203,7 +203,8 @@ export const preparePairingRegistration = Effect.fn(
             connectionId: fleetDeliveryConnectionId(routes, pairingRoute),
           };
     if (
-      (candidate !== undefined && conflictsWithSavedFleetRoute(routes, candidate)) ||
+      (candidate !== undefined &&
+        conflictsWithSavedFleetRoute(routes, candidate, fleetReplacement?.previousIdentity)) ||
       (fleetReplacement !== undefined &&
         (candidate === undefined ||
           fleetReplacementRoutes(saved, candidate, fleetReplacement.previousIdentity) === null))
@@ -332,7 +333,8 @@ const registerPairingConnection = Effect.fn(
       return (
         route.target._tag === "PrimaryConnectionTarget" ||
         (profile?._tag === "BearerConnectionProfile" &&
-          (profile.fleetId === input.fleetId || profile.fleetTls !== undefined))
+          (profile.fleetTls !== undefined ||
+            (input.tls === undefined && profile.fleetId === input.fleetId)))
       );
     });
     if (hasFleetRoute) return saved.target.environmentId;
@@ -341,29 +343,20 @@ const registerPairingConnection = Effect.fn(
   let fleetReplacement: { readonly previousIdentity: FleetTlsIdentity | undefined } | undefined;
   if (isReplacement) {
     const previousIdentity = savedFleetIdentity(saved, input.tls);
-    if (previousIdentity === null) {
-      const hasFleetPin =
-        saved !== undefined &&
-        connectionRoutes(saved).some((route) => fleetTlsOfRoute(route) !== undefined);
-      if (
-        retired.length === 0 &&
-        !hasFleetPin &&
-        input.preserveManualConnection === true &&
-        input.fleetId === undefined &&
-        saved !== undefined
-      )
-        return saved.target.environmentId;
-      // A switch can pair beside remaining manual routes without replacing them.
-      if (
-        hasFleetPin ||
-        (input.tls !== undefined && input.fleetId === undefined && retired.length === 0)
-      )
-        return yield* new ConnectionBlockedError({
-          reason: "configuration",
-          detail:
-            "There is no single verified fleet route to replace. Existing connections were kept.",
-        });
-    } else if (input.tls !== undefined || previousIdentity !== undefined) {
+    if (
+      previousIdentity === undefined &&
+      saved !== undefined &&
+      input.preserveManualConnection === true &&
+      input.fleetId === undefined
+    )
+      return saved.target.environmentId;
+    if (previousIdentity === null)
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail:
+          "There is no single verified fleet route to replace. Existing connections were kept.",
+      });
+    if (input.tls !== undefined || previousIdentity !== undefined) {
       fleetReplacement = { previousIdentity };
     }
   }

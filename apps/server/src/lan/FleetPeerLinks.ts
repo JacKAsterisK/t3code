@@ -706,6 +706,32 @@ const make = Effect.gen(function* () {
         subject.startsWith(SUBJECT_PREFIX) ||
         subject.startsWith(`${CredentialAttribution.MCP_CLIENT_SUBJECT}:${SUBJECT_PREFIX}`),
     );
+    const serving = new Map<string, Serving>();
+    for (const [machineId, entry] of Object.entries(current.serving)) {
+      const lastLink = entry.linked ?? entry.sessions.at(-1);
+      if (lastLink !== undefined)
+        serving.set(machineId, {
+          linked: { deliveryId: lastLink.deliveryId, level: lastLink.level },
+          sessions: [],
+        });
+    }
+    let unidentifiedPeer = false;
+    for (const session of served) {
+      const root = CredentialAttribution.attributionRoot(session.subject) ?? "";
+      const [machineId, deliveryId, extra] = Delivery.fleetCredentialSubjectParts(root)
+        .subject.slice(SUBJECT_PREFIX.length)
+        .split(":");
+      if (!isFleetMachineId(machineId) || !deliveryId || extra !== undefined) {
+        unidentifiedPeer = true;
+        continue;
+      }
+      const level = FleetAccessPolicy.credentialAccess(session);
+      const entry = serving.get(machineId) ?? { linked: { deliveryId, level }, sessions: [] };
+      serving.set(machineId, {
+        ...entry,
+        sessions: [...entry.sessions, { sessionId: session.sessionId, deliveryId, level }],
+      });
+    }
     const sessions = served
       .map(({ sessionId, subject }) => ({ sessionId, subject }))
       .toSorted((a, b) => (a.sessionId < b.sessionId ? -1 : Number(a.sessionId > b.sessionId)));
@@ -719,7 +745,7 @@ const make = Effect.gen(function* () {
       codes,
       state: {
         linking: Object.keys(current.linking).length,
-        serving: Object.keys(current.serving).length,
+        serving: new Set([...Object.keys(current.serving), ...serving.keys()]).size,
       },
     };
     const sorted = <A>(entries: Readonly<Record<string, A>>) =>
@@ -734,48 +760,29 @@ const make = Effect.gen(function* () {
       state: { ...current, linking: sorted(current.linking), serving: sorted(current.serving) },
     });
     const digest = NodeCrypto.createHash("sha256").update(canonical).digest("hex");
-    return { preview: { fleetId, items, digest } satisfies LanFleetResetPreview, served };
+    const reset = { ...emptyState, serving: Object.fromEntries(serving) };
+    return {
+      preview: { fleetId, items, digest } satisfies LanFleetResetPreview,
+      reset,
+      unidentifiedPeer,
+    };
   });
 
   const resetLinks = Effect.fn("FleetPeerLinks.resetLinks")(
     function* (fleetId: string, input: LanFleetResetInput) {
-      const { preview, served } = yield* previewReset(fleetId).pipe(
+      const { preview, reset, unidentifiedPeer } = yield* previewReset(fleetId).pipe(
         Effect.mapError(() => new LanFleetError({ reason: "unavailable" })),
       );
       if (input.mode === "preview") return preview;
       if (input.fleetId !== fleetId || input.previewDigest !== preview.digest)
         return yield* new LanFleetError({ reason: "configuration", refusal: "stale-review" });
-      const current = yield* Ref.get(state);
-      const serving = new Map<string, Serving>();
-      for (const [machineId, entry] of Object.entries(current.serving)) {
-        const lastLink = entry.linked ?? entry.sessions.at(-1);
-        if (lastLink !== undefined) {
-          serving.set(machineId, {
-            linked: { deliveryId: lastLink.deliveryId, level: lastLink.level },
-            sessions: [],
-          });
-        }
-      }
-      for (const session of served) {
-        const root = CredentialAttribution.attributionRoot(session.subject) ?? "";
-        const [machineId, deliveryId, extra] = Delivery.fleetCredentialSubjectParts(root)
-          .subject.slice(SUBJECT_PREFIX.length)
-          .split(":");
-        if (!isFleetMachineId(machineId) || !deliveryId || extra !== undefined)
-          return yield* new LanFleetError({
-            reason: "configuration",
-            refusal: "reset-peer-unidentified",
-          });
-        if (!serving.has(machineId)) {
-          serving.set(machineId, {
-            linked: { deliveryId, level: FleetAccessPolicy.credentialAccess(session) },
-            sessions: [],
-          });
-        }
-      }
-      const reset = { ...emptyState, serving: Object.fromEntries(serving) };
+      if (unidentifiedPeer)
+        return yield* new LanFleetError({
+          reason: "configuration",
+          refusal: "reset-peer-unidentified",
+        });
       return yield* Effect.gen(function* () {
-        // Record the reoffers before revoking sessions so a failed state write leaves them usable.
+        // Keep sessions in the saved state until a pass sees their revocation.
         yield* writeFleetJson(stateFile, reset);
         yield* Ref.set(state, reset);
         yield* Queue.offer(requests, undefined);

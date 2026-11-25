@@ -446,17 +446,29 @@ stays saved.
 Old fleet pins without a recorded fleet ID stay saved. An exact TLS match can
 renew beside other saved pins, and an exact-pin renewal preserves a recorded
 fleet ID when the delivery omits it. When a delivery identifies its fleet and
-the saved route has neither a fleet ID nor a pin, the desktop can save the
-delivered credential as a separate fleet route at the same address. Both routes
-keep their own credentials, and later renewals target the fleet route. This also
-covers older fleet connections saved before fleet IDs were recorded. A delivery
-without a fleet ID cannot create a separate route at a conflicting address
-without an exact saved fleet pin. Conflicting pins still require a verified
-replacement. If the delivery cannot be matched or saved separately, you may need
-to pair again. An environment with only proven old-fleet routes does not count as
-connected for fleet delivery or acknowledgment.
-A fresh signed report that omits the route also lets the owner send a new offer
-after an older client reported it as connected.
+the saved route has neither a fleet ID nor a pin, the desktop saves the fleet
+credential under a separate connection ID even when the manual route uses the
+same address. This also applies if the manual route is added during pickup.
+Later deliveries reuse that fleet connection ID, including when the fleet adds
+its first pin. The manual route keeps its ID, address, and credential. At the
+same address, the client tries the pinned fleet route through the desktop gateway
+before its manual counterpart when both routes are reachable.
+
+The connection ID is also the credential key. Reusing it requires ownership
+proved by the saved fleet ID or an exact TLS pin. A fleet ID allows the client
+to allocate a spare ID when a manual route occupies the default one. An incoming
+delivery with neither a fleet ID nor an exact saved pin cannot reuse that
+credential or allocate a separate fleet route there. A different certificate or
+public key at the same pinned address requires a verified replacement of the
+saved pin. If pickup cannot establish which route to renew or replace, you may
+need to pair again.
+
+An environment with only proven old-fleet routes does not count as connected
+for delivery or acknowledgment. When a fresh signed report shows the recipient
+no longer has the connection, an explicit owner send can replace an acknowledged
+or expired offer. The replacement stays pending until its own pickup is
+acknowledged. An old receipt stops showing the connection as connected when its
+offer expires. A current signed report can still show a saved connection.
 
 Deliveries and owner link requests expire after 24 hours; signed connection
 summaries last ten minutes. Polling stops after three consecutive failures and
@@ -488,7 +500,9 @@ Reset invalidates sign-ins approved under retired offers. Before revoking
 sessions, it records which peers need a fresh offer, using the served sessions
 if the adapter state is missing or unreadable. Those peers can reconnect on
 the next eligible fleet pass under the current Machine access policy. The
-serving state count can include peers still waiting for a fresh offer. If Reset
+serving count includes peers recovered from authenticated sessions and peers
+with saved serving state. If revocation stops partway through, the surviving
+sessions stay tracked. Preview again to review the remaining items. If Reset
 cannot identify a served peer, it stops before applying changes and directs you
 to Authorized clients. If an agent link pass is already running, wait for it
 to finish and confirm again. Reset itself changes local state only. Keep shared

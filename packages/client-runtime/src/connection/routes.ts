@@ -96,9 +96,26 @@ function keepsSeparateFleetCredential(route: ConnectionRoute, candidate: FleetRo
   const profile = Option.getOrUndefined(route.profile);
   return (
     isSeparateFleetConnectionId(candidate.connectionId) &&
+    (candidate.fleetId !== undefined || candidate.fleetTls !== undefined) &&
     connectionRouteId(route.target) !== candidate.connectionId &&
     profile?._tag === "BearerConnectionProfile" &&
     profile.fleetTls === undefined
+  );
+}
+
+function canRenewUnpinnedFleetRoute(route: ConnectionRoute, candidate: FleetRouteCandidate) {
+  const profile = Option.getOrUndefined(route.profile);
+  return (
+    profile?._tag === "BearerConnectionProfile" &&
+    profile.fleetId !== undefined &&
+    profile.fleetId === candidate.fleetId &&
+    profile.fleetTls === undefined &&
+    (candidate.fleetTls !== undefined || candidate.fleetReplacementDeliveryId !== undefined) &&
+    profile.connectionId === candidate.connectionId &&
+    connectionRouteId(route.target) === candidate.connectionId &&
+    profile.learned !== true &&
+    profile.authorization === undefined &&
+    sameFleetCandidateAddress(route, candidate)
   );
 }
 
@@ -143,7 +160,7 @@ export function fleetDeliveryConnectionId(
       (id === candidate.connectionId || sameFleetCandidateAddress(route, candidate)) &&
       profile?._tag === "BearerConnectionProfile" &&
       profile.fleetTls === undefined &&
-      (profile.fleetId !== candidate.fleetId || candidate.fleetTls !== undefined)
+      profile.fleetId !== candidate.fleetId
     );
   });
   if (!needsSeparateId) return candidate.connectionId;
@@ -156,6 +173,7 @@ export function fleetDeliveryConnectionId(
 export function conflictsWithSavedFleetRoute(
   routes: ReadonlyArray<ConnectionRoute>,
   candidate: FleetRouteCandidate,
+  predecessor?: FleetTlsIdentity,
 ): boolean {
   return routes.some((route) => {
     if (
@@ -165,7 +183,8 @@ export function conflictsWithSavedFleetRoute(
       return false;
     if (keepsSeparateFleetCredential(route, candidate)) return false;
     const profile = Option.getOrUndefined(route.profile);
-    if (profile?._tag !== "BearerConnectionProfile") return true;
+    if (profile?._tag !== "BearerConnectionProfile" || !sameFleetCandidateAddress(route, candidate))
+      return true;
     if (
       profile.fleetId !== undefined &&
       candidate.fleetId !== undefined &&
@@ -174,21 +193,13 @@ export function conflictsWithSavedFleetRoute(
       return true;
     if (profile.fleetTls !== undefined && candidate.fleetTls !== undefined) {
       return (
-        profile.fleetId !== candidate.fleetId &&
-        !sameFleetTlsIdentity(profile.fleetTls, candidate.fleetTls)
+        !sameFleetTlsIdentity(profile.fleetTls, candidate.fleetTls) &&
+        (profile.fleetId !== candidate.fleetId ||
+          predecessor === undefined ||
+          !sameFleetTlsRoute(profile.fleetTls, predecessor))
       );
     }
-    return (
-      profile.fleetId === undefined ||
-      profile.fleetId !== candidate.fleetId ||
-      profile.fleetTls !== undefined ||
-      candidate.fleetTls !== undefined ||
-      candidate.fleetReplacementDeliveryId === undefined ||
-      profile.connectionId !== candidate.connectionId ||
-      profile.learned === true ||
-      profile.authorization !== undefined ||
-      profile.httpBaseUrl.replace(/\/+$/u, "") !== candidate.httpBaseUrl.replace(/\/+$/u, "")
-    );
+    return !canRenewUnpinnedFleetRoute(route, candidate);
   });
 }
 
@@ -199,7 +210,7 @@ export function savedFleetIdentity(
   if (entry === undefined) return undefined;
   const identities = connectionRoutes(entry).flatMap((route) => fleetTlsOfRoute(route) ?? []);
   if (identities.length === 1) return identities[0];
-  if (identities.length === 0) return null;
+  if (identities.length === 0) return undefined;
   if (candidate === undefined) return null;
   const exact = identities.filter((identity) => sameFleetTlsIdentity(identity, candidate));
   return exact.length === 1 ? exact[0]! : null;
@@ -240,9 +251,10 @@ export function fleetReplacementRoutes(
         });
   return retained.some(
     (route) =>
-      connectionRouteId(route.target) === candidate.connectionId ||
-      (sameFleetCandidateAddress(route, candidate) &&
-        !keepsSeparateFleetCredential(route, candidate)),
+      !canRenewUnpinnedFleetRoute(route, candidate) &&
+      (connectionRouteId(route.target) === candidate.connectionId ||
+        (sameFleetCandidateAddress(route, candidate) &&
+          !keepsSeparateFleetCredential(route, candidate))),
   )
     ? null
     : retained;
@@ -625,9 +637,35 @@ export function sendsTokenInClear(
   );
 }
 
+export function preferredConnectionRoutes(
+  entry: ConnectionCatalogEntry,
+): ReadonlyArray<ConnectionRoute> {
+  const saved = connectionRoutes(entry);
+  const routes = [...saved];
+  for (const route of saved) {
+    if (fleetTlsOfRoute(route) === undefined) continue;
+    const index = routes.indexOf(route);
+    const address = routeAddressKey(route);
+    const manual = routes.findIndex((other) => {
+      const profile = Option.getOrUndefined(other.profile);
+      return (
+        profile?._tag === "BearerConnectionProfile" &&
+        profile.fleetId === undefined &&
+        profile.fleetTls === undefined &&
+        routeAddressKey(other) === address
+      );
+    });
+    if (manual !== -1 && manual < index) {
+      routes.splice(index, 1);
+      routes.splice(manual, 0, route);
+    }
+  }
+  return routes;
+}
+
 /** Routes a connect may use: none sends a paired token over plain HTTP it wasn't paired over. */
 export function usableRoutes(entry: ConnectionCatalogEntry): ReadonlyArray<ConnectionRoute> {
-  const routes = connectionRoutes(entry);
+  const routes = preferredConnectionRoutes(entry);
   return routes.filter((route) => !sendsTokenInClear(routes, route));
 }
 

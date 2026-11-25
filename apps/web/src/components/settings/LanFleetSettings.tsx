@@ -115,7 +115,8 @@ function ResetFleetLinks({
           <DialogHeader>
             <DialogTitle>Reset fleet links</DialogTitle>
             <DialogDescription>
-              Review the fleet links and credentials that will be retired on this machine.
+              Review the fleet links and credentials that will be retired on this machine. Eligible
+              peers can receive a fresh offer after reset.
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>
@@ -133,8 +134,8 @@ function ResetFleetLinks({
               <div className="space-y-3 text-sm wrap-anywhere">
                 <p>Fleet {review.preview.fleetId}</p>
                 <p>
-                  {review.preview.items.state.linking} outgoing and{" "}
-                  {review.preview.items.state.serving} serving state entries
+                  {review.preview.items.state.linking} outgoing state entries and{" "}
+                  {review.preview.items.state.serving} peers with serving state or sessions
                 </p>
                 <ul className="list-disc ps-5">
                   {review.preview.items.links.map((link) => (

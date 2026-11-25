@@ -194,7 +194,9 @@ it("reviews a fleet reset, refuses stale review, and removes saved routes only w
   await expect.element(page.getByText(/Agent link to Agent peer/)).toBeVisible();
   await expect.element(page.getByText(/Served session fixture-session/)).toBeVisible();
   await expect.element(page.getByText(/Pending code fixture-code/)).toBeVisible();
-  await expect.element(page.getByText(/1 outgoing and 2 serving/)).toBeVisible();
+  await expect
+    .element(page.getByText(/1 outgoing state entries and 2 peers with serving state or sessions/))
+    .toBeVisible();
   await expect.element(page.getByText(/Current fleet route/)).toBeVisible();
   await expect.element(page.getByText(/Route added during preview/)).toBeVisible();
   await expect.element(page.getByText(/Legacy pin route/)).toBeVisible();

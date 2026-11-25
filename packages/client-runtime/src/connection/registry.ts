@@ -640,7 +640,7 @@ export const make = Effect.gen(function* () {
           retained === null ||
           (candidate !== undefined &&
             options?.fleetDelivery === true &&
-            conflictsWithSavedFleetRoute(savedRoutes, candidate)) ||
+            conflictsWithSavedFleetRoute(savedRoutes, candidate, replacement?.previousIdentity)) ||
           (unpinnedRenewal && retained.some((saved) => fleetTlsOfRoute(saved) !== undefined))
         )
           return yield* new ConnectionBlockedError({

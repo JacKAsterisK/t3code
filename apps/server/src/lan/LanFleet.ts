@@ -339,18 +339,24 @@ const make = Effect.gen(function* () {
             const journal: { -readonly [K in keyof Journal]: Journal[K] } = { ...saved };
             const machines: Array<LanFleetSyncResult["machines"][number]> = [];
             const incoming: Array<LanFleetSyncResult["incoming"][number]> = [];
-            const activeLinks = sharedFolder ? [...(yield* auth.listPairingLinks())] : [];
+            const explicitSends = new Set(input.mode === "status" ? [] : input.sendMachineIds);
+            const activeLinks =
+              sharedFolder || (config.managed && explicitSends.size > 0)
+                ? [...(yield* auth.listPairingLinks())]
+                : [];
             const activeSessions = sharedFolder ? yield* auth.listSessions() : [];
             const availableDeliveryIds = new Set<string>();
             const rejectedDeliveryIds = new Set<string>();
-            const activeGrant = (subject: string, expiresAt: number, pairingLinkId?: string) => {
-              const matches = activeLinks.filter(
+            const matchingGrants = (subject: string, expiresAt: number, pairingLinkId?: string) =>
+              activeLinks.filter(
                 (link) =>
                   link.subject === subject &&
                   (pairingLinkId === undefined || link.id === pairingLinkId) &&
                   DateTime.toEpochMillis(link.expiresAt) > now &&
                   Math.abs(DateTime.toEpochMillis(link.expiresAt) - expiresAt) <= 60_000,
               );
+            const activeGrant = (subject: string, expiresAt: number, pairingLinkId?: string) => {
+              const matches = matchingGrants(subject, expiresAt, pairingLinkId);
               return matches.length === 1 ? matches[0] : undefined;
             };
             yield* fs.makeDirectory(config.deliveryDirectory, { recursive: true });
@@ -363,10 +369,7 @@ const make = Effect.gen(function* () {
               (input.mode === "manual" || (input.mode === "automatic" && config.autoPickup))
                 ? campaign.machineIds
                 : [];
-            const requested = new Set([
-              ...(input.mode === "status" ? [] : input.sendMachineIds),
-              ...campaignIds,
-            ]);
+            const requested = new Set([...explicitSends, ...campaignIds]);
             const readOffer = (file: string) => {
               const read = readFleetJson(file, Delivery.Delivery);
               return sharedFolder ? Effect.option(read) : read.pipe(Effect.asSome);
@@ -692,10 +695,62 @@ const make = Effect.gen(function* () {
                       availableDeliveryIds.add(existing.header.deliveryId);
                   }
                 }
+                let acknowledged = sent?.status === "connected";
+                if (sent !== undefined && !acknowledged && sent.expiresAt > now) {
+                  const receiptFile = path.join(
+                    config.deliveryDirectory,
+                    `${outgoingKey}.receipt.json`,
+                  );
+                  if (yield* fs.exists(receiptFile)) {
+                    const receipt = yield* readFleetJson(receiptFile, Delivery.Receipt);
+                    acknowledged = Delivery.verifyReceipt(receipt, sent.deliveryId, self, peer);
+                  }
+                }
+                if (
+                  !sharedFolder &&
+                  peerCatalog !== undefined &&
+                  !recipientConnected &&
+                  explicitSends.has(peer.machineId) &&
+                  sent !== undefined &&
+                  sent.deliveryId !== EXISTING_CONNECTION &&
+                  sent.status !== "publishing" &&
+                  (acknowledged || sent.expiresAt <= now)
+                ) {
+                  const grants = matchingGrants(subject, sent.expiresAt, sent.pairingLinkId);
+                  if (grants.length > 1) {
+                    reportStatus("uncertain");
+                    continue;
+                  }
+                  if (outgoingExists) {
+                    const offer = Option.getOrUndefined(yield* readOffer(outFile));
+                    if (
+                      offer === undefined ||
+                      offer.header.deliveryId !== sent.deliveryId ||
+                      offer.header.expiresAt !== sent.expiresAt ||
+                      !Delivery.verifyDelivery(offer, self, peer, Math.min(now, sent.expiresAt - 1))
+                    ) {
+                      reportStatus("uncertain");
+                      continue;
+                    }
+                  }
+                  // An older client could acknowledge before spending the grant.
+                  const grant = grants[0];
+                  if (grant !== undefined) yield* auth.revokePairingLink(grant.id);
+                  if (outgoingExists)
+                    yield* fs.rename(outFile, `${outFile}.obsolete-${sent.deliveryId}`);
+                  delete journal[`sent:${outgoingKey}`];
+                  yield* writeFleetJson(journalFile, journal);
+                  sent = undefined;
+                  outgoingExists = false;
+                  acknowledged = false;
+                }
                 if (recipientConnected) {
                   sent = {
                     deliveryId: sent?.deliveryId ?? EXISTING_CONNECTION,
                     expiresAt: sent?.expiresAt ?? now,
+                    ...(sent?.pairingLinkId === undefined
+                      ? {}
+                      : { pairingLinkId: sent.pairingLinkId }),
                     ...generation,
                     status: "connected",
                   };
@@ -738,11 +793,11 @@ const make = Effect.gen(function* () {
                     subject,
                     scopes: FleetAccessPolicy.fleetCredentialScopes(minted),
                   });
-                  if (sharedFolder) {
+                  if (config.managed) {
                     sent = { ...sent, pairingLinkId: issued.id };
                     journal[`sent:${outgoingKey}`] = sent;
                     yield* writeFleetJson(journalFile, journal);
-                    activeLinks.push(issued);
+                    if (sharedFolder) activeLinks.push(issued);
                   }
                   const delivery = yield* Effect.try(() =>
                     Delivery.sealDelivery({
@@ -775,22 +830,15 @@ const make = Effect.gen(function* () {
                 if (sent !== undefined) {
                   status = outgoingRejected
                     ? "uncertain"
-                    : sent.status === "connected"
+                    : recipientConnected || sent.deliveryId === EXISTING_CONNECTION
                       ? "connected"
                       : sent.status === "publishing"
                         ? "uncertain"
                         : sent.expiresAt <= now
                           ? "expired"
-                          : "pending";
-                  const receiptFile = path.join(
-                    config.deliveryDirectory,
-                    `${outgoingKey}.receipt.json`,
-                  );
-                  if (yield* fs.exists(receiptFile)) {
-                    const receipt = yield* readFleetJson(receiptFile, Delivery.Receipt);
-                    if (Delivery.verifyReceipt(receipt, sent.deliveryId, self, peer))
-                      status = "connected";
-                  }
+                          : acknowledged
+                            ? "connected"
+                            : "pending";
                 }
                 const incomingKey = Delivery.deliveryFileName(peer.machineId, self.machineId);
                 const inFile = path.join(config.deliveryDirectory, `${incomingKey}.json`);
@@ -807,8 +855,16 @@ const make = Effect.gen(function* () {
                   );
                   const grantAvailable = sharedFolder && grantOffered === true;
                   const connected = connectedEnvironmentIds.includes(peer.environmentId);
+                  const ownerResend =
+                    config.managed &&
+                    !sharedFolder &&
+                    !connected &&
+                    received !== undefined &&
+                    received.deliveryId !== delivery.header.deliveryId &&
+                    (received.status === "connected" || received.expiresAt <= now);
                   const replacementOffer =
-                    (received?.status === "connected" &&
+                    (!ownerResend &&
+                      received?.status === "connected" &&
                       received.deliveryId !== delivery.header.deliveryId) ||
                     ((sharedFolder ||
                       config.credentialScope !== undefined ||
@@ -829,7 +885,8 @@ const make = Effect.gen(function* () {
                     (received === undefined ||
                       received.deliveryId === delivery.header.deliveryId ||
                       (grantAvailable && received.status !== "connected") ||
-                      replacement)
+                      replacement ||
+                      ownerResend)
                   ) {
                     const open = Effect.try(() =>
                       Delivery.openDelivery(delivery, config, peer, self, now),
@@ -854,6 +911,7 @@ const make = Effect.gen(function* () {
                       (grantAvailable || (!sharedFolder && !replacing)) &&
                       (received === undefined ||
                         replacement ||
+                        ownerResend ||
                         (sharedFolder &&
                           received.status === "connecting" &&
                           peerCatalog?.availableDeliveryIds?.includes(

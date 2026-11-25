@@ -604,6 +604,7 @@ it.live.each([
   "dropped offer",
   "unidentified session",
   "state write failure",
+  "partial revoke",
 ] as const)("reoffers or preserves the session when resetting a settled peer with %s", (mode) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -636,18 +637,38 @@ it.live.each([
               subject: "lan-fleet-peer-link:fixture-without-delivery",
             })
           : undefined;
+      const extra =
+        mode === "partial revoke"
+          ? yield* linked.auth.issueSession({ subject: session!.subject })
+          : undefined;
+      let revokeCount = 0;
       const adapter = yield* FleetPeerLinks.FleetPeerLinks.pipe(
         Effect.provide(FleetPeerLinks.layerServices.pipe(Layer.fresh)),
-        Effect.provideContext(linked.context),
+        Effect.provideContext(
+          Context.add(linked.context, EnvironmentAuth.EnvironmentAuth, {
+            ...linked.auth,
+            revokeSession: (id) =>
+              Effect.suspend(() =>
+                mode === "partial revoke" && ++revokeCount === 2
+                  ? Effect.fail(
+                      new EnvironmentAuth.ServerAuthSessionRevocationError({
+                        cause: "synthetic revocation failure",
+                      }),
+                    )
+                  : linked.auth.revokeSession(id),
+              ),
+          }),
+        ),
       );
       const fleetId = "synthetic-fleet";
       const preview = yield* adapter.resetLinks(fleetId, { mode: "preview" });
       if (!("digest" in preview)) return yield* Effect.die("Expected fleet reset preview");
-      expect(preview.items.state.serving).toBe(mode === "missing" || mode === "unreadable" ? 0 : 1);
+      expect(preview.items.state.serving).toBe(1);
       expect(preview.items.sessions.map(({ sessionId }) => sessionId).toSorted()).toEqual(
         [
           session!.sessionId,
           ...(unidentified === undefined ? [] : [unidentified.sessionId]),
+          ...(extra === undefined ? [] : [extra.sessionId]),
         ].toSorted(),
       );
       const offer = path.join(
@@ -678,7 +699,29 @@ it.live.each([
         });
         return;
       }
-      expect(yield* apply).toMatchObject({ revokedSessions: 1 });
+      if (mode === "partial revoke") {
+        expect(yield* apply.pipe(Effect.flip)).toMatchObject({ reason: "unavailable" });
+        const survivor = preview.items.sessions[1]!;
+        const persisted = yield* FleetPeerLinks.loadLinkState({
+          stateDir: config.stateDir,
+          rosterPath: undefined,
+        });
+        expect(persisted.state.serving[machineId]?.sessions).toEqual(
+          expect.arrayContaining([expect.objectContaining({ sessionId: survivor.sessionId })]),
+        );
+        const retry = yield* adapter.resetLinks(fleetId, { mode: "preview" });
+        if (!("digest" in retry)) return yield* Effect.die("Expected fleet reset preview");
+        expect(retry.items.sessions).toEqual([survivor]);
+        expect(
+          yield* adapter.resetLinks(fleetId, {
+            mode: "apply",
+            fleetId,
+            previewDigest: retry.digest,
+          }),
+        ).toMatchObject({ revokedSessions: 1 });
+      } else {
+        expect(yield* apply).toMatchObject({ revokedSessions: 1 });
+      }
       expect(yield* linked.linkSessions(fleet.cryoFrog)).toEqual([]);
       yield* linking.adapter.pass;
       yield* adapter.pass;

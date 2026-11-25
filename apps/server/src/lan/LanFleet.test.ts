@@ -996,6 +996,84 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
       }).pipe(Effect.provide(testConfig)),
   );
 
+  it.effect.each([
+    { switched: false, spent: true },
+    { switched: true, spent: true },
+    { switched: false, spent: false },
+  ])(
+    "re-arms an acknowledged owner-approved offer after a fleet change ($switched, $spent)",
+    ({ switched, spent }) =>
+      Effect.gen(function* () {
+        const fleetId = "current-fleet";
+        const f = yield* setup(
+          true,
+          false,
+          false,
+          true,
+          switched ? fleetId : undefined,
+          fleetId,
+          true,
+        );
+        const environmentId = f.a.peer.environmentId;
+        const sendMachineIds = ["beta"];
+        const saved = { connectedEnvironmentIds: [environmentId] };
+        const stale = {
+          ...saved,
+          pinnedFleetRoutes: [{ environmentId, fleetIds: ["other-fleet"] }],
+        };
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds });
+        const first = (yield* f.sync(f.recipient.service)).incoming[0]!;
+        if (spent) f.consume("alpha");
+        yield* f.sync(f.recipient.service, saved);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+
+        yield* f.sync(f.recipient.service, { ...stale, mode: "status" });
+        assert.equal((yield* f.sync(f.recipient.service, stale)).incoming.length, 0);
+        assert.equal(
+          (yield* f.sync(f.sender.service, { sendMachineIds })).machines[1]?.status,
+          "pending",
+        );
+        const resent = (yield* f.sync(f.recipient.service, stale)).incoming[0]!;
+        assert.isDefined(resent);
+        assert.notEqual(resent.deliveryId, first.deliveryId);
+        assert.deepEqual(f.issued, ["alpha", "alpha"]);
+        assert.deepEqual(f.revoked, spent ? [] : ["synthetic-1"]);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "pending");
+
+        f.consume("alpha");
+        yield* f.sync(f.recipient.service, saved);
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+      }).pipe(Effect.provide(testConfig)),
+  );
+
+  it.effect("expires an owner-approved offer even if it has a receipt", () =>
+    Effect.gen(function* () {
+      const f = yield* setup(true, false, false, true, undefined, "current-fleet", true);
+      const environmentId = f.a.peer.environmentId;
+      yield* f.sync(f.recipient.service, { mode: "status" });
+      yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+      // An older client acknowledges based only on its saved environment ID.
+      yield* f.sync(f.recipient.service, { connectedEnvironmentIds: [environmentId] });
+      assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+
+      yield* TestClock.adjust("24 hours");
+      const stale = {
+        connectedEnvironmentIds: [environmentId],
+        pinnedFleetRoutes: [{ environmentId, fleetIds: ["other-fleet"] }],
+      };
+      yield* f.sync(f.recipient.service, { ...stale, mode: "status" });
+      assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "expired");
+      assert.equal((yield* f.sync(f.recipient.service, stale)).incoming.length, 0);
+      assert.deepEqual(f.issued, ["alpha"]);
+      assert.equal(
+        (yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] })).machines[1]?.status,
+        "pending",
+      );
+      assert.lengthOf((yield* f.sync(f.recipient.service, stale)).incoming, 1);
+    }).pipe(Effect.provide(testConfig)),
+  );
+
   it.effect("skips existing environment identities and refuses guessed recipients", () =>
     Effect.gen(function* () {
       const f = yield* setup();

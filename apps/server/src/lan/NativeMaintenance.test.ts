@@ -4,6 +4,7 @@ import * as NodeSqlite from "node:sqlite";
 import * as NodeFS from "node:fs";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeURL from "node:url";
+import * as NodePath from "node:path";
 import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
@@ -14,6 +15,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
 import * as NativeMaintenance from "./NativeMaintenance.ts";
+import { unfinishedWorkAt } from "./NativeUnfinishedWork.ts";
 import { nativeMaintenanceRefusalMessage } from "./nativeMaintenanceEntry.ts";
 import { nativeRestartSafeEffects } from "./nativeWorkStates.ts";
 import {
@@ -151,6 +153,317 @@ const hostNowMs = () => DateTime.toEpochMillis(DateTime.nowUnsafe());
 const isoAtMs = (ms: number) => DateTime.formatIso(DateTime.makeUnsafe(ms));
 const readinessWork = (databasePath: string) =>
   NativeMaintenance.inspectNativeUpdateReadinessWork(databasePath);
+
+effectIt.effect(
+  "binds stopped workflow cancellation to the reviewed work and keeps a private backup",
+  () =>
+    Effect.gen(function* () {
+      const { dbPath, request, insert } = yield* fixture;
+      yield* insert("orchestration_v2_thread_launch_workflows", "pending", {
+        command_id: "command:stopped-fixture",
+        thread_id: "thread:launch-not-yet-created",
+        title: "Stopped fixture workflow",
+      });
+      const preview = { ...request, operation: "inspect-unfinished-work" as const };
+      const excluded = { ...preview, includeRestartContinuations: false };
+      const before = yield* unfinishedWorkAt(dbPath, excluded, identity);
+      assert.equal(before.blocking.restartContinuations, 1);
+      assert.equal(before.threads[0]?.items[0]?.selected, false);
+      const selected = yield* unfinishedWorkAt(dbPath, preview, identity);
+      assert.equal(selected.workGeneration, before.workGeneration);
+      assert.notEqual(selected.reviewSha256, before.reviewSha256);
+      const cancel = {
+        ...excluded,
+        operation: "cancel-unfinished-work" as const,
+        expectedWorkGeneration: before.workGeneration,
+        expectedReviewSha256: before.reviewSha256,
+      };
+      assert.equal(
+        (yield* unfinishedWorkAt(dbPath, cancel, identity).pipe(Effect.flip)).reason,
+        "busy",
+      );
+      assert.equal(
+        (yield* unfinishedWorkAt(
+          dbPath,
+          { ...cancel, includeRestartContinuations: true },
+          identity,
+        ).pipe(Effect.flip)).reason,
+        "changed",
+      );
+      const result = yield* unfinishedWorkAt(
+        dbPath,
+        {
+          ...cancel,
+          includeRestartContinuations: true,
+          expectedReviewSha256: selected.reviewSha256,
+        },
+        identity,
+      );
+      assert.isTrue("backupDirectory" in result && result.backupDirectory !== null);
+      if (!("backupDirectory" in result) || result.backupDirectory === null) return;
+      const backup = result.backupDirectory;
+      try {
+        assert.equal(result.blocking.restartContinuations, 0);
+        assert.deepEqual(result.cancelled, { entities: 1, events: 0 });
+        assert.equal(result.providerLaunches, 0);
+        assert.equal(
+          NativeMaintenance.inspectNativeUpdateWork(
+            NodePath.join(backup, "statev2.sqlite"),
+            2,
+            true,
+          ).workGeneration,
+          before.workGeneration,
+        );
+        assert.isTrue(NodeFS.existsSync(NodePath.join(backup, "prepared-receipt.json")));
+        const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+        try {
+          assert.equal(
+            db
+              .prepare(
+                "SELECT status FROM orchestration_v2_thread_launch_workflows WHERE command_id=?",
+              )
+              .get("command:stopped-fixture")?.status,
+            "failed",
+          );
+        } finally {
+          db.close();
+        }
+      } finally {
+        for (const name of [
+          "statev2.sqlite",
+          "statev2.sqlite-wal",
+          "statev2.sqlite-shm",
+          "prepared-receipt.json",
+        ])
+          NodeFS.rmSync(NodePath.join(backup, name), { force: true });
+        NodeFS.rmdirSync(backup);
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect(
+  "carries preserved message questions with their exact cards after a terminal provider turn",
+  () =>
+    Effect.gen(function* () {
+      const { dbPath, request, insert, mutate } = yield* fixture;
+      const ids = {
+        threadId: "thread:input",
+        runId: "run:input",
+        nodeId: "node:input",
+        providerThreadId: "provider-thread:input",
+        providerTurnId: "provider-turn:input",
+        requestId: "request:input",
+      };
+      const { threadId, runId, nodeId, providerThreadId, providerTurnId, requestId } = ids;
+      yield* insert("orchestration_v2_projection_runs", "completed", {
+        thread_id: threadId,
+        run_id: runId,
+        payload_json: JSON.stringify({ id: runId, threadId, status: "completed" }),
+      });
+      yield* insert("orchestration_v2_projection_nodes", "completed", {
+        thread_id: threadId,
+        run_id: runId,
+        node_id: nodeId,
+        kind: "user_input_request",
+        runtime_request_id: null,
+        payload_json: JSON.stringify({
+          ...ids,
+          id: nodeId,
+          kind: "user_input_request",
+          status: "completed",
+          runtimeRequestId: requestId,
+        }),
+      });
+      yield* insert("orchestration_v2_projection_provider_turns", "completed", {
+        thread_id: threadId,
+        provider_thread_id: providerThreadId,
+        provider_turn_id: providerTurnId,
+        node_id: "node:root",
+        payload_json: JSON.stringify({
+          id: providerTurnId,
+          status: "completed",
+          providerThreadId,
+          nodeId: "node:root",
+        }),
+      });
+      yield* insert("orchestration_v2_projection_runtime_requests", "pending", {
+        thread_id: threadId,
+        node_id: nodeId,
+        runtime_request_id: requestId,
+        provider_turn_id: providerTurnId,
+        kind: "user_input",
+        payload_json: JSON.stringify({
+          id: requestId,
+          status: "pending",
+          kind: "user_input",
+          nodeId,
+          providerTurnId,
+          responseCapability: { type: "message" },
+        }),
+      });
+      yield* insert("orchestration_v2_projection_turn_items", "waiting", {
+        thread_id: threadId,
+        run_id: runId,
+        node_id: nodeId,
+        provider_thread_id: providerThreadId,
+        provider_turn_id: providerTurnId,
+        turn_item_id: "item:input",
+        type: "user_input_request",
+        payload_json: JSON.stringify({
+          ...ids,
+          id: "item:input",
+          status: "waiting",
+          type: "user_input_request",
+          questions: [{ question: "Keep answerable after the update?" }],
+        }),
+      });
+      const legacy = NativeMaintenance.inspectNativeUpdateWork(dbPath, 2, false);
+      const optedIn = NativeMaintenance.inspectNativeUpdateWork(dbPath, 2, true);
+      assert.equal(legacy.backgroundAgents, 1);
+      assert.equal(optedIn.backgroundAgents, 0);
+      assert.equal(optedIn.carriedWork.pendingRequests, 1);
+      assert.equal(optedIn.workGeneration, legacy.workGeneration);
+      const review = yield* unfinishedWorkAt(
+        dbPath,
+        { ...request, operation: "inspect-unfinished-work" },
+        identity,
+      );
+      assert.deepEqual(review.staleWork, {});
+      assert.equal(review.threads[0]?.items[0]?.selected, false);
+      yield* mutate(
+        "UPDATE orchestration_v2_projection_turn_items SET provider_turn_id='contradiction'",
+      );
+      assert.equal(NativeMaintenance.inspectNativeUpdateWork(dbPath, 2, true).backgroundAgents, 1);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+effectIt.effect("settles a failed-run Claude turn while retaining its history", () =>
+  Effect.gen(function* () {
+    const { dbPath, request, insert, mutate } = yield* fixture;
+    const old = isoAtMs(hostNowMs() - 12 * 86400000);
+    const threadId = "thread:failed";
+    const runId = "run:failed";
+    const nodeId = "node:failed";
+    const providerThreadId = "provider-thread:failed";
+    const turnId = "provider-turn:failed";
+    const attemptId = "attempt:failed";
+    yield* insert("orchestration_v2_projection_threads", "failed", {
+      thread_id: threadId,
+      title: "Failed Claude fixture",
+    });
+    yield* insert("orchestration_v2_projection_runs", "failed", {
+      thread_id: threadId,
+      run_id: runId,
+      completed_at: old,
+      payload_json: JSON.stringify({ id: runId, threadId, status: "failed", completedAt: old }),
+    });
+    yield* insert("orchestration_v2_projection_provider_threads", "idle", {
+      thread_id: threadId,
+      provider_thread_id: providerThreadId,
+      provider_session_id: "session:stopped",
+      payload_json: JSON.stringify({ id: providerThreadId, status: "idle" }),
+    });
+    yield* insert("orchestration_v2_projection_provider_sessions", "stopped", {
+      thread_id: threadId,
+      provider_session_id: "session:stopped",
+    });
+    yield* insert("orchestration_v2_projection_nodes", "failed", {
+      thread_id: threadId,
+      run_id: runId,
+      node_id: nodeId,
+      runtime_request_id: null,
+      payload_json: JSON.stringify({
+        id: nodeId,
+        threadId,
+        runId,
+        status: "failed",
+        runtimeRequestId: null,
+      }),
+    });
+    yield* insert("orchestration_v2_projection_run_attempts", "failed", {
+      thread_id: threadId,
+      run_id: runId,
+      attempt_id: attemptId,
+      payload_json: JSON.stringify({ id: attemptId, runId, status: "failed" }),
+    });
+    yield* insert("orchestration_v2_projection_provider_turns", "running", {
+      thread_id: threadId,
+      node_id: nodeId,
+      provider_thread_id: providerThreadId,
+      provider_turn_id: turnId,
+      run_attempt_id: attemptId,
+      ordinal: 1,
+      started_at: old,
+      payload_json: JSON.stringify({
+        id: turnId,
+        providerThreadId,
+        nodeId,
+        runAttemptId: attemptId,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "running",
+        startedAt: old,
+        completedAt: null,
+      }),
+    });
+    const preview = { ...request, operation: "inspect-unfinished-work" as const };
+    const before = yield* unfinishedWorkAt(dbPath, preview, identity);
+    assert.equal(before.blocking.backgroundAgents, 0);
+    assert.deepEqual(before.staleWork, { provider_turn: 1 });
+    assert.equal(before.threads[0]?.title, "Failed Claude fixture");
+    yield* mutate("UPDATE orchestration_v2_projection_provider_sessions SET status='running'");
+    const owned = yield* unfinishedWorkAt(dbPath, preview, identity);
+    assert.deepEqual(owned.staleWork, {});
+    assert.isAbove(owned.blocking.backgroundAgents, 0);
+    yield* mutate("UPDATE orchestration_v2_projection_provider_sessions SET status='stopped'");
+    const result = yield* unfinishedWorkAt(
+      dbPath,
+      {
+        ...request,
+        operation: "settle-stale-work",
+        expectedWorkGeneration: before.workGeneration,
+        expectedReviewSha256: before.reviewSha256,
+      },
+      identity,
+    );
+    assert.isTrue("backupDirectory" in result && result.backupDirectory !== null);
+    if (!("backupDirectory" in result) || result.backupDirectory === null) return;
+    try {
+      assert.equal(result.blocking.backgroundAgents, 0);
+      assert.deepEqual(result.cancelled, { entities: 1, events: 1 });
+      const db = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+      try {
+        assert.equal(
+          db
+            .prepare(
+              "SELECT status FROM orchestration_v2_projection_provider_turns WHERE provider_turn_id=?",
+            )
+            .get(turnId)?.status,
+          "cancelled",
+        );
+        assert.equal(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM orchestration_events WHERE event_type='provider-turn.updated'",
+            )
+            .get()?.count,
+          1,
+        );
+      } finally {
+        db.close();
+      }
+    } finally {
+      for (const name of [
+        "statev2.sqlite",
+        "statev2.sqlite-wal",
+        "statev2.sqlite-shm",
+        "prepared-receipt.json",
+      ])
+        NodeFS.rmSync(NodePath.join(result.backupDirectory, name), { force: true });
+      NodeFS.rmdirSync(result.backupDirectory);
+    }
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
 
 effectIt.effect("live readiness avoids historical payload reads and generation scans", () =>
   Effect.gen(function* () {

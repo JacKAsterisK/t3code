@@ -34,6 +34,73 @@ const decodeEvent = Schema.decodeUnknownEffect(OrchestrationV2DomainEventJson);
 const reason =
   "Cancelled by the user during offline T3 home recovery; conversation and session history retained.";
 
+export const offlineEventForWork = Effect.fnUntraced(function* (
+  index: number,
+  row: { thread_id: string | null; status: string; payload_json: string },
+  threadId: string,
+  occurredAt: string,
+  cancellationReason: string,
+  cancelRestarts = false,
+  expectedId?: string,
+) {
+  const parsed: unknown = strictJson(Buffer.from(row.payload_json));
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    return yield* new OfflineWorkCancellationError({ reason: "invalid-state" });
+  const prior = parsed as Record<string, unknown>;
+  if (
+    prior.status !== row.status ||
+    (expectedId !== undefined && prior.id !== expectedId) ||
+    (prior.threadId !== undefined && prior.threadId !== row.thread_id)
+  )
+    return yield* new OfflineWorkCancellationError({ reason: "invalid-state" });
+  const payload = { ...prior };
+  if (index === 3) Object.assign(payload, { status: "stopped", updatedAt: occurredAt });
+  else if (index === 4) {
+    Object.assign(payload, {
+      status: row.status === "active" ? "idle" : row.status,
+      updatedAt: occurredAt,
+    });
+    if (
+      typeof prior.goal === "object" &&
+      prior.goal !== null &&
+      "status" in prior.goal &&
+      prior.goal.status === "active"
+    )
+      payload.goal = { ...prior.goal, status: "paused" };
+  } else if (index === 6)
+    Object.assign(payload, {
+      status: "cancelled",
+      resolvedAt: occurredAt,
+      responseCapability: { type: "not_resumable", reason: cancellationReason },
+    });
+  else if (
+    !cancelRestarts ||
+    index !== 7 ||
+    ["pending", "running", "waiting"].includes(row.status)
+  ) {
+    Object.assign(payload, { status: "cancelled", completedAt: occurredAt });
+    if (index === 0) Object.assign(payload, { queuePosition: null });
+    if (index === 7 || index === 8) Object.assign(payload, { updatedAt: occurredAt });
+    if (index === 8 && typeof payload.streaming === "boolean") payload.streaming = false;
+    if (index === 8 && payload.type === "secret_request" && payload.secretStatus === "pending")
+      payload.secretStatus = "cancelled";
+  }
+  if (cancelRestarts && index === 4) payload.pendingBackgroundTasks = [];
+  if (cancelRestarts && index === 7) {
+    if (payload.completionDelivery !== undefined)
+      payload.completionDelivery = { state: "disposed", observedByRunId: null };
+  }
+  return {
+    type: eventTypes[index],
+    threadId,
+    payload,
+    ...(typeof prior.runId === "string" ? { runId: prior.runId } : {}),
+    ...(typeof prior.providerInstanceId === "string"
+      ? { providerInstanceId: prior.providerInstanceId }
+      : {}),
+    ...(typeof prior.driver === "string" ? { driver: prior.driver } : {}),
+  };
+});
 /** Caller owns a staged database and exclusive admission. It must never attach a worker to this layer. */
 export const cancelOfflineWork = Effect.fn("OfflineWorkCancellation.cancel")(function* (
   repairId: string,
@@ -76,58 +143,8 @@ export const cancelOfflineWork = Effect.fn("OfflineWorkCancellation.cancel")(fun
           states,
         );
         for (const row of rows) {
-          const parsed: unknown = strictJson(Buffer.from(row.payload_json));
-          if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-            return yield* new OfflineWorkCancellationError({ reason: "invalid-state" });
-          const prior = parsed as Record<string, unknown>;
-          if (
-            prior.status !== row.status ||
-            (prior.threadId !== undefined && prior.threadId !== row.thread_id)
-          )
-            return yield* new OfflineWorkCancellationError({ reason: "invalid-state" });
-          const payload = { ...prior };
-          if (index === 3) Object.assign(payload, { status: "stopped", updatedAt: occurredAt });
-          else if (index === 4) {
-            Object.assign(payload, {
-              status: row.status === "active" ? "idle" : row.status,
-              updatedAt: occurredAt,
-            });
-            if (
-              typeof prior.goal === "object" &&
-              prior.goal !== null &&
-              "status" in prior.goal &&
-              prior.goal.status === "active"
-            )
-              payload.goal = { ...prior.goal, status: "paused" };
-          } else if (index === 6)
-            Object.assign(payload, {
-              status: "cancelled",
-              resolvedAt: occurredAt,
-              responseCapability: { type: "not_resumable", reason },
-            });
-          else {
-            Object.assign(payload, { status: "cancelled", completedAt: occurredAt });
-            if (index === 0) Object.assign(payload, { queuePosition: null });
-            if (index === 7 || index === 8) Object.assign(payload, { updatedAt: occurredAt });
-            if (index === 8 && typeof payload.streaming === "boolean") payload.streaming = false;
-            if (
-              index === 8 &&
-              payload.type === "secret_request" &&
-              payload.secretStatus === "pending"
-            )
-              payload.secretStatus = "cancelled";
-          }
           counts[`${table}:${row.status}`] = (counts[`${table}:${row.status}`] ?? 0) + 1;
-          yield* append({
-            type: eventTypes[index],
-            threadId: row.thread_id,
-            payload,
-            ...(typeof prior.runId === "string" ? { runId: prior.runId } : {}),
-            ...(typeof prior.providerInstanceId === "string"
-              ? { providerInstanceId: prior.providerInstanceId }
-              : {}),
-            ...(typeof prior.driver === "string" ? { driver: prior.driver } : {}),
-          });
+          yield* append(yield* offlineEventForWork(index, row, row.thread_id, occurredAt, reason));
         }
       }
       const messages = yield* sql<{

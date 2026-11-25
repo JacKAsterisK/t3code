@@ -6,7 +6,11 @@ import * as Logger from "effect/Logger";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { NativeActivationBuildIdentity, NativeMaintenanceRequest } from "@t3tools/contracts";
+import {
+  NativeActivationBuildIdentity,
+  NativeMaintenanceRequest,
+  NativeUnfinishedWorkRequest,
+} from "@t3tools/contracts";
 import { isEntrypoint } from "../entrypoint.ts";
 import * as NativeMaintenance from "./NativeMaintenance.ts";
 import {
@@ -14,6 +18,7 @@ import {
   fleetRecoveryRefusal,
   recoverFleetCredential,
 } from "./fleetCredentialRecoveryEntry.ts";
+import { unfinishedWork } from "./NativeUnfinishedWork.ts";
 import { strictJson } from "@t3tools/shared/strictJson";
 
 declare const __T3_LAN_BUILD_IDENTITY__: unknown;
@@ -72,22 +77,39 @@ if (
             document,
           )
         : undefined;
-      const request = recovery
-        ? {
-            schemaVersion: 1 as const,
-            operation: "inspect" as const,
-            nonce: recovery.nonce,
-            homeDirectory: recovery.homeDirectory,
-            environmentId: recovery.environmentId,
-            journalPath: recovery.journalPath,
-            generationVersion: 2 as const,
-          }
-        : Schema.decodeUnknownSync(NativeMaintenanceRequest, { onExcessProperty: "error" })(
-            document,
-          );
+      const workRequest =
+        typeof document === "object" &&
+        document !== null &&
+        "operation" in document &&
+        ["inspect-unfinished-work", "cancel-unfinished-work", "settle-stale-work"].includes(
+          String(document.operation),
+        )
+          ? Schema.decodeUnknownSync(NativeUnfinishedWorkRequest, { onExcessProperty: "error" })(
+              document,
+            )
+          : undefined;
+      const request =
+        workRequest !== undefined
+          ? undefined
+          : recovery
+            ? {
+                schemaVersion: 1 as const,
+                operation: "inspect" as const,
+                nonce: recovery.nonce,
+                homeDirectory: recovery.homeDirectory,
+                environmentId: recovery.environmentId,
+                journalPath: recovery.journalPath,
+                generationVersion: 2 as const,
+              }
+            : Schema.decodeUnknownSync(NativeMaintenanceRequest, { onExcessProperty: "error" })(
+                document,
+              );
       fallbackReason = "io";
       const result = await Effect.runPromise(
         Effect.gen(function* () {
+          if (workRequest !== undefined) return yield* unfinishedWork(workRequest, identity);
+          if (request === undefined)
+            return yield* new NativeMaintenance.NativeMaintenanceError({ reason: "schema" });
           const service = yield* NativeMaintenance.NativeMaintenance;
           if (recovery !== undefined) {
             yield* service.inspect(request);
@@ -111,6 +133,7 @@ if (
             NativeMaintenance.layer(identity).pipe(
               Layer.provide(NativeMaintenance.layerNativeLease),
             ),
+            NativeMaintenance.layerNativeLease,
             NodeServices.layer,
             Logger.layer([], { mergeWithExisting: false }),
           ]),

@@ -19,12 +19,17 @@ import { strictJson } from "@t3tools/shared/strictJson";
 import {
   NativeActivationBuildIdentity,
   type NativeMaintenanceRequest,
+  type NativeUnfinishedWorkRequest,
   OrchestrationV2DelegatedCompletionCohort,
   OrchestrationV2DelegatedCompletionTaskDelivery,
   OrchestrationV2ProviderGoal,
 } from "@t3tools/contracts";
 import { nativeDataGeneration, NativeDataGenerationChanged } from "./NativeDataGeneration.ts";
-import { describeStaleApprovalLinks, staleApprovalClassifier } from "./nativeStaleWork.ts";
+import {
+  carriedMessageInputClassifier,
+  describeStaleApprovalLinks,
+  staleApprovalClassifier,
+} from "./nativeStaleWork.ts";
 import { migrationManifest, runMigrations } from "../persistence/Migrations.ts";
 import {
   emptyNativeWork,
@@ -499,6 +504,7 @@ function inspectWork(
   readiness?: false,
   generationVersion?: 2,
   allowStaleApprovals?: boolean,
+  detail?: { db?: NodeSqlite.DatabaseSync; entries: NativeWorkEntry[] },
 ): WorkInspection & { readonly workGeneration: string };
 function inspectWork(
   databasePath: string,
@@ -506,14 +512,17 @@ function inspectWork(
   readiness = false,
   generationVersion?: 2,
   allowStaleApprovals = false,
+  detail?: { db?: NodeSqlite.DatabaseSync; entries: NativeWorkEntry[] },
 ): WorkInspection & { readonly workGeneration?: string } {
   const lightweight = readiness || generationVersion === 2;
-  const db = new NodeSqlite.DatabaseSync(databasePath, {
-    readOnly: true,
-    enableForeignKeyConstraints: true,
-  });
+  const db =
+    detail?.db ??
+    new NodeSqlite.DatabaseSync(databasePath, {
+      readOnly: true,
+      enableForeignKeyConstraints: true,
+    });
   try {
-    db.exec("PRAGMA query_only=ON; BEGIN;");
+    if (detail?.db === undefined) db.exec("PRAGMA query_only=ON; BEGIN;");
     if (!lightweight && db.prepare("PRAGMA quick_check").get()?.quick_check !== "ok")
       throw new NativeMaintenanceError({ reason: "schema" });
     const recorded = db
@@ -773,7 +782,7 @@ function inspectWork(
       unconsumedContext +
       childResults;
     const updateWork = update
-      ? classifyUpdateWork(db, childResults, isTerminalDisplay, lightweight)
+      ? classifyUpdateWork(db, childResults, isTerminalDisplay, lightweight, false, detail?.entries)
       : undefined;
     const work = {
       activeRuns,
@@ -789,7 +798,14 @@ function inspectWork(
       updateWork.backgroundAgents > 0 &&
       recorded.some((row) => row.migration_id === 82) &&
       (readiness || (generationVersion === 2 && allowStaleApprovals))
-        ? classifyUpdateWork(db, childResults, isTerminalDisplay, lightweight, true)
+        ? classifyUpdateWork(
+            db,
+            childResults,
+            isTerminalDisplay,
+            lightweight,
+            true,
+            detail?.entries,
+          )
         : work;
     // Live close admission needs current work only; stopped verification owns history integrity.
     if (readiness) {
@@ -899,13 +915,13 @@ function inspectWork(
         }
       }
     }
-    db.exec("COMMIT");
+    if (detail?.db === undefined) db.exec("COMMIT");
     return {
       ...admittedWork,
       workGeneration: hash.digest("hex"),
     };
   } finally {
-    db.close();
+    if (detail?.db === undefined) db.close();
   }
 }
 
@@ -918,22 +934,28 @@ export const inspectNativeUpdateWork = (
   const work = inspectWork(databasePath, true, false, generationVersion, allowStaleApprovals);
   return { ...work, carriedWork: work.carriedWork ?? emptyNativeWork() };
 };
+export function inspectUnfinishedWorkRows(db: NodeSqlite.DatabaseSync) {
+  const entries: NativeWorkEntry[] = [];
+  const work = inspectWork("", true, false, 2, true, { db, entries });
+  return { ...work, carriedWork: work.carriedWork ?? emptyNativeWork(), entries };
+}
+
 export const inspectNativeUpdateReadinessWork = (databasePath: string) => {
   const work = inspectWork(databasePath, true, true);
   return { ...work, carriedWork: work.carriedWork ?? emptyNativeWork() };
 };
 
-function createPrivateDiagnosticDirectory(): string {
+export function createPrivateSnapshotDirectory(prefix = "t3-stale-work-"): string {
   const host = Context.empty();
   if (Context.get(host, HostProcess.Platform) !== "win32") {
     const temporaryRoot = NodeFS.realpathSync(NodeOS.tmpdir());
-    return NodeFS.mkdtempSync(NodePath.join(temporaryRoot, "t3-stale-work-"));
+    return NodeFS.mkdtempSync(NodePath.join(temporaryRoot, prefix));
   }
   // mkdtemp inherits the parent ACL on Windows. Put the backup under the
   // current profile and create its directory with a protected user-only ACL.
   const profile = NodeFS.realpathSync(Context.get(host, HostProcess.HomeDirectory));
   safeParents(profile);
-  const scratch = NodePath.join(profile, ".t3-stale-work-" + NodeCrypto.randomUUID());
+  const scratch = NodePath.join(profile, "." + prefix + NodeCrypto.randomUUID());
   const systemRoot = Context.get(host, HostProcess.Environment).SystemRoot;
   if (!systemRoot || !NodePath.isAbsolute(systemRoot))
     throw new NativeMaintenanceError({ reason: "identity" });
@@ -987,7 +1009,7 @@ export async function diagnoseStaleWorkSnapshot(homeDirectory: string) {
   const sourcePath = NodePath.join(state, "statev2.sqlite");
   safeParents(state);
   safeFile(sourcePath);
-  const scratch = createPrivateDiagnosticDirectory();
+  const scratch = createPrivateSnapshotDirectory();
   const snapshot = NodePath.join(scratch, "snapshot.sqlite");
   try {
     const source = new NodeSqlite.DatabaseSync(sourcePath, { readOnly: true });
@@ -1022,16 +1044,40 @@ export async function diagnoseStaleWorkSnapshot(homeDirectory: string) {
 }
 
 type WorkRow = Record<string, NodeSqlite.SQLOutputValue>;
+export type NativeWorkEntry = {
+  table: string;
+  row: WorkRow;
+  category: keyof ReturnType<typeof emptyNativeWork>;
+  count: number;
+  carried: boolean;
+  stale?: true;
+};
 const classifyUpdateWork = (
   db: NodeSqlite.DatabaseSync,
   childResults: number,
   isTerminalDisplay: ReturnType<typeof terminalDisplayClassifier>,
   readiness = false,
   checkStale = false,
+  entries?: NativeWorkEntry[],
 ) => {
+  entries?.splice(0);
   const blocking = emptyNativeWork();
   const carriedWork = emptyNativeWork();
-  const rows = (table: string) => workRows(db, table, readiness).all();
+  const sources = entries === undefined ? undefined : new WeakMap<WorkRow, string>();
+  const rows = (table: string) => {
+    const selected = workRows(db, table, readiness).all();
+    if (sources !== undefined) for (const row of selected) sources.set(row, table);
+    return selected;
+  };
+  const record = (
+    row: WorkRow,
+    category: keyof typeof blocking,
+    count: number,
+    carried = false,
+  ) => {
+    if (sources !== undefined)
+      entries!.push({ table: sources.get(row)!, row, category, count, carried });
+  };
   const payload = (row: WorkRow) => {
     try {
       return decodePayload(row.payload_json);
@@ -1085,7 +1131,15 @@ const classifyUpdateWork = (
       value.responseCapability.type === "message"
     );
   };
-  const messageNodes = new Set(requests.filter(messageRequest).map((row) => row.node_id));
+  const messageRequests = requests.filter(messageRequest);
+  const messageNodes = new Set(messageRequests.map((row) => row.node_id));
+  const carriesInputCard = checkStale
+    ? carriedMessageInputClassifier(
+        db,
+        payload,
+        new Map(messageRequests.map((row) => [row.runtime_request_id, row])),
+      )
+    : () => false;
   const tasks = rows("orchestration_v2_projection_subagents");
   const appTask = (row: WorkRow) => {
     const value = payload(row);
@@ -1110,6 +1164,7 @@ const classifyUpdateWork = (
   const blockingProviderThreads = new Set<unknown>();
   const block = (row: WorkRow, category: keyof typeof blocking, count = 1) => {
     blocking[category] += count;
+    record(row, category, count);
     if (text(row.thread_id)) blockingThreads.add(row.thread_id);
     if (text(row.provider_thread_id)) blockingProviderThreads.add(row.provider_thread_id);
   };
@@ -1182,10 +1237,21 @@ const classifyUpdateWork = (
             text(value.childThreadId) &&
             text(value.subagentId) &&
             delegatedNode(value.subagentId)));
-      if (preserved) carriedWork.backgroundAgents++;
-      else if (table === "orchestration_v2_projection_turn_items" && isStaleApproval(row, value))
+      if (table === "orchestration_v2_projection_turn_items" && carriesInputCard(row, value)) {
+        carriedWork.backgroundAgents++;
+        record(row, "backgroundAgents", 1, true);
+      } else if (preserved) carriedWork.backgroundAgents++;
+      else if (table === "orchestration_v2_projection_turn_items" && isStaleApproval(row, value)) {
         staleApprovals++;
-      else block(row, "backgroundAgents");
+        entries?.push({
+          table,
+          row,
+          category: "backgroundAgents",
+          count: 1,
+          carried: false,
+          stale: true,
+        });
+      } else block(row, "backgroundAgents");
     }
   }
   for (const row of tasks) {
@@ -1218,8 +1284,13 @@ const classifyUpdateWork = (
   for (const row of rows("scheduled_tasks")) {
     if (!["never", "running", "succeeded", "failed"].includes(String(row.last_run_status)))
       throw new NativeMaintenanceError({ reason: "schema" });
-    if (row.last_run_status === "running") blocking.scheduledWork++;
-    else if (row.enabled === 1) carriedWork.scheduledWork++;
+    if (row.last_run_status === "running") {
+      blocking.scheduledWork++;
+      record(row, "scheduledWork", 1);
+    } else if (row.enabled === 1) {
+      carriedWork.scheduledWork++;
+      record(row, "scheduledWork", 1, true);
+    }
   }
   if (
     db
@@ -1231,8 +1302,13 @@ const classifyUpdateWork = (
     for (const row of rows("scheduled_task_webhook_pending")) {
       if (!["pending", "dispatching", "running", "completed", "failed"].includes(String(row.state)))
         throw new NativeMaintenanceError({ reason: "schema" });
-      if (["dispatching", "running"].includes(String(row.state))) blocking.scheduledWork++;
-      else if (row.state === "pending") carriedWork.scheduledWork++;
+      if (["dispatching", "running"].includes(String(row.state))) {
+        blocking.scheduledWork++;
+        record(row, "scheduledWork", 1);
+      } else if (row.state === "pending") {
+        carriedWork.scheduledWork++;
+        record(row, "scheduledWork", 1, true);
+      }
     }
   }
   const providerThreads = rows("orchestration_v2_projection_provider_threads");
@@ -1246,19 +1322,24 @@ const classifyUpdateWork = (
   const busySessions = new Set<unknown>();
   for (const row of providerThreads) {
     if (blockingThreads.has(row.thread_id) || blockingProviderThreads.has(row.provider_thread_id)) {
-      if (row.status === "active") blocking.backgroundAgents++;
+      if (row.status === "active") {
+        blocking.backgroundAgents++;
+        record(row, "backgroundAgents", 1);
+      }
       if (row.provider_session_id !== null) busySessions.add(row.provider_session_id);
     } else if (row.status === "active") carriedWork.backgroundAgents++;
   }
   for (const row of rows("orchestration_v2_projection_provider_session_bindings"))
     if (blockingThreads.has(row.thread_id)) busySessions.add(row.provider_session_id);
   for (const row of rows("orchestration_v2_projection_provider_sessions")) {
-    if (["starting", "running", "waiting"].includes(String(row.status)))
+    if (["starting", "running", "waiting"].includes(String(row.status))) {
       blocking.backgroundAgents++;
-    else if (row.status === "ready") {
-      if (blockingThreads.has(row.thread_id) || busySessions.has(row.provider_session_id))
+      record(row, "backgroundAgents", 1);
+    } else if (row.status === "ready") {
+      if (blockingThreads.has(row.thread_id) || busySessions.has(row.provider_session_id)) {
         blocking.backgroundAgents++;
-      else carriedWork.backgroundAgents++;
+        record(row, "backgroundAgents", 1);
+      } else carriedWork.backgroundAgents++;
     }
   }
   return {
@@ -1398,6 +1479,59 @@ const readNativeUpdateReadiness = (home: string, environmentId: string, now: num
     guardedCloseSupported,
   };
 };
+export const stoppedUnfinishedWorkDatabase = Effect.fn("NativeMaintenance.unfinishedWorkDatabase")(
+  function* (request: NativeUnfinishedWorkRequest) {
+    const lease = yield* NativeMaintenanceLease;
+    yield* lease.verify(request.homeDirectory);
+    return yield* Effect.try({
+      try: () => {
+        const home = NodePath.resolve(request.homeDirectory);
+        if (
+          home !== request.homeDirectory ||
+          !isAllowedMaintenanceLayout(home, request.journalPath)
+        )
+          throw new NativeMaintenanceError({ reason: "identity" });
+        const state = NodePath.join(home, "userdata");
+        safeParents(state);
+        const identity = NodePath.join(state, "environment-id");
+        if (
+          safeFile(identity).size > 256 ||
+          NodeFS.readFileSync(identity, "utf8").trim() !== request.environmentId
+        )
+          throw new NativeMaintenanceError({ reason: "identity" });
+        const database = NodePath.join(state, "statev2.sqlite");
+        safeFile(database);
+        for (const file of [request.journalPath, database + "-wal", database + "-shm"]) {
+          try {
+            safeFile(file);
+            if (file === request.journalPath) throw new NativeMaintenanceError({ reason: "busy" });
+          } catch (cause) {
+            if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT"))
+              throw cause;
+          }
+        }
+        const owner = NodePath.join(state, "server-owner.sqlite");
+        safeFile(owner);
+        let handle: number;
+        try {
+          handle = NodeFS.openSync(owner, "r+");
+        } catch (cause) {
+          if (
+            cause instanceof Error &&
+            "code" in cause &&
+            ["EACCES", "EPERM", "EBUSY"].includes(String(cause.code))
+          )
+            return database;
+          throw new NativeMaintenanceError({ reason: "lease", cause });
+        }
+        NodeFS.closeSync(handle);
+        throw new NativeMaintenanceError({ reason: "lease" });
+      },
+      catch: ioError,
+    });
+  },
+);
+
 export const layer = (compiledIdentity: NativeBuildIdentity) =>
   Layer.effect(
     NativeMaintenance,

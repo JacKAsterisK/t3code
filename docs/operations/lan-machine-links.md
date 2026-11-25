@@ -461,18 +461,25 @@ machine asks for or offers a link, since a link would carry each machine's setup
 access, normally standard. That includes a machine with no saved list that finds
 no `fleet-access` folder on the share.
 
-A fleet rebuilt or switched to a new roster keeps the list a person set on the old
-one. When the new fleet has no list, no starting list and no history, a standard
-machine that accepted a list on its previous fleet signs that list in as the new
-fleet's revision 1. Only machines on the new roster keep their entries, and only
-exceptions between them that still apply. A carried list that makes any machine
-read-only waits for every enabled machine to mark itself ready, as a starting list
-does. A machine the previous list made read-only never carries it. With no previous
-list, **Machine access** offers **Save access list**, which saves the access it
-shows as revision 1 without changing any machine. Without one of these, the
-switch's credential retirement leaves every machine unlinked: on 2026-11-25 the
-D178 roster switch revoked every peer link and nothing replaced them until a list
-was saved.
+A fleet rebuilt or switched to a new roster never takes a list on its own; a person
+saves the first one. When the new fleet has no list, no starting list and no
+history, **Machine access** on each enrolled machine whose roster row is enabled
+offers **Carry over access list**: the list that machine had on its previous fleet,
+read as it read that list (restrictions it could not verify still apply). Every
+machine's entry is kept, including machines not enrolled yet. Exceptions are kept
+only between machines of the new fleet, and only where they apply. Settings names
+every grant the save would make: each machine's level, entries for machines not
+here yet, the level for machines added later, and each exception with its
+receivers. A machine that list made read-only offers nothing, and nothing older is
+ever offered instead, even when the previous fleet's archive
+(`lan-fleet-access.previous.json`, written before a new fleet replaces the cache)
+cannot be read. The save names the fleet it was shown for. Under the share lock it
+must still be exactly the current proposal, with no starting list or list since;
+otherwise it is refused and Machine access asks for a fresh review. **Save access
+list** saves the access shown instead, when it leaves a machine standard. Without
+either, the switch's credential retirement leaves every machine unlinked: on
+2026-11-25 the D178 roster switch revoked every peer link, and nothing replaced
+them until a list was saved.
 
 On its first start on a switched roster, the link adapter begins from the links
 the previous fleet made, keeping only which machine each reached. Each machine
@@ -480,9 +487,9 @@ still in the fleet links again; the fleet-made link to one that left is forgotte
 on the next pass. Manual links are never touched.
 
 An agent link card made for a fleet peer's forwarded https address while fleet
-links are inactive is refused with the plain-http audience as before, and the
-refusal now says why: the fleet needs a Machine access list. Fleet peers need no
-card once links are active.
+links are inactive is still refused with the plain-http audience. The refusal now
+says why: the fleet has no Machine access list yet, or fleet links are turned off
+on that machine. Fleet peers need no card once links are active.
 
 The linking machine also holds itself to its own list: it never links above the
 access its accepted list gives it, whatever the destination offers, reading its

@@ -284,7 +284,16 @@ it("hides a save the server would refuse, when no machine would stay standard", 
     .not.toBeInTheDocument();
 });
 
-it("names what the previous fleet's list brings and saves it as proposed on one click", async () => {
+it("shows every grant a carried list makes and saves exactly that list for its fleet", async () => {
+  const carryProposal = {
+    fleetId: "fleet-synthetic",
+    defaultAccess: "read-only" as const,
+    machines: [
+      { machineId: "self", access: "standard" as const },
+      { machineId: "returning", access: "standard" as const },
+    ],
+    exceptions: [{ machineId: "other", standardOn: ["self"] }],
+  };
   const { configure } = setup({
     stage: "active",
     sharedFolderTrust: true,
@@ -295,24 +304,30 @@ it("names what the previous fleet's list brings and saves it as proposed on one 
       machines: [],
       selfAccess: "standard",
       canChange: true,
-      carryProposal: {
-        defaultAccess: "standard",
-        machines: [{ machineId: "other", access: "read-only" }],
-        exceptions: [],
-      },
+      carryProposal,
     },
   });
   await using screen = await render(<LanFleetSetup />);
-  await expect.element(screen.getByText(/read only: Other machine/)).toBeVisible();
+  // An approved machine that inherits the read-only default is named as read only.
+  await expect.element(screen.getByText("Other machine: read only")).toBeVisible();
+  await expect.element(screen.getByText("Synthetic device: standard")).toBeVisible();
+  await expect
+    .element(screen.getByText("returning (not in this fleet yet): standard"))
+    .toBeVisible();
+  await expect.element(screen.getByText("Machines added later: read only")).toBeVisible();
+  await expect
+    .element(screen.getByText("Other machine standard on Synthetic device"))
+    .toBeVisible();
   expect(configure).not.toHaveBeenCalled();
   await screen.getByRole("button", { name: "Carry over access list" }).click();
   expect(configure).toHaveBeenCalledExactlyOnceWith({
     operation: "access",
     confirmed: true,
     revision: 0,
-    defaultAccess: "standard",
-    machines: [{ machineId: "other", access: "read-only" }],
-    exceptions: [],
+    defaultAccess: "read-only",
+    machines: carryProposal.machines,
+    exceptions: carryProposal.exceptions,
+    carry: { fleetId: "fleet-synthetic" },
   });
 });
 

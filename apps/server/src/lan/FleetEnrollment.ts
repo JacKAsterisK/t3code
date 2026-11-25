@@ -435,10 +435,11 @@ const make = Effect.gen(function* () {
                 FleetAccessPolicy.selfAccess(policy) === "standard" && policy.unavailable !== true,
               ...(policy.seed === undefined ? {} : { seed: policy.seed }),
               ...(policy.seedPending === undefined ? {} : { seedPending: policy.seedPending }),
-              ...(policy.carryProposal === undefined
+              ...(policy.carryProposal === undefined || record === undefined
                 ? {}
                 : {
                     carryProposal: {
+                      fleetId: record.fleetId,
                       defaultAccess: policy.carryProposal.defaultAccess,
                       machines: policy.carryProposal.machines,
                       exceptions: FleetAccessPolicy.exceptionsOf(policy.carryProposal, [
@@ -507,6 +508,12 @@ const make = Effect.gen(function* () {
                   )
               )
                 return yield* configurationError();
+              // A carry names the fleet it was shown for, and only an enrolled member with an
+              // enabled roster row proposes one.
+              if (input.carry !== undefined && input.carry.fleetId !== record.fleetId)
+                return yield* refused("stale-review");
+              if (input.carry !== undefined && current.member !== true)
+                return yield* refused("machine-not-enabled");
               yield* fleetAccess.change({
                 root: current.root,
                 fleetId: record.fleetId,
@@ -520,6 +527,7 @@ const make = Effect.gen(function* () {
                 member: current.member,
                 signingPrivateKey: record.signingPrivateKey,
                 expectedRevision: input.revision,
+                ...(input.carry === undefined ? {} : { carry: true }),
                 next: {
                   defaultAccess: input.defaultAccess,
                   machines: input.machines,

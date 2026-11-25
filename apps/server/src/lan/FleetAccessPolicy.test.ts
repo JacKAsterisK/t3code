@@ -1264,7 +1264,7 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
       service: FleetAccessPolicy.FleetAccess["Service"],
       input: ReturnType<Effect.Success<ReturnType<typeof fleetAt>>["input"]>,
       next: FleetAccessPolicy.FleetAccessSnapshot,
-    ) => service.change({ ...input, expectedRevision: 0, next });
+    ) => service.change({ ...input, expectedRevision: 0, next, carry: true });
     return { f, before, switched, fleetAt, save, stateDirOf };
   });
   const byMachine = (
@@ -1434,13 +1434,92 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
       expect(seeded.seed).toBe("waiting");
       expect(seeded.carryProposal).toBeUndefined();
       yield* n.f.fs.remove(seedFile);
-      yield* n.save(yield* n.switched(n.f.anvil), target.input(n.f.anvil), {
-        defaultAccess: "standard",
-        machines: [],
+      // Any other machine saves an ordinary list.
+      yield* (yield* n.switched(n.f.anvil)).change({
+        ...target.input(n.f.anvil),
+        expectedRevision: 0,
+        next: { defaultAccess: "standard", machines: [] },
       });
       const listed = yield* (yield* n.switched(n.f.cryo)).refresh(target.input(n.f.cryo));
       expect(listed.revision).toBe(1);
       expect(listed.carryProposal).toBeUndefined();
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("refuses a carry that is no longer exactly the proposal under the lock", () =>
+    Effect.gen(function* () {
+      const n = yield* nextFleet();
+      yield* n.f.change(yield* n.before(n.f.cryo), n.f.cryo, 0, [n.f.readOnly(n.f.anvil)]);
+      const target = yield* n.fleetAt("fleet-after-switch");
+      const cryo = yield* n.switched(n.f.cryo);
+      const shown = (yield* cryo.refresh(target.input(n.f.cryo))).carryProposal!;
+      // Anything other than what was shown is refused, a wider list included.
+      const wider = yield* cryo
+        .change({
+          ...target.input(n.f.cryo),
+          expectedRevision: 0,
+          carry: true,
+          next: { ...shown, machines: [] },
+        })
+        .pipe(Effect.flip);
+      expect(wider.refusal).toBe("stale-review");
+      // A starting list arriving after the review ends it, though the click shows the old list.
+      yield* n.f.fs.writeFileString(
+        n.f.path.join(target.root, FleetAccessPolicy.SEED_FILE),
+        JSON.stringify({
+          version: 1,
+          fleetId: target.fleetId,
+          defaultAccess: "standard",
+          readOnly: [n.f.panda.peer.machineId],
+        }),
+      );
+      const afterSeed = yield* cryo
+        .change({ ...target.input(n.f.cryo), expectedRevision: 0, carry: true, next: shown })
+        .pipe(Effect.flip);
+      expect(afterSeed.refusal).toBe("stale-review");
+      expect(yield* n.f.fs.exists(target.accessDirectory)).toBe(false);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("proposes nothing to a machine whose roster row is not enabled", () =>
+    Effect.gen(function* () {
+      const n = yield* nextFleet();
+      yield* n.f.change(yield* n.before(n.f.cryo), n.f.cryo, 0, []);
+      const target = yield* n.fleetAt("fleet-after-switch");
+      const state = yield* (yield* n.switched(n.f.cryo)).refresh({
+        ...target.input(n.f.cryo),
+        member: false,
+      });
+      expect(state.carryProposal).toBeUndefined();
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("never reads an older list in place of a previous fleet it cannot read", () =>
+    Effect.gen(function* () {
+      const n = yield* nextFleet();
+      // Fleet one: CryoFrog standard. Fleet two, on the switch roster: CryoFrog read-only.
+      yield* n.f.change(yield* n.before(n.f.cryo), n.f.cryo, 0, []);
+      const two = yield* n.fleetAt("fleet-two");
+      yield* (yield* n.switched(n.f.panda)).change({
+        ...two.input(n.f.panda),
+        expectedRevision: 0,
+        next: { defaultAccess: "standard", machines: [n.f.readOnly(n.f.cryo)] },
+      });
+      yield* (yield* n.switched(n.f.cryo)).refresh(two.input(n.f.cryo));
+      // Fleet three archives fleet two; then that archive becomes unreadable.
+      const three = yield* n.fleetAt("fleet-three");
+      expect(
+        (yield* (yield* n.switched(n.f.cryo)).refresh(three.input(n.f.cryo))).carryProposal,
+      ).toBeUndefined();
+      const archive = n.f.path.join(
+        yield* n.stateDirOf(n.f.cryo),
+        "lan-fleet-access.previous.json.d178",
+      );
+      expect(yield* n.f.fs.exists(archive)).toBe(true);
+      yield* n.f.fs.writeFileString(archive, "{ not json");
+      const restarted = yield* (yield* n.switched(n.f.cryo)).refresh(three.input(n.f.cryo));
+      expect(restarted.carryProposal).toBeUndefined();
+      expect(yield* n.f.fs.exists(three.accessDirectory)).toBe(false);
     }).pipe(Effect.provide(configLayer)),
   );
 

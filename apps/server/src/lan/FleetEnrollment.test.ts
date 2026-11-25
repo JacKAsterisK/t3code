@@ -495,6 +495,25 @@ it.layer(NodeServices.layer)("explicit fleet setup", (it) => {
       }).pipe(Effect.provide(configLayer)),
   );
 
+  it.effect("refuses a carried list shown for another fleet", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(false, "accessible");
+      yield* f.start();
+      const refusal = yield* f.a.enrollment
+        .configure({
+          operation: "access",
+          confirmed: true,
+          revision: 0,
+          defaultAccess: "standard",
+          machines: [],
+          exceptions: [],
+          carry: { fleetId: "a-fleet-it-was-shown-for" },
+        })
+        .pipe(Effect.flip);
+      assert.equal(refusal.refusal, "stale-review");
+    }).pipe(Effect.provide(configLayer)),
+  );
+
   it.effect("names why joining is refused, not only that setup failed", () =>
     Effect.gen(function* () {
       // Without shared-folder trust, joining needs the owner code.

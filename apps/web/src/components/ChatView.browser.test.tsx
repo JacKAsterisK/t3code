@@ -271,7 +271,11 @@ it("opens a linked Linear issue from an inactive thread's sidebar badge", async 
   const contextMenu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
   await act(() => previewLink.element().dispatchEvent(contextMenu));
   expect(contextMenu.defaultPrevented).toBe(false);
-  await userEvent.click(badge);
+  // T3 Code LAN: activate the badge from the keyboard. On a loaded host (the Windows release gate)
+  // the hover preview's delay can end between a pointer press and its release; the release then
+  // lands on the opening preview and no click reaches the badge.
+  await act(() => (badge.element() as HTMLElement).focus());
+  await userEvent.keyboard("{Enter}");
   const issueRow = page
     .getByRole("region", { name: "Linked issues" })
     .getByRole("link", { name: issueName });

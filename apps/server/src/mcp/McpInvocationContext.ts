@@ -1,4 +1,5 @@
 import {
+  type AgentFeedbackMode,
   type AuthMcpClientAccess,
   type EnvironmentId,
   McpCapabilityUnavailableError,
@@ -163,6 +164,8 @@ export interface McpInvocationScope {
   /** False while the Linked environments beta is off here; `/mcp` reads it per request. */
   readonly linkedEnvironments?: boolean;
   readonly agentEventsEnabled?: boolean;
+  /** The Agent feedback mode here; `/mcp` reads it per request. Unset is off. */
+  readonly agentFeedback?: AgentFeedbackMode;
   /**
    * The origin this `/mcp` request reached, e.g. a T3 Connect tunnel. Hosted clients cannot
    * see the URL they were configured with, so links they must fetch carry it. Unset in-process.
@@ -206,16 +209,6 @@ export const hiddenFromSubagents = (): boolean => {
   return scope?.thread?.subagent !== true;
 };
 
-/**
- * `McpSchema.EnabledWhen` for the LAN task tools: they serve outside task clients and always
- * refuse an in-app thread, which reaches other machines through linked environments instead.
- */
-export const hiddenFromThreads = (): boolean => {
-  const fiber = Fiber.getCurrent();
-  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
-  return scope?.thread === undefined;
-};
-
 /** Internal link protocols require the authenticated immediate peer, including for discovery. */
 export const hiddenUnlessLinkedPeer = (): boolean => {
   const fiber = Fiber.getCurrent();
@@ -256,11 +249,29 @@ export const hiddenWithoutBackgroundWait = (): boolean => {
   );
 };
 
+/**
+ * `McpSchema.EnabledWhen` for tools only a client outside a thread drives, such as the CLI, and
+ * for the LAN task tools, which always refuse an in-app thread: it reaches other machines
+ * through linked environments instead.
+ */
+export const hiddenFromThreads = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope?.thread === undefined;
+};
+
 /** `McpSchema.EnabledWhen` for tools that only serve links, hidden while the beta is off. */
 export const hiddenWhileLinksOff = (): boolean => {
   const fiber = Fiber.getCurrent();
   const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
   return scope?.linkedEnvironments !== false;
+};
+
+/** `McpSchema.EnabledWhen` for agent feedback tools, for every client including `t3 feedback`. */
+export const hiddenWhileFeedbackOff = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope?.agentFeedback !== undefined && scope.agentFeedback !== "off";
 };
 
 /** `McpSchema.EnabledWhen` for tools that act on the thread's forge, hidden where it has none. */

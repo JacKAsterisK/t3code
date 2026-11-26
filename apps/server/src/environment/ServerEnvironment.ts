@@ -233,6 +233,7 @@ export const make = Effect.gen(function* () {
       issues: true,
       linkedThreadRefreshes: true,
       issueLinkedThreads: true,
+      issueTrackerAccounts: true,
       sideChats: true,
       vcsBranchStatus: true,
       inlineMessageContext: true,
@@ -309,6 +310,7 @@ export const make = Effect.gen(function* () {
       shellThreadFamilies: true,
       shellOlderSettled: true,
       shellKeepsPinnedSubagents: true,
+      agentFeedback: true,
     },
   };
 

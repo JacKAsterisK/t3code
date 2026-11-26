@@ -13,6 +13,7 @@ import {
   type OrchestrationV2CreationSource,
   type OrchestrationV2DelegatedFrom,
   type OrchestrationV2RuntimeModeEscalation,
+  type OrchestrationV2WorkflowOrigin,
   type OrchestrationV2LinkOrigin,
   type OrchestrationV2ProviderThreadNativeMetadata,
   type OrchestrationV2ThreadProjection,
@@ -131,6 +132,8 @@ export interface ThreadLaunchInput {
   /** The parent there, when that environment's agent delegated this as a task. */
   readonly delegatedFrom?: OrchestrationV2DelegatedFrom;
   readonly runtimeModeEscalation?: OrchestrationV2RuntimeModeEscalation;
+  /** The workflow run this thread is an agent step of. */
+  readonly workflowRun?: OrchestrationV2WorkflowOrigin;
 }
 
 type PreparationInput = Pick<
@@ -1489,6 +1492,7 @@ const make = Effect.gen(function* () {
                 ...(input.runtimeModeEscalation === undefined
                   ? {}
                   : { runtimeModeEscalation: input.runtimeModeEscalation }),
+                ...(input.workflowRun === undefined ? {} : { workflowRun: input.workflowRun }),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
                 ...(initialMessage === undefined

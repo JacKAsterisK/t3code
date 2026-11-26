@@ -123,13 +123,15 @@ it.effect(
       const links = Context.get(context, Links.PeerLinks);
       const gate = Context.get(context, Gate.ApprovalAdmissionGate);
       yield* insert("manual", "manual");
-      assert.isFalse(yield* links.unlink(EnvironmentId.make("manual"), { machineId: "machine" }));
+      assert.isFalse(
+        (yield* links.unlink(EnvironmentId.make("manual"), { machineId: "machine" })).removed,
+      );
       yield* insert("automatic", "fleet", "machine");
       assert.isFalse(
-        yield* links.unlink(EnvironmentId.make("automatic"), {
+        (yield* links.unlink(EnvironmentId.make("automatic"), {
           machineId: "machine",
           linkedAt: "1969-12-31T00:00:00.000Z",
-        }),
+        })).removed,
       );
       blockRemoval = true;
       const holding = yield* gate

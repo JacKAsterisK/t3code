@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
@@ -21,6 +22,7 @@ import { isLanDistribution } from "@t3tools/shared/distribution";
 import * as CloudLink from "../cloud/CloudLink.ts";
 import { agentApprovalAppUrlConfig } from "../cloud/publicConfig.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as McpOAuth from "./McpOAuth.ts";
 import { renderErrorPage } from "./mcpOAuthHtml.ts";
 
@@ -91,6 +93,7 @@ export const layer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const oauth = yield* McpOAuth.McpOAuth;
     const requestUrls = makeRequestUrls(yield* Effect.serviceOption(McpOAuth.McpOAuthPublicOrigin));
+    const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const cloudLink = yield* CloudLink.CloudLink;
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironmentIdentity;
     // LAN builds have no T3 Connect and never resolve a hosted app URL.
@@ -237,7 +240,23 @@ export const layer = HttpApiBuilder.group(
       .handle("revoke", ({ payload }) =>
         Effect.gen(function* () {
           yield* noStore;
-          yield* oauth.revoke({ urls: yield* requestUrls, token: payload });
+          // RFC 7009 §2.2: an unknown or already revoked token gets the same 200 as a revoked one.
+          if (payload.token === undefined) return {};
+          // A task grant's refresh token names its client; any other MCP session ends by its token alone.
+          if (payload.client_id !== undefined) {
+            yield* oauth.revoke({
+              urls: yield* requestUrls,
+              token: {
+                client_id: payload.client_id,
+                token: Redacted.value(payload.token),
+                ...(payload.resource === undefined ? {} : { resource: payload.resource }),
+              },
+            });
+            return {};
+          }
+          yield* environmentAuth
+            .revokeMcpClientToken(Redacted.value(payload.token))
+            .pipe(Effect.orDie);
           return {};
         }),
       );

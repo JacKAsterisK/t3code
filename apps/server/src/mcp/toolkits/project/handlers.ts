@@ -473,6 +473,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
           // Named, else the calling thread's: a thread an agent starts stays with its owner.
           ...FleetUsers.inheritedOwner(input.ownerId, caller?.ownerId),
+          // A link's word for it, like `delegatedFrom`: nothing else may name a run.
+          ...(linkOrigin === undefined || input.workflowRun === undefined
+            ? {}
+            : { workflowRun: input.workflowRun }),
         }).pipe(
           Effect.mapError((error) => {
             if (error._tag === "AttachmentClaimError") {

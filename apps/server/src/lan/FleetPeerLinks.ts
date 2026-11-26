@@ -790,7 +790,7 @@ const make = Effect.gen(function* () {
         let revokedSessions = 0;
         let revokedCodes = 0;
         for (const { environmentId, machineId } of preview.items.links)
-          if (yield* peerLinks.unlink(environmentId, { machineId })) unlinked++;
+          if ((yield* peerLinks.unlink(environmentId, { machineId })).removed) unlinked++;
         for (const { sessionId } of preview.items.sessions)
           if (yield* auth.revokeSession(sessionId)) revokedSessions++;
         for (const { id } of preview.items.codes)

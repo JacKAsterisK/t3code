@@ -11,7 +11,6 @@ import {
   AuthMcpTokenError,
   type AuthMcpTokenRequest,
   type AuthMcpTokenResult,
-  type AuthMcpRevokeRequest,
   type AuthMcpClientAccess,
   type AuthEnvironmentScope,
   type AuthSessionId,
@@ -303,9 +302,14 @@ export class McpOAuth extends Context.Service<
       readonly urls: McpOAuthUrls;
       readonly token: AuthMcpTokenRequest;
     }) => Effect.Effect<AuthMcpTokenResult, AuthMcpTokenError>;
+    /** Revokes a task grant by its refresh token. */
     readonly revoke: (input: {
       readonly urls: McpOAuthUrls;
-      readonly token: AuthMcpRevokeRequest;
+      readonly token: {
+        readonly client_id: string;
+        readonly token: string;
+        readonly resource?: string | undefined;
+      };
     }) => Effect.Effect<void, AuthMcpTokenError>;
   }
 >()("t3/auth/McpOAuth") {}

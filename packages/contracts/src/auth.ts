@@ -570,6 +570,7 @@ export const AuthMcpAuthorizationServerMetadata = Schema.Struct({
   authorization_endpoint: Schema.String,
   token_endpoint: Schema.String,
   registration_endpoint: Schema.String,
+  // Older environments do not serve one.
   revocation_endpoint: Schema.optionalKey(Schema.String),
   response_types_supported: Schema.Array(Schema.Literal("code")),
   grant_types_supported: Schema.Array(Schema.Literals(["authorization_code", "refresh_token"])),
@@ -697,6 +698,18 @@ export const AuthMcpTokenRequest = Schema.Struct({
 }).pipe(HttpApiSchema.asFormUrlEncoded());
 export type AuthMcpTokenRequest = typeof AuthMcpTokenRequest.Type;
 
+/**
+ * RFC 7009. A task grant's refresh token is revoked with its `client_id` (and `resource`); without
+ * one, the holder of an access token ends its session.
+ */
+export const AuthMcpRevokeRequest = Schema.Struct({
+  client_id: Schema.optionalKey(Schema.String),
+  token: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
+  token_type_hint: Schema.optionalKey(Schema.String),
+  resource: Schema.optionalKey(Schema.String),
+}).pipe(HttpApiSchema.asFormUrlEncoded());
+export type AuthMcpRevokeRequest = typeof AuthMcpRevokeRequest.Type;
+
 export const AuthMcpTokenResult = Schema.Struct({
   access_token: Schema.String,
   token_type: Schema.Literal("Bearer"),
@@ -708,13 +721,6 @@ export const AuthMcpTokenResult = Schema.Struct({
   task_only: Schema.optionalKey(Schema.Boolean),
 });
 export type AuthMcpTokenResult = typeof AuthMcpTokenResult.Type;
-
-export const AuthMcpRevokeRequest = Schema.Struct({
-  client_id: Schema.String,
-  token: Schema.String,
-  resource: Schema.optionalKey(Schema.String),
-}).pipe(HttpApiSchema.asFormUrlEncoded());
-export type AuthMcpRevokeRequest = typeof AuthMcpRevokeRequest.Type;
 
 export class AuthMcpTokenError extends Schema.Error<AuthMcpTokenError>("AuthMcpTokenError")(
   {

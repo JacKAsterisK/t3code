@@ -23,7 +23,7 @@ export function getDesktopScheme(isDevelopment: boolean): string {
   return getDistributionProtocolScheme(isDevelopment);
 }
 
-function getDesktopOrigin(isDevelopment: boolean): string {
+export function getDesktopOrigin(isDevelopment: boolean): string {
   return `${getDesktopScheme(isDevelopment)}://${DESKTOP_HOST}`;
 }
 

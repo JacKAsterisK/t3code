@@ -73,6 +73,7 @@ export interface SettingsSearchItem {
   readonly peerLinksOnly?: boolean;
   readonly fleetUsersOnly?: boolean;
   readonly fastWorktreeCheckoutOnly?: boolean;
+  readonly agentFeedbackOnly?: boolean;
   readonly textGeneratorsOnly?: boolean;
   readonly secondary?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
@@ -90,6 +91,7 @@ export interface SettingsSearchAvailability {
   readonly hasPeerLinkHost?: boolean;
   readonly hasFleetUsers?: boolean;
   readonly hasFastWorktreeCheckoutEnvironment?: boolean;
+  readonly hasAgentFeedbackEnvironment?: boolean;
   /** An environment without a provider allow-list, which hides text generators. */
   readonly hasTextGeneratorsEnvironment?: boolean;
   readonly hasPrimaryEnvironment?: boolean;
@@ -527,6 +529,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     targetId: "boring-sidebar",
     searchTerms: [msg("beta boring sidebar folder rows multiline branch pull request details")],
   },
+
   {
     id: "tool-call-visibility",
     title: msg("Tool calls in chat"),
@@ -570,6 +573,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/labs",
     scope: "environment",
     searchTerms: [msg("beta link another machine vps peer agents work there delegate")],
+  },
+  {
+    id: "workflows-beta",
+    title: msg("Workflows"),
+    to: "/settings/labs",
+    scope: "environment",
+    searchTerms: [msg("beta workflow durable runs automation steps schedule webhook folder")],
   },
   {
     id: "prompt-suggestions-beta",
@@ -1011,6 +1021,16 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: msg("Diagnostics"),
     to: "/settings/maintenance",
     searchTerms: [msg("logs traces processes resource history failures spans cpu memory")],
+  },
+  {
+    id: "agent-feedback",
+    title: msg("Agent feedback"),
+    to: "/settings/labs",
+    scope: "environment-defaults",
+    agentFeedbackOnly: true,
+    searchTerms: [
+      msg("report bug problem t3 team send feedback agents tools automatic when i ask"),
+    ],
   },
   {
     id: "open-source-licenses",
@@ -1578,6 +1598,7 @@ export function getSettingsSearchTargetScope(targetId: string) {
         title: item.title,
         scope: item.scope ?? SETTINGS_CATEGORY_SCOPES[item.to],
         ...(item.requiresThreadAutoSettlement ? { requiresThreadAutoSettlement: true } : {}),
+        ...(item.agentFeedbackOnly ? { agentFeedbackOnly: true } : {}),
       }
     : null;
 }
@@ -1671,6 +1692,7 @@ export function filterAvailableSettingsSearchItems(
       (!item.fleetUsersOnly || availability.hasFleetUsers === true) &&
       (!item.fastWorktreeCheckoutOnly ||
         availability.hasFastWorktreeCheckoutEnvironment === true) &&
+      (!item.agentFeedbackOnly || availability.hasAgentFeedbackEnvironment === true) &&
       (!item.textGeneratorsOnly || availability.hasTextGeneratorsEnvironment === true) &&
       (!item.secretProvidersOnly || availability.hasSecretProvidersEnvironment === true),
   );

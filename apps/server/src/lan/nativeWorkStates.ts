@@ -82,6 +82,7 @@ export const nativeRestartSafeEffects: Readonly<Record<string, ReadonlyArray<str
   "terminal.cleanup": [],
   "preview.cleanup": [],
   "attachment.cleanup": [],
+  "thread-content.purge": [],
   "thread-title.generate": [],
   "delegated-tasks.stop": [],
 };

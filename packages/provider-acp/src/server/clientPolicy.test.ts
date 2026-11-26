@@ -159,68 +159,74 @@ describe("acpPermissionDisposition", () => {
     }
   });
 
-  it.effect("auto-accept-edits asks for edits that leave the folder through a link", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const workspace = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-acp-permission-workspace-",
-      });
-      const outside = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-acp-permission-outside-",
-      });
-      yield* fileSystem.symlink(outside, path.join(workspace, "linked-directory"));
-      yield* fileSystem.makeDirectory(path.join(workspace, "src"));
-      const autoAcceptEdits: AcpRuntimePolicy = {
-        runtimeMode: "auto-accept-edits",
-        cwd: workspace,
-      };
-      const edit = (target: string) =>
-        acpPermissionDisposition(autoAcceptEdits, permissionRequest("edit", [{ path: target }]));
+  // Its fixtures are symlinks (Windows: Developer Mode or elevation).
+  it.effect.skipIf(!symlinksSupported)(
+    "auto-accept-edits asks for edits that leave the folder through a link",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspace = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-acp-permission-workspace-",
+        });
+        const outside = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-acp-permission-outside-",
+        });
+        yield* fileSystem.symlink(outside, path.join(workspace, "linked-directory"));
+        yield* fileSystem.makeDirectory(path.join(workspace, "src"));
+        const autoAcceptEdits: AcpRuntimePolicy = {
+          runtimeMode: "auto-accept-edits",
+          cwd: workspace,
+        };
+        const edit = (target: string) =>
+          acpPermissionDisposition(autoAcceptEdits, permissionRequest("edit", [{ path: target }]));
 
-      assert.equal(edit("src/new-file.ts"), "allow");
-      assert.equal(edit("linked-directory/new-file.ts"), "ask");
-      assert.equal(edit(path.join(outside, "new-file.ts")), "ask");
-    }).pipe(Effect.provide(NodeServices.layer)),
+        assert.equal(edit("src/new-file.ts"), "allow");
+        assert.equal(edit("linked-directory/new-file.ts"), "ask");
+        assert.equal(edit(path.join(outside, "new-file.ts")), "ask");
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("checks a file change's path exactly as the agent sent it", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const workspace = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-acp-permission-workspace-",
-      });
-      const outside = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-acp-permission-outside-",
-      });
-      // Two different files on POSIX: `target` stays in the folder, `target ` leads out of it.
-      yield* fileSystem.writeFileString(path.join(workspace, "target"), "");
-      yield* fileSystem.symlink(path.join(outside, "file"), path.join(workspace, "target "));
-      yield* fileSystem.symlink(outside, path.join(workspace, " linked"));
-      yield* fileSystem.makeDirectory(path.join(workspace, "linked"));
-      const disposition = (sandboxPolicy: AcpRuntimePolicy["sandboxPolicy"], target: string) =>
-        acpPermissionDisposition(
-          {
-            runtimeMode: sandboxPolicy === undefined ? "auto-accept-edits" : "full-access",
-            cwd: workspace,
-            ...(sandboxPolicy === undefined ? {} : { approvalPolicy: "never", sandboxPolicy }),
-          },
-          permissionRequest("edit", [{ path: target }]),
-        );
-      for (const [sandboxPolicy, refused] of [
-        [undefined, "ask"],
-        [{ type: "workspaceWrite", writableRoots: [] }, "deny"],
-      ] as const) {
-        assert.equal(disposition(sandboxPolicy, path.join(workspace, "target")), "allow");
-        assert.equal(disposition(sandboxPolicy, "target"), "allow");
-        assert.equal(disposition(sandboxPolicy, "linked/new.ts"), "allow");
-        if (NodePath.sep !== "/") continue;
-        assert.equal(disposition(sandboxPolicy, path.join(workspace, "target ")), refused);
-        assert.equal(disposition(sandboxPolicy, "target "), refused);
-        assert.equal(disposition(sandboxPolicy, " linked/new.ts"), refused);
-      }
-    }).pipe(Effect.provide(NodeServices.layer)),
+  // Its fixtures are symlinks (Windows: Developer Mode or elevation).
+  it.effect.skipIf(!symlinksSupported)(
+    "checks a file change's path exactly as the agent sent it",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspace = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-acp-permission-workspace-",
+        });
+        const outside = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-acp-permission-outside-",
+        });
+        // Two different files on POSIX: `target` stays in the folder, `target ` leads out of it.
+        yield* fileSystem.writeFileString(path.join(workspace, "target"), "");
+        yield* fileSystem.symlink(path.join(outside, "file"), path.join(workspace, "target "));
+        yield* fileSystem.symlink(outside, path.join(workspace, " linked"));
+        yield* fileSystem.makeDirectory(path.join(workspace, "linked"));
+        const disposition = (sandboxPolicy: AcpRuntimePolicy["sandboxPolicy"], target: string) =>
+          acpPermissionDisposition(
+            {
+              runtimeMode: sandboxPolicy === undefined ? "auto-accept-edits" : "full-access",
+              cwd: workspace,
+              ...(sandboxPolicy === undefined ? {} : { approvalPolicy: "never", sandboxPolicy }),
+            },
+            permissionRequest("edit", [{ path: target }]),
+          );
+        for (const [sandboxPolicy, refused] of [
+          [undefined, "ask"],
+          [{ type: "workspaceWrite", writableRoots: [] }, "deny"],
+        ] as const) {
+          assert.equal(disposition(sandboxPolicy, path.join(workspace, "target")), "allow");
+          assert.equal(disposition(sandboxPolicy, "target"), "allow");
+          assert.equal(disposition(sandboxPolicy, "linked/new.ts"), "allow");
+          if (NodePath.sep !== "/") continue;
+          assert.equal(disposition(sandboxPolicy, path.join(workspace, "target ")), refused);
+          assert.equal(disposition(sandboxPolicy, "target "), refused);
+          assert.equal(disposition(sandboxPolicy, " linked/new.ts"), refused);
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it("asks about a file change whose path may mean another file to the agent", () => {

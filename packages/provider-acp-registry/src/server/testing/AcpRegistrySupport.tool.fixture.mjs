@@ -12,7 +12,17 @@ const writeExecutable = (directory, name) => {
 const output = (text) => process.stdout.write(`${text}\n`);
 if (manager === "npm") {
   NodeFS.appendFileSync(process.env.FAKE_NPM_LOG, `${args.join(" ")}\n`);
-  const prefix = process.env.npm_config_prefix ?? process.env.FAKE_NPM_PREFIX;
+  let prefix = process.env.npm_config_prefix ?? process.env.FAKE_NPM_PREFIX;
+  // Some npm shims (Bun-backed ones) honor only a literal --prefix argument.
+  if (process.env.FAKE_NPM_IGNORE_PREFIX_ENV) {
+    prefix = process.env.FAKE_NPM_PREFIX;
+    args.forEach((arg, index) => {
+      if (arg.startsWith("--prefix=")) prefix = arg.slice("--prefix=".length);
+      if (args[index - 1] === "--prefix") prefix = arg;
+    });
+  }
+  // Others ignore every prefix setting.
+  if (process.env.FAKE_NPM_IGNORE_PREFIX) prefix = process.env.FAKE_NPM_PREFIX;
   const modules = windows
     ? NodePath.join(prefix, "node_modules")
     : NodePath.join(prefix, "lib", "node_modules");

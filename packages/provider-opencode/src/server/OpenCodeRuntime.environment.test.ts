@@ -7,6 +7,7 @@ import * as Path from "effect/Path";
 
 import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
 import * as OpenCodeServerLedger from "./OpenCodeServerLedger.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 describe("resolveOpenCodeServerPassword", () => {
   it("uses the settings password when local settings and environment differ", () => {
@@ -33,50 +34,53 @@ describe("resolveOpenCodeServerPassword", () => {
 });
 
 describe("startOpenCodeServerProcess", () => {
-  it.effect("gives a server started without a configured password a generated one", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode-password-" });
-      const binaryPath = path.join(tempDir, "opencode");
-      const receivedPath = path.join(tempDir, "received");
-      yield* fs.writeFileString(
-        binaryPath,
-        [
-          "#!/bin/sh",
-          `printf %s "$OPENCODE_SERVER_PASSWORD" > "${receivedPath}"`,
-          'echo "opencode server listening on http://127.0.0.1:4096"',
-          "",
-        ].join("\n"),
-      );
-      yield* fs.chmod(binaryPath, 0o755);
+  // Fakes opencode with a #!/bin/sh script.
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "gives a server started without a configured password a generated one",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode-password-" });
+        const binaryPath = path.join(tempDir, "opencode");
+        const receivedPath = path.join(tempDir, "received");
+        yield* fs.writeFileString(
+          binaryPath,
+          [
+            "#!/bin/sh",
+            `printf %s "$OPENCODE_SERVER_PASSWORD" > "${receivedPath}"`,
+            'echo "opencode server listening on http://127.0.0.1:4096"',
+            "",
+          ].join("\n"),
+        );
+        yield* fs.chmod(binaryPath, 0o755);
 
-      const server = yield* OpenCodeRuntime.OpenCodeRuntime.pipe(
-        Effect.flatMap((runtime) =>
-          runtime.startOpenCodeServerProcess({
-            binaryPath,
-            directory: tempDir,
-            port: 4096,
-            environment: { PATH: process.env.PATH, OPENCODE_SERVER_PASSWORD: "" },
-            verify: () => Effect.succeed("1.0.0"),
-          }),
-        ),
-        Effect.provide(
-          OpenCodeRuntime.layer.pipe(
-            Layer.provide(
-              Layer.succeed(
-                OpenCodeServerLedger.OpenCodeServerLedger,
-                OpenCodeServerLedger.OpenCodeServerLedger.of({
-                  track: () => Effect.succeed(Effect.void),
-                }),
+        const server = yield* OpenCodeRuntime.OpenCodeRuntime.pipe(
+          Effect.flatMap((runtime) =>
+            runtime.startOpenCodeServerProcess({
+              binaryPath,
+              directory: tempDir,
+              port: 4096,
+              environment: { PATH: process.env.PATH, OPENCODE_SERVER_PASSWORD: "" },
+              verify: () => Effect.succeed("1.0.0"),
+            }),
+          ),
+          Effect.provide(
+            OpenCodeRuntime.layer.pipe(
+              Layer.provide(
+                Layer.succeed(
+                  OpenCodeServerLedger.OpenCodeServerLedger,
+                  OpenCodeServerLedger.OpenCodeServerLedger.of({
+                    track: () => Effect.succeed(Effect.void),
+                  }),
+                ),
               ),
             ),
           ),
-        ),
-      );
+        );
 
-      expect(server.serverPassword).toMatch(/^[\w-]{43}$/);
-      expect(yield* fs.readFileString(receivedPath)).toBe(server.serverPassword);
-    }).pipe(Effect.provide(NodeServices.layer)),
+        expect(server.serverPassword).toMatch(/^[\w-]{43}$/);
+        expect(yield* fs.readFileString(receivedPath)).toBe(server.serverPassword);
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

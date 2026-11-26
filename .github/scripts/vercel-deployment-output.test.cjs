@@ -5,6 +5,11 @@ const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
 
+// T3 Code LAN: these run workflow steps written for the Linux release runner (bash, jq, and
+// executable #!/bin/bash shims on a POSIX PATH), which a Windows gate host does not provide.
+// oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone node:test script has no Effect runtime.
+const linuxRunnerOnly = process.platform === "win32" && "Linux release runner step";
+
 const release = readFileSync(join(__dirname, "../workflows/release.yml"), "utf8");
 const preview = readFileSync(join(__dirname, "../workflows/web-preview.yml"), "utf8");
 const stepPattern =
@@ -62,7 +67,7 @@ for (const [name, script] of steps) {
     ["lockfile warning", `${warning}\n${url}`],
     ["trailing diagnostic", `${url}\nDone`],
   ]) {
-    test(`${name}: saves one deployment URL after ${label}`, () => {
+    test(`${name}: saves one deployment URL after ${label}`, { skip: linuxRunnerOnly }, () => {
       const result = runStep(script, stdout);
       assert.equal(result.status, 0, result.stderr);
       assert.deepEqual(
@@ -78,7 +83,7 @@ for (const [name, script] of steps) {
     ["multiple URLs", `${url}\nhttps://other.vercel.app`, 0],
     ["failed deployment", url, 1],
   ]) {
-    test(`${name}: rejects ${label} without saving output`, () => {
+    test(`${name}: rejects ${label} without saving output`, { skip: linuxRunnerOnly }, () => {
       const result = runStep(script, stdout, exitCode);
       assert.notEqual(result.status, 0);
       assert.equal(result.output, "");

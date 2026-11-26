@@ -163,19 +163,25 @@ function recordTag(commitOf, failedFetches = 0) {
   }
 }
 
-test("the build record tags the named commit only when it is on the workflow's ref", () => {
-  const onRef = recordTag((shas) => shas.first);
-  assert.deepEqual([onRef.status, onRef.tagged], [0, onRef.shas.first]);
-  const retried = recordTag((shas) => shas.first, 2);
-  assert.deepEqual([retried.status, retried.tagged], [0, retried.shas.first]);
-  assert.equal(recordTag((shas) => shas.first, 3).status, 1);
-  const head = recordTag(() => "");
-  assert.deepEqual([head.status, head.tagged], [0, head.shas.head]);
-  for (const commitOf of [(shas) => shas.elsewhere, () => "main", () => "0".repeat(40)]) {
-    const refused = recordTag(commitOf);
-    assert.deepEqual([refused.status, refused.tagged], [1, ""]);
-  }
-});
+test(
+  "the build record tags the named commit only when it is on the workflow's ref",
+  // T3 Code LAN: the record step and its git shim need bash on a POSIX PATH (the Linux runner).
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone node:test script has no Effect runtime.
+  { skip: process.platform === "win32" && "Linux release runner step" },
+  () => {
+    const onRef = recordTag((shas) => shas.first);
+    assert.deepEqual([onRef.status, onRef.tagged], [0, onRef.shas.first]);
+    const retried = recordTag((shas) => shas.first, 2);
+    assert.deepEqual([retried.status, retried.tagged], [0, retried.shas.first]);
+    assert.equal(recordTag((shas) => shas.first, 3).status, 1);
+    const head = recordTag(() => "");
+    assert.deepEqual([head.status, head.tagged], [0, head.shas.head]);
+    for (const commitOf of [(shas) => shas.elsewhere, () => "main", () => "0".repeat(40)]) {
+      const refused = recordTag(commitOf);
+      assert.deepEqual([refused.status, refused.tagged], [1, ""]);
+    }
+  },
+);
 
 test("the store build record job runs the workflow's own action and passes the built commit as data", () => {
   const { record } = jobs("workflows/mobile-eas-production-build.yml");

@@ -48,6 +48,9 @@ const isFinal = (error: OrchestratorMcpFailure) =>
 // The other machine asleep or a dropped route is worth a few more tries before the run pauses.
 const retried = { schedule: Schedule.exponential("2 seconds"), times: 5 };
 
+// T3 Code LAN: a read-only link refuses writes, so each call says whether its tool writes.
+const READING_TOOLS = new Set(["t3_thread_read", "t3_thread_wait"]);
+
 type Service = WorkflowAgents["Service"];
 
 export const make = Effect.gen(function* () {
@@ -66,6 +69,7 @@ export const make = Effect.gen(function* () {
         tool,
         arguments: args,
         limits: LIMITS,
+        writes: !READING_TOOLS.has(tool),
         success,
       })
       .pipe(

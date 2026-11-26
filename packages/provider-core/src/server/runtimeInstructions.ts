@@ -40,6 +40,7 @@ export function taskOwnerInstructions(ownerName: string | undefined): string {
 
 function baseRuntimeInstructions(runtime: {
   readonly harness: string;
+  readonly agentFeedback?: AgentFeedbackMode;
   readonly model?: string | undefined;
   readonly modelName?: string | undefined;
   readonly reasoningEffort?: string | undefined;

@@ -32,7 +32,7 @@ const stagedFiles = (count: number) =>
   );
 
 const filesOf = (command: string, prefix: string) =>
-  [...command.slice(prefix.length).matchAll(/"([^"]*)"/g)].map((match) => match[1]);
+  [...command.slice(prefix.length).matchAll(/"([^"]*)"/g)].map((match) => match[1] ?? "");
 
 it("splits each command over every staged file, in order, within the Windows budget", () => {
   const files = stagedFiles(3000);

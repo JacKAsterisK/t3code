@@ -35,6 +35,7 @@ import * as ExternalLauncher from "../process/externalLauncher.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
+import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -2016,6 +2017,7 @@ it.effect.each(["normal", "prepare-failure"] as const)(
         Layer.mock(ThreadManagement.ThreadManagementService)({}),
         Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
         Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({}),
+        Layer.mock(BackgroundPolicy.BackgroundPolicy)({ shouldRunHostWork: Effect.succeed(false) }),
         Layer.mock(HttpServer.HttpServer)({
           address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 3773),
         }),

@@ -57,6 +57,7 @@ import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as FleetPeerLinks from "../lan/FleetPeerLinks.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
 import * as PeerMcpClient from "../peer/PeerMcpClient.ts";
 import * as WorkflowRuntime from "../workflows/WorkflowRuntime.ts";
@@ -348,7 +349,13 @@ const layerWorkflowsProvided = WorkflowRuntime.layer.pipe(
     ).pipe(Layer.provideMerge(layerProjectService)),
   ),
   // Layers memoize by reference, so these are the links Settings and agents use.
-  Layer.provide(PeerMcpClient.layer.pipe(Layer.provideMerge(PeerLinks.layer))),
+  Layer.provide(
+    PeerMcpClient.layer.pipe(
+      // T3 Code LAN: this machine's own list caps every write a workflow sends over a link.
+      Layer.provide(FleetPeerLinks.layerWriteCeiling),
+      Layer.provideMerge(PeerLinks.layer),
+    ),
+  ),
 );
 const layerSecretRequestsProvided = SecretRequests.layer.pipe(
   Layer.provide(layerThreadManagementProvided),

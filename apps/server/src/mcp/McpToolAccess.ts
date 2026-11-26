@@ -240,6 +240,7 @@ export const writesOwnerWork = <P, A, E, R>(
   return declare(
     (params: P) => check.pipe(Effect.flatMap(() => handle(params))),
     () => check,
+    always,
   );
 };
 

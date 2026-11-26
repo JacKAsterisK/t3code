@@ -46,10 +46,7 @@ export function loadLanBuildPolicy(
   return selection.identity;
 }
 
-export const lanBuildDefines = (
-  identity: LanBuildIdentity | undefined,
-  upstreamTestMode = false,
-) =>
+export const lanBuildDefines = (identity: LanBuildIdentity | undefined, upstreamTestMode = false) =>
   identity === undefined && upstreamTestMode
     ? {}
     : {

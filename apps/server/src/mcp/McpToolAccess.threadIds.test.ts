@@ -301,6 +301,7 @@ const threadServer = McpHttpServer.layerThreadToolkit.pipe(
   Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
   Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
   Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+  Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
   Layer.provide(NodeCrypto.layer),
   Layer.provide(
     Layer.mock(ThreadManagement.ThreadManagementService)({

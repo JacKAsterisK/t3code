@@ -126,7 +126,8 @@ function serverOsFromNodePlatform(platform: string): ClientOs {
 export const make = Effect.gen(function* () {
   if (!distributionTelemetryEnabled)
     return AnalyticsService.of({
-      record: Effect.fn("AnalyticsService.record")(() => Effect.void),
+      // LAN builds record nothing.
+      record: Effect.fn("AnalyticsService.record")(() => Effect.succeed(false)),
       flush: Effect.void,
       recordOwners: Effect.fn("AnalyticsService.recordOwners")(() => Effect.void),
     });

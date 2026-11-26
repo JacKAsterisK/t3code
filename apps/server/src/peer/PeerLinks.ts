@@ -624,7 +624,7 @@ const make = Effect.gen(function* () {
     const previous = yield* Effect.gen(function* () {
       const admission = yield* (
         serverSettings.getAdmissionSettings ??
-          Effect.fail(new PeerLinkError({ reason: "disabled", message: LINKED_ENVIRONMENTS_OFF }))
+        Effect.fail(new PeerLinkError({ reason: "disabled", message: LINKED_ENVIRONMENTS_OFF }))
       );
       if (!admission.linkedEnvironmentsEnabled)
         return yield* new PeerLinkError({ reason: "disabled", message: LINKED_ENVIRONMENTS_OFF });

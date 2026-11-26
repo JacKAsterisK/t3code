@@ -245,6 +245,19 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       }),
     ),
   ),
+  t3_thread_set_runtime_mode: McpToolAccess.setsThreadRuntimeMode((input) =>
+    dispatch(input.threadId, (common) => ({
+      ...common,
+      type: "thread.runtime-mode.set",
+      runtimeMode: input.runtimeMode,
+    })).pipe(
+      Effect.map((result) => ({
+        ...result,
+        threadId: input.threadId,
+        runtimeMode: input.runtimeMode,
+      })),
+    ),
+  ),
   t3_pending_request: McpToolAccess.either(
     (input) => input.action !== "respond",
     McpToolAccess.reads((input) =>
@@ -282,6 +295,32 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         return { sequence: result.sequence };
       }),
     ),
+  ),
+  t3_submit_output: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const { scope, threads } = yield* readCaller();
+      if (scope.thread === undefined) return yield* unavailable();
+      return yield* threads
+        .submitRunOutput({
+          threadId: scope.thread.threadId,
+          commandId: yield* newCommandId(),
+          json: input.json,
+        })
+        .pipe(
+          Effect.mapError((error) =>
+            error._tag === "ThreadManagementRunOutputRejectedError"
+              ? new OrchestratorMcpFailure({
+                  code: "invalid_request",
+                  // The agent wrote the value, so it is told what in it did not fit.
+                  message:
+                    error.cause instanceof Error
+                      ? `${error.message}\n${error.cause.message.slice(0, 2000)}`
+                      : error.message,
+                })
+              : unavailable(),
+          ),
+        );
+    }),
   ),
   t3_queue: McpToolAccess.either(
     (input) => input.action === "list" || input.action === "read",

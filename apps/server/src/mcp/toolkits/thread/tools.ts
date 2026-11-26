@@ -23,7 +23,7 @@ import {
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/ai";
+import { McpSchema, Tool, Toolkit } from "effect/ai";
 
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
@@ -32,7 +32,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const ThreadOrganizeTool = Tool.make("t3_thread_organize", {
   description:
-    "Pin, snooze, settle, archive, or mark a thread unread. Omit `threadId` for this thread. `snooze` needs `snoozedUntil`. Auto threads may organize Full access threads on this environment or through an environment link approved for Full access. Settling this thread applies at turn end. A failed turn or queued message leaves it active.",
+    "Pin, snooze, settle, archive or mark unread. threadId defaults here. Snooze needs snoozedUntil. Auto can organize Full access threads locally or over Full access links. Settling this thread applies at turn end unless it fails or has queued messages.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
@@ -84,7 +84,7 @@ const QUEUE_READ_ACTIONS = ["list", "read"] as const;
 const QueueTool = Tool.make("t3_queue", {
   ...commandTool,
   description:
-    "Manage a thread's queued messages. Omit `threadId` for this thread. list: send order, paged by `cursor` and `limit`. read: up to 16,000 chars of one. edit: replace its `text`; attachments stay. cancel. reorder: before `beforeRunId`, or to the end with null. promote_to_steer: send it now as steering to active `targetRunId`. Writes fail once the run is no longer queued.",
+    "Manage this thread's queue unless threadId is given. List in send order with cursor/limit. Read one up to 16000 chars. Edit text, retaining attachments. Cancel or reorder before beforeRunId (null ends). promote_to_steer sends now to active targetRunId. Writes require a queued run.",
   parameters: Schema.Struct({
     action: Schema.Literals([
       ...QUEUE_READ_ACTIONS,
@@ -155,7 +155,7 @@ const threadConfiguration = Schema.Struct({
 const ThreadConfigureTool = Tool.make("t3_thread_configure", {
   ...commandTool,
   description:
-    "Read a thread's provider, model, and modes, or set its provider, model, and options with `modelSelection`. Omit `threadId` for this thread. Auto threads may configure Full access threads on this environment or through an environment link approved for Full access. Values from `orchestrator_capabilities`.",
+    "Read provider/model/modes or set modelSelection including options. threadId defaults here. Auto can configure Full access threads locally or over Full access links. Get values from orchestrator_capabilities.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
@@ -164,10 +164,27 @@ const ThreadConfigureTool = Tool.make("t3_thread_configure", {
   success: Schema.Union([threadConfiguration, OrchestrationV2DispatchCommandResult]),
 }).annotate(Tool.Destructive, true);
 
+const ThreadSetRuntimeModeTool = Tool.make("t3_thread_set_runtime_mode", {
+  ...commandTool,
+  description:
+    "Set an idle thread's runtime mode. Read its mode with t3_thread_configure and pass it as expectedRuntimeMode. Linked calls can keep or lower the mode within their approved access. Raising an Auto thread to Full access requires the owner's separate setting and verified local owner ancestry for both threads. Older threads cannot be raised by this tool.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: ThreadId,
+    expectedRuntimeMode: RuntimeMode,
+    runtimeMode: RuntimeMode,
+  }),
+  success: Schema.Struct({
+    ...OrchestrationV2DispatchCommandResult.fields,
+    threadId: ThreadId,
+    runtimeMode: RuntimeMode,
+  }),
+}).annotate(Tool.Destructive, true);
+
 const ThreadTransferTool = Tool.make("t3_thread_transfer", {
   ...commandTool,
   description:
-    "Move context between threads. Omit `threadId` for this thread. fork: copy it from `sourcePoint` (default latest stable run) into a new thread with the same setup; no turn runs yet. merge_back: merge it from `sourcePoint` into a related `targetThreadId` in the same project. status: its context transfers.",
+    "Transfer context, with threadId defaulting here. Fork from sourcePoint (latest stable run by default) into an idle thread with the same setup. merge_back targets a related targetThreadId in the same project. status lists transfers.",
   parameters: Schema.Struct({
     action: Schema.Literals(["fork", "merge_back", "status"]),
     environmentId: OrchestratorMcpEnvironmentTarget,
@@ -241,12 +258,27 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const SubmitOutputTool = Tool.make("t3_submit_output", {
+  ...commandTool,
+  description:
+    "Return this turn's result as data, when the message asked for one. `json`: JSON text matching the schema it gave. A rejection says what did not fit; fix it and call again.",
+  // Stored on the run, which every client of the thread holds.
+  parameters: Schema.Struct({ json: Schema.String.check(Schema.isMaxLength(200000)) }),
+  success: Schema.Struct({ runId: RunId }),
+})
+  // It writes only the caller's own run, so a read-only or plan-mode agent can still answer.
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
+
 export const ThreadToolkit = Toolkit.make(
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadConfigureTool,
+  ThreadSetRuntimeModeTool,
   ThreadTransferTool,
   ThreadOrganizeTool,
   PendingRequestTool,
   QueueTool,
+  SubmitOutputTool,
 );

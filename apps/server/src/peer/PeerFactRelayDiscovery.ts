@@ -11,6 +11,7 @@ import * as Invocation from "../mcp/McpInvocationContext.ts";
 import * as Ports from "../agentEvents/AgentFactRelayAccess.ts";
 import * as Links from "./PeerLinks.ts";
 import * as Network from "./PeerNetworkDispatch.ts";
+import { RequireFleetPin } from "../lan/FleetPeerHttpClient.ts";
 
 const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeInitialize = Schema.decodeUnknownEffect(
@@ -194,7 +195,10 @@ const make = Effect.gen(function* () {
             fresh(authorization),
           )
           .pipe(Effect.interruptible, Effect.timeoutOption("1 second"), Effect.ignoreCause),
-    ).pipe(Effect.timeout("15 seconds"));
+    ).pipe(
+      Effect.provideService(RequireFleetPin, link.requiresFleetPin === true),
+      Effect.timeout("15 seconds"),
+    );
   });
   const require = Effect.fn("PeerFactRelayDiscovery.require")(
     function* (authorization: Ports.RelayAuthorization) {

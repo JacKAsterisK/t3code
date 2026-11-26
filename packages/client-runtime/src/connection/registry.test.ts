@@ -166,6 +166,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     readonly beforePrepareRoute?: (
       target: ConnectionTarget,
     ) => Effect.Effect<ConnectionBlockedError | undefined>;
+    readonly initialDrafts?: ReadonlyMap<EnvironmentId, string>;
     readonly initialDisabled?: ReadonlyArray<EnvironmentId>;
     readonly directEndpoints?: ServerConfig["directEndpoints"];
   },
@@ -174,6 +175,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
   const shellCache = yield* Ref.make(new Map([[TARGET.environmentId, CACHED_SNAPSHOT]]));
   const cacheClears = yield* Ref.make<ReadonlyArray<EnvironmentId>>([]);
   const ownedDataClears = yield* Ref.make<ReadonlyArray<EnvironmentId>>([]);
+  const drafts = yield* Ref.make(new Map(options?.initialDrafts));
   const sessions = yield* Ref.make<ReadonlyArray<SessionControl>>([]);
   const releasedSessions = yield* Ref.make(0);
   const storedProfiles = yield* Ref.make(
@@ -309,7 +311,15 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
   });
   const ownedDataCleanup = Persistence.EnvironmentOwnedDataCleanup.of({
     clear: (environmentId) =>
-      Ref.update(ownedDataClears, (environmentIds) => [...environmentIds, environmentId]),
+      Ref.update(drafts, (current) => {
+        const next = new Map(current);
+        next.delete(environmentId);
+        return next;
+      }).pipe(
+        Effect.andThen(
+          Ref.update(ownedDataClears, (environmentIds) => [...environmentIds, environmentId]),
+        ),
+      ),
   });
   const networkStatus = yield* SubscriptionRef.make<"unknown" | "offline" | "online">("online");
   const connectivity = Connectivity.Connectivity.of({
@@ -482,6 +492,7 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
     shellCache,
     cacheClears,
     ownedDataClears,
+    drafts,
     sessions,
     releasedSessions,
     storedProfiles,
@@ -2195,6 +2206,155 @@ describe("EnvironmentRegistry routes", () => {
           .reorderRoutes(LAN_TARGET.environmentId, ["relay"])
           .pipe(Effect.flip);
         expect(error._tag).toBe("ConnectionBlockedError");
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  const resetPin = {
+    origin: new URL(LAN_PROFILE.httpBaseUrl).origin,
+    certificate: "synthetic-pin",
+    publicKeySha256: "c".repeat(64),
+  };
+
+  it.effect.each([true, undefined] as const)(
+    "fleet Reset keeps an unlisted alias and the pin it borrows (learned flag: %s)",
+    (learnedFlag) =>
+      Effect.gen(function* () {
+        const learnedOrigin = "https://learned.example.test";
+        const learned = new BearerConnectionTarget({
+          ...LAN_TARGET,
+          connectionId:
+            "learned:" +
+            LAN_TARGET.environmentId +
+            ":" +
+            learnedOrigin +
+            "@" +
+            LAN_TARGET.connectionId,
+        });
+        const manual = new BearerConnectionTarget({
+          ...LAN_TARGET,
+          connectionId: "manual-route",
+        });
+        const before = [LAN_TARGET, learned, manual];
+        const harness = yield* makeHarness(
+          before,
+          [
+            new BearerConnectionProfile({ ...LAN_PROFILE, fleetTls: resetPin }),
+            new BearerConnectionProfile({
+              ...LAN_PROFILE,
+              connectionId: learned.connectionId,
+              httpBaseUrl: learnedOrigin,
+              wsBaseUrl: "wss://learned.example.test",
+              ...(learnedFlag === undefined ? {} : { learned: learnedFlag }),
+            }),
+            new BearerConnectionProfile({
+              ...LAN_PROFILE,
+              connectionId: manual.connectionId,
+              httpBaseUrl: "https://manual.example.test",
+              wsBaseUrl: "wss://manual.example.test",
+            }),
+          ],
+          [[LAN_TARGET.connectionId, BEARER_CREDENTIAL]],
+        );
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          const outcome = yield* Effect.exit(
+            registry.removeRoute(LAN_TARGET.environmentId, LAN_TARGET.connectionId, {
+              fleetTls: resetPin,
+            }),
+          );
+          expect(yield* Ref.get(harness.storedTargets)).toEqual(before);
+          expect((yield* Ref.get(harness.storedCredentials)).get(LAN_TARGET.connectionId)).toEqual(
+            BEARER_CREDENTIAL,
+          );
+          expect(Exit.isFailure(outcome)).toBe(true);
+          if (Exit.isFailure(outcome)) {
+            expect(outcome.cause.reasons).toContainEqual(
+              expect.objectContaining({
+                error: expect.objectContaining({
+                  detail:
+                    "A saved fleet connection was kept because a learned route uses its credential.",
+                }),
+              }),
+            );
+          }
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      }),
+  );
+
+  it.effect("fleet Reset leaves an unsent draft and cache after removing the last route", () =>
+    Effect.gen(function* () {
+      const pin = new BearerConnectionTarget({
+        ...BEARER_TARGET,
+        environmentId: TARGET.environmentId,
+      });
+      const draft = "Unsent follow-up about the fixture";
+      const profile = new BearerConnectionProfile({
+        ...BEARER_PROFILE,
+        environmentId: pin.environmentId,
+        httpBaseUrl: resetPin.origin,
+        fleetTls: resetPin,
+      });
+      const harness = yield* makeHarness(
+        [pin],
+        [profile],
+        [[pin.connectionId, BEARER_CREDENTIAL]],
+        {
+          initialDrafts: new Map([[pin.environmentId, draft]]),
+          initialDisabled: [pin.environmentId],
+        },
+      );
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.removeRoute(pin.environmentId, pin.connectionId, { fleetTls: resetPin });
+        expect(yield* Ref.get(harness.storedTargets)).toEqual([]);
+        expect((yield* SubscriptionRef.get(registry.entries)).has(pin.environmentId)).toBe(false);
+        expect((yield* Ref.get(harness.drafts)).get(pin.environmentId)).toBe(draft);
+        expect((yield* Ref.get(harness.shellCache)).get(pin.environmentId)).toEqual(
+          CACHED_SNAPSHOT,
+        );
+        expect(yield* Ref.get(harness.ownedDataClears)).toEqual([]);
+
+        yield* registry.register(lanRegistration(pin, profile), { fleetPickup: true });
+        expect((yield* SubscriptionRef.get(registry.entries)).get(pin.environmentId)?.enabled).toBe(
+          false,
+        );
+        expect((yield* Ref.get(harness.drafts)).get(pin.environmentId)).toBe(draft);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    }),
+  );
+
+  it.effect("fleet Reset skips a reviewed route that has since been renewed or learned", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness(
+        [LAN_TARGET],
+        [
+          new BearerConnectionProfile({
+            ...LAN_PROFILE,
+            fleetTls: resetPin,
+            fleetReplacementDeliveryId: "renewed-after-preview",
+          }),
+        ],
+        [[LAN_TARGET.connectionId, BEARER_CREDENTIAL]],
+      );
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.removeRoute(LAN_TARGET.environmentId, LAN_TARGET.connectionId, {
+          fleetTls: resetPin,
+          fleetReplacementDeliveryId: "reviewed-delivery",
+        });
+        expect(yield* Ref.get(harness.storedTargets)).toEqual([LAN_TARGET]);
+
+        yield* registry.register(
+          lanRegistration(
+            LAN_TARGET,
+            new BearerConnectionProfile({ ...LAN_PROFILE, fleetTls: resetPin, learned: true }),
+          ),
+        );
+        yield* registry.removeRoute(LAN_TARGET.environmentId, LAN_TARGET.connectionId, {
+          fleetTls: resetPin,
+        });
+        expect(yield* Ref.get(harness.storedTargets)).toEqual([LAN_TARGET]);
       }).pipe(Effect.provide(harness.layer), Effect.scoped);
     }),
   );

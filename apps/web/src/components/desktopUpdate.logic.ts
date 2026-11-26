@@ -1,3 +1,4 @@
+import { desktopTrackMismatchText } from "@t3tools/client-runtime/state/server";
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
 import {
   nativeUpdatesEnabled,
@@ -151,6 +152,14 @@ export function getDesktopUpdateButtonTooltip(
       return resolve(
         msg("Update {version} downloaded. Click to restart and install.", {
           version: state.downloadedVersion,
+        }),
+      );
+    }
+    if (state.trackMismatch !== undefined) {
+      return resolve(
+        desktopTrackMismatchText({
+          buildChannel: state.trackMismatch.buildChannel,
+          savedChannel: state.channel,
         }),
       );
     }

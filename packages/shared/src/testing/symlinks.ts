@@ -3,6 +3,8 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import * as HostProcess from "../HostProcess.ts";
+
 /** Skip symlink fixtures when unsupported; Windows requires Developer Mode or elevation. */
 export const symlinksSupported: boolean = (() => {
   let directory: string | undefined;
@@ -19,3 +21,11 @@ export const symlinksSupported: boolean = (() => {
     } catch {}
   }
 })();
+
+/** Use an unprivileged Windows junction for fixtures that only need a directory alias. */
+export const makeTestDirectoryLink = (target: string, link: string): Promise<void> =>
+  NodeFS.promises.symlink(
+    target,
+    link,
+    HostProcess.Platform.defaultValue() === "win32" ? "junction" : "dir",
+  );

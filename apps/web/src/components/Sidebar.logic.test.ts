@@ -8,11 +8,11 @@ import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import {
   shouldCreateNewThreadInCurrentProject,
+  resolveScopedNewThreadProjectRef,
   deleteSelectedThreadEntries,
   getFallbackThreadIdAfterDelete,
   hasUnseenCompletion,
   filterSidebarV2VisibleThreads,
-  sidebarDelegatedUnderParent,
   orderItemsByPreferredIds,
   pinOrderKeyBetween,
   resolveSidebarSweepKeys,
@@ -38,13 +38,13 @@ import {
   groupSidebarThreadsByProject,
   resolveSidebarFolderDot,
   sidebarFolderExpansionKeys,
+  withoutRemovedCheckout,
 } from "./Sidebar.logic";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
   sortActiveThreadsByOrderKey,
   sortPinnedThreadsByOrderKey,
 } from "@t3tools/client-runtime/state/thread-sort";
-import { resolveListedAncestorThreadRef } from "@t3tools/client-runtime/state/threads";
 import { resolveProjectExpanded } from "../uiStateStore";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { EnvironmentId, ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
@@ -174,7 +174,7 @@ describe("filterSidebarV2VisibleThreads owner filter", () => {
   });
 });
 
-it("lists a cross-environment delegate on its own machine while keeping local children nested", () => {
+it("lists local and remote subagents only when requested, even without a listed remote parent", () => {
   const parent = makeThreadFixture({ id: ThreadId.make("parent") });
   const remote = makeThreadFixture({
     environmentId: EnvironmentId.make("remote-machine"),
@@ -199,15 +199,24 @@ it("lists a cross-environment delegate on its own machine while keeping local ch
     },
   });
   const remoteRef = scopeThreadRef(remote.environmentId, remote.id);
-  const parentRef = scopeThreadRef(parent.environmentId, parent.id);
   const nested = new Set([threadKey(remoteRef)]);
   const threads = [parent, remote, subagent, sideChat];
-  const ordinary = sidebarDelegatedUnderParent(threads, nested, false);
-  const grouped = sidebarDelegatedUnderParent(threads, nested, true);
-  expect(filterSidebarV2VisibleThreads(threads, null, ordinary)).toEqual([parent]);
-  expect(filterSidebarV2VisibleThreads(threads, null, grouped)).toEqual([parent, remote]);
-  expect(resolveListedAncestorThreadRef(remoteRef, threads, ordinary)).toEqual(parentRef);
-  expect(resolveListedAncestorThreadRef(remoteRef, threads, grouped)).toEqual(remoteRef);
+  expect(filterSidebarV2VisibleThreads(threads, null, nested)).toEqual([parent]);
+  expect(filterSidebarV2VisibleThreads(threads, null, new Set())).toEqual([parent]);
+  const pinnedRemote = { ...remote, pinnedAt: "2026-11-21T00:00:00.000Z" };
+  expect(filterSidebarV2VisibleThreads([parent, pinnedRemote, subagent], null, nested)).toEqual([
+    parent,
+    pinnedRemote,
+  ]);
+  const unpinnedRemote = { ...pinnedRemote, pinnedAt: null };
+  expect(filterSidebarV2VisibleThreads([parent, unpinnedRemote, subagent], null, nested)).toEqual([
+    parent,
+  ]);
+  expect(filterSidebarV2VisibleThreads(threads, null, nested, null, true)).toEqual([
+    parent,
+    remote,
+    subagent,
+  ]);
 });
 
 function makeLatestRun(overrides?: {
@@ -225,6 +234,48 @@ function makeLatestRun(overrides?: {
       overrides?.completedAt !== undefined ? overrides.completedAt : "2026-03-09T10:05:00.000Z",
   };
 }
+
+describe("withoutRemovedCheckout", () => {
+  const worktree = { branch: "t3/task", worktreePath: "/worktrees/task" };
+  const local = { branch: "main", worktreePath: null };
+  const removed = { branch: null, worktreePath: null };
+  const tracking = { trackedFolders: [{ path: "/work/wrapper/api" }] };
+
+  it.each([
+    {
+      why: "status still loading",
+      thread: worktree,
+      isRepo: undefined,
+      project: null,
+      to: worktree,
+    },
+    { why: "a live checkout", thread: worktree, isRepo: true, project: null, to: worktree },
+    { why: "a removed worktree", thread: worktree, isRepo: false, project: null, to: removed },
+    {
+      why: "a removed worktree of a project tracking nothing",
+      thread: worktree,
+      isRepo: false,
+      project: { trackedFolders: [] },
+      to: removed,
+    },
+    {
+      why: "a plain task folder of a project with tracked folders",
+      thread: worktree,
+      isRepo: false,
+      project: tracking,
+      to: worktree,
+    },
+    {
+      why: "a local thread whose project folder is not a repository",
+      thread: local,
+      isRepo: false,
+      project: tracking,
+      to: removed,
+    },
+  ])("$why", ({ thread, isRepo, project, to }) => {
+    expect(withoutRemovedCheckout(thread, { isRepo }, project)).toEqual(to);
+  });
+});
 
 describe("orderItemsByPreferredIds", () => {
   it("resolves legacy preference aliases without materializing project state", () => {
@@ -1775,5 +1826,68 @@ describe("shouldCreateNewThreadInCurrentProject", () => {
     expect(shouldCreateNewThreadInCurrentProject(false, 1, 3)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(false, 0, 0)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(true, 2, 2)).toBe(true);
+  });
+});
+
+describe("resolveScopedNewThreadProjectRef", () => {
+  const local = { environmentId: "env-local", projectId: "api" };
+  const remote = { environmentId: "env-remote", projectId: "api-remote" };
+  const api = { environmentId: "env-local", id: "api", memberProjectRefs: [local, remote] };
+  const web = {
+    environmentId: "env-local",
+    id: "web",
+    memberProjectRefs: [{ environmentId: "env-local", projectId: "web" }],
+  };
+  const viewedWeb = { environmentId: "env-local", projectId: "web" };
+
+  it("starts in the one scoped project even while another project's thread is open", () => {
+    expect(
+      resolveScopedNewThreadProjectRef({
+        shiftKey: false,
+        scopedProjectGroups: [api],
+        viewed: viewedWeb,
+      }),
+    ).toBe(local);
+    expect(
+      resolveScopedNewThreadProjectRef({
+        shiftKey: false,
+        scopedProjectGroups: [api],
+        viewed: null,
+      }),
+    ).toBe(local);
+  });
+
+  it("keeps the viewed thread's environment when that thread is in the scoped project", () => {
+    expect(
+      resolveScopedNewThreadProjectRef({
+        shiftKey: false,
+        scopedProjectGroups: [api],
+        viewed: { environmentId: "env-remote", projectId: "api-remote" },
+      }),
+    ).toBe(remote);
+  });
+
+  it("leaves Shift+click, no scope and several scoped projects to the existing rule", () => {
+    expect(
+      resolveScopedNewThreadProjectRef({
+        shiftKey: true,
+        scopedProjectGroups: [api],
+        viewed: viewedWeb,
+      }),
+    ).toBeNull();
+    expect(
+      resolveScopedNewThreadProjectRef({
+        shiftKey: false,
+        scopedProjectGroups: [],
+        viewed: viewedWeb,
+      }),
+    ).toBeNull();
+    expect(
+      resolveScopedNewThreadProjectRef({
+        shiftKey: false,
+        scopedProjectGroups: [api, web],
+        viewed: viewedWeb,
+      }),
+    ).toBeNull();
   });
 });

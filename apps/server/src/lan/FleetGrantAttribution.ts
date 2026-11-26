@@ -9,6 +9,7 @@ import * as Schema from "effect/Schema";
 import * as CredentialAttribution from "../auth/CredentialAttribution.ts";
 import * as FleetContext from "./FleetContext.ts";
 import * as Delivery from "./FleetDelivery.ts";
+import { fleetSigningKeyDigest } from "./FleetAuthority.ts";
 import * as FleetEnrollment from "./FleetEnrollment.ts";
 import { RoutingFleetIdentity } from "./RemoteTaskTransport.ts";
 
@@ -84,7 +85,9 @@ export const layerServices = Layer.effect(
     return CredentialAttribution.McpGrantAttribution.of({
       verify: Effect.fn("FleetGrantAttribution.verify")(function* (assertion) {
         const fleet = yield* context.load.pipe(Effect.orElseSucceed(() => undefined));
-        if (fleet === undefined) return undefined;
+        // A new fleet requires a new approval. A member cannot adopt an older
+        // unattributed grant by signing for its existing refresh token.
+        if (fleet === undefined || fleet.config.credentialScope !== undefined) return undefined;
         const claim = verifyGrantAssertion({
           assertion,
           peers: fleet.peers.map(({ peer }) => peer),
@@ -92,11 +95,28 @@ export const layerServices = Layer.effect(
           now: yield* Clock.currentTimeMillis,
         });
         if (claim === undefined || claim.signer === fleet.self.machineId) return undefined;
+        const keyDigest = Delivery.fleetCredentialKeyFor(
+          fleet.config.credentialKeyDigests,
+          claim.signer,
+        );
+        if (
+          keyDigest !== undefined &&
+          !fleet.peers.some(
+            ({ peer }) =>
+              peer.machineId === claim.signer &&
+              fleetSigningKeyDigest(peer.signingPublicKey) === keyDigest,
+          )
+        )
+          return undefined;
+
         // The subject of what this machine's fleet credential for the signer approves.
         return {
           grantId: claim.grantId,
           subject: CredentialAttribution.mcpClientSubject(
-            `lan-fleet:${Delivery.deliveryFileName(fleet.self.machineId, claim.signer)}`,
+            Delivery.fleetCredentialSubject(
+              "lan-fleet:" + Delivery.deliveryFileName(fleet.self.machineId, claim.signer),
+              keyDigest,
+            ),
           ),
         };
       }),

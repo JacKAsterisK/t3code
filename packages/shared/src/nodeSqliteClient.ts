@@ -781,6 +781,7 @@ const startCheckpointWorker = Effect.fnUntraced(function* (filename: string) {
 
 const make = Effect.fn("makeWithDatabase")(function* (
   options: SqliteClientConfig,
+  borrowedDatabase?: NodeSqlite.DatabaseSync,
 ): Effect.fn.Return<Client.SqlClient, SqlError, Scope.Scope | Reactivity.Reactivity> {
   yield* checkNodeSqliteCompat();
 
@@ -798,27 +799,30 @@ const make = Effect.fn("makeWithDatabase")(function* (
 
   const makeConnection = Effect.gen(function* () {
     const scope = yield* Effect.scope;
-    const db = yield* Effect.try({
-      try: () =>
-        new NodeSqlite.DatabaseSync(options.filename, {
-          readOnly: options.readonly ?? false,
-          allowExtension: false,
-        }),
-      catch: (cause) =>
-        new SqlError({
-          reason: classifyError(cause, "Failed to open database", "open"),
-        }),
-    });
-    yield* Scope.addFinalizer(
-      scope,
-      Effect.try({
-        try: () => db.close(),
+    const db =
+      borrowedDatabase ??
+      (yield* Effect.try({
+        try: () =>
+          new NodeSqlite.DatabaseSync(options.filename, {
+            readOnly: options.readonly ?? false,
+            allowExtension: false,
+          }),
         catch: (cause) =>
           new SqlError({
-            reason: classifyError(cause, "Failed to close database", "close"),
+            reason: classifyError(cause, "Failed to open database", "open"),
           }),
-      }).pipe(Effect.orDie),
-    );
+      }));
+    if (borrowedDatabase === undefined)
+      yield* Scope.addFinalizer(
+        scope,
+        Effect.try({
+          try: () => db.close(),
+          catch: (cause) =>
+            new SqlError({
+              reason: classifyError(cause, "Failed to close database", "close"),
+            }),
+        }).pipe(Effect.orDie),
+      );
     const statementReaderCache = new WeakMap<NodeSqlite.StatementSync, boolean>();
     const hasRows = (statement: NodeSqlite.StatementSync): boolean => {
       const cached = statementReaderCache.get(statement);
@@ -1177,3 +1181,12 @@ const make = Effect.fn("makeWithDatabase")(function* (
 
 export const layer = (config: SqliteClientConfig): Layer.Layer<Client.SqlClient, SqlError> =>
   Layer.effect(Client.SqlClient, make(config)).pipe(Layer.provide(Reactivity.layer));
+
+/** The caller owns this connection and must use it only within the client transaction. */
+export const layerFromDatabase = (
+  db: NodeSqlite.DatabaseSync,
+): Layer.Layer<Client.SqlClient, SqlError> =>
+  Layer.effect(
+    Client.SqlClient,
+    make({ filename: "", readerWorker: false, writerWorker: false }, db),
+  ).pipe(Layer.provide(Reactivity.layer));

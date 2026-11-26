@@ -67,7 +67,7 @@ const fixture = Effect.fn("fixture.discovery")(function* (
                     id: 0,
                     result: {
                       protocolVersion: "2025-06-18",
-                      capabilities: {},
+                      capabilities: { repositoryIdentity: false },
                       serverInfo: { name: "free-mock", version: "1" },
                     },
                   },
@@ -97,6 +97,7 @@ const fixture = Effect.fn("fixture.discovery")(function* (
             Effect.succeed({
               url: "http://127.0.0.1:12345",
               token: "isolated-token",
+              capabilities: { repositoryIdentity: false },
               link: {
                 environmentId: EnvironmentId.make("peer"),
                 label: "Peer",
@@ -227,6 +228,7 @@ it.live("discovery guards every send and skips stale cleanup without caching uns
                     Effect.succeed({
                       url: receiver.url,
                       token: "isolated-token",
+                      capabilities: { repositoryIdentity: false },
                       link: {} as Links.ResolvedPeerLink["link"],
                     }),
                 }),

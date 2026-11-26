@@ -10,6 +10,42 @@ import {
 import * as Schema from "effect/Schema";
 
 const Pem = Schema.String.check(Schema.isMaxLength(8192));
+export const FleetCredentialKeyDigests = Schema.Record(
+  FleetMachineId,
+  Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+);
+export type FleetCredentialKeyDigests = typeof FleetCredentialKeyDigests.Type;
+
+const credentialKeySeparator = ":key:";
+
+export function fleetCredentialKeyFor(
+  digests: FleetCredentialKeyDigests | undefined,
+  machineId: string,
+  credentialScope?: string,
+): string | undefined {
+  const digest =
+    digests !== undefined && Object.hasOwn(digests, machineId) ? digests[machineId] : undefined;
+  return credentialScope === undefined
+    ? digest
+    : NodeCrypto.createHash("sha256")
+        .update(JSON.stringify(["fleet-credential", credentialScope, machineId, digest ?? null]))
+        .digest("hex");
+}
+
+export function fleetCredentialSubject(subject: string, keyDigest: string | undefined): string {
+  return keyDigest === undefined ? subject : subject + credentialKeySeparator + keyDigest;
+}
+
+export function fleetCredentialSubjectParts(subject: string) {
+  const separator = subject.lastIndexOf(credentialKeySeparator);
+  return separator < 0
+    ? { subject, keyDigest: undefined }
+    : {
+        subject: subject.slice(0, separator),
+        keyDigest: subject.slice(separator + credentialKeySeparator.length),
+      };
+}
+
 export const FleetCampaign = Schema.Struct({
   id: Schema.String,
   expiresAt: Schema.Number,
@@ -32,6 +68,9 @@ export const FleetPrivateConfig = Schema.Struct({
   signingPrivateKey: Pem,
   peers: Schema.Array(FleetPeer).check(Schema.isMaxLength(100)),
   managed: Schema.optionalKey(Schema.Boolean),
+  fleetId: Schema.optionalKey(Schema.String),
+  credentialScope: Schema.optionalKey(Schema.String),
+  credentialKeyDigests: Schema.optionalKey(FleetCredentialKeyDigests),
   access: Schema.optionalKey(Schema.Literals(["read-only", "standard"])),
   campaign: Schema.optionalKey(Schema.NullOr(FleetCampaign)),
 });

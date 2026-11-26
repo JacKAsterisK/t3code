@@ -1,3 +1,4 @@
+// oxlint-disable t3code/no-untranslated-copy -- T3 Code LAN fleet setup ships English-only; its copy predates the rule and is translated as one follow-up, not piecemeal.
 import { useState } from "react";
 import type { FleetAccess, LanFleetSetupState } from "@t3tools/contracts";
 import { useLanFleet } from "../../connection/lanFleet";
@@ -415,6 +416,8 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
             ),
           );
   const disabled = fleet.busy || !fleet.allowed || !policy.canChange;
+  // The server refuses a list that leaves no machine standard, so only offer one it would save.
+  const savableAsShown = machines.some((peer) => accessOf(peer.machineId) === "standard");
   const select = (label: string, value: FleetAccess, machineId: string | null) => (
     <div className="w-36 shrink-0">
       <Select
@@ -470,10 +473,33 @@ function FleetMachineAccess({ setup }: { setup: LanFleetSetupState }) {
           place.
         </p>
       ) : policy.revision === 0 && policy.seed === undefined ? (
-        <p className="text-xs text-muted-foreground">
-          Machines link to each other once this fleet has an access list. Changing access here saves
-          one.
-        </p>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs text-muted-foreground">
+            Machines link to each other once this fleet has an access list.{" "}
+            {savableAsShown
+              ? "Save the access shown here as the list, or change a machine's access to save one."
+              : "Give at least one machine standard access to save one."}
+          </p>
+          {savableAsShown ? (
+            <Button
+              size="compact"
+              variant="outline"
+              disabled={disabled}
+              onClick={() =>
+                void fleet.configure({
+                  operation: "access",
+                  confirmed: true,
+                  revision: 0,
+                  defaultAccess: policy.defaultAccess,
+                  machines: policy.machines,
+                  requireNoStartingList: true,
+                })
+              }
+            >
+              Save access list
+            </Button>
+          ) : null}
+        </div>
       ) : policy.seed === "invalid" ? (
         <p className="text-xs text-destructive">
           The starting access list on the shared folder can't be used, so machines don't link to

@@ -150,6 +150,22 @@ it.layer(NodeServices.layer)("fleet credential storage", (it) => {
       }).pipe(Effect.provide(vaultLayer)),
   );
 
+  it.effect("advancing a stale authority revision preserves a saved transport stop", () =>
+    Effect.gen(function* () {
+      reset();
+      const record = { ...recordFixture(), tlsEnabled: true };
+      keyring.value = JSON.stringify(record);
+      const vault = yield* FleetVault.FleetVault;
+      yield* vault.save({ ...record, tlsEnabled: false });
+      yield* vault.advanceRevision(record, record.lastRevision + 1);
+      assert.deepEqual(yield* vault.read, {
+        ...record,
+        tlsEnabled: false,
+        lastRevision: record.lastRevision + 1,
+      });
+    }).pipe(Effect.provide(vaultLayer)),
+  );
+
   it.effect.each([
     { label: "null", value: null },
     { label: "undefined", value: undefined },

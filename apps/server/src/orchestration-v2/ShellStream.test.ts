@@ -172,6 +172,7 @@ describe("omitIdleSubagentShells", () => {
     const threads = [
       row("root", null),
       row("idle", "root"),
+      row("pinned", "root", { pinnedAt: DateTime.makeUnsafe(0) }),
       row("running", "root", { activityRunStatus: "running" }),
       row("queued", "root", { status: "queued" }),
       row("asking", "root", {
@@ -190,6 +191,7 @@ describe("omitIdleSubagentShells", () => {
     ];
     expect(omitIdleSubagentShells(threads).map((thread) => thread.id)).toEqual([
       "root",
+      "pinned",
       "running",
       "queued",
       "asking",

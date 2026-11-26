@@ -955,6 +955,12 @@ it.effect("a read-only client reads threads and is refused every write before it
       modelSelection: { instanceId: "codex", model: "gpt-5" },
     });
     expect(declaredFailure(configure)).toMatchObject({ code: "capability_denied" });
+    const mode = yield* call("t3_thread_set_runtime_mode", {
+      threadId: "other-project-thread",
+      runtimeMode: "full-access",
+      expectedRuntimeMode: "auto",
+    });
+    expect(declaredFailure(mode)).toMatchObject({ code: "capability_denied" });
     expect(dispatched).toEqual([]);
   }).pipe(
     Effect.provide(

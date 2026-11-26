@@ -81,11 +81,14 @@ const MCP_OAUTH_SCOPES = [
 export interface McpOAuthUrls {
   readonly issuer: string;
   readonly resource: string;
+  /** Why this request did not get the address a client may expect here, when that is known. */
+  readonly audienceNote?: string;
 }
 
 export const requestUrls = (
   request: HttpServerRequest.HttpServerRequest,
   publicOrigin?: string,
+  audienceNote?: string,
 ): McpOAuthUrls => {
   const origin =
     publicOrigin ??
@@ -93,7 +96,11 @@ export const requestUrls = (
       onNone: () => "http://localhost",
       onSome: (url) => url.origin,
     });
-  return { issuer: origin, resource: `${origin}/mcp` };
+  return {
+    issuer: origin,
+    resource: `${origin}/mcp`,
+    ...(audienceNote === undefined ? {} : { audienceNote }),
+  };
 };
 
 /**
@@ -106,20 +113,26 @@ export class McpOAuthPublicOrigin extends Context.Service<
     readonly forRequest: (
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<string | undefined>;
+    /**
+     * For a request `forRequest` gives no origin although its front would, why not; shown with a
+     * refused token audience so the person can fix the cause. Never changes what is accepted.
+     */
+    readonly withheldReason?: (
+      request: HttpServerRequest.HttpServerRequest,
+    ) => Effect.Effect<string | undefined>;
   }
 >()("t3/auth/McpOAuth/McpOAuthPublicOrigin") {}
 
 /**
- * Optional: told which pairing code's subject each new peer-link session came from, so the
- * code's issuer can revoke that session later. A session it could not record is refused.
+ * Fleet peer-link issuance is guarded by the offer that approved it and the reset lock.
  */
 export class McpPeerLinkSessionObserver extends Context.Service<
   McpPeerLinkSessionObserver,
   {
-    readonly sessionIssued: (input: {
-      readonly subject: string;
-      readonly sessionId: AuthSessionId;
-    }) => Effect.Effect<boolean>;
+    readonly issueSession: <A extends { readonly sessionId: AuthSessionId }, E>(
+      subject: string,
+      issue: Effect.Effect<A, E>,
+    ) => Effect.Effect<A | undefined, E>;
   }
 >()("t3/auth/McpOAuth/McpPeerLinkSessionObserver") {}
 
@@ -416,7 +429,7 @@ const make = Effect.gen(function* () {
         return yield* new AuthMcpRegistrationError({
           error: "invalid_client_metadata",
           error_description:
-            "Linked environments is off on that machine. Turn it on in its Settings → Labs.",
+            'Linked environments is off on that machine. Turn it on in its Settings → Labs, or without a desktop, set "linkedEnvironmentsEnabled": true in userdata/settings.json in its T3 home (~/.t3 by default).',
         });
       }
       const clientId = yield* signClientId(name, redirectUris, peerLink);
@@ -476,7 +489,12 @@ const make = Effect.gen(function* () {
       return yield* fail("invalid_request", "PKCE with code_challenge_method=S256 is required.");
     }
     if (!sameResource(urls, request.resource)) {
-      return yield* fail("invalid_target", `This server only issues tokens for ${urls.resource}.`);
+      return yield* fail(
+        "invalid_target",
+        `This server only issues tokens for ${urls.resource}.${
+          urls.audienceNote === undefined ? "" : ` ${urls.audienceNote}`
+        }`,
+      );
     }
     if (
       (request.task_only !== undefined && request.task_only !== "true") ||
@@ -774,7 +792,7 @@ const make = Effect.gen(function* () {
             Effect.mapError(() => fail("invalid_grant", "The task grant could not be issued.")),
           );
       }
-      const issued = yield* environmentAuth
+      const issue = environmentAuth
         .issueMcpClientSession({
           label: pending.clientName,
           approvals: pending.approvals,
@@ -795,18 +813,13 @@ const make = Effect.gen(function* () {
             ),
           ),
         );
-      if (
-        pending.peerLink &&
-        pending.approvalSubject !== undefined &&
-        Option.isSome(sessionObserver) &&
-        !(yield* sessionObserver.value.sessionIssued({
-          subject: pending.approvalSubject,
-          sessionId: issued.sessionId,
-        }))
-      ) {
-        yield* environmentAuth.revokeSession(issued.sessionId).pipe(Effect.ignore);
+      const issued = yield* pending.peerLink &&
+      pending.approvalSubject !== undefined &&
+      Option.isSome(sessionObserver)
+        ? sessionObserver.value.issueSession(pending.approvalSubject, issue)
+        : issue;
+      if (issued === undefined)
         return yield* fail("invalid_grant", "The session could not be issued.");
-      }
       return {
         access_token: issued.token,
         token_type: "Bearer",

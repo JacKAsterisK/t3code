@@ -24,6 +24,8 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import type * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { FLEET_ROSTER_ENV, fleetLocalName } from "./FleetBootstrap.ts";
 import * as ServerConfig from "../config.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 
@@ -112,7 +114,8 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;
-  const cacheFile = path.join(config.stateDir, CACHE_FILE);
+  const rosterPath = (yield* HostProcess.Environment)[FLEET_ROSTER_ENV];
+  const cacheFile = path.join(config.stateDir, fleetLocalName(CACHE_FILE, rosterPath));
   const mutex = yield* Semaphore.make(1);
   let cache: LocalCache | undefined = (yield* fs
     .exists(cacheFile)

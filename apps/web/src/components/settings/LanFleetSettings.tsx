@@ -1,7 +1,19 @@
+// oxlint-disable t3code/no-untranslated-copy -- T3 Code LAN fleet settings ship English-only alongside fleet setup.
+import type { EnvironmentId, LanFleetResetReceipt } from "@t3tools/contracts";
 import { useEffect, useEffectEvent, useState } from "react";
-import { useLanFleet } from "../../connection/lanFleet";
+import { useLanFleet, useLanFleetReset } from "../../connection/lanFleet";
 import { startFleetPolling } from "../../connection/lanFleetPolling";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "../ui/dialog";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SettingsSection } from "./settingsLayout";
 import { LanFleetSetup } from "./LanFleetSetup";
@@ -39,6 +51,173 @@ const labels = {
   expired: "Expired · review needed",
   uncertain: "Interrupted · review needed",
 };
+
+function ResetFleetLinks({
+  environmentId,
+  syncing,
+}: {
+  environmentId: EnvironmentId;
+  syncing: boolean;
+}) {
+  const { allowed, reset } = useLanFleetReset(environmentId);
+  type Preview = Extract<Awaited<ReturnType<typeof reset>>, { preview: unknown }>;
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [review, setReview] = useState<Preview>();
+  const [receipt, setReceipt] = useState<LanFleetResetReceipt>();
+  const [error, setError] = useState<string>();
+  const [includeConnections, setIncludeConnections] = useState(false);
+
+  const preview = async () => {
+    setOpen(true);
+    setBusy(true);
+    setReview(undefined);
+    setReceipt(undefined);
+    setError(undefined);
+    setIncludeConnections(false);
+    const result = await reset({ mode: "preview" });
+    if (result.preview !== undefined) setReview(result);
+    setError(result.error);
+    setBusy(false);
+  };
+  const apply = async () => {
+    if (review === undefined) return;
+    const { fleetId, digest } = review.preview;
+    setBusy(true);
+    setError(undefined);
+    const result = await reset(
+      { mode: "apply", fleetId, previewDigest: digest },
+      includeConnections ? review.routes : [],
+    );
+    setReview(undefined);
+    setReceipt(result.receipt);
+    setError(result.error);
+    setBusy(false);
+  };
+
+  return (
+    <>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={!allowed || syncing}
+        onClick={() => void preview()}
+      >
+        Reset fleet links
+      </Button>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          if (!busy) setOpen(next);
+        }}
+      >
+        <DialogPopup>
+          <DialogHeader>
+            <DialogTitle>Reset fleet links</DialogTitle>
+            <DialogDescription>
+              Review the fleet links and credentials that will be retired on this machine. Eligible
+              peers can receive a fresh offer after reset.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel>
+            {busy ? (
+              <p role="status">
+                {review === undefined ? "Loading preview…" : "Resetting fleet links…"}
+              </p>
+            ) : null}
+            {error === undefined ? null : (
+              <p role="alert" className="text-sm text-destructive">
+                {error}
+              </p>
+            )}
+            {review === undefined ? null : (
+              <div className="space-y-3 text-sm wrap-anywhere">
+                <p>Fleet {review.preview.fleetId}</p>
+                <p>
+                  {review.preview.items.state.linking} outgoing state entries and{" "}
+                  {review.preview.items.state.serving} peers with serving state or sessions
+                </p>
+                <ul className="list-disc ps-5">
+                  {review.preview.items.links.map((link) => (
+                    <li key={link.environmentId}>
+                      Agent link to {link.label} ({link.environmentId}, {link.machineId})
+                    </li>
+                  ))}
+                  {review.preview.items.sessions.map((session) => (
+                    <li key={session.sessionId}>
+                      Served session {session.sessionId} ({session.subject})
+                    </li>
+                  ))}
+                  {review.preview.items.codes.map((code) => (
+                    <li key={code.id}>
+                      Pending code {code.id} ({code.subject})
+                    </li>
+                  ))}
+                </ul>
+                {review.routes.length === 0 ? null : (
+                  <>
+                    <p>
+                      These saved connections came from a fleet. They stay saved unless you include
+                      them.
+                    </p>
+                    <ul className="list-disc ps-5">
+                      {review.routes.map((route) => (
+                        <li key={route.routeId}>
+                          {route.label} ({route.address})
+                        </li>
+                      ))}
+                    </ul>
+                    <label className="flex items-center gap-2">
+                      <Checkbox
+                        checked={includeConnections}
+                        disabled={busy}
+                        onCheckedChange={setIncludeConnections}
+                      />
+                      Also remove these saved fleet connections
+                    </label>
+                  </>
+                )}
+              </div>
+            )}
+            {receipt === undefined ? null : (
+              <div role="status" className="space-y-1 text-sm">
+                <p>Fleet reset complete</p>
+                <p>
+                  {receipt.unlinked} agent links removed, {receipt.revokedSessions} sessions
+                  revoked, {receipt.revokedCodes} codes revoked.
+                </p>
+                <p>
+                  Fleet {receipt.fleetId} · {receipt.completedUtc}
+                </p>
+                <p className="wrap-anywhere">
+                  Review digest <code>{receipt.previewDigest}</code>
+                </p>
+              </div>
+            )}
+          </DialogPanel>
+          <DialogFooter>
+            <Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>
+              {receipt === undefined ? "Cancel" : "Done"}
+            </Button>
+            {review !== undefined ? (
+              <Button
+                variant="destructive"
+                disabled={!allowed || busy || syncing}
+                onClick={() => void apply()}
+              >
+                Confirm reset
+              </Button>
+            ) : error !== undefined && receipt === undefined ? (
+              <Button disabled={!allowed || busy} onClick={() => void preview()}>
+                Review again
+              </Button>
+            ) : null}
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
+    </>
+  );
+}
 
 export function LanFleetSettings() {
   const fleet = useLanFleet();
@@ -119,6 +298,9 @@ export function LanFleetSettings() {
           >
             {fleet.busy ? "Syncing…" : "Sync now"}
           </Button>
+          {fleet.setup?.stage === "active" || fleet.summary?.enabled === true ? (
+            <ResetFleetLinks environmentId={fleet.environmentId} syncing={fleet.busy} />
+          ) : null}
         </div>
         {fleet.summary?.machines.map((machine) => (
           <div key={machine.machineId} className="flex items-center justify-between gap-3 text-xs">

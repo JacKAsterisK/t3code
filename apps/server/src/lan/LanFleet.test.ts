@@ -44,6 +44,8 @@ const setup = Effect.fn("FleetTest.setup")(function* (
   failIssue = false,
   sharedFolder = false,
   tls = false,
+  credentialScope?: string,
+  fleetId?: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -79,6 +81,7 @@ const setup = Effect.fn("FleetTest.setup")(function* (
   // One-shot hooks: the list changing after a sync read it, or while a code is minted.
   let onListLinks: (() => void) | undefined;
   let onIssue: (() => void) | undefined;
+  let shareTrust = sharedFolder;
   let policy: FleetAccessPolicy.FleetAccessState = {
     revision: 0,
     defaultAccess: "standard",
@@ -99,6 +102,8 @@ const setup = Effect.fn("FleetTest.setup")(function* (
       signingPrivateKey: identity.signingPrivateKey,
       peers: [a.peer, b.peer],
       ...(sharedFolder ? { managed: true } : {}),
+      ...(credentialScope === undefined ? {} : { credentialScope }),
+      ...(fleetId === undefined ? {} : { fleetId }),
     };
     const privateFile = path.join(stateDir, "lan-fleet-private.json");
     yield* writeFleetJson(privateFile, config);
@@ -113,20 +118,21 @@ const setup = Effect.fn("FleetTest.setup")(function* (
           Layer.provide(
             Layer.mock(FleetEnrollment.FleetEnrollment)({
               resolve: Effect.as(Effect.void, undefined),
-              status: Effect.succeed({
+              savedFleetId: Effect.succeed(fleetId),
+              status: Effect.sync(() => ({
                 available: true,
                 stage: "active",
                 owner: false,
                 ownerCode: null,
                 deviceCode: null,
-                sharedFolderTrust: sharedFolder,
+                sharedFolderTrust: shareTrust,
                 environmentId: identity.peer.environmentId,
                 label: identity.peer.label,
                 origin: identity.peer.origin,
                 autoPickup,
                 access: "standard",
                 peers: [],
-              }),
+              })),
             }),
           ),
           Layer.provide(Config.layer({ ...base, stateDir })),
@@ -242,6 +248,9 @@ const setup = Effect.fn("FleetTest.setup")(function* (
         });
     }),
     issuedScopes,
+    setShareTrust: (value: boolean) => {
+      shareTrust = value;
+    },
     setPolicy: (next: Partial<FleetAccessPolicy.FleetAccessState>) => {
       policy = { ...policy, ...next };
     },
@@ -464,7 +473,7 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
     "replaces a connected peer's credential when its fleet access changes, with no approval",
     () =>
       Effect.gen(function* () {
-        const f = yield* setup(true, false, true);
+        const f = yield* setup(false, false, true);
         f.setPolicy({ revision: 1 });
         const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
         yield* f.sync(f.recipient.service, { mode: "status" });
@@ -484,21 +493,84 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
           f.issuedScopes.at(-1),
           FleetAccessPolicy.fleetCredentialScopes("read-only"),
         );
-        const replacement = yield* f.sync(f.recipient.service, connected);
+        assert.equal(
+          (yield* f.sync(f.recipient.service, { mode: "automatic" })).incoming.length,
+          0,
+        );
+        const replacement = yield* f.sync(f.recipient.service, { ...connected, mode: "automatic" });
         assert.equal(replacement.incoming.length, 1);
         assert.equal(replacement.incoming[0]?.replace, true);
-        // A saved connection is not proof of pickup while the replacement grant is unspent.
-        yield* TestClock.adjust("1 second");
+        assert.equal(replacement.incoming[0]?.requireSavedConnection, true);
+        const deliveryId = replacement.incoming[0]!.deliveryId;
+        const receiptPath = f.path.join(
+          f.deliveryDirectory,
+          `${Delivery.deliveryFileName("alpha", "beta")}.receipt.json`,
+        );
+        const oldReceipt = yield* f.fs.readFileString(receiptPath);
+        yield* f.fs.remove(f.path.join(f.recipient.stateDir, "lan-fleet-state.json"));
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
+        const completed = { ...connected, completedReplacementDeliveryIds: [deliveryId] };
+
+        // Neither an expired sender catalog nor an existing saved ID proves pickup.
+        yield* TestClock.adjust("11 minutes");
+        yield* f.sync(f.recipient.service, completed);
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
         yield* f.sync(f.sender.service);
         assert.equal((yield* f.sync(f.recipient.service, connected)).incoming[0]?.replace, true);
+        yield* f.sync(f.recipient.service, completed);
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
 
         f.consume("alpha");
         yield* TestClock.adjust("1 second");
         yield* f.sync(f.sender.service);
         assert.equal((yield* f.sync(f.recipient.service, connected)).incoming.length, 0);
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
+        yield* f.sync(f.recipient.service, completed);
+        assert.notEqual(yield* f.fs.readFileString(receiptPath), oldReceipt);
         assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
         assert.deepEqual(f.issued, ["alpha", "alpha"]);
         assert.deepEqual(f.revoked, ["session-synthetic-1"]);
+      }).pipe(Effect.provide(testConfig)),
+  );
+  it.effect.each(["scoped", "unscoped"] as const)(
+    "keeps an unspent %s replacement pending after journal and share trust loss",
+    (scope) =>
+      Effect.gen(function* () {
+        const credentialScope = scope === "scoped" ? "synthetic-switched-fleet" : undefined;
+        const f = yield* setup(false, false, true, false, credentialScope);
+        const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
+        f.setPolicy({ revision: 1 });
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        assert.equal((yield* f.sync(f.recipient.service)).incoming.length, 1);
+        f.consume("alpha");
+        yield* f.sync(f.recipient.service, connected);
+        const receiptPath = f.path.join(
+          f.deliveryDirectory,
+          `${Delivery.deliveryFileName("alpha", "beta")}.receipt.json`,
+        );
+        const oldReceipt = yield* f.fs.readFileString(receiptPath);
+
+        f.setPolicy({ revision: 2, machines: [{ machineId: "beta", access: "read-only" }] });
+        yield* TestClock.adjust("1 second");
+        assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "pending");
+        yield* f.fs.remove(f.path.join(f.recipient.stateDir, "lan-fleet-state.json"));
+        f.setShareTrust(false);
+
+        yield* f.sync(f.recipient.service, { ...connected, mode: "status" });
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
+        assert.equal((yield* f.sync(f.recipient.service, connected)).incoming.length, 0);
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
+
+        f.setShareTrust(true);
+        const resumed = yield* f.sync(f.recipient.service, connected);
+        assert.equal(resumed.incoming.length, 1);
+        assert.equal(
+          resumed.incoming[0]?.preserveManualConnection,
+          credentialScope === undefined ? undefined : true,
+        );
+        assert.equal(yield* f.fs.readFileString(receiptPath), oldReceipt);
       }).pipe(Effect.provide(testConfig)),
   );
   it.effect(
@@ -595,8 +667,41 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
           assert.equal(f.revoked.includes(`session-synthetic-${index}`), index < f.issued.length);
       }).pipe(Effect.provide(testConfig)),
   );
+  it.effect(
+    "collects an existing offer despite a proven old pin and stamps the local fleet ID",
+    () =>
+      Effect.gen(function* () {
+        const fleetId = "new-fleet";
+        const f = yield* setup(true, false, true, true, fleetId, fleetId);
+        const environmentId = f.a.peer.environmentId;
+        yield* f.sync(f.recipient.service, { mode: "status" });
+        yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
+        const stale = {
+          connectedEnvironmentIds: [environmentId],
+          pinnedFleetRoutes: [{ environmentId, fleetIds: ["old-fleet"] }],
+        };
+        const { incoming } = yield* f.sync(f.recipient.service, stale);
+        assert.equal(incoming.length, 1);
+        assert.equal(incoming[0]?.fleetId, fleetId);
+        assert.isDefined(incoming[0]?.tls);
+        assert.equal(incoming[0]?.replace, true);
+        const receipt = f.path.join(
+          f.deliveryDirectory,
+          Delivery.deliveryFileName("alpha", "beta") + ".receipt.json",
+        );
+        assert.equal(yield* f.fs.exists(receipt), false);
+        f.consume("alpha");
+        yield* f.sync(f.sender.service);
+        yield* f.sync(f.recipient.service, {
+          ...stale,
+          pinnedFleetRoutes: [{ environmentId, fleetIds: [fleetId] }],
+          completedReplacementDeliveryIds: [incoming[0]!.deliveryId],
+        });
+        assert.equal(yield* f.fs.exists(receipt), true);
+      }).pipe(Effect.provide(testConfig)),
+  );
   it.effect.each([0, 1])(
-    "renews a fleet credential a week before it expires, at access policy revision %i",
+    "renews an unpinned 1.0.53 pickup in shared-folder mode without the encrypted endpoint (access policy revision %i)",
     (revision) =>
       Effect.gen(function* () {
         const f = yield* setup(true, false, true);
@@ -604,10 +709,18 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
         const connected = { connectedEnvironmentIds: [f.a.peer.environmentId] };
         yield* f.sync(f.recipient.service, { mode: "status" });
         yield* f.sync(f.sender.service, { sendMachineIds: ["beta"] });
-        yield* f.sync(f.recipient.service);
+        const pickup = yield* f.sync(f.recipient.service);
+        assert.equal(pickup.incoming.length, 1);
+        assert.equal(pickup.incoming[0]?.tls, undefined);
+        assert.equal(pickup.incoming[0]?.fleetId, undefined);
         f.consume("alpha");
         yield* f.sync(f.recipient.service, connected);
         assert.equal((yield* f.sync(f.sender.service)).machines[1]?.status, "connected");
+
+        const fleetId = "upgraded-synthetic-fleet";
+        for (const machine of [f.sender, f.recipient]) {
+          yield* writeFleetJson(machine.privateFile, { ...machine.config, fleetId });
+        }
 
         // Eight days left: the credential is left alone.
         yield* TestClock.adjust("22 days");
@@ -625,6 +738,7 @@ it.layer(NodeServices.layer)("LAN fleet isolated sync", (it) => {
         const renewal = yield* f.sync(f.recipient.service, connected);
         assert.equal(renewal.incoming.length, 1);
         assert.equal(renewal.incoming[0]?.replace, true);
+        assert.equal(renewal.incoming[0]?.fleetId, fleetId);
 
         // The peer reconnects with its renewed session, which retires the old one.
         f.consume("alpha");

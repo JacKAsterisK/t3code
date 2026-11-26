@@ -2731,57 +2731,63 @@ describe("CursorAdapterV2", () => {
     ),
   );
 
-  it.live("honors the user's Cursor CLI attribution preferences", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-attribution-" });
-      yield* fileSystem.makeDirectory(path.join(home, ".cursor"));
-      yield* fileSystem.writeFileString(
-        path.join(home, ".cursor", "cli-config.json"),
-        JSON.stringify({
-          attribution: { attributeCommitsToAgent: false, attributePRsToAgent: false },
-        }),
-      );
-      const backend = yield* fakeCursorBackend;
-      // CURSOR_CONFIG_DIR outranks an ambient XDG_CONFIG_HOME; the home overrides keep the real ~/.cursor out.
-      yield* scopedProcessEnv({
-        HOME: home,
-        USERPROFILE: home,
-        CURSOR_CONFIG_DIR: path.join(home, ".cursor"),
-      });
-      const options = makeCursorAgentOptions({
-        apiKey: "synthetic-cursor-api-key",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("cursor"),
-          model: "composer-2",
-        },
-        runtimePolicy: {
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          cwd: home,
-        },
-        threadId: ThreadId.make("cursor-attribution-thread"),
-        mcpSession: undefined,
-        platform: "linux",
-      });
-      const agent = yield* Effect.acquireRelease(
-        Effect.promise(() =>
-          Agent.create({
-            ...options,
-            // The default SQLite store stays open for the process, which keeps Windows from removing the temp home.
-            local: { ...options.local, store: new JsonlLocalAgentStore(path.join(home, "agents")) },
+  // The SDK also holds a workspace SQLite handle when supplied a JSONL agent store.
+  it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "honors the user's Cursor CLI attribution preferences",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-attribution-" });
+        yield* fileSystem.makeDirectory(path.join(home, ".cursor"));
+        yield* fileSystem.writeFileString(
+          path.join(home, ".cursor", "cli-config.json"),
+          JSON.stringify({
+            attribution: { attributeCommitsToAgent: false, attributePRsToAgent: false },
           }),
-        ),
-        (agent) => Effect.sync(() => agent.close()),
-      );
-      yield* Effect.promise(() => agent.send("Commit hello.txt."));
+        );
+        const backend = yield* fakeCursorBackend;
+        // CURSOR_CONFIG_DIR outranks an ambient XDG_CONFIG_HOME; the home overrides keep the real ~/.cursor out.
+        yield* scopedProcessEnv({
+          HOME: home,
+          USERPROFILE: home,
+          CURSOR_CONFIG_DIR: path.join(home, ".cursor"),
+        });
+        const options = makeCursorAgentOptions({
+          apiKey: "synthetic-cursor-api-key",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("cursor"),
+            model: "composer-2",
+          },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: home,
+          },
+          threadId: ThreadId.make("cursor-attribution-thread"),
+          mcpSession: undefined,
+          platform: "linux",
+        });
+        const agent = yield* Effect.acquireRelease(
+          Effect.promise(() =>
+            Agent.create({
+              ...options,
+              // The default SQLite store stays open for the process, which keeps Windows from removing the temp home.
+              local: {
+                ...options.local,
+                store: new JsonlLocalAgentStore(path.join(home, "agents")),
+              },
+            }),
+          ),
+          (agent) => Effect.sync(() => agent.close()),
+        );
+        yield* Effect.promise(() => agent.send("Commit hello.txt."));
 
-      assert.deepEqual(yield* Deferred.await(backend.requestContext), {
-        commitAttributionMessage: undefined,
-        prAttributionMessage: undefined,
-      });
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+        assert.deepEqual(yield* Deferred.await(backend.requestContext), {
+          commitAttributionMessage: undefined,
+          prAttributionMessage: undefined,
+        });
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   // The real SDK keeps its workspace SQLite store open until process exit on Windows.
@@ -3515,6 +3521,143 @@ describe("CursorAdapterV2", () => {
           Layer.mergeAll(NodeServices.layer, IdAllocator.layer, McpProviderSessions.layer),
         ),
       ),
+  );
+
+  it.effect("reopens a fresh session when a cached worker session is no longer alive", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspace = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-cursor-dead-worker-",
+      });
+      const instanceId = ProviderInstanceId.make("cursor");
+      const threadId = ThreadId.make("cursor-dead-worker-thread");
+      const modelSelection = { instanceId, model: "composer-2.5" };
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: workspace,
+      });
+
+      let firstAlive = true;
+      let firstClosed = 0;
+      const opens: Array<{ readonly operation: string; readonly agentId?: string }> = [];
+      const sends: Array<number> = [];
+
+      const adapter = yield* makeCursorAdapterV2({
+        instanceId,
+        environment: { HOME: workspace },
+      }).pipe(
+        Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
+          assertComplete: Effect.void,
+          open: (input) => {
+            const sessionNumber = opens.length + 1;
+            opens.push({
+              operation: input.operation,
+              ...(input.agentId === undefined ? {} : { agentId: input.agentId }),
+            });
+            return Effect.succeed({
+              agentId: "native-cursor-reopen",
+              isAlive: () => (sessionNumber === 1 ? firstAlive : true),
+              listMessages: Effect.succeed([]),
+              close: Effect.sync(() => {
+                if (sessionNumber === 1) firstClosed += 1;
+              }),
+              send: () => {
+                sends.push(sessionNumber);
+                return Effect.succeed({
+                  agentId: "native-cursor-reopen",
+                  runId: `run-${sessionNumber}`,
+                  wait: Effect.succeed({
+                    id: `run-${sessionNumber}`,
+                    requestId: `req-${sessionNumber}`,
+                    status: "finished" as const,
+                    result: "ok",
+                    model: { id: "composer-2.5" },
+                    durationMs: 1,
+                  }),
+                  cancel: Effect.void,
+                });
+              },
+            });
+          },
+        }),
+        Effect.provide(TestProviderHost.layer({ cwd: workspace })),
+      );
+
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("cursor-dead-worker-session"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      assert.deepEqual(opens, [{ operation: "create" }]);
+
+      // Simulate the first worker terminating after ensureThread.
+      firstAlive = false;
+      const now = yield* DateTime.now;
+      yield* runtime.startTurn({
+        threadId,
+        providerThread,
+        modelSelection,
+        runtimePolicy,
+        runId: RunId.make("cursor-dead-worker-run"),
+        runOrdinal: 1,
+        providerTurnOrdinal: 1,
+        attemptId: RunAttemptId.make("cursor-dead-worker-attempt"),
+        rootNodeId: NodeId.make("cursor-dead-worker-root"),
+        appThread: {
+          id: threadId,
+          projectId: ProjectId.make("cursor-dead-worker-project"),
+          createdBy: "user",
+          creationSource: "web",
+          title: "Dead worker recovery",
+          providerInstanceId: instanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: providerThread.id,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+        message: {
+          messageId: MessageId.make("cursor-dead-worker-message"),
+          createdBy: "user",
+          creationSource: "web",
+          text: "Continue on a fresh worker.",
+          attachments: [],
+        },
+      });
+      const events = yield* runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+      );
+      assert.equal(events.find((event) => event.type === "turn.terminal")?.status, "completed");
+      assert.equal(firstClosed, 1);
+      assert.deepEqual(opens, [
+        { operation: "create" },
+        { operation: "resume", agentId: "native-cursor-reopen" },
+      ]);
+      assert.deepEqual(sends, [2]);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, IdAllocator.layer, McpProviderSessions.layer),
+      ),
+    ),
   );
 
   it("preserves failed nested read calls when Cursor omits their path", () => {

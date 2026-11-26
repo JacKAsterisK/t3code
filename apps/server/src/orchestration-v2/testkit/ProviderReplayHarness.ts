@@ -63,6 +63,8 @@ import * as RunExecutionService from "../RunExecutionService.ts";
 import * as RunFinalizationService from "../RunFinalizationService.ts";
 import * as ThreadTitleRegenerationService from "../ThreadTitleRegenerationService.ts";
 import * as RuntimePolicy from "../RuntimePolicy.ts";
+import * as WorkspaceFolders from "../../workspace/WorkspaceFolders.ts";
+import * as TaskFolderStore from "../../workspace/TaskFolderStore.ts";
 import * as TurnItemPositionStore from "../TurnItemPositionStore.ts";
 import * as RuntimeRequestService from "../RuntimeRequestService.ts";
 import * as ThreadCommandExecutor from "../ThreadCommandExecutor.ts";
@@ -208,6 +210,9 @@ export function runOrchestratorV2ProviderReplayScenario<
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
     readonly managedPolicy?: ManagedPolicyDocument;
+    readonly providerInstances?: Partial<
+      ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]
+    >;
   } = {},
 ): Effect.Effect<
   OrchestratorV2ScenarioResult,
@@ -252,6 +257,9 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
     readonly continueThreadsAfterServerUpdate?: boolean;
     readonly managedPolicy?: ManagedPolicyDocument;
     readonly replayGate?: ProviderReplayGate;
+    readonly providerInstances?: Partial<
+      ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]
+    >;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
@@ -289,6 +297,13 @@ export function layerWithRegistry<Error>(
       store: ProjectionStore.ProjectionStoreV2Shape,
     ) => ProjectionStore.ProjectionStoreV2Shape;
     readonly managedPolicy?: ManagedPolicyDocument;
+    readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+    /** A fixture that changes settings can supply the instance it also uses outside the harness. */
+    readonly settingsLayer?: Layer.Layer<ServerSettings.ServerSettingsService>;
+    /** The instances the ingestor reads snapshots from, such as an endpoint behind a hub. */
+    readonly providerInstances?: Partial<
+      ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]
+    >;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
@@ -317,19 +332,22 @@ export function layerWithRegistry<Error>(
   const layerProvidedRegistry = registryLayer.pipe(
     Layer.provide(Layer.merge(layerContinuationRequests, McpProviderSessions.layer)),
   );
-  const layerServerSettings = Layer.unwrap(
-    Effect.map(ManagedPolicy.fromDocument("/test/policy.json", options.managedPolicy), (policy) =>
-      ServerSettings.layerTest(
-        {
-          responseStreamingMode: "turn",
-          ...(options.continueThreadsAfterServerUpdate === undefined
-            ? {}
-            : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
-        },
-        policy.summary,
+  const layerServerSettings =
+    options.settingsLayer ??
+    Layer.unwrap(
+      Effect.map(ManagedPolicy.fromDocument("/test/policy.json", options.managedPolicy), (policy) =>
+        ServerSettings.layerTest(
+          {
+            responseStreamingMode: "turn",
+            ...options.settings,
+            ...(options.continueThreadsAfterServerUpdate === undefined
+              ? {}
+              : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
+          },
+          policy.summary,
+        ),
       ),
-    ),
-  ).pipe(Layer.orDie);
+    ).pipe(Layer.orDie);
   const layerEffectOutboxProvided = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
   const wrapProjectionStore = options.wrapProjectionStore;
   const layerProjectionStore =
@@ -358,12 +376,13 @@ export function layerWithRegistry<Error>(
   const layerCommandReceiptStoreProvided = CommandReceiptStore.layer.pipe(
     Layer.provide(layerDatabase),
   );
+  const layerProviderInstances = Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)(
+    options.providerInstances ?? { getInstance: () => Effect.undefined },
+  );
   const layerProviderEventIngestorProvided = ProviderEventIngestor.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
-          getInstance: () => Effect.undefined,
-        }),
+        layerProviderInstances,
         layerStores,
         layerEventSinkProvided,
         IdAllocator.layer,
@@ -385,7 +404,16 @@ export function layerWithRegistry<Error>(
     Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
   const layerCheckpointServiceProvided = CheckpointService.layer.pipe(
-    Layer.provide(Layer.mergeAll(layerCheckpointStore, IdAllocator.layer)),
+    Layer.provide(
+      Layer.mergeAll(
+        layerCheckpointStore,
+        IdAllocator.layer,
+        WorkspaceFolders.layer.pipe(
+          Layer.provide(layerStores),
+          Layer.provide(TaskFolderStore.layer.pipe(Layer.provide(layerDatabase))),
+        ),
+      ),
+    ),
   );
   const layerContextHandoffServiceProvided = ContextHandoffService.layer.pipe(
     Layer.provide(IdAllocator.layer),
@@ -510,12 +538,14 @@ export function layerWithRegistry<Error>(
         layerContextHandoffServiceProvided,
         layerPersistence,
         layerProvidedRegistry,
+        layerProviderInstances,
         layerContinuationRequests,
         layerRuntime,
         layerProviderSessionManagerProvided,
         layerProviderSwitchServiceProvided,
         layerRunExecutionServiceProvided,
         layerServerSettings,
+        TaskFolderStore.layer.pipe(Layer.provide(layerDatabase)),
         ThreadForkService.layer,
       ),
     ),

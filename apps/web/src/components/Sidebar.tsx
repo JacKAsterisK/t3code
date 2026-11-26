@@ -164,6 +164,7 @@ import {
   useQuietThreadShells,
 } from "../state/entities";
 import { environmentPresentations } from "../state/presentation";
+import { liveShellEnvironmentIdsAtom } from "../state/shell";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { environmentProjects } from "../state/projects";
 import { threadEnvironment } from "../state/threads";
@@ -202,7 +203,6 @@ import {
 import {
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
-  sidebarDelegatedUnderParent,
   groupSidebarThreadsByProject,
   sidebarFolderExpansionKeys,
   buildBulkTitleRegenerationContextMenuItem,
@@ -223,6 +223,7 @@ import {
   resolveSidebarReorderableThreadKeys,
   searchSidebarThreads,
   shouldCreateNewThreadInCurrentProject,
+  resolveScopedNewThreadProjectRef,
   shouldNavigateAfterThreadPark,
   sidebarListItemId,
   sidebarThreadKeyAtY,
@@ -275,6 +276,7 @@ import {
   ComboboxTrigger,
   useComboboxFilter,
 } from "./ui/combobox";
+import { Switch } from "./ui/switch";
 import { Toggle, ToggleGroup } from "./ui/toggle-group";
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
@@ -293,7 +295,7 @@ import {
   type SidebarProviderEntry,
   type SidebarSweepAction,
 } from "./sidebar/SidebarThreadRow";
-import { SidebarDraftBlock } from "./sidebar/SidebarDraftBlock";
+import { SidebarDraftBlock, useSidebarDrafts } from "./sidebar/SidebarDraftBlock";
 import {
   SidebarProjectFolderHeader,
   sidebarFolderRowId,
@@ -303,6 +305,11 @@ import {
   sidebarMachineRowId,
   type SidebarMachineEntry,
 } from "./sidebar/SidebarMachineGroupHeader";
+import {
+  EMPTY_MACHINE_ACTIVITY,
+  groupMachineActivity,
+  hasMachineActivityInScope,
+} from "./sidebar/SidebarMachineActivity.logic";
 import {
   SidebarDragBoundary,
   SidebarSectionHeader,
@@ -360,6 +367,7 @@ const sidebarProviderEntriesAtom = Atom.make((get) => {
 
 const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, SidebarProviderEntry> = new Map();
 const EMPTY_THREADS: readonly EnvironmentThreadShell[] = [];
+const EMPTY_DRAFT_IDS: readonly DraftId[] = [];
 
 const SETTLED_TAIL_INITIAL_COUNT = 10;
 const SETTLED_TAIL_PAGE_COUNT = 25;
@@ -392,6 +400,7 @@ interface SidebarThreadPartitionInput {
   readonly ownerFilterId: string | null;
   /** Tasks linked environments run for a listed thread; they show under it. */
   readonly delegatedUnderParent: ReadonlySet<string>;
+  readonly showSubagents: boolean;
   readonly serverConfigs: ReadonlyMap<EnvironmentId, EnvironmentServerConfig>;
   readonly connectedEnvironmentIds: readonly EnvironmentId[];
   readonly optimisticDrop: SidebarOptimisticDrop | null;
@@ -463,6 +472,7 @@ function useSidebarThreads(input: {
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly threads: readonly EnvironmentThreadShell[];
   readonly delegatedUnderParent: ReadonlySet<string>;
+  readonly showSubagents: boolean;
   readonly routeRowThreadKey: string | null;
   // Set in boring mode: the project groups to fold active threads into, in order.
   readonly folderGroups: readonly SidebarProjectSnapshot[] | null;
@@ -484,6 +494,7 @@ function useSidebarThreads(input: {
     optimisticDrop,
     threads,
     delegatedUnderParent,
+    showSubagents,
     routeRowThreadKey,
     folderGroups,
     keepEmptyFolders: keepEmpty,
@@ -545,6 +556,7 @@ function useSidebarThreads(input: {
     scopedProjectKeys,
     ownerFilterId,
     delegatedUnderParent,
+    showSubagents,
     serverConfigs,
     connectedEnvironmentIds,
     optimisticDrop,
@@ -727,6 +739,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     scopedProjectKeys,
     ownerFilterId,
     delegatedUnderParent,
+    showSubagents,
     serverConfigs,
     optimisticDrop,
     workingShelfEnabled,
@@ -738,6 +751,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     scopedProjectKeys,
     delegatedUnderParent,
     ownerFilterId,
+    showSubagents,
   );
   const inboxObservation = inboxReturns.observe(workingShelfEnabled ? threads : null);
   const pinned: EnvironmentThreadShell[] = [];
@@ -1028,7 +1042,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectGroupByScopeKey,
     projectScopeItems: lookupProjectScopeItems,
   } = useSidebarLookups();
-  const nestedDelegates = useDelegatedUnderParent();
+  const delegatedUnderParent = useDelegatedUnderParent();
+  const showSubagents = useClientSettings((s) => s.sidebarShowSubagents);
   const fleetUsersDirectory = useFleetUsersDirectory();
   const selfOwnerId = useSelfOwnerId();
   const sidebarOwnerFilter = useClientSettings((s) => s.sidebarOwnerFilter);
@@ -1234,11 +1249,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // The boring sidebar already folds threads by project, and one machine needs no headers.
   const canGroupByMachine = !boringSidebarEnabled && environmentPresentationList.length > 1;
   const groupByMachine = canGroupByMachine && threadGrouping === "machine";
-  const delegatedUnderParent = sidebarDelegatedUnderParent(
-    threads,
-    nestedDelegates,
-    groupByMachine,
-  );
+  const liveMachineShellIds = useAtomValue(liveShellEnvironmentIdsAtom);
+  const machineActivity = groupByMachine ? groupMachineActivity(threads) : null;
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
   const listedThreads =
     promotingDraftThreadKeys.length === 0
@@ -1248,12 +1260,21 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ? asLaunchingThread(thread)
             : thread,
         );
-  const routeRowThreadKey =
-    routeThreadRef === null
-      ? null
-      : scopedThreadKey(
-          resolveListedAncestorThreadRef(routeThreadRef, threads, delegatedUnderParent),
-        );
+  const routeRowThreadKey = (() => {
+    if (routeThreadRef === null) return null;
+    const key = scopedThreadKey(routeThreadRef);
+    const thread = threads.find((candidate) => threadShellKey(candidate) === key);
+    if (
+      thread !== undefined &&
+      filterSidebarV2VisibleThreads([thread], null, delegatedUnderParent, null, showSubagents)
+        .length > 0
+    ) {
+      return key;
+    }
+    return scopedThreadKey(
+      resolveListedAncestorThreadRef(routeThreadRef, threads, delegatedUnderParent),
+    );
+  })();
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
   // The open draft's first send names its thread in place; a finalized draft reached by
   // navigation resolves through its redirect instead, and still reveals.
@@ -1270,6 +1291,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     isSearching: isSearchingThreads,
     scopedProjectKeys: chosenScopeProjectKeys,
     delegatedUnderParent,
+    showSubagents,
     findThread: (key) => threads.find((candidate) => threadShellKey(candidate) === key),
   });
   const projectScopeKeys = revealWidensScope ? [] : chosenProjectScopeKeys;
@@ -1533,6 +1555,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     optimisticDrop,
     threads: listedThreads,
     delegatedUnderParent,
+    showSubagents,
     routeRowThreadKey,
     folderGroups: boringSidebarEnabled
       ? scopedProjectGroups.length === 0
@@ -1547,11 +1570,17 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         ? null
         : {
             machines: machineEntries,
-            // A project filter narrows the list to matching threads only.
+            // Running children can be hidden under their parent on another machine.
             keepEmpty: (machine) =>
-              scopedProjectGroups.length === 0 &&
-              machine.connection === "connected" &&
-              machineThreadProjects(machine.environmentId).length > 0,
+              hasMachineActivityInScope(
+                machine.environmentId,
+                machineActivity?.get(machine.environmentId) ?? EMPTY_MACHINE_ACTIVITY,
+                scopedProjectKeys,
+              ) ||
+              (scopedProjectGroups.length === 0 &&
+                (machine.connection !== "connected" ||
+                  !liveMachineShellIds.has(machine.environmentId) ||
+                  machineThreadProjects(machine.environmentId).length > 0)),
           },
   });
   const handleMachineContextMenu = useStableCallback(
@@ -1697,18 +1726,27 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const settledThreadKeysRef = useRef(settledThreadKeys);
   const snoozedThreadKeysRef = useRef(snoozedThreadKeys);
 
+  const { draftIds, routeDraftComposer } = useSidebarDrafts(scopedProjectKeys, routeDraftIdForRows);
+  // Draft rows sit above the threads, so jumps and traversal reach them first.
+  // Search hides them, so they drop out while it is open.
+  const listedDraftIds = isSearchingThreads ? EMPTY_DRAFT_IDS : draftIds;
+  const draftIdByRowKey = new Map<string, DraftId>(listedDraftIds.map((id) => [`draft:${id}`, id]));
+  const orderedRowKeys = [...draftIdByRowKey.keys(), ...orderedThreadKeys];
+  const routeDraftRowKey = `draft:${routeDraftIdForRows}`;
+  const routeRowKey = draftIdByRowKey.has(routeDraftRowKey) ? routeDraftRowKey : routeRowThreadKey;
+
   const jumpLabelByKey = (() => {
     const mapping = new Map<string, string>();
-    for (const [index, threadKey] of orderedThreadKeys.entries()) {
+    for (const [index, rowKey] of orderedRowKeys.entries()) {
       const jumpCommand = threadJumpCommandForIndex(index);
       if (!jumpCommand) break;
       const label = shortcutLabelForCommand(keybindings, jumpCommand);
-      if (label) mapping.set(threadKey, label);
+      if (label) mapping.set(rowKey, label);
     }
     return mapping;
   })();
 
-  const navigateToThread = (threadRef: ScopedThreadRef) => {
+  const navigateToThread = useStableCallback((threadRef: ScopedThreadRef) => {
     if (useThreadSelectionStore.getState().selectedThreadKeys.size > 0) {
       clearSelection();
     }
@@ -1720,7 +1758,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(threadRef),
     });
-  };
+  });
 
   const handleThreadFileDrop = async (threadRef: ScopedThreadRef, files: File[]) => {
     const dropId = queuePendingFileDrop({ threadRef, files });
@@ -3193,21 +3231,24 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         platform: navigator.platform,
         context: threadShortcutContext(routeThreadRef),
       });
-      const navigateToThreadKey = (targetThreadKey: string | null) => {
-        if (!targetThreadKey) return false;
-        const targetThread = threadByKey.get(targetThreadKey);
-        if (!targetThread) return false;
+      const navigateToRowKey = (targetRowKey: string | null) => {
+        if (!targetRowKey) return false;
+        const targetDraftId = draftIdByRowKey.get(targetRowKey);
+        const targetThread = threadByKey.get(targetRowKey);
+        if (targetDraftId === undefined && !targetThread) return false;
         event.preventDefault();
         event.stopPropagation();
-        navigateToThread(scopeThreadRef(targetThread.environmentId, targetThread.id));
+        if (targetDraftId !== undefined) navigateToDraft(targetDraftId);
+        else if (targetThread)
+          navigateToThread(scopeThreadRef(targetThread.environmentId, targetThread.id));
         return true;
       };
       const traversalDirection = threadTraversalDirectionFromCommand(command);
       if (traversalDirection !== null) {
-        navigateToThreadKey(
+        navigateToRowKey(
           resolveAdjacentThreadId({
-            threadIds: orderedThreadKeys,
-            currentThreadId: routeRowThreadKey,
+            threadIds: orderedRowKeys,
+            currentThreadId: routeRowKey,
             direction: traversalDirection,
           }),
         );
@@ -3215,22 +3256,43 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       }
       const jumpIndex = threadJumpIndexFromCommand(command ?? "");
       if (jumpIndex === null) return;
-      navigateToThreadKey(orderedThreadKeys[jumpIndex] ?? null);
+      navigateToRowKey(orderedRowKeys[jumpIndex] ?? null);
     };
     window.addEventListener("keydown", onWindowKeyDown);
     return () => window.removeEventListener("keydown", onWindowKeyDown);
   }, [
+    draftIdByRowKey,
     keybindings,
+    navigateToDraft,
     navigateToThread,
-    orderedThreadKeys,
-    routeRowThreadKey,
+    orderedRowKeys,
+    routeRowKey,
     routeThreadRef,
     threadByKey,
   ]);
 
   const showJumpHints = useThreadJumpHintsVisible(keybindings, routeThreadRef);
+  const draftJumpLabelById = showJumpHints
+    ? new Map(
+        listedDraftIds.flatMap((id) => {
+          const label = jumpLabelByKey.get(`draft:${id}`);
+          return label ? [[id, label] as const] : [];
+        }),
+      )
+    : null;
 
   const handleNewThreadClick = (event?: ReactMouseEvent) => {
+    const scopedProjectRef = resolveScopedNewThreadProjectRef({
+      shiftKey: event?.shiftKey ?? false,
+      // The folder sidebar's header button always opens the picker.
+      scopedProjectGroups: boringSidebarEnabled ? [] : scopedProjectGroups,
+      viewed: newThreadContext.activeThread ?? newThreadContext.activeDraftThread,
+    });
+    if (scopedProjectRef) {
+      if (isMobile) setOpenMobile(false);
+      void handleNewThread(scopedProjectRef);
+      return;
+    }
     if (
       shouldCreateNewThreadInCurrentProject(
         event?.shiftKey ?? false,
@@ -3432,6 +3494,18 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         </ToggleGroup>
                       </div>
                     ) : null}
+                    <label className="flex items-center justify-between gap-2 border-b border-border px-2 py-1.5">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        <T>Show subagents</T>
+                      </span>
+                      <Switch
+                        aria-label={gt("Show subagents")}
+                        checked={showSubagents}
+                        onCheckedChange={(checked) =>
+                          void updateClientSettings({ sidebarShowSubagents: checked })
+                        }
+                      />
+                    </label>
                     {ownerFilterOptions.length > 0 ? (
                       <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1.5">
                         <span className="text-xs font-medium text-muted-foreground">
@@ -3862,9 +3936,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                       const items: ReactNode[] = [
                         <SidebarDraftBlock
                           key="draft-sessions"
+                          draftIds={draftIds}
+                          routeDraftComposer={routeDraftComposer}
+                          jumpLabelByDraftId={draftJumpLabelById}
                           projectByKey={projectByKey}
                           projectDisplayNameByKey={projectDisplayNameByKey}
-                          scopedProjectKeys={scopedProjectKeys}
                           routeDraftId={routeDraftIdForRows}
                           onNavigateToDraft={navigateToDraft}
                           onDraftContextMenu={handleDraftContextMenu}
@@ -3891,6 +3967,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                   !folder.machine.readOnly &&
                                   machineThreadProjects(folder.machine.environmentId).length > 0
                                 }
+                                activity={
+                                  folder.machine.connection === "connected" &&
+                                  liveMachineShellIds.has(folder.machine.environmentId)
+                                    ? (machineActivity?.get(folder.machine.environmentId) ??
+                                      EMPTY_MACHINE_ACTIVITY)
+                                    : null
+                                }
+                                onOpenActivityThread={navigateToThread}
                                 onToggle={toggleMachineGroup}
                                 onNewThread={startThreadOnMachine}
                                 onContextMenu={handleMachineContextMenu}

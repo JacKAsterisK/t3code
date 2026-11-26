@@ -20,13 +20,20 @@ import * as DirectEndpoints from "../environment/DirectEndpoints.ts";
 import * as Config from "../config.ts";
 import * as Vault from "./FleetVault.ts";
 import * as Authority from "./FleetAuthority.ts";
-import type { FleetPrivateConfig } from "./FleetDelivery.ts";
-import { resolveFleetBootstrap, trustedFleetShareRoot } from "./FleetBootstrap.ts";
+import { fleetCredentialKeyFor, type FleetPrivateConfig } from "./FleetDelivery.ts";
+import {
+  FLEET_ROSTER_ENV,
+  fleetLocalName,
+  isFleetSwitchRoster,
+  resolveFleetBootstrap,
+  trustedFleetShareRoot,
+} from "./FleetBootstrap.ts";
 import { readFleetJson, validateRoster, writeFleetJson, writeFleetRoster } from "./FleetFiles.ts";
 import { secureOrigin } from "./GatewayT3OAuthClient.ts";
 import * as FleetTransport from "./FleetTransport.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import { makeMembership } from "./FleetMembership.ts";
+import { reportFleetRecoveryReceiver } from "./fleetCredentialRecoveryEntry.ts";
 
 export class FleetEnrollment extends Context.Service<
   FleetEnrollment,
@@ -36,11 +43,14 @@ export class FleetEnrollment extends Context.Service<
       input: LanFleetSetupInput,
     ) => Effect.Effect<LanFleetSetupState, LanFleetError>;
     readonly resolve: Effect.Effect<FleetPrivateConfig | null | undefined, LanFleetError>;
+    readonly savedFleetId: Effect.Effect<string | undefined, LanFleetError>;
   }
 >()("t3/lan/FleetEnrollment") {}
 
 const isFleetError = Schema.is(LanFleetError);
 const configurationError = () => new LanFleetError({ reason: "configuration" });
+/** A refusal with a reason the person can act on; see LanFleetError's messages. */
+const refused = (refusal: string) => new LanFleetError({ reason: "configuration", refusal });
 const translate = (error: unknown) =>
   isFleetError(error) ? error : new LanFleetError({ reason: "unavailable" });
 
@@ -49,6 +59,7 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const processEnvironment = yield* HostProcess.Environment;
   const platform = yield* HostProcess.Platform;
+  const hostname = yield* HostProcess.Hostname;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const endpoints = yield* DirectEndpoints.DirectEndpoints;
   const config = yield* Config.ServerConfig;
@@ -56,14 +67,22 @@ const make = Effect.gen(function* () {
   const transport = yield* Effect.serviceOption(FleetTransport.FleetTransport);
   const fleetAccess = yield* FleetAccessPolicy.FleetAccess;
   const setupLock = path.join(config.stateDir, "lan-fleet-setup.lock");
-  const membership = yield* makeMembership(path.join(config.stateDir, "lan-fleet-members.json"));
+  const switchedFleet = isFleetSwitchRoster(processEnvironment[FLEET_ROSTER_ENV]);
+  const membership = yield* makeMembership(
+    path.join(
+      config.stateDir,
+      fleetLocalName("lan-fleet-members.json", processEnvironment[FLEET_ROSTER_ENV]),
+    ),
+  );
+  let reportedRecoveryAuthority: string | undefined;
+  let nextRecoveryReport = 0;
   const bootstrap = () =>
     Effect.try({ try: () => resolveFleetBootstrap(processEnvironment), catch: configurationError });
   // Sync and the fleet context stop before reading enrollment when the fleet is switched off, so a
   // membership cached from an earlier launch is cleared here, at startup.
   if ((yield* bootstrap().pipe(Effect.orElseSucceed(() => null))) === undefined)
     yield* fleetAccess.leave;
-  const load = Effect.fn("FleetEnrollment.load")(function* () {
+  const load = Effect.fn("FleetEnrollment.load")(function* (observeVaultError = false) {
     const paths = yield* bootstrap();
     if (paths === undefined) {
       yield* fleetAccess.leave;
@@ -80,7 +99,14 @@ const make = Effect.gen(function* () {
     const root = path.dirname(paths.rosterPath);
     const authorityFile = path.join(root, "fleet-authority.json");
     const requestsDirectory = path.join(root, "fleet-enrollment");
-    const record = yield* vault.read;
+    const credential = yield* vault.read.pipe(
+      Effect.map((record) => ({ record, error: undefined })),
+      Effect.catchIf(
+        () => observeVaultError,
+        (error) => Effect.succeed({ record: undefined, error }),
+      ),
+    );
+    const { record } = credential;
     const authority = (yield* fs.exists(authorityFile))
       ? yield* readFleetJson(authorityFile, Authority.FleetAuthority)
       : undefined;
@@ -90,9 +116,10 @@ const make = Effect.gen(function* () {
         catch: configurationError,
       });
       if (record !== undefined && authority.revision > record.lastRevision)
-        yield* vault.save({ ...record, lastRevision: authority.revision });
+        yield* vault.advanceRevision(record, authority.revision);
     }
-    const roster = (yield* fs.exists(paths.rosterPath))
+    const rosterAvailable = yield* fs.exists(paths.rosterPath);
+    const roster = rosterAvailable
       ? yield* readFleetJson(paths.rosterPath, FleetRoster)
       : { version: 1 as const, machines: [] };
     yield* Effect.try({ try: () => validateRoster(roster), catch: configurationError });
@@ -134,7 +161,14 @@ const make = Effect.gen(function* () {
             existing.enabled &&
             existing.machineId === peer.machineId &&
             existing.environmentId === peer.environmentId &&
-            existing.origin === peer.origin
+            existing.origin === peer.origin &&
+            // A member explicitly signed by the fleet owner may refresh its TLS metadata,
+            // but an enrollment file cannot restore the superseded signing or encryption keys.
+            (((!switchedFleet || existing.environmentId !== authority.ownerEnvironmentId) &&
+              fleetCredentialKeyFor(authority.credentialKeyDigests, existing.machineId) ===
+                undefined) ||
+              (existing.signingPublicKey === peer.signingPublicKey &&
+                existing.encryptionPublicKey === peer.encryptionPublicKey))
           )
             peers[index] = peer;
         }
@@ -194,7 +228,7 @@ const make = Effect.gen(function* () {
       );
     // With no enrollment here the fleet no longer links this machine. A missing authority file may
     // only be a share blip, so it changes nothing.
-    if (record === undefined) yield* fleetAccess.leave;
+    if (record === undefined && credential.error === undefined) yield* fleetAccess.leave;
     const accessPolicy =
       record === undefined || authority === undefined || record.fleetId !== authority.fleetId
         ? undefined
@@ -206,10 +240,43 @@ const make = Effect.gen(function* () {
             legacyAccess: record.access,
             member,
             signingPrivateKey: record.signingPrivateKey,
+            credentialAuthorityRevision: authority.revision,
+            ...(authority.credentialKeyDigests === undefined
+              ? {}
+              : { credentialKeyDigests: authority.credentialKeyDigests }),
             rosterDisabled: roster.machines
               .filter((machine) => !machine.enabled)
               .map((machine) => machine.machineId),
           });
+    if (
+      accessPolicy !== undefined &&
+      (accessPolicy.credentialAuthorityReady === false ||
+        (accessPolicy.credentialAuthorityRevision !== undefined &&
+          accessPolicy.credentialAuthorityRevision !== authority?.revision) ||
+        Object.entries(accessPolicy.credentialKeyDigests ?? {}).some(
+          ([machineId, digest]) =>
+            fleetCredentialKeyFor(authority?.credentialKeyDigests, machineId) !== digest,
+        ))
+    )
+      return yield* new LanFleetError({ reason: "unavailable" });
+    if (
+      sharedFolderTrust &&
+      member &&
+      record !== undefined &&
+      ownPeer !== undefined &&
+      authority !== undefined &&
+      accessPolicy?.credentialAuthorityReady === true
+    ) {
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      if (reportedRecoveryAuthority !== authority.signature || now >= nextRecoveryReport) {
+        // A signed observation supports an owner-approved recovery. It never grants fleet access.
+        reportedRecoveryAuthority = authority.signature;
+        nextRecoveryReport = now + 60_000;
+        yield* reportFleetRecoveryReceiver(root, authority, record, ownPeer, now).pipe(
+          Effect.ignore,
+        );
+      }
+    }
     return {
       accessPolicy,
       member,
@@ -218,8 +285,10 @@ const make = Effect.gen(function* () {
       authorityFile,
       requestsDirectory,
       record,
+      credentialError: credential.error,
       authority,
       roster,
+      rosterAvailable,
       sharedFolderTrust,
       peers: trustedPeers,
       fleetPeers,
@@ -228,10 +297,24 @@ const make = Effect.gen(function* () {
 
   const status = Effect.gen(function* () {
     const descriptor = yield* environment.getDescriptor;
-    const current = yield* load();
+    const current = yield* load(true);
     const local = current?.roster.machines.find(
       (machine) => machine.environmentId === descriptor.environmentId,
     );
+    const credentialUnavailable =
+      current?.sharedFolderTrust === true &&
+      current.record === undefined &&
+      current.authority !== undefined &&
+      local?.enabled === true &&
+      current.peers.some(
+        (peer) =>
+          peer.enabled &&
+          peer.machineId === local.machineId &&
+          peer.environmentId === local.environmentId &&
+          peer.origin === local.origin,
+      );
+    if (current?.credentialError !== undefined && !credentialUnavailable)
+      return yield* current.credentialError;
     const advertised = yield* endpoints.resolve();
     const suggestedTlsOrigins = Option.isSome(transport) ? yield* transport.value.suggestions : [];
     const tlsReady =
@@ -250,6 +333,7 @@ const make = Effect.gen(function* () {
     const base: LanFleetSetupState = {
       available: current !== undefined,
       sharedFolderTrust: current?.sharedFolderTrust ?? false,
+      ...(credentialUnavailable ? { credentialUnavailable } : {}),
       stage: "unconfigured",
       owner: false,
       ownerCode: null,
@@ -418,9 +502,14 @@ const make = Effect.gen(function* () {
                 machineId: record.machineId,
                 peers: current.fleetPeers,
                 legacyAccess: record.access,
+                credentialAuthorityRevision: authority.revision,
+                ...(authority.credentialKeyDigests === undefined
+                  ? {}
+                  : { credentialKeyDigests: authority.credentialKeyDigests }),
                 member: current.member,
                 signingPrivateKey: record.signingPrivateKey,
                 expectedRevision: input.revision,
+                ...(input.requireNoStartingList === true ? { requireNoStartingList: true } : {}),
                 next: {
                   defaultAccess: input.defaultAccess,
                   machines: input.machines,
@@ -436,6 +525,12 @@ const make = Effect.gen(function* () {
               });
               return;
             }
+            if (
+              switchedFleet &&
+              input.operation === "start" &&
+              hostname.toLowerCase() !== "buildmachine"
+            )
+              return yield* refused("switched-fleet-start");
             yield* fs.makeDirectory(current.root, { recursive: true });
             const ownerLock = path.join(current.root, "fleet-authority.lock");
             yield* Effect.acquireUseRelease(
@@ -454,21 +549,31 @@ const make = Effect.gen(function* () {
                     const existing = fresh.roster.machines.find(
                       (machine) => machine.environmentId === descriptor.environmentId,
                     );
-                    if (existing !== undefined && (!existing.enabled || existing.origin !== origin))
-                      return yield* configurationError();
+                    if (existing !== undefined && !existing.enabled)
+                      return yield* refused("roster-row-disabled");
+                    if (existing !== undefined && existing.origin !== origin)
+                      return yield* refused("roster-origin-mismatch");
                     if (
                       input.operation === "start" &&
-                      fresh.authority !== undefined &&
-                      fresh.record?.rootPrivateKey === undefined
+                      fresh.record === undefined &&
+                      fresh.authority !== undefined
                     )
-                      return yield* configurationError();
+                      return yield* refused("fleet-exists");
+                    if (input.operation === "start" && fresh.record !== undefined) {
+                      if (fresh.record.rootPrivateKey === undefined)
+                        return yield* refused("already-member");
+                      if (fresh.authority === undefined && fresh.record.lastRevision > 1)
+                        return yield* refused("owner-authority-missing");
+                    }
+                    if (input.operation === "join" && fresh.authority === undefined)
+                      return yield* refused("fleet-missing");
                     if (
                       input.operation === "join" &&
-                      (fresh.authority === undefined ||
-                        (!fresh.sharedFolderTrust &&
-                          Authority.ownerVerificationCode(fresh.authority) !== input.ownerCode))
+                      fresh.authority !== undefined &&
+                      !fresh.sharedFolderTrust &&
+                      Authority.ownerVerificationCode(fresh.authority) !== input.ownerCode
                     )
-                      return yield* configurationError();
+                      return yield* refused("owner-code-mismatch");
                     if (
                       fresh.record === undefined &&
                       (existing !== undefined ||
@@ -476,7 +581,7 @@ const make = Effect.gen(function* () {
                           (peer) => peer.environmentId === descriptor.environmentId,
                         ))
                     )
-                      return yield* configurationError();
+                      return yield* refused("roster-row-without-keys");
                     const original =
                       fresh.record ??
                       Authority.generateFleetIdentity(
@@ -584,7 +689,7 @@ const make = Effect.gen(function* () {
                           Authority.identityPeer(record, self.label, self.origin),
                         )
                     )
-                      return yield* configurationError();
+                      return yield* refused("machine-not-enabled");
                     // Shared-folder admission already supplies the effective automatic campaign.
                     // Linking validates those peers without requiring the owner or rewriting authority.
                     return;
@@ -595,7 +700,7 @@ const make = Effect.gen(function* () {
                     authority.ownerEnvironmentId !== descriptor.environmentId ||
                     !record.enabled
                   )
-                    return yield* configurationError();
+                    return yield* refused("not-owner");
                   let updated = authority;
                   if (input.operation === "approve") {
                     const request = yield* readFleetJson(
@@ -606,9 +711,16 @@ const make = Effect.gen(function* () {
                       try: () => Authority.verifyEnrollment(request, authority),
                       catch: configurationError,
                     });
+                    const approvedKey = fleetCredentialKeyFor(
+                      authority.credentialKeyDigests,
+                      input.machineId,
+                    );
                     if (
                       Authority.peerVerificationCode(request.peer) !== input.verificationCode ||
                       request.peer.machineId !== input.machineId ||
+                      (approvedKey !== undefined &&
+                        approvedKey !==
+                          Authority.fleetSigningKeyDigest(request.peer.signingPublicKey)) ||
                       // No machine takes an ID that could read as an access-list exception.
                       FleetAccessPolicy.reservedMachineId(input.machineId)
                     )
@@ -686,6 +798,10 @@ const make = Effect.gen(function* () {
                     { ...updated, revision: authority.revision + 1 },
                     record.rootPrivateKey,
                   );
+                  yield* Effect.try({
+                    try: () => Authority.verifyAuthority(signed, record),
+                    catch: configurationError,
+                  });
                   yield* writeFleetJson(fresh.authorityFile, signed);
                   yield* vault.save({ ...record, lastRevision: signed.revision });
                 }),
@@ -696,72 +812,118 @@ const make = Effect.gen(function* () {
       );
       return yield* status;
     },
+    (effect) => (Option.isSome(transport) ? transport.value.serializeSetup(effect) : effect),
     Effect.mapError(translate),
     Effect.provideService(FileSystem.FileSystem, fs),
   );
 
+  const repairTarget = (current: NonNullable<Effect.Success<ReturnType<typeof load>>>) => {
+    const record = current.record;
+    if (!current.sharedFolderTrust || record?.enabled !== true || record.tlsEnabled === false)
+      return undefined;
+    const local = current.roster.machines.find(
+      (machine) =>
+        machine.enabled &&
+        machine.machineId === record.machineId &&
+        machine.environmentId === record.environmentId,
+    );
+    if (local === undefined) return undefined;
+    const own = current.peers.find(
+      (peer) =>
+        peer.enabled &&
+        peer.environmentId === record.environmentId &&
+        peer.machineId === record.machineId &&
+        peer.origin === local.origin,
+    );
+    const identity = Authority.identityPeer(record, local.label, local.origin);
+    if (
+      own?.signingPublicKey !== identity.signingPublicKey ||
+      own.encryptionPublicKey !== identity.encryptionPublicKey ||
+      (record.tls !== undefined &&
+        Authority.peerVerificationCode(own) === Authority.peerVerificationCode(identity))
+    )
+      return undefined;
+    return { record, local, own, requestsDirectory: current.requestsDirectory };
+  };
+
   const resolve = Effect.gen(function* () {
     let current = yield* load();
     if (current?.record === undefined) return undefined;
-    if (!current.record.enabled || current.authority === undefined) return null;
-    const localId = current.record.environmentId;
-    const local = current.roster.machines.find(
-      (machine) => machine.environmentId === localId && machine.enabled,
-    );
-    const ownPeer = current.peers.find((peer) => peer.environmentId === localId && peer.enabled);
-    const ownIdentity =
-      local === undefined
-        ? undefined
-        : Authority.identityPeer(current.record, local.label, local.origin);
-    if (
-      current.sharedFolderTrust &&
-      current.record.tlsEnabled !== false &&
-      local !== undefined &&
-      ownPeer !== undefined &&
-      ownPeer.machineId === current.record.machineId &&
-      ownPeer.origin === local.origin &&
-      ownPeer.signingPublicKey === ownIdentity?.signingPublicKey &&
-      ownPeer.encryptionPublicKey === ownIdentity?.encryptionPublicKey &&
-      Option.isSome(transport) &&
-      (current.record.tls !== undefined ||
-        !(yield* endpoints.resolve()).some((endpoint) =>
-          endpoint.httpBaseUrl.startsWith("https://"),
-        )) &&
-      (current.record.tls === undefined ||
-        Authority.peerVerificationCode(ownPeer) !== Authority.peerVerificationCode(ownIdentity!))
-    ) {
-      const tls = current.record.tls ?? (yield* transport.value.prepare(local.origin));
-      const restored = { ...current.record, tls, tlsEnabled: true };
-      yield* transport.value.persist(restored);
-      const peer = Authority.identityPeer(restored, local.label, local.origin);
-      yield* fs.makeDirectory(current.requestsDirectory, { recursive: true });
-      yield* writeFleetJson(
-        path.join(current.requestsDirectory, `${peer.machineId}.json`),
-        Authority.enrollmentRequest(restored, peer),
+    if (!current.record.enabled) return null;
+    // A transient share failure must leave the last verified outbound pins in place.
+    if (current.authority === undefined || !current.rosterAvailable)
+      return yield* new LanFleetError({ reason: "unavailable" });
+    if (Option.isSome(transport) && repairTarget(current) !== undefined) {
+      const service = transport.value;
+      yield* service.serializeSetup(
+        Effect.gen(function* () {
+          // Serialize with local setup without leaving a lock behind if the server exits.
+          const latest = yield* load();
+          const target = latest === undefined ? undefined : repairTarget(latest);
+          if (target === undefined) return;
+          const { record, local, own, requestsDirectory } = target;
+          let repaired = record;
+          if (record.tls !== undefined) {
+            const approved = Effect.gen(function* () {
+              const observed = yield* load();
+              if (!observed?.rosterAvailable || observed.authority === undefined)
+                return yield* new LanFleetError({ reason: "unavailable" });
+              const fresh = repairTarget(observed);
+              return (
+                fresh !== undefined &&
+                Authority.peerVerificationCode(fresh.own) === Authority.peerVerificationCode(own)
+              );
+            }).pipe(Effect.mapError(translate), Effect.provideService(FileSystem.FileSystem, fs));
+            if (!(yield* service.restore(record, approved))) return;
+          } else {
+            if (
+              (yield* endpoints.resolve()).some((endpoint) =>
+                endpoint.httpBaseUrl.startsWith("https://"),
+              )
+            )
+              return;
+            repaired = { ...record, tls: yield* service.prepare(local.origin), tlsEnabled: true };
+            yield* service.persist(repaired);
+          }
+          const peer = Authority.identityPeer(repaired, local.label, local.origin);
+          yield* fs.makeDirectory(requestsDirectory, { recursive: true });
+          yield* writeFleetJson(
+            path.join(requestsDirectory, peer.machineId + ".json"),
+            Authority.enrollmentRequest(repaired, peer),
+          );
+        }),
       );
       current = yield* load();
-      if (current?.record === undefined || current.authority === undefined) return null;
+      if (current?.record === undefined || !current.record.enabled) return null;
+      if (current.authority === undefined || !current.rosterAvailable)
+        return yield* new LanFleetError({ reason: "unavailable" });
     }
     if (current.record.tls !== undefined && current.record.tlsEnabled === false) return null;
-    if (
-      current.record.tls !== undefined &&
-      (Option.isNone(transport) || !(yield* transport.value.ready(current.record)))
-    )
-      return yield* new LanFleetError({ reason: "transport" });
-    const { record, authority } = current;
-    const self = current.peers.find(
-      (peer) =>
-        peer.environmentId === record.environmentId &&
-        peer.machineId === record.machineId &&
-        peer.enabled,
-    );
-    if (
-      self === undefined ||
-      Authority.peerVerificationCode(self) !==
-        Authority.peerVerificationCode(Authority.identityPeer(record, self.label, self.origin))
-    )
-      return null;
-    yield* vault.save({ ...record, lastRevision: authority.revision });
+    if (!current.member) return null;
+    const record = current.record;
+    if (record.tls !== undefined) {
+      if (Option.isNone(transport)) return yield* new LanFleetError({ reason: "transport" });
+      const service = transport.value;
+      if (!(yield* service.ready(record))) {
+        const approved = Effect.gen(function* () {
+          const latest = yield* load();
+          if (!latest?.rosterAvailable || latest.authority === undefined)
+            return yield* new LanFleetError({ reason: "unavailable" });
+          return (
+            latest.member &&
+            latest.record?.tlsEnabled !== false &&
+            latest.record?.tls?.publicKeySha256 === record.tls?.publicKeySha256
+          );
+        }).pipe(Effect.mapError(translate), Effect.provideService(FileSystem.FileSystem, fs));
+        if (!(yield* service.restore(record, approved))) return null;
+        current = yield* load();
+        if (current?.authority === undefined || !current.rosterAvailable)
+          return yield* new LanFleetError({ reason: "unavailable" });
+        if (!current.member || current.record?.tlsEnabled === false) return null;
+      }
+      if (!(yield* service.ready(record))) return yield* new LanFleetError({ reason: "transport" });
+    }
+    const authority = current.authority;
     return {
       version: 1 as const,
       machineId: record.machineId,
@@ -772,6 +934,11 @@ const make = Effect.gen(function* () {
       signingPrivateKey: record.signingPrivateKey,
       peers: current.peers,
       managed: true,
+      fleetId: authority.fleetId,
+      ...(switchedFleet ? { credentialScope: authority.fleetId } : {}),
+      ...(authority.credentialKeyDigests === undefined
+        ? {}
+        : { credentialKeyDigests: authority.credentialKeyDigests }),
       access: record.access,
       campaign: current.sharedFolderTrust
         ? {
@@ -782,7 +949,11 @@ const make = Effect.gen(function* () {
         : authority.campaign,
     } satisfies FleetPrivateConfig;
   }).pipe(Effect.mapError(translate), Effect.provideService(FileSystem.FileSystem, fs));
-  return FleetEnrollment.of({ status, configure, resolve });
+  const savedFleetId = Effect.gen(function* () {
+    if ((yield* bootstrap()) === undefined) return undefined;
+    return (yield* vault.read)?.fleetId;
+  }).pipe(Effect.mapError(translate));
+  return FleetEnrollment.of({ status, configure, resolve, savedFleetId });
 });
 
 export const layerServices = Layer.effect(FleetEnrollment, make);

@@ -1,9 +1,10 @@
 import { msg } from "gt-i18n";
 import { detailFromError, translatableDetail } from "../errors/translatable.ts";
-import type {
-  DesktopSshEnvironmentTarget,
-  EnvironmentId,
-  FleetTlsIdentity,
+import {
+  sameFleetTlsRoute,
+  type DesktopSshEnvironmentTarget,
+  type EnvironmentId,
+  type FleetTlsIdentity,
 } from "@t3tools/contracts";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import * as Clock from "effect/Clock";
@@ -48,7 +49,16 @@ import {
 import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentRegistry from "./registry.ts";
 import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
-import { connectionRoutes, routeEntry, sshTargetKey } from "./routes.ts";
+import {
+  conflictsWithSavedRoute,
+  connectionRoutes,
+  fleetReplacementRoutes,
+  fleetTlsOfRoute,
+  routeEntry,
+  savedFleetIdentity,
+  splitOldFleetRoutes,
+  sshTargetKey,
+} from "./routes.ts";
 
 export interface PairingConnectionInput {
   readonly pairingUrl?: string;
@@ -56,7 +66,11 @@ export interface PairingConnectionInput {
   readonly pairingCode?: string;
   readonly expectedEnvironmentId?: EnvironmentId;
   readonly skipExisting?: boolean;
+  readonly preserveManualConnection?: boolean;
+  readonly replacementDeliveryId?: string;
+  readonly requireSavedConnection?: boolean;
   readonly tls?: FleetTlsIdentity;
+  readonly fleetId?: string;
 }
 
 export interface SshConnectionInput {
@@ -89,6 +103,11 @@ export class ConnectionOnboarding extends Context.Service<
     readonly updateBearer: (
       input: BearerConnectionUpdateInput,
     ) => Effect.Effect<void, ConnectionAttemptError | Persistence.ConnectionPersistenceError>;
+    /** Whether `host` answers this device as `environmentId`. Nothing is sent but the question. */
+    readonly reaches: (input: {
+      readonly host: string;
+      readonly environmentId: EnvironmentId;
+    }) => Effect.Effect<boolean>;
   }
 >()("@t3tools/client-runtime/connection/onboarding/ConnectionOnboarding") {}
 
@@ -125,7 +144,11 @@ function differentMachineError(label: string) {
 
 export const preparePairingRegistration = Effect.fn(
   "clientRuntime.connection.onboarding.preparePairingRegistration",
-)(function* (input: PairingConnectionInput) {
+)(function* (
+  input: PairingConnectionInput,
+  fleetReplacement?: { readonly previousIdentity: FleetTlsIdentity | undefined },
+  retiredIdentities: ReadonlyArray<FleetTlsIdentity> = [],
+) {
   const resolved = yield* resolvePairingTarget(input);
   if (
     input.tls !== undefined &&
@@ -136,6 +159,55 @@ export const preparePairingRegistration = Effect.fn(
       reason: "configuration",
       detail: "Fleet endpoint identity does not match this delivery.",
     });
+  const unpinnedRenewal = input.replacementDeliveryId !== undefined && input.tls === undefined;
+  if (
+    fleetReplacement !== undefined ||
+    retiredIdentities.length > 0 ||
+    input.requireSavedConnection === true ||
+    unpinnedRenewal
+  ) {
+    const environmentId = input.expectedEnvironmentId;
+    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+    const current =
+      environmentId === undefined
+        ? undefined
+        : (yield* SubscriptionRef.get(registry.entries)).get(environmentId);
+    if (input.requireSavedConnection === true && current === undefined)
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail: "This saved connection was removed. Add it again to reconnect.",
+      });
+    const { saved } = splitOldFleetRoutes(current, input.fleetId);
+    const retained = saved === undefined ? [] : connectionRoutes(saved);
+    const retiring = retiredIdentities.length > 0;
+    const candidate =
+      environmentId === undefined
+        ? undefined
+        : {
+            connectionId: bearerConnectionId(environmentId, resolved.httpBaseUrl),
+            httpBaseUrl: resolved.httpBaseUrl,
+            ...(input.tls === undefined ? {} : { fleetTls: input.tls }),
+            ...(input.fleetId === undefined ? {} : { fleetId: input.fleetId }),
+          };
+    if (
+      (retiring && (candidate === undefined || conflictsWithSavedRoute(retained, candidate))) ||
+      (fleetReplacement !== undefined &&
+        (candidate === undefined ||
+          fleetReplacementRoutes(saved, candidate, fleetReplacement.previousIdentity) === null)) ||
+      (unpinnedRenewal &&
+        (retained.some((route) => fleetTlsOfRoute(route) !== undefined) ||
+          (!retiring &&
+            fleetReplacement === undefined &&
+            candidate !== undefined &&
+            conflictsWithSavedRoute(retained, candidate, true))))
+    )
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail:
+          "The fleet offer conflicts with a saved connection. Existing connections were kept.",
+      });
+  }
+  const previousIdentity = fleetReplacement?.previousIdentity;
   const gateway = yield* ClientCapabilities.FleetTlsGateway;
   const protectedEndpoint =
     input.tls === undefined
@@ -143,6 +215,10 @@ export const preparePairingRegistration = Effect.fn(
       : yield* gateway.prepare({
           environmentId: input.expectedEnvironmentId!,
           identity: input.tls,
+          ...(previousIdentity === undefined || sameFleetTlsRoute(input.tls, previousIdentity)
+            ? {}
+            : { previousIdentity }),
+          ...(retiredIdentities.length === 0 ? {} : { retiredIdentities }),
         });
   const target = { ...resolved, ...protectedEndpoint };
   const presentation = yield* ClientCapabilities.ClientPresentation;
@@ -170,6 +246,10 @@ export const preparePairingRegistration = Effect.fn(
       httpBaseUrl: resolved.httpBaseUrl,
       wsBaseUrl: resolved.wsBaseUrl,
       ...(input.tls === undefined ? {} : { fleetTls: input.tls }),
+      ...(input.fleetId === undefined ? {} : { fleetId: input.fleetId }),
+      ...(input.replacementDeliveryId === undefined
+        ? {}
+        : { fleetReplacementDeliveryId: input.replacementDeliveryId }),
     }),
   };
   // The registry checks again under its lease; this early check keeps a refused code unspent.
@@ -227,23 +307,87 @@ const registerPairingConnection = Effect.fn(
   "clientRuntime.connection.onboarding.registerPairingConnection",
 )(function* (input: PairingConnectionInput) {
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-  if (
-    input.skipExisting === true &&
-    input.expectedEnvironmentId !== undefined &&
-    (yield* SubscriptionRef.get(registry.entries)).has(input.expectedEnvironmentId)
-  )
-    return input.expectedEnvironmentId;
-  const registration = yield* preparePairingRegistration(input);
+  const isReplacement =
+    input.replacementDeliveryId !== undefined || input.preserveManualConnection === true;
+  const current =
+    input.expectedEnvironmentId === undefined
+      ? undefined
+      : (yield* SubscriptionRef.get(registry.entries)).get(input.expectedEnvironmentId);
+  const { saved, retired } = splitOldFleetRoutes(current, input.fleetId);
+  if (retired.length === 0 && saved !== undefined && input.skipExisting === true)
+    return saved.target.environmentId;
+  const fleetPickup =
+    input.skipExisting !== undefined ||
+    isReplacement ||
+    input.tls !== undefined ||
+    input.fleetId !== undefined;
+
+  let fleetReplacement: { readonly previousIdentity: FleetTlsIdentity | undefined } | undefined;
+  if (isReplacement && retired.length === 0) {
+    const previousIdentity = savedFleetIdentity(saved, input.tls);
+    if (previousIdentity === null) {
+      const hasFleetPin =
+        saved !== undefined &&
+        connectionRoutes(saved).some((route) => fleetTlsOfRoute(route) !== undefined);
+      if (!hasFleetPin && input.preserveManualConnection === true && saved !== undefined)
+        return saved.target.environmentId;
+      // Original fleets can renew an unpinned credential without retiring a saved route.
+      if (hasFleetPin || input.tls !== undefined)
+        return yield* new ConnectionBlockedError({
+          reason: "configuration",
+          detail:
+            "There is no single verified fleet route to replace. Existing connections were kept.",
+        });
+    } else {
+      fleetReplacement = { previousIdentity };
+    }
+  }
+  const retiredIdentities = retired.flatMap((route) => fleetTlsOfRoute(route) ?? []);
+  const registration = yield* preparePairingRegistration(
+    input,
+    fleetReplacement,
+    retiredIdentities,
+  );
   const knownAddressOnly = input.expectedEnvironmentId === undefined;
-  if (!(yield* registry.register(registration, { knownAddressOnly }))) {
+  if (
+    !(yield* registry.register(registration, {
+      knownAddressOnly,
+      ...(fleetPickup ? { fleetPickup: true } : {}),
+      ...(retiredIdentities.length === 0 ? {} : { retiredIdentities }),
+      ...(input.requireSavedConnection === true ? { requireSavedConnection: true } : {}),
+      ...(fleetReplacement === undefined ? {} : { fleetReplacement }),
+    }))
+  ) {
     return registration.target.environmentId;
   }
+  if (fleetPickup) return registration.target.environmentId;
   yield* registry.setCompatibility(registration.target.environmentId, null);
   yield* registry
     .setEnabled(registration.target.environmentId, true)
     .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }));
   return registration.target.environmentId;
 });
+
+const REACHABILITY_TIMEOUT_MS = 6_000;
+
+const reachesEnvironment = Effect.fn("clientRuntime.connection.onboarding.reachesEnvironment")(
+  function* (input: { readonly host: string; readonly environmentId: EnvironmentId }) {
+    const httpBaseUrl = yield* Effect.try({
+      try: () => normalizeHttpBaseUrl(input.host),
+      catch: () =>
+        new ConnectionBlockedError({
+          reason: "configuration",
+          ...translatableDetail(msg("The environment URL is invalid.")),
+        }),
+    });
+    const descriptor = yield* fetchRemoteEnvironmentDescriptor({
+      httpBaseUrl,
+      timeoutMs: REACHABILITY_TIMEOUT_MS,
+    });
+    return descriptor.environmentId === input.environmentId;
+  },
+  Effect.orElseSucceed(() => false),
+);
 
 const isBearerProfile = Schema.is(BearerConnectionProfile);
 
@@ -336,6 +480,10 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       label,
       httpBaseUrl,
       wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
+      ...(httpBaseUrl === entry.profile.value.httpBaseUrl &&
+      entry.profile.value.fleetId !== undefined
+        ? { fleetId: entry.profile.value.fleetId }
+        : {}),
     }),
     credential: credential.value,
   });
@@ -413,6 +561,12 @@ export const make = Effect.gen(function* () {
       },
       Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
       Effect.provideService(ConnectionCredentialStore.ConnectionCredentialStore, credentials),
+    ),
+    reaches: Effect.fnUntraced(
+      function* (input) {
+        return yield* reachesEnvironment(input);
+      },
+      Effect.provideService(HttpClient.HttpClient, httpClient),
     ),
   });
 });

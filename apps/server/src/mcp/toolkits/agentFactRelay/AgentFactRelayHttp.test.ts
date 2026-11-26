@@ -202,7 +202,7 @@ it.live(
       const f = yield* serve();
       const initialized = yield* f.post("initialize", {
         protocolVersion: "2025-06-18",
-        capabilities: {},
+        capabilities: { repositoryIdentity: false },
         clientInfo: { name: "free-fixture", version: "1" },
       });
       const session = initialized.headers["mcp-session-id"];
@@ -275,7 +275,7 @@ it.live("an events startup disable keeps relay tools hidden after a live enable"
     yield* f.settings.updateSettings({ agentEventsEnabled: true });
     const initialized = yield* f.post("initialize", {
       protocolVersion: "2025-06-18",
-      capabilities: {},
+      capabilities: { repositoryIdentity: false },
       clientInfo: { name: "free-fixture", version: "1" },
     });
     assert.deepEqual(
@@ -336,6 +336,7 @@ it.live(
               Effect.succeed({
                 url: source.url,
                 token: "peer",
+                capabilities: { repositoryIdentity: false },
                 link: {
                   environmentId: EnvironmentId.make("here"),
                   label: "Origin",

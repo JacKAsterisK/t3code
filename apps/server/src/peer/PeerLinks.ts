@@ -9,8 +9,11 @@ import {
   type PeerLink,
   type PeerLinkCreateInput,
   PeerLinkError,
+  type PeerLinkName,
   type PeerLinkSummary,
+  type LanFleetResetPreview,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -41,6 +44,7 @@ import { isLocalLoopbackHost, isTailnetHost } from "@t3tools/shared/hostClassifi
 
 import { peerConnectionFailure } from "@t3tools/shared/fleetTlsProxy";
 import * as Fleet from "../lan/FleetPeerHttpClient.ts";
+import { FLEET_ROSTER_ENV, isFleetSwitchRoster } from "../lan/FleetBootstrap.ts";
 import * as Gate from "../auth/ApprovalAdmissionGate.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -85,7 +89,13 @@ export interface ResolvedPeerLink {
   /** The first address that answered as this peer. */
   readonly url: string;
   readonly token: string;
+  readonly requiresFleetPin?: boolean;
+  /** What the peer said it can do when it answered. */
+  readonly capabilities: ExecutionEnvironmentCapabilities;
 }
+
+/** What a link's session is called in the peer's Connections, before this environment's label. */
+export const LINK_CLIENT_NAME_PREFIX = "T3 Code · ";
 
 export const LINKED_ENVIRONMENTS_OFF =
   "Linked environments is off on this machine. Turn it on in Settings → Labs.";
@@ -114,6 +124,9 @@ export class PeerLinks extends Context.Service<
       input: PeerLinkCreateInput,
     ) => Effect.Effect<{ readonly link: PeerLink; readonly alreadyLinked: boolean }, PeerLinkError>;
     readonly list: Effect.Effect<ReadonlyArray<PeerLinkSummary>, PeerLinkError>;
+    readonly fleetLinks: Effect.Effect<LanFleetResetPreview["items"]["links"], PeerLinkError>;
+    /** The unexpired links' names, from what is stored, without asking any peer. */
+    readonly names: Effect.Effect<ReadonlyArray<PeerLinkName>, PeerLinkError>;
     /** The stored link, without asking the peer whether it answers. */
     readonly get: (
       environmentId: EnvironmentId,
@@ -151,6 +164,7 @@ interface PeerLinkRow {
   readonly last_reached_at: string | null;
   readonly last_error: string | null;
   readonly fenced: number;
+  readonly provenance: string;
 }
 
 const decodeUrls = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(Schema.String)));
@@ -247,7 +261,11 @@ const linkLimitsHold = (peer: { readonly capabilities: ExecutionEnvironmentCapab
   peer.capabilities.mcpModeLimitHeader === true && peer.capabilities.linkFence === true;
 
 const make = Effect.gen(function* () {
+  const preserveManualLinks = isFleetSwitchRoster(
+    (yield* HostProcess.Environment)[FLEET_ROSTER_ENV],
+  );
   const sql = yield* SqlClient.SqlClient;
+  const fleetTrust = yield* Effect.serviceOption(Fleet.FleetPeerTrust);
   const { withGate } = yield* Gate.ApprovalAdmissionGate;
   const changes = yield* PubSub.unbounded<string>();
   const secrets = yield* ServerSecretStore.ServerSecretStore;
@@ -518,6 +536,17 @@ const make = Effect.gen(function* () {
     return { primary, peer: yield* probe(primary), origins };
   });
 
+  const preserveManual = (row: Option.Option<PeerLinkRow>, automatic: boolean) =>
+    preserveManualLinks && automatic && Option.isSome(row) && row.value.provenance !== "fleet"
+      ? Effect.fail(
+          new PeerLinkError({
+            reason: "pairing_rejected",
+            message:
+              "This environment already has a manual or older link. Hub preserved it during the fleet switch.",
+          }),
+        )
+      : Effect.void;
+
   const linkWith = Effect.fn("PeerLinks.link")(function* (
     input: PeerLinkCreateInput,
     keepLinked: boolean,
@@ -538,6 +567,7 @@ const make = Effect.gen(function* () {
             input.expectedLabel ?? input.expectedEnvironmentId,
           );
     const row = yield* readRow(peer.environmentId);
+    yield* preserveManual(row, provenance !== undefined);
     const stored = Option.isSome(row) ? yield* toLink(row.value) : undefined;
     const current =
       stored !== undefined && DateTime.isGreaterThan(stored.expiresAt, yield* DateTime.now)
@@ -569,7 +599,7 @@ const make = Effect.gen(function* () {
         message: `${peer.label} runs a T3 Code version that cannot keep a linked agent's limits. Update it, then link again.`,
       });
     }
-    const issued = yield* signIn(primary, input, `T3 Code · ${self.label}`);
+    const issued = yield* signIn(primary, input, `${LINK_CLIENT_NAME_PREFIX}${self.label}`);
     const now = yield* DateTime.now;
     const linked: PeerLink = {
       environmentId: peer.environmentId,
@@ -597,6 +627,7 @@ const make = Effect.gen(function* () {
         return yield* new PeerLinkError({ reason: "disabled", message: LINKED_ENVIRONMENTS_OFF });
       const urlsJson = yield* encodeUrls(origins).pipe(Effect.catch(failStorage));
       const previous = yield* readRow(peer.environmentId);
+      yield* preserveManual(previous, provenance !== undefined);
       yield* sql`
         INSERT INTO peer_environment_links (
           environment_id, secret_name, label, urls_json, access, linked_at, expires_at,
@@ -674,6 +705,38 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const fleetLinks: PeerLinks["Service"]["fleetLinks"] = sql<{
+    environment_id: string;
+    label: string;
+    fleet_machine_id: string;
+    linked_at: string;
+  }>`
+    SELECT environment_id, label, fleet_machine_id, linked_at FROM peer_environment_links
+    WHERE provenance = 'fleet' AND fleet_machine_id IS NOT NULL
+    ORDER BY environment_id COLLATE BINARY
+  `.pipe(
+    NodeSqliteClient.readOnly,
+    Effect.map((rows) =>
+      rows.map((row) => ({
+        environmentId: EnvironmentId.make(row.environment_id),
+        label: row.label,
+        machineId: row.fleet_machine_id,
+        linkedAt: row.linked_at,
+      })),
+    ),
+    Effect.catch(failStorage),
+  );
+
+  const names: PeerLinks["Service"]["names"] = Effect.gen(function* () {
+    const links = yield* Effect.forEach(yield* readRows, toLink);
+    const now = yield* DateTime.now;
+    return links.flatMap((link) =>
+      DateTime.isGreaterThan(link.expiresAt, now)
+        ? [{ environmentId: link.environmentId, label: link.label }]
+        : [],
+    );
+  });
+
   const get: PeerLinks["Service"]["get"] = (environmentId) =>
     readRow(environmentId).pipe(
       Effect.flatMap(
@@ -730,14 +793,24 @@ const make = Effect.gen(function* () {
       }
       // Race the addresses without a credential, then use only one that still answers as this peer.
       const failures = new Map<string, string>();
-      const fleet = yield* Effect.serviceOption(Fleet.FleetPeerTrust);
-      const trusted = Option.isSome(fleet) ? yield* fleet.value.current : [];
+      const trusted = Option.isSome(fleetTrust) ? yield* fleetTrust.value.current : [];
+      // Migration cannot prove that an unclassified historical link was created manually.
+      const requiresFleetPin = row.value.provenance !== "manual";
+      const urls = requiresFleetPin
+        ? link.urls.filter((url) => trusted.some((peer) => peer.origin === url))
+        : link.urls;
+      if (requiresFleetPin && urls.length === 0)
+        return yield* new PeerLinkError({
+          reason: "unreachable",
+          message: "The approved fleet TLS pin for this link is unavailable.",
+        });
       const answered =
-        link.urls.length === 0
+        urls.length === 0
           ? Option.none()
           : yield* Effect.raceAll(
-              link.urls.map((url) =>
+              urls.map((url) =>
                 probe(url).pipe(
+                  Effect.provideService(Fleet.RequireFleetPin, requiresFleetPin),
                   Effect.map((peer) => {
                     if (peer.environmentId === environmentId) return Option.some({ url, peer });
                     failures.set(
@@ -783,6 +856,8 @@ const make = Effect.gen(function* () {
         link: yield* withLabel(link, peer.label),
         url,
         token: new TextDecoder().decode(stored.value),
+        ...(requiresFleetPin ? { requiresFleetPin: true } : {}),
+        capabilities: peer.capabilities,
       };
     },
   );
@@ -817,6 +892,8 @@ const make = Effect.gen(function* () {
     link,
     linkUnlessLinked,
     list,
+    fleetLinks,
+    names,
     get,
     unlink,
     resolve,

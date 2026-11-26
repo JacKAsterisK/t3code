@@ -22,6 +22,7 @@ import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import * as Network from "./PeerNetworkDispatch.ts";
+import { RequireFleetPin } from "../lan/FleetPeerHttpClient.ts";
 import { INITIATING_CLIENT_HEADER } from "../approvals/ApprovalLaunchProvenance.ts";
 
 /** The only MCP protocol version a T3 Code `/mcp` registers. */
@@ -162,8 +163,7 @@ const make = Effect.gen(function* () {
       : Effect.void;
 
   const post = (
-    url: string,
-    token: string,
+    { url, token, requiresFleetPin }: PeerLinks.ResolvedPeerLink,
     body: unknown,
     headers: Record<string, string>,
     beforeSend?: Effect.Effect<void, OrchestratorMcpFailure>,
@@ -177,14 +177,16 @@ const make = Effect.gen(function* () {
       }),
       HttpClientRequest.setBody(HttpBody.text(JSON.stringify(body), "application/json")),
     );
-    return beforeSend === undefined
-      ? httpClient.execute(request)
-      : dispatch
-          .execute(
-            request,
-            beforeSend.pipe(Effect.mapError((failure) => new BeforeSendRefused({ failure }))),
-          )
-          .pipe(Effect.timeout(timeoutMs));
+    return (
+      beforeSend === undefined
+        ? httpClient.execute(request)
+        : dispatch
+            .execute(
+              request,
+              beforeSend.pipe(Effect.mapError((failure) => new BeforeSendRefused({ failure }))),
+            )
+            .pipe(Effect.timeout(timeoutMs))
+    ).pipe(Effect.provideService(RequireFleetPin, requiresFleetPin === true));
   };
 
   // A peer that renews a used link says when it now ends; one that does not sends nothing.
@@ -208,13 +210,12 @@ const make = Effect.gen(function* () {
 
   const openSession = Effect.fn("PeerMcpClient.openSession")(
     function* (
-      { link, url, token }: PeerLinks.ResolvedPeerLink,
+      resolved: PeerLinks.ResolvedPeerLink,
       limitHeader: Record<string, string>,
       beforeSend?: Effect.Effect<void, OrchestratorMcpFailure>,
     ) {
       const initialized = yield* post(
-        url,
-        token,
+        resolved,
         {
           jsonrpc: "2.0",
           id: 0,
@@ -239,10 +240,9 @@ const make = Effect.gen(function* () {
               : `The linked environment refused to start an MCP session (HTTP ${initialized.status}).`,
         });
       }
-      yield* recordLinkExpiry(link, initialized.headers);
+      yield* recordLinkExpiry(resolved.link, initialized.headers);
       yield* post(
-        url,
-        token,
+        resolved,
         { jsonrpc: "2.0", method: "notifications/initialized" },
         { ...limitHeader, "mcp-session-id": sessionId, "mcp-protocol-version": PROTOCOL_VERSION },
         beforeSend,
@@ -285,8 +285,7 @@ const make = Effect.gen(function* () {
         writeAllowed(input).pipe(
           Effect.andThen(
             post(
-              resolved.url,
-              resolved.token,
+              resolved,
               {
                 jsonrpc: "2.0",
                 id: 1,

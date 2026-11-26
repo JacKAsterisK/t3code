@@ -76,3 +76,124 @@ it.live(
       );
     }),
 );
+
+it.live("stages a fleet gateway without disrupting the saved route until selection", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      const prior = createFleetTlsCertificate({ address: "127.0.0.1", now });
+      const next = createFleetTlsCertificate({ address: "127.0.0.1", now });
+      const origin = "https://127.0.0.1:9";
+      const previousIdentity = {
+        origin,
+        certificate: prior.certificate,
+        publicKeySha256: prior.publicKeySha256,
+      };
+      const identity = {
+        origin,
+        certificate: next.certificate,
+        publicKeySha256: next.publicKeySha256,
+      };
+      const environmentId = EnvironmentId.make("fleet-replacement-synthetic");
+      const gateway = yield* DesktopFleetGateway.DesktopFleetGateway;
+      const oldGateway = yield* gateway.prepare({ environmentId, identity: previousIdentity });
+
+      expect(
+        yield* gateway
+          .prepare({
+            environmentId,
+            identity,
+            previousIdentity: { ...previousIdentity, publicKeySha256: "0".repeat(64) },
+          })
+          .pipe(Effect.flip),
+      ).toMatchObject({ reason: "configuration" });
+
+      const hostOnly = { ...previousIdentity, connectHost: "localhost" };
+      const failed = yield* gateway.prepare({
+        environmentId,
+        identity: hostOnly,
+        previousIdentity,
+      });
+      expect(failed.httpBaseUrl).not.toBe(oldGateway.httpBaseUrl);
+      expect(yield* gateway.prepare({ environmentId, identity: previousIdentity })).toEqual(
+        oldGateway,
+      );
+      expect(yield* Effect.promise(() => request(oldGateway.httpBaseUrl))).toBe(502);
+
+      const retry = createFleetTlsCertificate({ address: "127.0.0.1", now });
+      const retryIdentity = {
+        origin,
+        certificate: retry.certificate,
+        publicKeySha256: retry.publicKeySha256,
+      };
+      const savedStage = yield* gateway.prepare({ environmentId, identity, previousIdentity });
+      expect(savedStage.httpBaseUrl).not.toBe(oldGateway.httpBaseUrl);
+      yield* Effect.promise(() =>
+        expect(request(failed.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
+      );
+      // The prior replacement is saved, but a manual route was selected before the next rotation.
+      const staged = yield* gateway.prepare({
+        environmentId,
+        identity: retryIdentity,
+        previousIdentity: identity,
+      });
+      expect(yield* gateway.prepare({ environmentId, identity })).toEqual(savedStage);
+      yield* Effect.promise(() =>
+        expect(request(oldGateway.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
+      );
+      expect(yield* gateway.prepare({ environmentId, identity: retryIdentity })).toEqual(staged);
+      yield* Effect.promise(() =>
+        expect(request(savedStage.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
+      );
+    }).pipe(Effect.provide(DesktopFleetGateway.layer)),
+  ),
+);
+
+it.live.each([false, true])(
+  "can roll back promotion after a failed catalog save (previous gateway active: %s)",
+  (warm) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        const prior = createFleetTlsCertificate({ address: "127.0.0.1", now });
+        const next = createFleetTlsCertificate({ address: "127.0.0.1", now });
+        const origin = "https://127.0.0.1:9";
+        const previousIdentity = {
+          origin,
+          certificate: prior.certificate,
+          publicKeySha256: prior.publicKeySha256,
+        };
+        const identity = {
+          origin,
+          certificate: next.certificate,
+          publicKeySha256: next.publicKeySha256,
+        };
+        const environmentId = EnvironmentId.make("fleet-rollback-synthetic");
+        const gateway = yield* DesktopFleetGateway.DesktopFleetGateway;
+        const oldRequest = { environmentId, identity: previousIdentity };
+        const oldGateway = warm ? yield* gateway.prepare(oldRequest) : undefined;
+        const replacement = { environmentId, identity };
+        const stage = { ...replacement, retiredIdentities: [previousIdentity] };
+
+        const staged = yield* gateway.prepare(stage);
+        expect(yield* gateway.prepare({ ...replacement, stagedReplacement: "promote" })).toEqual(
+          staged,
+        );
+        yield* gateway.prepare({ ...replacement, stagedReplacement: "rollback" });
+        yield* Effect.promise(() =>
+          expect(request(staged.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
+        );
+        const restored = yield* gateway.prepare(oldRequest);
+        if (oldGateway !== undefined) expect(restored).toEqual(oldGateway);
+        expect(yield* Effect.promise(() => request(restored.httpBaseUrl))).toBe(502);
+
+        const retry = yield* gateway.prepare(stage);
+        yield* gateway.prepare({ ...replacement, stagedReplacement: "promote" });
+        yield* gateway.prepare({ ...replacement, stagedReplacement: "finish" });
+        expect(yield* gateway.prepare(replacement)).toEqual(retry);
+        yield* Effect.promise(() =>
+          expect(request(restored.httpBaseUrl)).rejects.toMatchObject({ code: "ECONNREFUSED" }),
+        );
+      }).pipe(Effect.provide(DesktopFleetGateway.layer)),
+    ),
+);

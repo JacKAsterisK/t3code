@@ -4,7 +4,11 @@ import {
   isSharedAddressSpaceHost,
   isTailnetHost,
 } from "@t3tools/shared/hostClassification";
-import type { DesktopSshEnvironmentTarget } from "@t3tools/contracts";
+import {
+  sameFleetTlsRoute,
+  type DesktopSshEnvironmentTarget,
+  type FleetTlsIdentity,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 
 import {
@@ -37,6 +41,119 @@ export function connectionRouteId(target: ConnectionTarget): string {
     case "SshConnectionTarget":
       return target.connectionId;
   }
+}
+
+export function fleetTlsOfRoute(route: ConnectionRoute) {
+  const profile = Option.getOrNull(route.profile);
+  return profile?._tag === "BearerConnectionProfile" ? profile.fleetTls : undefined;
+}
+
+function isOldFleetPin(route: ConnectionRoute, fleetId: string): boolean {
+  const saved = Option.getOrUndefined(route.profile);
+  return (
+    saved?._tag === "BearerConnectionProfile" &&
+    saved.fleetTls !== undefined &&
+    saved.fleetId !== undefined &&
+    saved.fleetId !== fleetId
+  );
+}
+
+export function borrowsCredentialFrom(route: ConnectionRoute, connectionId: string): boolean {
+  return (
+    route.target._tag === "BearerConnectionTarget" &&
+    route.target.connectionId !== connectionId &&
+    credentialConnectionId(route.target.connectionId) === connectionId
+  );
+}
+
+export function splitOldFleetRoutes(
+  entry: ConnectionCatalogEntry | undefined,
+  fleetId: string | undefined,
+) {
+  if (entry === undefined || fleetId === undefined) return { saved: entry, retired: [] };
+  const routes = connectionRoutes(entry);
+  const retired = routes.filter(
+    (route) =>
+      isOldFleetPin(route, fleetId) &&
+      !routes.some((alias) => borrowsCredentialFrom(alias, connectionRouteId(route.target))),
+  );
+  if (retired.length === 0) return { saved: entry, retired };
+  const retained = routes.filter((route) => !retired.includes(route));
+  return { saved: retained.length === 0 ? undefined : entryWithRoutes(entry, retained), retired };
+}
+
+export function savedFleetIdentity(
+  entry: ConnectionCatalogEntry | undefined,
+  incoming?: FleetTlsIdentity,
+) {
+  if (entry === undefined) return undefined;
+  const pinned = connectionRoutes(entry).flatMap(({ profile }) => {
+    const saved = Option.getOrUndefined(profile);
+    return saved?._tag === "BearerConnectionProfile" && saved.fleetTls !== undefined
+      ? [{ identity: saved.fleetTls, fleetId: saved.fleetId }]
+      : [];
+  });
+  // D204 lets the gateway verify and replace a sole saved pin, even when the pin changes.
+  if (pinned.length === 1) return pinned[0]!.identity;
+  const exact = pinned.filter(
+    ({ identity }) => incoming !== undefined && sameFleetTlsRoute(identity, incoming),
+  );
+  const match = exact.length === 1 ? exact[0] : undefined;
+  // With several pins, only a route with known fleet provenance can renew in place.
+  return match?.fleetId === undefined ? null : match.identity;
+}
+
+export function fleetReplacementRoutes(
+  entry: ConnectionCatalogEntry | undefined,
+  candidate: {
+    readonly connectionId: string;
+    readonly httpBaseUrl: string;
+    readonly fleetTls?: FleetTlsIdentity;
+    readonly fleetId?: string;
+  },
+  predecessor: FleetTlsIdentity | undefined,
+): ReadonlyArray<ConnectionRoute> | null {
+  const current = savedFleetIdentity(entry, candidate.fleetTls);
+  if (current === null || (current === undefined) !== (predecessor === undefined)) return null;
+  if (
+    current !== undefined &&
+    (predecessor === undefined ||
+      !sameFleetTlsRoute(current, predecessor) ||
+      candidate.fleetTls === undefined)
+  )
+    return null;
+  const routes = entry === undefined ? [] : connectionRoutes(entry);
+  const predecessorRoute = routes.find((route) => {
+    const pin = fleetTlsOfRoute(route);
+    return pin !== undefined && current !== undefined && sameFleetTlsRoute(pin, current);
+  });
+  if (current !== undefined && predecessorRoute === undefined) return null;
+  const retained = routes.filter((route) => route !== predecessorRoute);
+  if (predecessorRoute !== undefined) {
+    const predecessorId = connectionRouteId(predecessorRoute.target);
+    if (
+      predecessorId !== candidate.connectionId &&
+      (retained.some((route) => fleetTlsOfRoute(route) !== undefined) ||
+        (candidate.fleetId !== undefined &&
+          isOldFleetPin(predecessorRoute, candidate.fleetId) &&
+          retained.some((route) => borrowsCredentialFrom(route, predecessorId))))
+    )
+      return null;
+  }
+  return conflictsWithSavedRoute(retained, candidate) ? null : retained;
+}
+
+export function conflictsWithSavedRoute(
+  routes: ReadonlyArray<ConnectionRoute>,
+  candidate: { readonly connectionId: string; readonly httpBaseUrl: string },
+  allowSameConnection = false,
+): boolean {
+  const address = candidate.httpBaseUrl.replace(/\/+$/u, "");
+  return routes.some((route) =>
+    connectionRouteId(route.target) === candidate.connectionId
+      ? !allowSameConnection
+      : routeHttpBaseUrl(route)?.replace(/\/+$/u, "") === address,
+  );
 }
 
 export function connectionRoutes(entry: ConnectionCatalogEntry): ReadonlyArray<ConnectionRoute> {
@@ -200,7 +317,11 @@ export function connectionRouteLabel(route: ConnectionRoute): string {
     case "lan":
       return "LAN";
     case "tailnet":
-      return "Tailscale";
+      // Tailscale Serve answers over HTTPS on the machine's name; the same machine's
+      // plain address is another route, so the two are told apart.
+      return routeHttpBaseUrl(route)?.startsWith("https:") === true
+        ? msg("Tailscale HTTPS")
+        : "Tailscale";
     case "vpn":
       return "VPN";
     case "ssh": {
@@ -426,6 +547,7 @@ function withNetwork(route: ConnectionRoute, tailscale: boolean): ConnectionRout
         wsBaseUrl: profile.wsBaseUrl,
         ...(profile.learned === undefined ? {} : { learned: profile.learned }),
         ...(profile.authorization === undefined ? {} : { authorization: profile.authorization }),
+        ...(profile.fleetId === undefined ? {} : { fleetId: profile.fleetId }),
         ...(tailscale ? { network: "tailscale" as const } : {}),
       }),
     ),

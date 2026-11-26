@@ -5,6 +5,11 @@ import * as NodePath from "node:path";
 import * as NodeAssert from "node:assert/strict";
 import * as NodeSqlite from "node:sqlite";
 import { test, vi } from "vite-plus/test";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import { it as effectIt } from "@effect/vitest";
+import { unfinishedWorkAt } from "../../apps/server/src/lan/NativeUnfinishedWork.ts";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeModule from "node:module";
 import {
@@ -676,3 +681,131 @@ test("failure after journal cleanup restores the barrier before rollback and ret
     NodeAssert.equal(treeDigest(original).sha256, before.sha256);
     NodeAssert.equal(previewHomeRepair(options).original.activeWork, beforeActiveWork);
   }));
+
+effectIt.effect(
+  "stopped cancellation pauses an older provider goal and retains the current provider selection",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const scratch = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-preserve-provider-selection-",
+      });
+      const home = NodePath.join(
+        scratch,
+        "T3CodeLAN",
+        "recovery",
+        "b".repeat(32),
+        "staged-original",
+      );
+      const attachments = NodePath.join(home, "userdata", "attachments");
+      yield* fs.makeDirectory(attachments, { recursive: true });
+      yield* fs.writeFileString(
+        NodePath.join(attachments, "retained.txt"),
+        "Retained attachment bytes",
+      );
+      const file = NodePath.join(home, "userdata", "statev2.sqlite");
+      yield* Effect.promise(() =>
+        migrateCancellationFixtureDatabase(file, supportedMigrationIds.at(-1)!),
+      );
+      yield* Effect.promise(() => seed(file));
+      yield* Effect.promise(() => cancelRepairStagedWork(home, "b".repeat(32)));
+      setFixtureGoal(file, "idle", retainedGoal);
+      const retainedProvider = "provider-thread:retained-current";
+      const db = new NodeSqlite.DatabaseSync(file);
+      let threadId: string;
+      try {
+        const old = db
+          .prepare(
+            "SELECT * FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id=?",
+          )
+          .get("provider-thread:fixture")!;
+        threadId = String(old.thread_id);
+        const payload = JSON.parse(String(old.payload_json));
+        const next = {
+          ...old,
+          provider_thread_id: retainedProvider,
+          payload_json: JSON.stringify({ ...payload, id: retainedProvider, goal: null }),
+        } as Record<string, NodeSqlite.SQLOutputValue>;
+        const fields = Object.keys(next);
+        db.prepare(
+          "INSERT INTO orchestration_v2_projection_provider_threads (" +
+            fields.join(",") +
+            ") VALUES (" +
+            fields.map(() => "?").join(",") +
+            ")",
+        ).run(...Object.values(next));
+        db.prepare(
+          "UPDATE orchestration_v2_projection_threads SET active_provider_thread_id=?, payload_json=json_set(payload_json,'$.activeProviderThreadId',?) WHERE thread_id=?",
+        ).run(retainedProvider, retainedProvider, threadId);
+      } finally {
+        db.close();
+      }
+      const request = {
+        schemaVersion: 1 as const,
+        nonce: "d".repeat(64),
+        homeDirectory: home,
+        environmentId: "fixture",
+        journalPath: NodePath.join(home, "activation.json"),
+      };
+      const identity = {
+        appId: "fixture",
+        productName: "fixture",
+        protocolScheme: "fixture",
+        homeDirectoryName: "T3CodeLAN" as const,
+        telemetry: "disabled" as const,
+        cloudConfiguration: "disabled" as const,
+        nativeUpdater: "disabled" as const,
+        applicationVersion: "0.1.11",
+        protocolVersion: 2 as const,
+        sourceCommit: "a".repeat(40),
+      };
+      const before = yield* unfinishedWorkAt(
+        file,
+        { ...request, operation: "inspect-unfinished-work" },
+        identity,
+      );
+      NodeAssert.equal(before.blocking.backgroundAgents, 1);
+      const result = yield* unfinishedWorkAt(
+        file,
+        {
+          ...request,
+          operation: "cancel-unfinished-work",
+          expectedWorkGeneration: before.workGeneration,
+          expectedReviewSha256: before.reviewSha256,
+        },
+        identity,
+      );
+      NodeAssert.ok("backupDirectory" in result && result.backupDirectory !== null);
+      const verified = new NodeSqlite.DatabaseSync(file, { readOnly: true });
+      try {
+        NodeAssert.equal(result.blocking.backgroundAgents, 0);
+        NodeAssert.equal(
+          verified
+            .prepare(
+              "SELECT active_provider_thread_id FROM orchestration_v2_projection_threads WHERE thread_id=?",
+            )
+            .get(threadId)?.active_provider_thread_id,
+          retainedProvider,
+        );
+        const replay = verified
+          .prepare(
+            "SELECT payload_json FROM orchestration_events WHERE event_type='thread.metadata-updated' ORDER BY sequence DESC LIMIT 1",
+          )
+          .get();
+        NodeAssert.equal(
+          JSON.parse(String(replay?.payload_json)).activeProviderThreadId,
+          retainedProvider,
+        );
+      } finally {
+        verified.close();
+        for (const name of [
+          "statev2.sqlite",
+          "statev2.sqlite-wal",
+          "statev2.sqlite-shm",
+          "prepared-receipt.json",
+        ])
+          NodeFS.rmSync(NodePath.join(result.backupDirectory, name), { force: true });
+        NodeFS.rmdirSync(result.backupDirectory);
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+);

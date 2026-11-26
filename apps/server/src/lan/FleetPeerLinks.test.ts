@@ -6,9 +6,12 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { NodeHttpServer } from "@effect/platform-node";
 import {
   type AuthMcpClientAccess,
+  EnvironmentId,
   EnvironmentHttpApi,
   type FleetAccess as FleetAccessLevel,
   LanFleetError,
+  MCP_PEER_LINK_SOFTWARE_ID,
+  type LanFleetResetPreview,
   mcpClientScopes,
   OrchestratorMcpFailure,
   type ServerSettings as ServerSettingsShape,
@@ -27,11 +30,14 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import { Tool, Toolkit } from "effect/ai";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
@@ -55,10 +61,13 @@ import * as PeerMcpClient from "../peer/PeerMcpClient.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import * as FleetContext from "./FleetContext.ts";
+import * as FleetEnrollment from "./FleetEnrollment.ts";
+import * as LanFleet from "./LanFleet.ts";
 import * as FleetCredentialAccess from "./FleetCredentialAccess.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import { syntheticFleetPeer } from "./FleetDelivery.fixtures.ts";
-import { writeFleetJson } from "./FleetFiles.ts";
+import { FLEET_SWITCH_ROSTER } from "./FleetBootstrap.ts";
+import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
 import * as FleetMcpOrigin from "./FleetMcpOrigin.ts";
 import * as FleetPeerHttpClient from "./FleetPeerHttpClient.ts";
 import * as FleetPeerLinks from "./FleetPeerLinks.ts";
@@ -200,7 +209,7 @@ const makeMachine = (input: {
         ),
       ),
       Layer.provideMerge(ServerSettings.layerTest(input.settings)),
-      Layer.provide(
+      Layer.provideMerge(
         Layer.succeed(FleetContext.FleetContext, {
           load: Ref.get(shareDown).pipe(
             Effect.flatMap((down) =>
@@ -209,7 +218,7 @@ const makeMachine = (input: {
           ),
         }),
       ),
-      Layer.provide(
+      Layer.provideMerge(
         Layer.mock(FleetAccessPolicy.FleetAccess)({
           accessFor: (environmentId) =>
             Ref.get(levels).pipe(
@@ -239,7 +248,7 @@ const makeMachine = (input: {
         }),
       ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-fleet-link-" })),
-      Layer.provide(Layer.succeed(HostProcess.Environment, input.launchEnvironment)),
+      Layer.provideMerge(Layer.succeed(HostProcess.Environment, input.launchEnvironment)),
       Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       Layer.fresh,
       Layer.build,
@@ -306,7 +315,7 @@ const serveBehindFleetEndpoint = (machine: Machine) =>
     ).pipe(
       Layer.provide(
         Layer.succeed(McpOAuth.McpPeerLinkSessionObserver, {
-          sessionIssued: machine.adapter.sessionIssued,
+          issueSession: machine.adapter.issueSession,
         }),
       ),
       Layer.provide(Layer.succeedContext(machine.context)),
@@ -448,6 +457,370 @@ const shareSnapshot = (share: string) =>
       fs.readFileString(path.join(share, name)).pipe(Effect.map((contents) => [name, contents])),
     );
   });
+
+it.live(
+  "previews and resets exactly the fleet peer links, credentials and local state under the sync lock",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+        const { linked, linking } = fleet;
+        yield* round(fleet);
+        const sql = Context.get(linked.context, SqlClient.SqlClient);
+        const config = Context.get(linked.context, ServerConfig.ServerConfig);
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fleetId = "synthetic-fleet";
+        const fleetSubject = "lan-fleet-peer-link:cryofrog:fixture";
+        const manualId = EnvironmentId.make("manual-target");
+        const outgoingId = EnvironmentId.make("fleet-target");
+        const unknownId = EnvironmentId.make("unknown-target");
+        yield* sql`INSERT INTO peer_environment_links(environment_id, secret_name, label, urls_json, access, linked_at, expires_at, provenance, fleet_machine_id)
+      VALUES (${manualId}, 'manual-secret', 'Manual peer', '[]', 'read-only', '1970-01-01T00:00:00.000Z', '2100-01-01T00:00:00.000Z', 'manual', NULL),
+      (${outgoingId}, 'fleet-secret', 'Fleet peer', '[]', 'read-only', '1970-01-01T00:00:00.000Z', '2100-01-01T00:00:00.000Z', 'fleet', 'synthetic-peer'),
+      (${unknownId}, 'unknown-secret', 'Unknown peer', '[]', 'read-only', '1970-01-01T00:00:00.000Z', '2100-01-01T00:00:00.000Z', 'unknown', NULL)`;
+        const pending = yield* linked.auth.createPairingLink({ subject: fleetSubject });
+        const manualCode = yield* linked.auth.createPairingLink({ subject: "manual-fixture" });
+        const manualSession = yield* linked.auth.issueSession({
+          subject: `lan-fleet-by:${fleetSubject}`,
+        });
+        const [served] = yield* linked.linkSessions(fleet.cryoFrog);
+        expect(served).toBeDefined();
+        const shareBefore = yield* shareSnapshot(fleet.share);
+        const journal = path.join(config.stateDir, "lan-fleet-state.json");
+        yield* writeFleetJson(journal, { synthetic: true });
+        const journalBefore = yield* fs.readFileString(journal);
+
+        const service = yield* LanFleet.LanFleet.pipe(
+          Effect.provide(LanFleet.layerServices),
+          Effect.provideService(FleetPeerLinks.FleetPeerLinks, linked.adapter),
+          Effect.provideService(
+            FleetEnrollment.FleetEnrollment,
+            FleetEnrollment.FleetEnrollment.of({
+              savedFleetId: Effect.succeed(fleetId),
+              resolve: Effect.undefined,
+              status: Effect.die("Unexpected enrollment status read"),
+              configure: () => Effect.die("Unexpected enrollment change"),
+            }),
+          ),
+          Effect.provide(
+            Layer.mock(FleetAccessPolicy.FleetAccess)({ current: Ref.get(linked.policy) }),
+          ),
+          Effect.provideService(HostProcess.Environment, {}),
+          Effect.provideService(HostProcess.Hostname, "synthetic.test"),
+          Effect.provideService(HostProcess.Platform, "win32"),
+          Effect.provideContext(linked.context),
+        );
+
+        const result = yield* service.resetLinks({ mode: "preview" });
+        if (!("digest" in result)) return yield* Effect.die("Expected fleet reset preview");
+        const preview: LanFleetResetPreview = result;
+        expect(preview.fleetId).toBe(fleetId);
+        expect(preview.items.links).toEqual([
+          {
+            environmentId: outgoingId,
+            label: "Fleet peer",
+            machineId: "synthetic-peer",
+            linkedAt: "1970-01-01T00:00:00.000Z",
+          },
+        ]);
+        expect(preview.items.codes.map(({ id }) => id)).toContain(pending.id);
+        expect(preview.items.codes.map(({ id }) => id)).not.toContain(manualCode.id);
+        expect(preview.items.sessions.map(({ sessionId }) => sessionId)).toEqual([
+          served!.sessionId,
+        ]);
+        expect(preview.items.state.serving).toBe(1);
+        expect(yield* service.resetLinks({ mode: "preview" })).toEqual(preview);
+        expect(Option.isSome(yield* linked.links.get(outgoingId))).toBe(true);
+        expect(yield* shareSnapshot(fleet.share)).toEqual(shareBefore);
+
+        const apply = { mode: "apply", fleetId, previewDigest: preview.digest } as const;
+        const lock = path.join(config.stateDir, "lan-fleet.lock");
+        yield* fs.makeDirectory(lock);
+        expect(yield* service.resetLinks({ mode: "preview" })).toEqual(preview);
+        expect(yield* service.resetLinks(apply).pipe(Effect.flip)).toMatchObject({
+          reason: "busy",
+        });
+        expect(yield* fs.exists(lock)).toBe(true);
+        yield* fs.remove(lock, { recursive: true });
+
+        const extra = yield* linked.auth.createPairingLink({ subject: `${fleetSubject}-new` });
+        expect(yield* service.resetLinks(apply).pipe(Effect.flip)).toMatchObject({
+          reason: "configuration",
+          refusal: "stale-review",
+        });
+        expect(Option.isSome(yield* linked.links.get(outgoingId))).toBe(true);
+        expect((yield* linked.auth.listSessions()).map(({ sessionId }) => sessionId)).toContain(
+          served!.sessionId,
+        );
+        const reviewed = yield* service.resetLinks({ mode: "preview" });
+        if (!("digest" in reviewed)) return yield* Effect.die("Expected new fleet reset preview");
+        expect(
+          yield* service
+            .resetLinks({ ...apply, fleetId: "old-fleet", previewDigest: reviewed.digest })
+            .pipe(Effect.flip),
+        ).toMatchObject({ reason: "configuration", refusal: "stale-review" });
+        expect(
+          yield* service.resetLinks({ ...apply, previewDigest: reviewed.digest }),
+        ).toMatchObject({
+          fleetId,
+          previewDigest: reviewed.digest,
+          unlinked: 1,
+          revokedSessions: 1,
+          revokedCodes: reviewed.items.codes.length,
+          completedUtc: expect.any(String),
+        });
+        expect(yield* fs.exists(lock)).toBe(false);
+        expect(Option.isNone(yield* linked.links.get(outgoingId))).toBe(true);
+        expect(Option.isSome(yield* linked.links.get(manualId))).toBe(true);
+        expect(Option.isSome(yield* linked.links.get(unknownId))).toBe(true);
+        expect((yield* linked.auth.listPairingLinks()).map(({ id }) => id)).toEqual([
+          manualCode.id,
+        ]);
+        expect((yield* linked.auth.listSessions()).map(({ sessionId }) => sessionId)).toEqual([
+          manualSession.sessionId,
+        ]);
+        expect(reviewed.items.codes.map(({ id }) => id)).toContain(extra.id);
+        expect(
+          (yield* FleetPeerLinks.loadLinkState({
+            stateDir: config.stateDir,
+            rosterPath: undefined,
+          })).state,
+        ).toMatchObject({ version: 1, linking: {} });
+        expect(yield* fs.readFileString(journal)).toBe(journalBefore);
+        expect(yield* shareSnapshot(fleet.share)).toEqual(shareBefore);
+        expect(Option.isSome(yield* linking.links.get(fleet.pandaMedic.peer.environmentId))).toBe(
+          true,
+        );
+        yield* round(fleet);
+        expect(yield* callerAccess(fleet)).toBe("full-access");
+      }).pipe(Effect.provide(NodeServices.layer)),
+    ),
+);
+
+it.live.each([
+  "missing",
+  "unreadable",
+  "dropped offer",
+  "unidentified session",
+  "state write failure",
+  "partial revoke",
+] as const)("reoffers or preserves the session when resetting a settled peer with %s", (mode) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+      const { linked, linking } = fleet;
+      yield* round(fleet);
+      const [session] = yield* linked.linkSessions(fleet.cryoFrog);
+      expect(session).toBeDefined();
+      const machineId = fleet.cryoFrog.peer.machineId;
+      const config = Context.get(linked.context, ServerConfig.ServerConfig);
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const { stateFile, state } = yield* FleetPeerLinks.loadLinkState({
+        stateDir: config.stateDir,
+        rosterPath: undefined,
+      });
+      const settled = state.serving[machineId]!;
+      expect(settled.linked).toBeDefined();
+      if (mode === "missing") yield* fs.remove(stateFile);
+      else if (mode === "unreadable")
+        yield* fs.writeFileString(stateFile, "invalid synthetic state");
+      else if (mode === "dropped offer")
+        yield* writeFleetJson(stateFile, {
+          ...state,
+          serving: { [machineId]: { sessions: settled.sessions } },
+        });
+      const unidentified =
+        mode === "unidentified session"
+          ? yield* linked.auth.issueSession({
+              subject: "lan-fleet-peer-link:fixture-without-delivery",
+            })
+          : undefined;
+      const extra =
+        mode === "partial revoke"
+          ? yield* linked.auth.issueSession({ subject: session!.subject })
+          : undefined;
+      let revokeCount = 0;
+      const adapter = yield* FleetPeerLinks.FleetPeerLinks.pipe(
+        Effect.provide(FleetPeerLinks.layerServices.pipe(Layer.fresh)),
+        Effect.provideContext(
+          Context.add(linked.context, EnvironmentAuth.EnvironmentAuth, {
+            ...linked.auth,
+            revokeSession: (id) =>
+              Effect.suspend(() =>
+                mode === "partial revoke" && ++revokeCount === 2
+                  ? Effect.fail(
+                      new EnvironmentAuth.ServerAuthSessionRevocationError({
+                        cause: "synthetic revocation failure",
+                      }),
+                    )
+                  : linked.auth.revokeSession(id),
+              ),
+          }),
+        ),
+      );
+      const fleetId = "synthetic-fleet";
+      const preview = yield* adapter.resetLinks(fleetId, { mode: "preview" });
+      if (!("digest" in preview)) return yield* Effect.die("Expected fleet reset preview");
+      expect(preview.items.state.serving).toBe(1);
+      expect(preview.items.sessions.map(({ sessionId }) => sessionId).toSorted()).toEqual(
+        [
+          session!.sessionId,
+          ...(unidentified === undefined ? [] : [unidentified.sessionId]),
+          ...(extra === undefined ? [] : [extra.sessionId]),
+        ].toSorted(),
+      );
+      const offer = path.join(
+        fleet.share,
+        Delivery.peerLinkFileNames(fleet.pandaMedic.peer.machineId, machineId).offer,
+      );
+      expect(yield* fs.exists(offer)).toBe(false);
+      const apply = adapter.resetLinks(fleetId, {
+        mode: "apply",
+        fleetId,
+        previewDigest: preview.digest,
+      });
+      if (mode === "unidentified session" || mode === "state write failure") {
+        if (mode === "state write failure") {
+          yield* fs.remove(stateFile);
+          yield* fs.makeDirectory(stateFile);
+        }
+        const result = yield* apply.pipe(Effect.result);
+        expect((yield* linked.auth.listSessions()).map(({ sessionId }) => sessionId)).toContain(
+          session!.sessionId,
+        );
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure:
+            mode === "unidentified session"
+              ? { reason: "configuration", refusal: "reset-peer-unidentified" }
+              : { reason: "unavailable" },
+        });
+        return;
+      }
+      if (mode === "partial revoke") {
+        expect(yield* apply.pipe(Effect.flip)).toMatchObject({ reason: "unavailable" });
+        const survivor = preview.items.sessions[1]!;
+        const persisted = yield* FleetPeerLinks.loadLinkState({
+          stateDir: config.stateDir,
+          rosterPath: undefined,
+        });
+        expect(persisted.state.serving[machineId]?.sessions).toEqual(
+          expect.arrayContaining([expect.objectContaining({ sessionId: survivor.sessionId })]),
+        );
+        const retry = yield* adapter.resetLinks(fleetId, { mode: "preview" });
+        if (!("digest" in retry)) return yield* Effect.die("Expected fleet reset preview");
+        expect(retry.items.sessions).toEqual([survivor]);
+        expect(
+          yield* adapter.resetLinks(fleetId, {
+            mode: "apply",
+            fleetId,
+            previewDigest: retry.digest,
+          }),
+        ).toMatchObject({ revokedSessions: 1 });
+      } else {
+        expect(yield* apply).toMatchObject({ revokedSessions: 1 });
+      }
+      expect(yield* linked.linkSessions(fleet.cryoFrog)).toEqual([]);
+      yield* linking.adapter.pass;
+      yield* adapter.pass;
+      const fresh = yield* readFleetJson(offer, Delivery.Delivery);
+      expect(fresh.header.deliveryId).not.toBe(settled.linked?.deliveryId);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
+
+it.live("invalidates an approved fleet sign-in during reset and accepts the fresh offer", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fleet = yield* makeFleet({ fleetLinkedEnvironmentsEnabled: true });
+      const { linked, linking } = fleet;
+      yield* linking.adapter.pass;
+      yield* linked.adapter.pass;
+      const path = yield* Path.Path;
+      const file = Delivery.peerLinkFileNames(
+        fleet.pandaMedic.peer.machineId,
+        fleet.cryoFrog.peer.machineId,
+      ).offer;
+      const sealed = yield* readFleetJson(path.join(fleet.share, file), Delivery.Delivery);
+      const config = (yield* Ref.get(linking.fleet))!.config;
+      const offer = Delivery.openDelivery(
+        sealed,
+        config,
+        fleet.pandaPeer,
+        fleet.cryoFrog.peer,
+        DateTime.toEpochMillis(yield* DateTime.now),
+        "peer-link",
+      );
+      const services = yield* McpOAuth.layer.pipe(
+        Layer.provide(
+          Layer.succeed(McpOAuth.McpPeerLinkSessionObserver, {
+            issueSession: linked.adapter.issueSession,
+          }),
+        ),
+        Layer.build,
+        Effect.provideContext(linked.context),
+      );
+      const oauth = Context.get(services, McpOAuth.McpOAuth);
+      const issuer = fleet.endpoint.origin;
+      const resource = issuer + "/mcp";
+      const urls = { issuer, resource };
+      const verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+      const redirectUri = "http://localhost:51234/callback";
+      const client = yield* oauth.register({
+        software_id: MCP_PEER_LINK_SOFTWARE_ID,
+        redirect_uris: [redirectUri],
+      });
+      const request = HttpServerRequest.fromWeb(new Request(issuer));
+      const authorization = yield* oauth.validateAuthorization({
+        urls,
+        request: {
+          response_type: "code",
+          client_id: client.clientId,
+          redirect_uri: redirectUri,
+          code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+          code_challenge_method: "S256",
+          resource,
+        },
+      });
+      const approved = yield* oauth.approve({
+        authorization,
+        request,
+        decision: { _tag: "pairing-code", access: "full-access", code: offer.credential },
+      });
+      const fleetId = "synthetic-fleet";
+      const preview = yield* linked.adapter.resetLinks(fleetId, { mode: "preview" });
+      if (!("digest" in preview)) return yield* Effect.die("Expected fleet reset preview");
+      yield* linked.adapter.resetLinks(fleetId, {
+        mode: "apply",
+        fleetId,
+        previewDigest: preview.digest,
+      });
+      const exchange = yield* oauth
+        .exchangeCode({
+          request,
+          urls,
+          token: {
+            grant_type: "authorization_code",
+            code: Redacted.make(new URL(approved).searchParams.get("code")!),
+            client_id: client.clientId,
+            redirect_uri: redirectUri,
+            code_verifier: Redacted.make(verifier),
+            resource,
+          },
+        })
+        .pipe(Effect.result);
+      expect(exchange._tag).toBe("Failure");
+      if (exchange._tag === "Failure") expect(exchange.failure.error).toBe("invalid_grant");
+      expect(yield* linked.auth.listSessions()).toEqual([]);
+      const after = yield* linked.adapter.resetLinks(fleetId, { mode: "preview" });
+      expect(after).toMatchObject({ items: { sessions: [], state: { serving: 0 } } });
+      yield* round(fleet);
+      expect(yield* callerAccess(fleet)).toBe("full-access");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
 
 it.live(
   "links, renews, narrows, widens and forgets a fleet peer with no prompt, leaving fleet connections alone",
@@ -1181,6 +1554,70 @@ it.live(
         expect(yield* callerAccess(fleet)).toBe("read-only");
         expect(yield* writeAccess(fleet)).toBe("capability_denied");
         expect(yield* linked.linkSessions(cryoFrog)).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.live(
+  "starts a switched roster from the previous fleet's links, without their spent tokens",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const stateDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-fleet-link-state-" });
+        const panda = EnvironmentId.make("environment-panda");
+        const departed = EnvironmentId.make("environment-departed");
+        const previous = {
+          version: 1,
+          linking: {
+            "machine-panda": {
+              environmentId: panda,
+              link: {
+                access: "full-access",
+                deliveryId: "spent",
+                linkedAt: "2026-11-24T06:38:18.485Z",
+              },
+              consumedDeliveryId: "spent",
+              request: { requestId: "old-request", expiresAt: 0 },
+            },
+            "machine-departed": { environmentId: departed, lastError: "unreachable" },
+          },
+          serving: {
+            "machine-panda": {
+              linked: { deliveryId: "served", level: "standard" },
+              sessions: [{ sessionId: "old-session", deliveryId: "served", level: "standard" }],
+            },
+          },
+        };
+        yield* writeFleetJson(path.join(stateDir, "lan-fleet-peer-links.json"), previous);
+
+        // First start on the switch roster: only where each link went, nothing it was given.
+        const first = yield* FleetPeerLinks.loadLinkState({
+          stateDir,
+          rosterPath: FLEET_SWITCH_ROSTER,
+        });
+        expect(first.stateFile).toBe(path.join(stateDir, "lan-fleet-peer-links.json.d178"));
+        expect(first.state).toEqual({
+          version: 1,
+          linking: {
+            "machine-panda": { environmentId: panda },
+            "machine-departed": { environmentId: departed },
+          },
+          serving: {},
+        });
+
+        // Once the switched roster has its own state, that is what loads.
+        const own = { version: 1, linking: {}, serving: {} };
+        yield* writeFleetJson(first.stateFile, own);
+        expect(
+          (yield* FleetPeerLinks.loadLinkState({ stateDir, rosterPath: FLEET_SWITCH_ROSTER }))
+            .state,
+        ).toEqual(own);
+        // Off the switch roster the machine's own state is untouched.
+        expect(
+          (yield* FleetPeerLinks.loadLinkState({ stateDir, rosterPath: undefined })).state,
+        ).toEqual(previous);
       }),
     ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );

@@ -5,6 +5,8 @@ import * as NodeHttps from "node:https";
 import { NodeHttpServer } from "@effect/platform-node";
 import { type ExecutionEnvironmentDescriptor, OrchestratorMcpFailure } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { FLEET_ROSTER_ENV, FLEET_SWITCH_ROSTER } from "../lan/FleetBootstrap.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -33,6 +35,7 @@ import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as McpToolAccess from "../mcp/McpToolAccess.ts";
 import * as PeerLinks from "./PeerLinks.ts";
+import * as Fleet from "../lan/FleetPeerHttpClient.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   descriptorOf,
@@ -161,6 +164,43 @@ it.effect("routes peer reads to readers and sees uncommitted link updates", () =
     expect(yield* links.unlink(box.environmentId)).toBe(true);
     expect(yield* links.list).toEqual([]);
   }),
+);
+
+it.effect("fresh fleet enrollment leaves an existing manual Full access link in place", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const b = yield* serveB(box);
+      const a = yield* makeA(laptop);
+      const manual = yield* b.auth.issuePairingCredential({
+        access: "full-access",
+        purpose: "peer-link",
+      });
+      const saved = yield* a.links.link({
+        url: b.url,
+        pairingCode: manual.credential,
+        access: "full-access",
+      });
+      const automatic = yield* b.auth.issuePairingCredential({
+        access: "auto",
+        purpose: "peer-link",
+      });
+      const refusal = yield* a.links
+        .link(
+          { url: b.url, pairingCode: automatic.credential, access: "auto" },
+          { fleetMachineId: "buildmachine" },
+        )
+        .pipe(Effect.flip);
+      expect(refusal.reason).toBe("pairing_rejected");
+      expect(yield* probe(a)).toMatchObject({ modes: "full-access/default" });
+      expect(yield* linkedSessions(b)).toHaveLength(1);
+      expect(
+        (yield* a.links.list).find((link) => link.environmentId === saved.environmentId)?.access,
+      ).toBe("full-access");
+    }).pipe(
+      Effect.provideService(HostProcess.Environment, { [FLEET_ROSTER_ENV]: FLEET_SWITCH_ROSTER }),
+      Effect.provide(NodeHttpServer.layerTest),
+    ),
+  ),
 );
 
 it.effect("links with a pairing code, and the peer holds its agents to the limits they carry", () =>
@@ -574,6 +614,7 @@ it.effect("reads one stored link without asking the peer", () =>
       const stored = yield* a.links.get(box.environmentId);
       expect(Option.map(stored, (link) => link.label)).toEqual(Option.some("Box"));
       expect(Option.isNone(yield* a.links.get(laptop.environmentId))).toBe(true);
+      expect(yield* a.links.names).toEqual([{ environmentId: box.environmentId, label: "Box" }]);
       expect(yield* Ref.get(b.probes)).toBe(0);
 
       // An older answer that lands after a newer one never moves the expiry back.
@@ -690,6 +731,7 @@ it.effect("tells the agent to link again once the peer revokes the link or it ex
 
       yield* TestClock.adjust(Duration.days(31));
       expect((yield* a.links.list).map((link) => link.status)).toEqual(["expired"]);
+      expect(yield* a.links.names).toEqual([]);
       yield* Ref.set(b.bearers, []);
       const expired = yield* probe(a).pipe(Effect.flip);
       expect(expired.code).toBe("capability_denied");
@@ -906,6 +948,53 @@ it.effect("names an untrusted certificate instead of calling the peer something 
       `;
       expect((yield* a.links.resolve(box.environmentId)).url).toBe(b.url);
       expect((yield* a.links.list).map((link) => link.status)).toEqual(["reachable"]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("requires pinned transport for a retained link of unknown provenance", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const a = yield* makeA(laptop);
+      const b = yield* serveB(box);
+      const pairing = yield* b.auth.issuePairingCredential();
+      yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      expect((yield* a.links.resolve(box.environmentId)).url).toBe(b.url);
+      yield* a.sql`UPDATE peer_environment_links SET provenance = 'unknown'
+        WHERE environment_id = ${box.environmentId}`;
+      const unavailable = yield* a.links.resolve(box.environmentId).pipe(Effect.flip);
+      expect(unavailable.reason).toBe("unreachable");
+      expect(unavailable.message).toContain("approved fleet TLS pin");
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("reads live fleet pins outside the link layer that supplied the trust service", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const context = yield* layerLinkingEnvironment(laptop).pipe(
+        Layer.provideMerge(Fleet.layerTrust),
+        Layer.build,
+      );
+      const links = Context.get(context, PeerLinks.PeerLinks);
+      const sql = Context.get(context, SqlClient.SqlClient);
+      const trust = Context.get(context, Fleet.FleetPeerTrust);
+      const b = yield* serveB(box);
+      const pairing = yield* b.auth.issuePairingCredential();
+      yield* links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      yield* sql`UPDATE peer_environment_links SET provenance = 'fleet'
+        WHERE environment_id = ${box.environmentId}`;
+      // The test HTTP client provides the transport itself. The service under test must keep
+      // using this trust table after the WebSocket-like caller loses the construction context.
+      const entry = { origin: b.url, certificate: "synthetic", publicKeySha256: "0".repeat(64) };
+      expect(Option.isNone(yield* Effect.serviceOption(Fleet.FleetPeerTrust))).toBe(true);
+      yield* trust.replace([entry]);
+      expect((yield* links.resolve(box.environmentId)).requiresFleetPin).toBe(true);
+      yield* trust.replace([]);
+      const unavailable = yield* links.resolve(box.environmentId).pipe(Effect.flip);
+      expect(unavailable.message).toContain("approved fleet TLS pin");
+      yield* trust.replace([entry]);
+      expect((yield* links.resolve(box.environmentId)).url).toBe(b.url);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

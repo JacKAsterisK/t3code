@@ -4,25 +4,31 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
+  LINKED_OWNER_POLICY_FULL_ACCESS,
+  RuntimeMode,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShell,
   type SourceControlCloneRepositoryInput,
   ProjectId,
+  OrchestratorMcpFailure,
   ProviderInstanceId,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
-import { expect, it } from "@effect/vitest";
+import { expect, it, vi } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerConfig from "../config.ts";
+import { ApprovalPeerAccess } from "../auth/ApprovalPeerAccess.ts";
+import type { ProjectionTimelinePageOptions } from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
@@ -33,6 +39,8 @@ import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterReg
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import { ProviderInstanceRegistry } from "../provider/ProviderInstanceRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -42,11 +50,13 @@ import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
+import { PeerMcpClient } from "./PeerMcpClient.ts";
 import * as PeerLinkRequests from "./PeerLinkRequests.ts";
 import { descriptorOf, layerLinkingEnvironment, linkTo, servePeer } from "./PeerLinks.testkit.ts";
 
 const laptop = descriptorOf("environment-laptop", "Laptop");
 const box = descriptorOf("environment-box", "Box");
+const isLegacyRuntimeMode = Schema.is(RuntimeMode);
 const boxProject = ProjectId.make("project:box");
 const boxThread = ThreadId.make("thread:box-auto");
 const boxRun = RunId.make("run:box-auto");
@@ -55,6 +65,7 @@ const boxRun = RunId.make("run:box-auto");
 interface Seen {
   readonly sends: ReadonlyArray<ThreadManagement.ThreadManagementSendInput>;
   readonly waits: ReadonlyArray<ThreadManagement.ThreadManagementWaitInput>;
+  readonly reads: ReadonlyArray<ProjectionTimelinePageOptions>;
   readonly launches: ReadonlyArray<ThreadLaunch.ThreadLaunchInput>;
   readonly projects: ReadonlyArray<ProjectService.ProjectCreateInput>;
   readonly clones: ReadonlyArray<SourceControlCloneRepositoryInput>;
@@ -64,6 +75,7 @@ interface Seen {
 const nothingSeen: Seen = {
   sends: [],
   waits: [],
+  reads: [],
   launches: [],
   projects: [],
   clones: [],
@@ -89,17 +101,33 @@ const boxThreads = (
   );
   const users = { ...liveThreadShell(usersThread, { runtimeMode: "auto" }), projectId: boxProject };
   const run = (status: OrchestrationV2Run["status"]) =>
-    ({ id: boxRun, status }) as unknown as OrchestrationV2Run;
+    ({
+      id: boxRun,
+      ordinal: 1,
+      status,
+      modelSelection: base.modelSelection,
+      requestedAt: base.createdAt,
+      startedAt: null,
+      completedAt: null,
+    }) as unknown as OrchestrationV2Run;
   const shellOf = (threadId: ThreadId): Effect.Effect<OrchestrationV2ThreadShell | null> =>
     threadId === boxThread ? linked : Effect.succeed(threadId === usersThread ? users : null);
   const projectionOf = (threadId: ThreadId) =>
     shellOf(threadId).pipe(
-      Effect.map((thread) => ({ thread, runs: [run("running")], runtimeRequests: [] }) as never),
+      Effect.map(
+        (thread) =>
+          ({ thread, runs: [run("running")], runtimeRequests: [], providerTurns: [] }) as never,
+      ),
     );
   return Layer.mock(ThreadManagement.ThreadManagementService)({
     getThreadShell: shellOf,
     getProjectThreadRecords: (input) => projectionOf(input.threadId),
     getThreadRecords: (threadId) => projectionOf(threadId),
+    getRunCount: () => Effect.succeed(1),
+    getTimelinePage: (_threadId, options) =>
+      Ref.update(seen, (current) => ({ ...current, reads: [...current.reads, options] })).pipe(
+        Effect.as({ items: [], totalItems: 0, hasMore: false, hasEarlier: false }),
+      ),
     listProjectThreads: () => linked.pipe(Effect.map((shell) => [shell] as never)),
     getShellSnapshot: () => linked.pipe(Effect.map((shell) => ({ threads: [shell] }) as never)),
     sendToThread: (input) =>
@@ -254,7 +282,30 @@ const serveBox = (
       Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
       Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
       Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
-      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(
+        Layer.mergeAll(
+          ServerSettings.layerTest(),
+          Layer.mock(ApprovalPeerAccess)({
+            rawPeer: (sessionId) =>
+              Ref.get(linkSession).pipe(
+                Effect.map((expected) =>
+                  sessionId === expected
+                    ? {
+                        linkIdentityId: "fixture-link",
+                        sourceEnvironmentId: laptop.environmentId,
+                        credentialRevision: 1,
+                        expiresAt: 1,
+                        access: "full-access",
+                        scopes: [],
+                        runtimeModeCeiling: "full-access",
+                        interactionModeCeiling: "default",
+                      }
+                    : undefined,
+                ),
+              ),
+          }),
+        ),
+      ),
       Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
       Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
       Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
@@ -279,7 +330,12 @@ const mcpClient = McpSchema.McpServerClient.of({
  * Environment A: its own orchestrator toolkit with forwarding, and a thread
  * caller whose modes the test picks. Its local threads never matter here.
  */
-const makeLaptop = Effect.gen(function* () {
+const makeLaptop = Effect.fn("makeLaptop")(function* (
+  supportedModesFor: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ReadonlyArray<RuntimeMode> | undefined> = () => Effect.undefined,
+  providerOnRead?: Effect.Effect<ProviderInstanceId>,
+) {
   const linking = yield* layerLinkingEnvironment(laptop).pipe(Layer.build);
   const layerHere = Layer.mergeAll(
     McpHttpServer.layerOrchestratorToolkit,
@@ -302,12 +358,24 @@ const makeLaptop = Effect.gen(function* () {
     ),
     Layer.provide(NodeServices.layer),
     Layer.provide(PeerForwarding.layer),
+    Layer.provide(
+      Layer.mock(ProviderInstanceRegistry)({
+        getInstance: (instanceId) =>
+          Effect.succeed({
+            snapshot: {
+              getSnapshot: supportedModesFor(instanceId).pipe(
+                Effect.map((supportedRuntimeModes) => ({ supportedRuntimeModes })),
+              ),
+            },
+          } as ProviderInstance),
+      }),
+    ),
     Layer.provide(Layer.succeedContext(linking)),
     Layer.provide(NodeCrypto.layer),
     Layer.provideMerge(
       Layer.mock(ThreadManagement.ThreadManagementService)({
-        getThreadShell: (threadId) =>
-          Effect.succeed(
+        getThreadShell: (threadId) => {
+          const shell =
             threadId === ThreadId.make("thread:laptop-from-desk")
               ? {
                   ...liveThreadShell(threadId, { runtimeMode: "full-access" }),
@@ -325,8 +393,15 @@ const makeLaptop = Effect.gen(function* () {
                         : threadId === ThreadId.make("thread:laptop-edits")
                           ? { runtimeMode: "auto-accept-edits" }
                           : { runtimeMode: "full-access" },
-                  ),
-          ),
+                  );
+          return providerOnRead === undefined
+            ? Effect.succeed(shell)
+            : Effect.map(providerOnRead, (providerInstanceId) => ({
+                ...shell,
+                providerInstanceId,
+                modelSelection: { ...shell.modelSelection, instanceId: providerInstanceId },
+              }));
+        },
         getProjectThreadRecords: ({ threadId }) =>
           Effect.succeed({
             thread: liveThreadShell(threadId, { runtimeMode: "full-access" }),
@@ -383,7 +458,12 @@ const makeLaptop = Effect.gen(function* () {
         ),
         Effect.provideService(McpSchema.McpServerClient, mcpClient),
       );
-  return { links: Context.get(linking, PeerLinks.PeerLinks), call };
+  return {
+    links: Context.get(linking, PeerLinks.PeerLinks),
+    settings: Context.get(linking, ServerSettings.ServerSettingsService),
+    peerClient: Context.get(linking, PeerMcpClient),
+    call,
+  };
 });
 
 const failureOf = (result: McpSchema.CallToolResult) => {
@@ -397,7 +477,7 @@ it.effect("an agent here works on a linked environment's threads within its own 
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
@@ -473,7 +553,7 @@ it.effect("forwards Auto messages to a Full access thread through a Full access 
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession, "full-access");
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "full-access");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
@@ -509,7 +589,7 @@ it.effect("keeps a forwarded wait short and its retries scoped to the caller", (
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
@@ -554,7 +634,7 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "full-access");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
       const codex = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" };
@@ -601,15 +681,23 @@ it.effect("launches in a linked environment with the caller's modes, retry-safe"
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
-it.effect(
-  "Auto can explicitly launch Full access and manage a Full access thread through a Full access link",
-  () =>
+it.effect.each([
+  { source: false, destination: false },
+  { source: true, destination: false },
+  { source: false, destination: true },
+  { source: true, destination: true },
+])(
+  "Auto can launch Full access through a Full access link with owner policies $source and $destination",
+  ({ source, destination }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const seen = yield* Ref.make<Seen>(nothingSeen);
         const linkSession = yield* Ref.make("");
         const b = yield* serveBox(seen, linkSession, "full-access");
-        const a = yield* makeLaptop;
+        const a = yield* makeLaptop();
+        const allowed = source && destination;
+        if (source) yield* a.settings.updateSettings({ allowAgentFullAccessLaunches: true });
+        if (destination) yield* b.settings.updateSettings({ allowAgentFullAccessLaunches: true });
         yield* linkTo(a.links, b, "full-access");
         yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
@@ -629,13 +717,70 @@ it.effect(
           runtimeMode: "full-access",
         };
         const autoCaller = "thread:laptop-auto";
-        expect(failureOf(yield* a.call(autoCaller, "t3_thread_launch", requested))).toBeUndefined();
+        // Old receivers only accept the original RuntimeMode enum.
+        expect(isLegacyRuntimeMode(LINKED_OWNER_POLICY_FULL_ACCESS)).toBe(false);
+        if (allowed) {
+          // Simulate a legacy sender talking to the real receiver over an approved link.
+          const legacy = yield* a.peerClient
+            .call({
+              environmentId: box.environmentId,
+              tool: "t3_thread_launch",
+              arguments: requested,
+              limits: { runtimeMode: "auto", interactionMode: "default" },
+              writes: true,
+              sender: {
+                environmentId: laptop.environmentId,
+                threadId: ThreadId.make(autoCaller),
+                title: "Auto",
+              },
+              success: Schema.Struct({ threadId: ThreadId }),
+            })
+            .pipe(Effect.flip);
+          expect(legacy.code).toBe("runtime_mode_escalation_denied");
+          const forged = yield* a.peerClient
+            .call({
+              environmentId: box.environmentId,
+              tool: "t3_thread_launch",
+              arguments: { ...requested, runtimeMode: LINKED_OWNER_POLICY_FULL_ACCESS },
+              limits: { runtimeMode: "auto", interactionMode: "default" },
+              writes: true,
+              sender: {
+                environmentId: EnvironmentId.make("environment-unrelated"),
+                threadId: ThreadId.make(autoCaller),
+                title: "Auto",
+              },
+              success: Schema.Struct({ threadId: ThreadId }),
+            })
+            .pipe(Effect.flip);
+          expect(forged.code).toBe("invalid_request");
+          expect(forged.message).toContain("authenticated peer");
+          expect((yield* Ref.get(seen)).launches).toEqual([]);
+        }
+        const explicit = yield* a.call(autoCaller, "t3_thread_launch", requested);
+        if (allowed) {
+          expect(failureOf(explicit)).toBeUndefined();
+        } else {
+          expect(failureOf(explicit)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+        }
         expect(failureOf(yield* a.call(autoCaller, "t3_thread_launch", launch))).toBeUndefined();
         const lower = yield* a.call("thread:laptop-edits", "t3_thread_launch", requested);
         expect(failureOf(lower)).toMatchObject({ code: "runtime_mode_escalation_denied" });
         const launches = (yield* Ref.get(seen)).launches;
-        expect(launches[0]?.modelSelection).toEqual(requested.modelSelection);
-        expect(launches.map((input) => input.runtimeMode)).toEqual(["full-access", "auto"]);
+        if (allowed) {
+          expect(launches[0]?.modelSelection).toEqual(requested.modelSelection);
+          expect(launches[0]?.runtimeModeEscalation).toMatchObject({
+            actor: {
+              threadId: autoCaller,
+              peer: { sessionId: yield* Ref.get(linkSession), environmentId: laptop.environmentId },
+            },
+            from: "auto",
+            to: "full-access",
+            reason: "explicit-launch-under-owner-policy",
+          });
+        }
+        expect(launches.map((input) => input.runtimeMode)).toEqual(
+          allowed ? ["full-access", "auto"] : ["auto"],
+        );
 
         const target = { environmentId: box.environmentId, threadId: boxThread };
         const configured = yield* a.call(autoCaller, "t3_thread_configure", {
@@ -659,7 +804,7 @@ it.effect("a launch in a linked environment keeps the calling thread's owner", (
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "full-access");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
       const launch = (
@@ -699,7 +844,7 @@ it.effect("brings a repository to a linked environment, only through full access
     Effect.gen(function* () {
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const b = yield* serveBox(seen, yield* Ref.make(""));
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       const clone = { repository: "pingdotgg/t3code", destinationPath: "/home/box/t3code" };
       const register = { title: "t3code", workspaceRoot: "/home/box/t3code" };
 
@@ -748,13 +893,50 @@ it.effect("brings a repository to a linked environment, only through full access
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
+it.effect("rejects a forwarded mode change if the authenticated provider changed", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const seen = yield* Ref.make<Seen>(nothingSeen);
+      const linkSession = yield* Ref.make("");
+      const receiver = yield* serveBox(seen, linkSession);
+      const reads = yield* Ref.make(0);
+      const original = ProviderInstanceId.make("codex");
+      const replacement = ProviderInstanceId.make("replacement");
+      const sender = yield* makeLaptop(
+        (id) => Effect.succeed(id === original ? ["approval-required"] : ["auto"]),
+        Ref.getAndUpdate(reads, (count) => count + 1).pipe(
+          Effect.map((count) => (count === 0 ? original : replacement)),
+        ),
+      );
+      yield* linkTo(sender.links, receiver, "auto");
+      yield* Ref.set(linkSession, (yield* receiver.linkedSessions)[0]!.sessionId);
+      const peerCall = yield* Effect.acquireRelease(
+        Effect.sync(() => vi.spyOn(sender.peerClient, "call")),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      );
+
+      const refused = yield* sender.call("thread:laptop-auto", "t3_thread_set_runtime_mode", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        expectedRuntimeMode: "auto",
+        runtimeMode: "approval-required",
+      });
+
+      expect(failureOf(refused)).toMatchObject({ code: "parent_not_active" });
+      expect(yield* Ref.get(reads)).toBe(2);
+      expect(peerCall).not.toHaveBeenCalled();
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
 it.effect("runs any tool that takes a linked environment there", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const modes = yield* Ref.make<ReadonlyArray<RuntimeMode> | undefined>(undefined);
+      const a = yield* makeLaptop(() => Ref.get(modes));
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
@@ -770,6 +952,45 @@ it.effect("runs any tool that takes a linked environment there", () =>
       });
       expect(archived.isError).toBe(false);
       expect((yield* Ref.get(seen)).stops).toEqual([`thread.archive ${boxThread}`]);
+      // A cursorless read from an agent here gets the newest page there, as it does locally.
+      const read = yield* a.call("thread:laptop-full", "t3_thread_read", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+      });
+      expect(read.isError).toBe(false);
+      expect((yield* Ref.get(seen)).reads).toEqual([
+        { beforePosition: Number.MAX_SAFE_INTEGER, limit: 10, view: "messages" },
+      ]);
+
+      const raised = yield* a.call("thread:laptop-full", "t3_thread_set_runtime_mode", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        expectedRuntimeMode: "auto",
+        runtimeMode: "full-access",
+      });
+      expect(failureOf(raised)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+      yield* Ref.set(modes, ["approval-required"]);
+      const fallbackWrite = yield* a.call("thread:laptop-auto", "t3_thread_set_runtime_mode", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        expectedRuntimeMode: "auto",
+        runtimeMode: "approval-required",
+      });
+      expect(failureOf(fallbackWrite)).toMatchObject({ code: "runtime_mode_escalation_denied" });
+      expect((yield* Ref.get(seen)).stops).not.toContain("thread.runtime-mode.set " + boxThread);
+      yield* Ref.set(modes, undefined);
+      const lowered = yield* a.call("thread:laptop-full", "t3_thread_set_runtime_mode", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        expectedRuntimeMode: "auto",
+        runtimeMode: "approval-required",
+      });
+      expect(lowered.isError).toBe(false);
+      expect(lowered.structuredContent).toMatchObject({
+        threadId: boxThread,
+        runtimeMode: "approval-required",
+      });
+      expect((yield* Ref.get(seen)).stops).toContain("thread.runtime-mode.set " + boxThread);
 
       // This environment's own id keeps the call here.
       const own = yield* a.call("thread:laptop-full", "t3_thread_configure", {
@@ -789,7 +1010,7 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
       yield* Ref.set(b.bearers, []);
@@ -861,11 +1082,12 @@ it.effect("refuses a launch there above the link's access, naming the link", () 
       const seen = yield* Ref.make<Seen>(nothingSeen);
       const linkSession = yield* Ref.make("");
       const b = yield* serveBox(seen, linkSession);
-      const a = yield* makeLaptop;
+      const a = yield* makeLaptop();
+      yield* a.settings.updateSettings({ allowAgentFullAccessLaunches: true });
       yield* linkTo(a.links, b, "auto");
       yield* Ref.set(linkSession, (yield* b.linkedSessions)[0]!.sessionId);
 
-      // An Auto agent here can request Full access, subject to the destination's approval.
+      // Source policy permits the request so this case exercises the link ceiling.
       const launchAboveLink = a.call("thread:laptop-auto", "t3_thread_launch", {
         environmentId: box.environmentId,
         projectId: boxProject,
@@ -886,4 +1108,53 @@ it.effect("refuses a launch there above the link's access, naming the link", () 
       expect(failureOf(yield* launchAboveLink).message).toContain("expired");
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+const refusedRead = (message: string) =>
+  new OrchestratorMcpFailure({ code: "invalid_request", message });
+const beforePositionRefusal = refusedRead(
+  `Invalid parameters for tool 't3_thread_read': Unknown argument "beforePosition". Accepted arguments: limit, view.`,
+);
+
+it("recognizes only a validation refusal of beforePosition", () => {
+  const cases: Array<[OrchestratorMcpFailure, boolean]> = [
+    [beforePositionRefusal, true],
+    [
+      refusedRead(
+        `Invalid parameters for tool 't3_thread_read': Unknown arguments "runLimit", "beforePosition". Accepted arguments: limit.`,
+      ),
+      true,
+    ],
+    [refusedRead(`Invalid parameters for tool 't3_thread_read': Unknown argument "limit".`), false],
+    // A thread id can carry the same words; only the refusal's code and prefix count.
+    [
+      new OrchestratorMcpFailure({
+        code: "thread_not_found",
+        message: `Thread Unknown argument "beforePosition". Accepted arguments: x. is no longer available.`,
+      }),
+      false,
+    ],
+  ];
+  for (const [failure, expected] of cases) {
+    expect(PeerForwarding.refusesBeforePosition(failure)).toBe(expected);
+  }
+});
+
+it.effect("retries a newest-page read without its cursor when the peer refuses the cursor", () =>
+  Effect.gen(function* () {
+    const sent: Array<unknown> = [];
+    const olderPeer = (args: unknown): Effect.Effect<string, OrchestratorMcpFailure> => {
+      sent.push(args);
+      return "beforePosition" in (args as object)
+        ? Effect.fail(beforePositionRefusal)
+        : Effect.succeed("forward page");
+    };
+    const params = { threadId: "thread:box-auto", limit: 35 };
+    const newest = { ...params, beforePosition: Number.MAX_SAFE_INTEGER };
+
+    const page = yield* PeerForwarding.readNewestOrRetry(olderPeer, newest, params);
+
+    expect(page).toBe("forward page");
+    expect(sent).toEqual([newest, params]);
+  }),
 );

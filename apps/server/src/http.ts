@@ -51,7 +51,6 @@ import {
   failEnvironmentInternal,
 } from "./auth/http.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
-import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
 import {
   browserApiCorsAllowedHeaders,
   browserApiCorsAllowedMethods,
@@ -59,6 +58,7 @@ import {
   MCP_HTTP_PATH,
 } from "./httpCors.ts";
 import { requestUrl } from "./requestUrl.ts";
+import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -423,8 +423,6 @@ const requestPath = (request: HttpServerRequest.HttpServerRequest) => {
   const queryIndex = request.url.indexOf("?");
   return queryIndex === -1 ? request.url : request.url.slice(0, queryIndex);
 };
-
-// Signed URLs carry bearer tokens in the path, which URL param redaction cannot reach.
 const isSignedUrlRequest = (request: HttpServerRequest.HttpServerRequest) => {
   const path = requestPath(request);
   return (
@@ -434,18 +432,17 @@ const isSignedUrlRequest = (request: HttpServerRequest.HttpServerRequest) => {
   );
 };
 
-// HttpRouter.serve builds routes privately; provide the server-wide TracerDisabledWhen to the served layer.
+// CORS preflights and unmatched requests can finish before per-route path redaction.
 const layerUntracedRequests = Layer.succeed(HttpMiddleware.TracerDisabledWhen)(
   (request) => requestPath(request) === OTLP_TRACES_PROXY_PATH || isSignedUrlRequest(request),
 );
+export const suppressSignedUrlRequestLogs = <A, E, R>(httpEffect: Effect.Effect<A, E, R>) =>
+  Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
+    isSignedUrlRequest(request) ? HttpMiddleware.withLoggerDisabled(httpEffect) : httpEffect,
+  );
 
-export const layerUnloggedSignedRequests = HttpRouter.middleware(
-  (httpEffect) =>
-    Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
-      isSignedUrlRequest(request) ? HttpMiddleware.withLoggerDisabled(httpEffect) : httpEffect,
-    ),
-  { global: true },
-);
+// Signed URLs carry their bearer token in the path; spans and request logs record it as REDACTED.
+const SIGNED_URL_ROUTE_OPTIONS = { redactedParams: ["*"] };
 
 export const withUntracedRequests = Layer.provide(layerUntracedRequests);
 
@@ -517,6 +514,7 @@ export const layerAssetRoute = HttpRouter.add(
       Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),
     );
   }),
+  SIGNED_URL_ROUTE_OPTIONS,
 );
 
 export const layerAttachmentUploadRoute = HttpRouter.add(
@@ -556,6 +554,7 @@ export const layerAttachmentUploadRoute = HttpRouter.add(
       ? HttpServerResponse.empty({ status: 204 })
       : HttpServerResponse.text(stored.detail, { status: stored.status });
   }),
+  SIGNED_URL_ROUTE_OPTIONS,
 );
 
 const decodeBuildManifest = Schema.decodeUnknownEffect(

@@ -42,6 +42,7 @@ const ANVIL = "anviltoad";
 const PANDA = "pandamedic";
 let policy: FleetAccessPolicy.FleetAccessState;
 let trusted: ReadonlyArray<string>;
+let shareAvailable = true;
 const resetFleet = () => {
   policy = {
     revision: 1,
@@ -54,6 +55,7 @@ const resetFleet = () => {
     })),
   };
   trusted = [ANVIL, PANDA];
+  shareAvailable = true;
 };
 const restrict = (machineId: string) => {
   policy = {
@@ -68,15 +70,20 @@ const identities = Object.fromEntries(
 );
 /** What CryoFrog's full trust check finds: itself, and the peers it still trusts. */
 const context = FleetContext.FleetContext.of({
-  load: Effect.sync(
-    () =>
-      ({
-        self: identities[CRYO]!.peer,
-        peers: trusted.map((machineId) => ({
-          peer: identities[machineId]!.peer,
-          connectHost: undefined,
-        })),
-      }) as unknown as FleetContext.FleetLinkContext,
+  load: Effect.sync(() =>
+    shareAvailable
+      ? ({
+          self: identities[CRYO]!.peer,
+          config: {
+            credentialKeyDigests: policy.credentialKeyDigests,
+            credentialScope: policy.credentialScope,
+          },
+          peers: trusted.map((machineId) => ({
+            peer: identities[machineId]!.peer,
+            connectHost: undefined,
+          })),
+        } as unknown as FleetContext.FleetLinkContext)
+      : undefined,
   ),
 });
 
@@ -457,8 +464,84 @@ it.live(
         expect(yield* accessOf(forgedRefreshed.access_token)).toBe("read-only");
         const replayed = yield* refresh(forgedRefreshed.refresh_token, claim(PANDA, panda.grantId));
         expect(yield* accessOf(replayed.access_token)).toBe("read-only");
+
+        resetFleet();
+        const unattributed = yield* legacy();
+        expect(yield* accessOf(unattributed.token)).toBe("auto");
+        policy = { ...policy, credentialKeyDigests: { [ANVIL]: "2".repeat(64) } };
+        expect(yield* accessOf(unattributed.token).pipe(Effect.isFailure)).toBe(true);
+        const unverified = yield* refresh(
+          unattributed.refreshToken!,
+          claim(ANVIL, unattributed.grantId),
+        );
+        expect(yield* accessOf(unverified.access_token).pipe(Effect.isFailure)).toBe(true);
+
+        resetFleet();
+        const previousFleet = yield* legacy();
+        policy = {
+          ...policy,
+          credentialScope: "replacement-fleet",
+          credentialAuthorityReady: true,
+        };
+        const revived = yield* refresh(
+          previousFleet.refreshToken!,
+          claim(ANVIL, previousFleet.grantId),
+        );
+        expect(yield* accessOf(revived.access_token).pipe(Effect.isFailure)).toBe(true);
+
+        const digest = Delivery.fleetCredentialKeyFor(undefined, ANVIL, policy.credentialScope);
+        const member = yield* auth.issueSession({
+          subject: Delivery.fleetCredentialSubject(
+            "lan-fleet:" + Delivery.deliveryFileName(CRYO, ANVIL),
+            digest,
+          ),
+          scopes: AuthStandardClientScopes,
+        });
+        const minted = yield* mintCode(handler, member.token);
+        expect(minted.status).toBe(200);
+        const approved = yield* approveTaskGrant(
+          handler,
+          (yield* json<{ credential: string }>(minted)).credential,
+        );
+        expect(yield* accessOf(approved.access_token)).toBe("auto");
       }),
     ),
+);
+
+it.live("revokes the retired fleet session if the shared folder disappears after acceptance", () =>
+  withRoutes((handler, { auth, revoke }) =>
+    Effect.gen(function* () {
+      const anvil = yield* anvilFleetSession(auth);
+      expect((yield* mintCode(handler, anvil.token)).status).toBe(200);
+      policy = { ...policy, credentialKeyDigests: { [ANVIL]: "2".repeat(64) } };
+      shareAvailable = false;
+      yield* revoke;
+      expect((yield* mintCode(handler, anvil.token)).status).toBe(401);
+      expect(
+        (yield* auth.listSessions()).some((session) => session.sessionId === anvil.sessionId),
+      ).toBe(false);
+    }),
+  ),
+);
+
+it.live("leaves healthy links in place when authority persistence temporarily blocks use", () =>
+  withRoutes((handler, { auth, revoke }) =>
+    Effect.gen(function* () {
+      const anvil = yield* anvilFleetSession(auth);
+      expect((yield* mintCode(handler, anvil.token)).status).toBe(200);
+      const links = (yield* auth.listPairingLinks()).map((link) => link.id);
+      expect(links).not.toHaveLength(0);
+      policy = { ...policy, credentialAuthorityReady: false };
+      expect((yield* mintCode(handler, anvil.token)).status).toBe(401);
+      yield* revoke;
+      expect(
+        (yield* auth.listSessions()).some((session) => session.sessionId === anvil.sessionId),
+      ).toBe(true);
+      expect((yield* auth.listPairingLinks()).map((link) => link.id)).toEqual(links);
+      policy = { ...policy, credentialAuthorityReady: true };
+      expect((yield* mintCode(handler, anvil.token)).status).toBe(200);
+    }),
+  ),
 );
 
 it.live("refuses everything from a machine that left or is no longer trusted, and revokes it", () =>
@@ -666,6 +749,78 @@ it.effect(
       list([]);
       expect(yield* access.administersFleet(anvil)).toBe(false);
     }).pipe(Effect.provide(layerAccess)),
+);
+
+it.effect("refuses the previous generation of a rotated machine's fleet credentials", () =>
+  Effect.gen(function* () {
+    resetFleet();
+    const access = yield* FleetCredentialAccess.FleetCredentialAccess;
+    const newKeyDigest = "2".repeat(64);
+    const retiredKeyDigest = "1".repeat(64);
+    const firstRoot = "lan-fleet:" + Delivery.deliveryFileName(CRYO, ANVIL);
+    const secondRoot = `lan-fleet-peer-link:${ANVIL}:00000000-0000-4000-8000-000000000001`;
+    expect(yield* access.limit("mcp-client", true)).toBeUndefined();
+    policy = { ...policy, credentialKeyDigests: { [ANVIL]: newKeyDigest } };
+    expect(yield* access.limit("mcp-client", true)).toBe("none");
+    expect(yield* access.limit("mcp-client:local", true)).toBeUndefined();
+    for (const root of [firstRoot, secondRoot]) {
+      for (const prefix of ["", "lan-fleet-by:", "mcp-client:"]) {
+        const subject = prefix + root;
+        expect(yield* access.limit(subject, false)).toBe("none");
+        expect(
+          yield* access.limit(Delivery.fleetCredentialSubject(subject, retiredKeyDigest), false),
+        ).toBe("none");
+        expect(
+          yield* access.limit(Delivery.fleetCredentialSubject(subject, newKeyDigest), false),
+        ).toBe("standard");
+      }
+    }
+    expect(yield* access.limit("lan-fleet:" + Delivery.deliveryFileName(CRYO, PANDA), false)).toBe(
+      "standard",
+    );
+    expect(yield* access.limit("browser-session", false)).toBeUndefined();
+  }).pipe(Effect.provide(layerAccess)),
+);
+
+it.effect("keeps manual sessions while denying credentials from the previous fleet", () =>
+  Effect.gen(function* () {
+    resetFleet();
+    const access = yield* FleetCredentialAccess.FleetCredentialAccess;
+    const previousDigest = "2".repeat(64);
+    policy = { ...policy, credentialAuthorityReady: false };
+    const roots = [
+      "lan-fleet:" + Delivery.deliveryFileName(CRYO, ANVIL),
+      "lan-fleet-peer-link:" + ANVIL + ":00000000-0000-4000-8000-000000000001",
+    ];
+    expect(yield* access.limit(roots[0]!, false)).toBe("none");
+    expect(yield* access.limit("browser-session", false)).toBeUndefined();
+
+    policy = {
+      ...policy,
+      credentialAuthorityReady: true,
+      credentialScope: "replacement-fleet",
+      credentialKeyDigests: { [ANVIL]: previousDigest },
+    };
+    for (const root of roots) {
+      for (const prefix of ["", "lan-fleet-by:", "mcp-client:"]) {
+        const subject = prefix + root;
+        expect(yield* access.limit(subject, false)).toBe("none");
+        expect(
+          yield* access.limit(Delivery.fleetCredentialSubject(subject, previousDigest), false),
+        ).toBe("none");
+        const current = Delivery.fleetCredentialKeyFor(
+          policy.credentialKeyDigests,
+          ANVIL,
+          policy.credentialScope,
+        );
+        expect(yield* access.limit(Delivery.fleetCredentialSubject(subject, current), false)).toBe(
+          "standard",
+        );
+      }
+    }
+    expect(yield* access.limit("browser-session", false)).toBeUndefined();
+    expect(yield* access.limit("mcp-client", true)).toBe("none");
+  }).pipe(Effect.provide(layerAccess)),
 );
 
 it.effect("refuses every credential of a machine whose ID an exception could take", () =>

@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  isRuntimeModeAbove,
   OrchestratorMcpFailure,
   type OrchestratorMcpEnvironmentLinksResult,
   OrchestratorMcpThreadInterruptInput,
@@ -10,6 +11,7 @@ import {
   OrchestratorMcpThreadWaitResult,
   type PeerLinkError,
   RuntimeMode,
+  LINKED_OWNER_POLICY_FULL_ACCESS,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -23,11 +25,19 @@ import type * as Tool from "effect/ai/Tool";
 import * as ApprovalAuthority from "../auth/ApprovalAuthority.ts";
 import { initiatingClientForForward } from "../approvals/ApprovalLaunchProvenance.ts";
 import * as Option from "effect/Option";
-import { runtimeModeRank } from "../mcp/delegatedTaskModes.ts";
+import { resolveRuntimeMode, runtimeModeRank } from "../mcp/delegatedTaskModes.ts";
 import { assertNotLinked } from "../mcp/linkOrigin.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
-import { readCaller, unavailable } from "../mcp/threadAccess.ts";
+import {
+  assertLiveCaller,
+  readCaller,
+  threadCreationRuntimeLimit,
+  unavailable,
+} from "../mcp/threadAccess.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import { providerRuntimeMode } from "../orchestration-v2/RuntimePolicy.ts";
+import { ProviderInstanceRegistry } from "../provider/ProviderInstanceRegistry.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
 
@@ -39,6 +49,7 @@ const MAX_WAIT_TIMEOUT_MS = 45_000;
 type Scope = McpInvocationContext.McpInvocationScope;
 
 const LAUNCH_TOOL = "t3_thread_launch";
+const SET_RUNTIME_MODE_TOOL = "t3_thread_set_runtime_mode";
 
 /**
  * Runs T3 MCP tools in a linked environment for an agent here. The tool's own
@@ -103,7 +114,26 @@ const linkStorageFailure = (error: PeerLinkError) =>
 export const remoteTarget = (scope: Scope, environmentId: EnvironmentId | undefined) =>
   environmentId === scope.environmentId ? undefined : environmentId;
 
+// Older peers reject beforePosition during parameter validation.
+const BEFORE_POSITION_REFUSAL =
+  /^Invalid parameters for tool 't3_thread_read': Unknown arguments? (?:"[^"]+", )*"beforePosition"(?:, "[^"]+")*\. Accepted arguments: /;
+export const refusesBeforePosition = (failure: {
+  readonly code: string;
+  readonly message: string;
+}) => failure.code === "invalid_request" && BEFORE_POSITION_REFUSAL.test(failure.message);
+
+/** A newest-page read, retried as the peer always served it when the peer refuses the cursor. */
+export const readNewestOrRetry = Effect.fn("PeerForwarding.readNewestOrRetry")(function* <A>(
+  read: (args: unknown) => Effect.Effect<A, OrchestratorMcpFailure>,
+  newest: unknown,
+  params: unknown,
+) {
+  return yield* read(newest).pipe(Effect.catchIf(refusesBeforePosition, () => read(params)));
+});
+
 const make = Effect.gen(function* () {
+  const serverSettings = yield* Effect.serviceOption(ServerSettingsService);
+  const providerInstances = yield* Effect.serviceOption(ProviderInstanceRegistry);
   const peers = yield* PeerMcpClient.PeerMcpClient;
   const approvalAuthority = yield* Effect.serviceOption(ApprovalAuthority.ApprovalAuthority);
   const links = yield* PeerLinks.PeerLinks;
@@ -166,12 +196,53 @@ const make = Effect.gen(function* () {
     params: unknown,
     writes: boolean,
   ) {
-    const { caller, limits } = yield* forwardingCaller(scope);
+    const forwarding = yield* forwardingCaller(scope);
+    const { caller, limits: callerLimits } = forwarding;
+    let limits = callerLimits;
     const encoded = (yield* Schema.encodeUnknownEffect(parameters as Schema.Encoder<unknown>)(
       params,
     ).pipe(Effect.mapError(unavailable))) as Record<string, unknown>;
     const { environmentId: _target, ...args } = encoded;
+    if (toolName === SET_RUNTIME_MODE_TOOL) {
+      // Bind provider capabilities to the same caller snapshot used to authorize the forwarded write.
+      yield* assertLiveCaller(forwarding);
+      if (scope.client?.linked === true || caller?.linkOrigin != null) {
+        return yield* new OrchestratorMcpFailure({
+          code: "forwarding_chain_refused",
+          message: "Runtime-mode changes support one linked hop.",
+        });
+      }
+      let runtimeMode = limits.runtimeMode;
+      if (caller !== undefined) {
+        const instance = Option.isNone(providerInstances)
+          ? undefined
+          : yield* providerInstances.value.getInstance(caller.providerInstanceId);
+        if (instance === undefined) {
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "The calling thread has no active provider instance.",
+          });
+        }
+        const { supportedRuntimeModes } = yield* instance.snapshot.getSnapshot;
+        runtimeMode = providerRuntimeMode(runtimeMode, supportedRuntimeModes);
+      }
+      const ceiling = Option.getOrUndefined(serverSettings)?.managedPolicy?.limits?.maxRuntimeMode;
+      if (ceiling !== undefined && isRuntimeModeAbove(runtimeMode, ceiling)) runtimeMode = ceiling;
+      if (isRuntimeMode(args.expectedRuntimeMode)) {
+        yield* resolveRuntimeMode(runtimeMode, args.expectedRuntimeMode);
+      }
+      limits = { ...limits, runtimeMode };
+    }
     yield* assertWithinLinkAccess(environmentId, args.runtimeMode);
+    if (toolName === LAUNCH_TOOL && args.runtimeMode === "full-access") {
+      const runtimeLimit = Option.isSome(serverSettings)
+        ? yield* threadCreationRuntimeLimit(scope, limits.runtimeMode, "full-access", caller).pipe(
+            Effect.provideService(ServerSettingsService, serverSettings.value),
+          )
+        : limits.runtimeMode;
+      yield* resolveRuntimeMode(runtimeLimit, "full-access");
+      if (limits.runtimeMode === "auto") args.runtimeMode = LINKED_OWNER_POLICY_FULL_ACCESS;
+    }
     // A pending upload lives here, so it cannot go with the call.
     if (Array.isArray(args.attachments) && args.attachments.length > 0) {
       return yield* new OrchestratorMcpFailure({
@@ -281,7 +352,29 @@ const make = Effect.gen(function* () {
     Effect.flatMap((enabled) => (enabled ? Effect.void : Effect.fail(linkedEnvironmentsOff))),
   );
 
+  // A peer pages a client's cursorless read forward; an agent's gets the newest page, as it does here.
+  const newestPageForAgent = (scope: Scope, toolName: string, params: unknown) => {
+    if (toolName !== "t3_thread_read" || scope.thread === undefined) return undefined;
+    const input = params as OrchestratorMcpThreadReadInput;
+    return input.afterPosition === undefined && input.beforePosition === undefined
+      ? { ...input, beforePosition: Number.MAX_SAFE_INTEGER }
+      : undefined;
+  };
+
   const call: PeerForwarding["Service"]["call"] = (scope, tool, environmentId, params, writes) => {
+    const forwardTool = (
+      args: unknown,
+    ): Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure> =>
+      forward(
+        scope,
+        tool.name,
+        tool.parametersSchema,
+        tool.successSchema,
+        environmentId,
+        args,
+        writes,
+      );
+    const newest = newestPageForAgent(scope, tool.name, params);
     const forwarded: Effect.Effect<
       Tool.Success<typeof tool>,
       OrchestratorMcpFailure
@@ -291,15 +384,9 @@ const make = Effect.gen(function* () {
           environmentId,
           params as OrchestratorMcpThreadWaitInput,
         ) as Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure>)
-      : forward(
-          scope,
-          tool.name,
-          tool.parametersSchema,
-          tool.successSchema,
-          environmentId,
-          params,
-          writes,
-        );
+      : newest === undefined
+        ? forwardTool(params)
+        : readNewestOrRetry(forwardTool, newest, params);
     return Effect.andThen(requireEnabled, forwarded);
   };
 

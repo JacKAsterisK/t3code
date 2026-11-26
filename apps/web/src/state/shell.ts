@@ -22,9 +22,25 @@ import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { isHostedStaticApp } from "../hostedPairing";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
+import { getClientSettingsSnapshot, subscribeClientSettings } from "../hooks/useSettings";
 
 export const shellEnvironment = createShellEnvironmentAtoms(connectionAtomRuntime);
-export const environmentShell = createEnvironmentShellAtoms(connectionAtomRuntime);
+const showSubagentsAtom = Atom.make((get) => {
+  let showing = getClientSettingsSnapshot().sidebarShowSubagents;
+  get.addFinalizer(
+    subscribeClientSettings(() => {
+      const next = getClientSettingsSnapshot().sidebarShowSubagents;
+      if (next === showing) return;
+      showing = next;
+      get.setSelf(next);
+    }),
+  );
+  return showing;
+});
+export const environmentShell = createEnvironmentShellAtoms(
+  connectionAtomRuntime,
+  showSubagentsAtom,
+);
 export const environmentSnapshotAtom = createEnvironmentSnapshotAtom(environmentShell.stateAtom);
 
 const NO_SHELL_STATUS_ATOM = Atom.make<EnvironmentShellStatus | null>(null).pipe(

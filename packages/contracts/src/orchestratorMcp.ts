@@ -42,10 +42,14 @@ import {
   OrchestrationV2CreationSource,
   OrchestrationV2DelegatedFrom,
   OrchestrationV2RunStatus,
+  OrchestrationV2RuntimeModeEscalation,
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+
+// A distinct wire value makes older peers reject an owner-policy launch before dispatch.
+export const LINKED_OWNER_POLICY_FULL_ACCESS = "full-access-with-owner-policy" as const;
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
 const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
@@ -502,6 +506,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   relationshipToParent: Schema.NullOr(Schema.Literals(["fork", "subagent"])),
   /** The linked environment's thread that delegated this one; absent otherwise. */
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+  runtimeModeEscalation: Schema.optional(OrchestrationV2RuntimeModeEscalation),
   runCount: NonNegativeInt,
   itemCount: NonNegativeInt,
   pendingRequestCount: NonNegativeInt,
@@ -578,6 +583,12 @@ export const OrchestratorMcpThreadSendInput = Schema.Struct({
         "Start a new provider session without the thread's earlier context, like /clear. Never steers.",
     }),
   ),
+  outputSchema: Schema.optional(
+    Schema.Record(Schema.String, Schema.Json).annotate({
+      description:
+        "JSON Schema for a result the turn must return as data, read back as `output` from `t3_thread_wait`. Never steers.",
+    }),
+  ),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
 export type OrchestratorMcpThreadSendInput = typeof OrchestratorMcpThreadSendInput.Type;
@@ -604,6 +615,12 @@ export const OrchestratorMcpThreadWaitInput = Schema.Struct({
         "Also wait for its delegated and background tasks and their completions to settle. `resultRun` then names the run with its final answer.",
     }),
   ),
+  untilOutput: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Also wait for the `output` the run was asked for, which a later turn may submit.",
+    }),
+  ),
 });
 export type OrchestratorMcpThreadWaitInput = typeof OrchestratorMcpThreadWaitInput.Type;
 
@@ -615,6 +632,8 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
   next: Schema.optional(OrchestratorMcpRunningTaskNext),
   /** With untilDelegatedWorkSettled, once settled: the run whose reply is the thread's result. */
   resultRun: Schema.optional(Schema.Struct({ runId: RunId, status: OrchestrationV2RunStatus })),
+  /** What the run returned against the `outputSchema` it was sent with. Absent until submitted. */
+  output: Schema.optional(Schema.Json),
 });
 export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitResult.Type;
 
@@ -825,6 +844,25 @@ const PastedSecretValue = Schema.String.check(
   Schema.makeFilter((value: string) => value.length > 0, { expected: "a non-empty string" }),
 );
 
+const RequestSecretFields = Schema.Array(
+  Schema.Struct({
+    name: TrimmedNonEmptyString.check(Schema.isPattern(/^[A-Za-z][A-Za-z0-9_]{0,31}$/)),
+    label: TrimmedNonEmptyString,
+    placeholder: Schema.optional(TrimmedNonEmptyString),
+    secret: Schema.optional(Schema.Boolean).annotate({
+      description: "false shows the typed value, e.g. an email.",
+    }),
+  }),
+)
+  .check(Schema.isMinLength(1), Schema.isMaxLength(8))
+  .check(
+    Schema.makeFilter((fields) =>
+      new Set(fields.map((field) => field.name)).size === fields.length
+        ? true
+        : "Field names must be unique.",
+    ),
+  );
+
 export const OrchestratorMcpRequestSecretInput = Schema.Struct({
   label: TrimmedNonEmptyString.annotate({
     description: "Card title, such as 'GitHub webhook secret'.",
@@ -844,6 +882,10 @@ export const OrchestratorMcpRequestSecretInput = Schema.Struct({
   placeholder: Schema.optional(TrimmedNonEmptyString),
   delivery: Schema.optional(Schema.Literals(["secretRef", "file"])).annotate({
     description: "secretRef (default) for a T3 tool; file for a command.",
+  }),
+  fields: Schema.optional(RequestSecretFields).annotate({
+    description:
+      'Values only the user has, in one card, e.g. email + password, with delivery "file". Returns `files` by name.',
   }),
   value: Schema.optional(PastedSecretValue).annotate({
     description: "Pasted in this thread; no card.",
@@ -870,6 +912,12 @@ export const OrchestratorMcpRequestSecretResult = Schema.Union([
     file: Schema.String.annotate({
       description:
         "Owner-only file with the value. Read it inside commands and never print it. Deleted after 24 hours.",
+    }),
+  }),
+  Schema.Struct({
+    status: Schema.Literal("saved"),
+    files: Schema.Record(Schema.String, Schema.String).annotate({
+      description: "One file per field name, used like `file`.",
     }),
   }),
   Schema.Struct({
@@ -1002,6 +1050,8 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
       "thread_not_found",
       "run_not_found",
       "thread_not_sendable",
+      "thread_busy",
+      "unsupported_runtime_mode",
       "thread_not_interruptible",
       "invalid_request",
       "orchestration_error",

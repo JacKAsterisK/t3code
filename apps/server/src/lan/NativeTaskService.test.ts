@@ -1,3 +1,4 @@
+import { ThreadCreationOrigin } from "../orchestration-v2/ThreadRuntimeModeChange.ts";
 // @effect-diagnostics nodeBuiltinImport:off -- Native storage regressions use only newly created temporary databases.
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -783,4 +784,25 @@ it.effect(
         assert.deepEqual(yield* sql`PRAGMA foreign_key_check`, []);
       }).pipe(Effect.provide(layer({ filename, controls })));
     }).pipe(Effect.scoped),
+);
+
+it.effect("passes an explicit task-grant origin into the native launch service", () =>
+  Effect.gen(function* () {
+    const service = yield* NativeTask.NativeTaskService;
+    const client = scope("auto");
+    yield* service.launch(
+      { ...client, client: { ...client.client!, taskOnly: true } },
+      { ...input, runtimeMode: "auto" },
+    );
+  }).pipe(
+    Effect.provide(
+      layer({
+        launch: () =>
+          Effect.gen(function* () {
+            assert.deepEqual(yield* ThreadCreationOrigin, { kind: "task-grant" });
+            return { threadId, projection, resumed: false };
+          }),
+      }),
+    ),
+  ),
 );

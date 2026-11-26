@@ -1,6 +1,8 @@
 // @effect-diagnostics globalJsonInEffect:off -- Only validated acyclic policy snapshots are serialized for change detection.
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- Ed25519 signs only schema-validated policy fields in a canonical order.
 import * as Gate from "../auth/ApprovalAdmissionGate.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { FLEET_ROSTER_ENV, fleetLocalName, isFleetSwitchRoster } from "./FleetBootstrap.ts";
 import * as NodeCrypto from "node:crypto";
 import {
   AuthDiagnosticsReadScope,
@@ -26,8 +28,14 @@ import * as Semaphore from "effect/Semaphore";
 import type * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as ServerConfig from "../config.ts";
-import type { FleetPeer } from "./FleetDelivery.ts";
+import {
+  FleetCredentialKeyDigests,
+  FleetPrivateConfig,
+  validateFleetKeys,
+  type FleetPeer,
+} from "./FleetDelivery.ts";
 import { readFleetJson, writeFleetJson } from "./FleetFiles.ts";
+import { readStartupCredential } from "./FleetVaultStartup.ts";
 
 type Level = FleetAccessLevel;
 const Digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
@@ -71,6 +79,36 @@ export const FleetAccessSeed = Schema.Struct({
   readOnly: Schema.Array(FleetMachineId).check(Schema.isMinLength(1), Schema.isMaxLength(100)),
 });
 export type FleetAccessSeed = typeof FleetAccessSeed.Type;
+
+/** The share lock every list write holds, the starting-list command's included. */
+export const ACCESS_LOCK = "fleet-access.lock";
+
+/**
+ * Places a starting list beside the roster under the lock a list change holds, so it and a first
+ * save never both succeed. Refused while the lock is held, once any list exists, or over one.
+ */
+export const writeStartingList = Effect.fn("FleetAccess.writeStartingList")(function* (
+  root: string,
+  seed: FleetAccessSeed,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const lock = path.join(root, ACCESS_LOCK);
+  const refused = (refusal: string) => new LanFleetError({ reason: "configuration", refusal });
+  yield* Effect.acquireUseRelease(
+    fs.makeDirectory(lock).pipe(Effect.mapError(() => new LanFleetError({ reason: "busy" }))),
+    () =>
+      Effect.gen(function* () {
+        const history = path.join(root, "fleet-access");
+        if ((yield* fs.exists(history)) && (yield* fs.readDirectory(history)).length > 0)
+          return yield* refused("list-exists");
+        const file = path.join(root, SEED_FILE);
+        if (yield* fs.exists(file)) return yield* refused("seed-exists");
+        yield* writeFleetJson(file, seed);
+      }),
+    () => fs.remove(lock, { recursive: true }).pipe(Effect.ignore),
+  );
+});
 
 /**
  * `fleet-access-ready/<machineId>.json` beside the roster, signed by that machine: it runs LAN
@@ -177,6 +215,8 @@ const LocalCache = Schema.Struct({
   // Entries kept only so later ones still have their parents; they never count as verified.
   unverified: Schema.optionalKey(Schema.Array(Digest).check(Schema.isMaxLength(10_000))),
   member: Schema.optionalKey(Schema.Boolean),
+  credentialKeyDigests: Schema.optionalKey(FleetCredentialKeyDigests),
+  credentialAuthorityRevision: Schema.optionalKey(Schema.Number),
 });
 type LocalCache = typeof LocalCache.Type;
 
@@ -542,6 +582,12 @@ export const credentialAccess = (credential: {
     : "read-only";
 
 export interface FleetAccessState {
+  /** Latest owner-signed replacement key for each formerly enrolled machine. */
+  readonly credentialKeyDigests?: FleetCredentialKeyDigests;
+  readonly credentialAuthorityRevision?: number;
+  /** A restart needs a current authority read before accepting managed fleet credentials. */
+  readonly credentialScope?: string;
+  readonly credentialAuthorityReady?: boolean;
   /** Current verified keys only; absent until a fresh fleet read publishes under admission. */
   readonly approvalTrust?: {
     readonly fleetId: string;
@@ -625,6 +671,8 @@ export const fleetLinksApply = (state: FleetAccessState) =>
 export const mayRevokeForAccess = (state: FleetAccessState) => state.unavailable !== true;
 
 interface FleetAccessInput {
+  readonly credentialAuthorityRevision?: number;
+  readonly credentialKeyDigests?: FleetCredentialKeyDigests;
   readonly root: string;
   readonly fleetId: string;
   readonly machineId: string;
@@ -668,6 +716,8 @@ export class FleetAccess extends Context.Service<
         readonly signingPrivateKey: string;
         readonly expectedRevision: number;
         readonly next: FleetAccessSnapshot;
+        /** Refused if, under the lock, the share holds a starting list the person did not see. */
+        readonly requireNoStartingList?: boolean;
       },
     ) => Effect.Effect<FleetAccessState, LanFleetError>;
   }
@@ -676,12 +726,16 @@ export class FleetAccess extends Context.Service<
 const configurationError = () => new LanFleetError({ reason: "configuration" });
 const isFleetError = Schema.is(LanFleetError);
 
-const make = Effect.gen(function* () {
+const make = Effect.fn("FleetAccess.make")(function* (
+  readCredential: typeof readStartupCredential,
+) {
   const gate = yield* Gate.ApprovalAdmissionGate;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;
-  const cacheFile = path.join(config.stateDir, "lan-fleet-access.json");
+  const rosterPath = (yield* HostProcess.Environment)[FLEET_ROSTER_ENV];
+  const switchedFleet = isFleetSwitchRoster(rosterPath);
+  const cacheFile = path.join(config.stateDir, fleetLocalName("lan-fleet-access.json", rosterPath));
   const mutex = yield* Semaphore.make(1);
   const readCache = (yield* fs.exists(cacheFile).pipe(Effect.orElseSucceed(() => false)))
     ? yield* readFleetJson(cacheFile, LocalCache).pipe(
@@ -713,6 +767,13 @@ const make = Effect.gen(function* () {
     // A cache from before this version may name one whose ID is reserved; it is never a peer.
     peers: trustedPeers(value?.peers ?? []),
     member: value?.member === true,
+    ...(value?.credentialAuthorityRevision === undefined
+      ? {}
+      : { credentialAuthorityRevision: value.credentialAuthorityRevision }),
+    ...(value?.credentialKeyDigests === undefined
+      ? {}
+      : { credentialKeyDigests: value.credentialKeyDigests }),
+    ...(switchedFleet && value !== undefined ? { credentialScope: value.fleetId } : {}),
     ...(unavailable ? { unavailable: true } : {}),
     ...(seed === undefined ? {} : { seed }),
     ...(seedPending === undefined ? {} : { seedPending }),
@@ -727,7 +788,38 @@ const make = Effect.gen(function* () {
           ),
           peers: [],
         });
-  const state = yield* SubscriptionRef.make(stateOf(cache, startup, "standard", false));
+  const privateFile = path.join(config.stateDir, "lan-fleet-private.json");
+  const legacyFleet =
+    rosterPath && !switchedFleet && cache?.credentialAuthorityRevision === undefined
+      ? yield* readFleetJson(privateFile, FleetPrivateConfig).pipe(
+          Effect.flatMap((legacy) =>
+            Effect.try({
+              try: () => {
+                const self = legacy.peers.find(
+                  (peer) => peer.enabled && peer.machineId === legacy.machineId,
+                );
+                if (legacy.managed === true || self === undefined) return false;
+                validateFleetKeys(legacy, self);
+                return true;
+              },
+              catch: configurationError,
+            }),
+          ),
+          // Enrollment takes precedence over the private file, even when the share is offline.
+          Effect.flatMap((valid) =>
+            valid
+              ? readCredential.pipe(Effect.map((record) => record === undefined))
+              : Effect.succeed(false),
+          ),
+          Effect.orElseSucceed(() => false),
+        )
+      : false;
+  const managed =
+    cache?.credentialAuthorityRevision !== undefined || (Boolean(rosterPath) && !legacyFleet);
+  const state = yield* SubscriptionRef.make({
+    ...stateOf(cache, startup, "standard", false),
+    ...(managed ? { credentialAuthorityReady: false } : {}),
+  });
 
   const readShare = Effect.fn("FleetAccess.readShare")(function* (directory: string) {
     if (!(yield* fs.exists(directory))) return [];
@@ -883,8 +975,20 @@ const make = Effect.gen(function* () {
         candidates: [...kept, ...candidates],
         peers: input.peers,
       });
+      const previous = yield* SubscriptionRef.get(state);
+      const credentialKeyDigests = {
+        ...(own ? cache?.credentialKeyDigests : undefined),
+        ...(previous.approvalTrust?.fleetId === input.fleetId
+          ? previous.credentialKeyDigests
+          : undefined),
+        ...input.credentialKeyDigests,
+      };
       const next: LocalCache = {
         version: 1,
+        ...(Object.keys(credentialKeyDigests).length === 0 ? {} : { credentialKeyDigests }),
+        ...(input.credentialAuthorityRevision === undefined
+          ? {}
+          : { credentialAuthorityRevision: input.credentialAuthorityRevision }),
         fleetId: input.fleetId,
         machineId: input.machineId,
         peers: trustedPeers(input.peers)
@@ -896,15 +1000,17 @@ const make = Effect.gen(function* () {
           .map((item) => item.digest),
         member: input.member,
       };
-      if (JSON.stringify(next) !== JSON.stringify(cache)) {
-        yield* writeFleetJson(cacheFile, next).pipe(
-          Effect.tapError((cause) =>
-            Effect.logWarning("Fleet access policy cache could not be saved.", { cause }),
+      const persisted =
+        JSON.stringify(next) === JSON.stringify(cache) ||
+        (yield* writeFleetJson(cacheFile, next).pipe(
+          Effect.as(true),
+          Effect.catch((cause) =>
+            Effect.logWarning("Fleet access policy cache could not be saved.", { cause }).pipe(
+              Effect.as(false),
+            ),
           ),
-          Effect.ignore,
-        );
-        cache = next;
-      }
+        ));
+      if (persisted) cache = next;
       // Any history here or on the share, even history that cannot be followed, is a list.
       const listed =
         accepted.length > 0 ||
@@ -914,7 +1020,7 @@ const make = Effect.gen(function* () {
       const readiness = seed._tag === "valid" ? yield* seedReadiness(input) : undefined;
       const updated = {
         ...stateOf(
-          cache,
+          next,
           evaluation,
           input.legacyAccess,
           unavailable || seed._tag === "unavailable",
@@ -923,6 +1029,9 @@ const make = Effect.gen(function* () {
             ? undefined
             : { machineIds: readiness.machineIds },
         ),
+        ...(input.credentialAuthorityRevision === undefined
+          ? {}
+          : { credentialAuthorityReady: persisted }),
         approvalTrust: {
           fleetId: input.fleetId,
           peers: trustedPeers(input.peers)
@@ -934,7 +1043,6 @@ const make = Effect.gen(function* () {
             })),
         },
       };
-      const previous = yield* SubscriptionRef.get(state);
       if (seed._tag === "invalid" && previous.seed !== "invalid")
         yield* Effect.logWarning(
           `The fleet's starting access list (${SEED_FILE}) cannot be used; nothing links until it is fixed or removed, or a list is saved.`,
@@ -966,7 +1074,7 @@ const make = Effect.gen(function* () {
 
   /** The share lock, cleared first if a crash left it behind. */
   const withShareLock = <A, E>(root: string, use: Effect.Effect<A, E>) => {
-    const lock = path.join(root, "fleet-access.lock");
+    const lock = path.join(root, ACCESS_LOCK);
     const busy = () => new LanFleetError({ reason: "busy" });
     const acquire = Effect.gen(function* () {
       if ((yield* Effect.result(fs.makeDirectory(lock)))._tag === "Success") return;
@@ -1122,6 +1230,8 @@ const make = Effect.gen(function* () {
         const view = yield* refreshUnlocked(input);
         if (view.unavailable) return yield* new LanFleetError({ reason: "unavailable" });
         if (view.state.revision !== input.expectedRevision) return yield* configurationError();
+        if (input.requireNoStartingList === true && view.seed._tag !== "absent")
+          return yield* new LanFleetError({ reason: "configuration", refusal: "stale-review" });
         // Every marker is read again under the lock, right before revision 1 is written.
         if (
           adoptingSeed &&
@@ -1245,21 +1355,34 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const superseded = (input: FleetAccessInput, current: FleetAccessState) =>
+    input.credentialAuthorityRevision !== undefined &&
+    current.credentialAuthorityRevision !== undefined &&
+    input.credentialAuthorityRevision < current.credentialAuthorityRevision &&
+    (current.approvalTrust?.fleetId ?? cache?.fleetId) === input.fleetId;
+
   const refresh = (input: FleetAccessInput) =>
     mutex.withPermits(1)(
-      refreshUnlocked(input).pipe(
-        Effect.flatMap((view) =>
-          view.seed._tag !== "valid"
-            ? endorse(input, view)
-            : view.readiness?.ready === true
-              ? adopt(input, view, view.seed.snapshot)
-              : Effect.succeed(view.state),
-        ),
-      ),
+      Effect.gen(function* () {
+        const current = yield* SubscriptionRef.get(state);
+        if (superseded(input, current)) return current;
+        const view = yield* refreshUnlocked(input);
+        if (view.state.credentialAuthorityReady === false) return view.state;
+        if (view.seed._tag !== "valid") return yield* endorse(input, view);
+        return view.readiness?.ready === true
+          ? yield* adopt(input, view, view.seed.snapshot)
+          : view.state;
+      }),
     );
 
   const change: FleetAccess["Service"]["change"] = (input) =>
-    mutex.withPermits(1)(changeUnlocked(input));
+    mutex.withPermits(1)(
+      Effect.gen(function* () {
+        if (superseded(input, yield* SubscriptionRef.get(state)))
+          return yield* configurationError();
+        return yield* changeUnlocked(input);
+      }),
+    );
 
   const leave = mutex.withPermits(1)(
     Effect.gen(function* () {
@@ -1298,4 +1421,6 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(FleetAccess, make).pipe(Layer.provideMerge(Gate.layer));
+export const layerWithCredentialReader = (readCredential: typeof readStartupCredential) =>
+  Layer.effect(FleetAccess, make(readCredential)).pipe(Layer.provideMerge(Gate.layer));
+export const layer = layerWithCredentialReader(readStartupCredential);

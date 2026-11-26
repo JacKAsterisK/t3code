@@ -359,6 +359,7 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     ["Handle", "Handling", "Handled", "pending questions"],
     "question-respond",
   ),
+  t3_submit_output: tool(["Submit", "Submitting", "Submitted", "the result"], "thread-send"),
   t3_queue_list: tool(["List", "Listing", "Listed", "queued messages"], "queue-list"),
   t3_queue_read: tool(["Read", "Reading", "Read", "a queued message"], "queue-read"),
   t3_queue_edit: tool(["Edit", "Editing", "Edited", "a queued message"], "queue-edit"),
@@ -385,6 +386,10 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "thread-configuration",
   ),
   t3_thread_configure: tool(["Use", "Using", "Used", "thread model settings"], "thread-configure"),
+  t3_thread_set_runtime_mode: tool(
+    ["Change", "Changing", "Changed", "thread runtime mode"],
+    "thread-configure",
+  ),
   t3_thread_transfer: tool(["Use", "Using", "Used", "thread transfers"], "thread-fork"),
   t3_thread_fork: tool(["Fork", "Forking", "Requested a fork of", "this thread"], "thread-fork"),
   t3_thread_merge_back: tool(

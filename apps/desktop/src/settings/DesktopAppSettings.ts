@@ -404,7 +404,7 @@ function readSettings(
       Option.match({
         onNone: () => Effect.succeed(defaultSettings),
         onSome: (raw) =>
-          decodeDesktopSettingsJson(raw).pipe(
+          decodeDesktopSettingsJson(raw.replace(/^\uFEFF/u, "")).pipe(
             Effect.map((parsed) => normalizeDesktopSettingsDocument(parsed, appVersion)),
             Effect.orElseSucceed(() => defaultSettings),
           ),

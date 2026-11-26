@@ -1,19 +1,24 @@
 // @effect-diagnostics nodeBuiltinImport:off -- the test signs a readiness marker as another machine would.
 import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { FLEET_ROSTER_ENV } from "./FleetBootstrap.ts";
 import { describe, expect, it } from "@effect/vitest";
-import { ORCHESTRATION_V2_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
+import { LanFleetError, ORCHESTRATION_V2_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as TestClock from "effect/testing/TestClock";
 
 import { requiredScopeForRpcMethod } from "../auth/RpcAuthorization.ts";
 import * as Config from "../config.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
+import * as Authority from "./FleetAuthority.ts";
+import * as Vault from "./FleetVault.ts";
 import { credentialAccess, fleetCredentialScopes } from "./FleetAccessPolicy.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import type { FleetPeer } from "./FleetDelivery.ts";
@@ -59,11 +64,16 @@ const fleet = Effect.fn("FleetAccessPolicyTest.fleet")(function* () {
   const anvil = syntheticFleetPeer("anviltoad");
   const spd = syntheticFleetPeer("spdevmachine");
   let peers: ReadonlyArray<FleetPeer> = [cryo.peer, panda.peer, anvil.peer, spd.peer];
-  const machine = Effect.fn("FleetAccessPolicyTest.machine")(function* (existingStateDir?: string) {
+  const machine = Effect.fn("FleetAccessPolicyTest.machine")(function* (
+    existingStateDir?: string,
+    read: Vault.FleetVault["Service"]["read"] = Effect.undefined,
+  ) {
     const stateDir =
       existingStateDir ?? (yield* fs.makeTempDirectoryScoped({ prefix: "t3-fleet-access-state-" }));
     const context = yield* Layer.build(
-      FleetAccessPolicy.layer.pipe(Layer.provide(Config.layer({ ...base, stateDir }))),
+      FleetAccessPolicy.layerWithCredentialReader(read).pipe(
+        Layer.provide(Config.layer({ ...base, stateDir })),
+      ),
     );
     return Context.get(context, FleetAccessPolicy.FleetAccess);
   });
@@ -1210,6 +1220,166 @@ it.layer(NodeServices.layer)("fleet access exceptions", (it) => {
         expect((yield* f.change(oddService, odd, own.revision, []).pipe(Effect.flip)).reason).toBe(
           "configuration",
         );
+      }).pipe(Effect.provide(configLayer)),
+  );
+  it.effect("refuses a first save shown without a starting list once one has appeared", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const cryo = yield* f.machine();
+      // Shown with no starting list; one restricting AnvilToad arrives before the click.
+      expect((yield* cryo.refresh(f.input(f.cryo))).seed).toBeUndefined();
+      yield* f.writeSeed(f.seedOf(f.anvil));
+      const refused = yield* cryo
+        .change({
+          ...f.input(f.cryo),
+          expectedRevision: 0,
+          requireNoStartingList: true,
+          next: { defaultAccess: "standard", machines: [] },
+        })
+        .pipe(Effect.flip);
+      expect(refused.refusal).toBe("stale-review");
+      const after = yield* cryo.refresh(f.input(f.cryo));
+      expect(after.revision).toBe(0);
+      expect(after.seed).toBe("waiting");
+      expect(yield* f.fs.exists(f.directory)).toBe(false);
+      // With no starting list, the same save goes through.
+      yield* f.fs.remove(f.seedFile);
+      const saved = yield* cryo.change({
+        ...f.input(f.cryo),
+        expectedRevision: 0,
+        requireNoStartingList: true,
+        next: { defaultAccess: "standard", machines: [] },
+      });
+      expect(saved.revision).toBe(1);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("writes a starting list only under the share lock a list change holds", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const seed = f.seedOf(f.anvil) as FleetAccessPolicy.FleetAccessSeed;
+      const lock = f.path.join(f.root, FleetAccessPolicy.ACCESS_LOCK);
+      // A first save holds the lock: the seed command waits its turn instead of racing it.
+      yield* f.fs.makeDirectory(lock);
+      const busy = yield* FleetAccessPolicy.writeStartingList(f.root, seed).pipe(Effect.flip);
+      expect(busy).toMatchObject({ reason: "busy" });
+      expect(yield* f.fs.exists(f.seedFile)).toBe(false);
+      yield* f.fs.remove(lock, { recursive: true });
+      // The save that held it published first: no starting list may follow it.
+      const cryo = yield* f.machine();
+      yield* f.change(cryo, f.cryo, 0, []);
+      const late = yield* FleetAccessPolicy.writeStartingList(f.root, seed).pipe(Effect.flip);
+      expect(late).toMatchObject({ refusal: "list-exists" });
+      expect(yield* f.fs.exists(f.seedFile)).toBe(false);
+      expect(yield* f.fs.exists(lock)).toBe(false);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("writes a starting list once on a fleet with no list", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const seed = f.seedOf(f.anvil) as FleetAccessPolicy.FleetAccessSeed;
+      yield* FleetAccessPolicy.writeStartingList(f.root, seed);
+      expect(yield* f.fs.exists(f.seedFile)).toBe(true);
+      const again = yield* FleetAccessPolicy.writeStartingList(f.root, seed).pipe(Effect.flip);
+      expect(again).toMatchObject({ refusal: "seed-exists" });
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect("an explicit roster path does not block a verified private-file fleet at startup", () =>
+    Effect.gen(function* () {
+      const f = yield* fleet();
+      const stateDir = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-legacy-fleet-state-" });
+      const path = yield* Path.Path;
+      const makeService = (read?: Vault.FleetVault["Service"]["read"]) =>
+        f.machine(stateDir, read).pipe(
+          Effect.provideService(HostProcess.Environment, {
+            [FLEET_ROSTER_ENV]: path.join(f.root, "roster.json"),
+          }),
+        );
+      expect((yield* (yield* makeService()).current).credentialAuthorityReady).toBe(false);
+
+      const legacy: Delivery.FleetPrivateConfig = {
+        version: 1,
+        machineId: f.cryo.peer.machineId,
+        autoPickup: false,
+        signingPrivateKey: f.cryo.signingPrivateKey,
+        encryptionPrivateKey: f.cryo.encryptionPrivateKey,
+        peers: [f.cryo.peer, f.anvil.peer],
+      };
+      yield* writeFleetJson(path.join(stateDir, "lan-fleet-private.json"), legacy);
+      expect((yield* (yield* makeService()).current).credentialAuthorityReady).toBeUndefined();
+
+      const enrolled = Authority.generateFleetIdentity(
+        f.cryo.peer.environmentId,
+        FLEET_ID,
+        f.anvil.peer.signingPublicKey,
+        false,
+        { autoPickup: true, access: "standard" },
+        f.cryo.peer.machineId,
+      );
+      const managed = yield* makeService(Effect.succeed(enrolled));
+      expect((yield* managed.current).credentialAuthorityReady).toBe(false);
+      const unavailable = yield* makeService(
+        Effect.fail(new LanFleetError({ reason: "configuration" })),
+      );
+      expect((yield* unavailable.current).credentialAuthorityReady).toBe(false);
+    }).pipe(Effect.provide(configLayer)),
+  );
+
+  it.effect(
+    "keeps the latest fleet credential generation across delayed refreshes and restart",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fleet();
+        const stateDir = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-fleet-key-state-" });
+        const service = yield* f.machine(stateDir);
+        const first = {
+          ...f.input(f.cryo),
+          credentialAuthorityRevision: 2,
+          credentialKeyDigests: { [f.anvil.peer.machineId]: "1".repeat(64) },
+        };
+        const next = {
+          ...first,
+          credentialAuthorityRevision: 3,
+          credentialKeyDigests: { [f.anvil.peer.machineId]: "2".repeat(64) },
+        };
+        yield* service.refresh(first);
+        const failOnce = { pending: true };
+        const interrupted = yield* f.machine(stateDir).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...f.fs,
+            rename: (source, destination) => {
+              if (!failOnce.pending || !destination.endsWith("lan-fleet-access.json"))
+                return f.fs.rename(source, destination);
+              failOnce.pending = false;
+              return Effect.fail(
+                PlatformError.systemError({
+                  _tag: "PermissionDenied",
+                  module: "FileSystem",
+                  method: "rename",
+                  description: "simulated durable cache failure",
+                  pathOrDescriptor: destination,
+                }),
+              );
+            },
+          }),
+        );
+        const pending = yield* interrupted.refresh(next);
+        expect(pending.credentialAuthorityReady).toBe(false);
+        expect(pending.credentialKeyDigests).toEqual(next.credentialKeyDigests);
+        const afterFailedWrite = yield* f.machine(stateDir);
+        expect((yield* afterFailedWrite.current).credentialAuthorityReady).toBe(false);
+        expect((yield* interrupted.refresh(next)).credentialAuthorityReady).toBe(true);
+        yield* service.refresh(next);
+        expect((yield* service.refresh(first)).credentialKeyDigests).toEqual(
+          next.credentialKeyDigests,
+        );
+        const restarted = yield* f.machine(stateDir);
+        expect((yield* restarted.current).credentialKeyDigests).toEqual(next.credentialKeyDigests);
+        expect((yield* restarted.current).credentialAuthorityReady).toBe(false);
+        expect((yield* restarted.refresh(first)).credentialAuthorityReady).toBe(false);
+        expect((yield* restarted.refresh(next)).credentialAuthorityReady).toBe(true);
       }).pipe(Effect.provide(configLayer)),
   );
 });

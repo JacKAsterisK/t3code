@@ -8,6 +8,10 @@ approval before code or runtime changes.
 
 ## Baseline
 
+- LAN 1.0.44 integration in progress against upstream `15d945faef` (311 commits
+  after `e6d521012d`). Upstream migrations 103 through 105 append as fork 117 through 119.
+  The target schema is 119, pending the Windows gate and packaged data audits.
+
 - Upstream sync in preparation for LAN 1.0.39: upstream `e6d521012d` (2,111 commits after `ee90bdc940`), application 0.1.11 and toolchain generation 139. Upstream migrations 083 through 102 append as fork 097 through 116. Home repair recognizes schema 116.
 
 - Upstream sync 2026-11-12: upstream `ee90bdc940` (680 commits after `12f3244e0593`), published as LAN 1.0.38 from `d83b739562` (application 0.1.9, toolchain generation 138); previous published LAN 1.0.37 is `68a7fb629f`. Upstream migrations 081 and 082 become fork 095 (ProjectionMessageSearchText) and 096 (TurnItemConversationIndex); schema 96.
@@ -33,6 +37,54 @@ approval before code or runtime changes.
   (off); no `userdata\lan-routing.json`, so every `t3_lan_*` call is denied; no
   peer-link secrets; eight connected fleet link deliveries;
   `sidebarThreadGrouping: "machine"` and `boringSidebarEnabled: false`.
+
+## LAN 1.0.43
+
+- In Settings ? Sharing & access, the environment owner can enable **Allow Auto
+  threads to start Full access threads**. The default is off. Local agents must
+  request Full access explicitly. A linked launch or delegate requires the
+  policy on both environments, a Full access link and peer support for the
+  owner-policy request. The administrator's
+  runtime ceiling still applies.
+- Assisted Full access launches record the requesting thread, Auto and Full
+  access modes, and the owner policy in the child creation event. Linked
+  audits bind the caller to its authenticated peer credential and verify the
+  source environment when the credential has that binding. The child
+  conversation identifies the peer that reported the thread details.
+- In the sidebar project filter, **Show subagents** defaults off for each user.
+  Local subagents and cross-environment delegates appear when enabled. Pinned
+  subagents remain in Pinned, and unpinning returns them to the selected filter.
+- The trial merge from upstream `e6d521012d` to `10586f9e31` brought 301 commits,
+  three migrations and 40 conflicted files. The urgent 1.0.43 changes ship from
+  the 1.0.42 upstream baseline. The new upstream integration is scoped to 1.0.44.
+
+## LAN 1.0.42 recovery build
+
+Stopped Gen2 admission now reports the historical approval card with a matching
+cancelled request and interrupted node/run even if the node's nullable
+`runtime_request_id` SQL column was left empty by the projection writer. The
+node payload, request, thread and run still have to agree. This exception leaves
+the saved work digest unchanged and requires no migration.
+
+The packaged native helper accepts `diagnose-stale-work --snapshot ABSOLUTE_T3_HOME`.
+It takes a local online SQLite backup while T3 runs and reports counts and
+approval-link checks. Treat the report as diagnostic evidence. Hub takes fresh
+stopped admission for activation and rollback.
+
+## LAN 1.0.40 hotfix
+
+Native activation now excludes the derived `inline_work_output` turn-item field
+from the stopped-work fingerprint. This lets Hub verify an update from schema 96
+when completed runs retain display-only plan rows. The schema-109 backfill still
+runs, and the fingerprint continues to cover the durable row payloads.
+
+The admission follow-up reports a waiting approval card as stale after 24 hours
+when its thread has no active or queued run, its linked or latest run is terminal
+and no pending request or unsettled approval receipt remains. Gen2 activation
+can carry the card without changing its durable work digest. Hub opts into
+this admission only when it supports rollback with stale cards. A running
+version still owns its guarded-close
+decision and may need a normal close before this update.
 
 ## 2026-11-20 sync decisions
 
@@ -284,6 +336,11 @@ approval before code or runtime changes.
 - **Revisit:** when upstream shares connections between desktops without the
   cloud, or when the fleet can create native peer links from which the client
   catalog is derived.
+
+- **LAN 1.0.44:** upstream now offers peer-assisted client pairing and link renewal.
+  Keep fleet membership and delivery; use native pairing with the existing
+  outside-sharing policy checked on both ends. A Full access link that derives
+  its rights from a fleet exception cannot mint independent credentials.
 
 ### 2. Agent target discovery
 

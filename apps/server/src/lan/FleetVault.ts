@@ -8,23 +8,31 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
-import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Config from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import { FleetVaultRecord } from "./FleetAuthority.ts";
+import type { FleetVaultRecord } from "./FleetAuthority.ts";
+import { readFleetVaultRecord, secretMarker } from "./FleetVaultCodec.ts";
+import { FLEET_ROSTER_ENV, fleetLocalName } from "./FleetBootstrap.ts";
 
 export class FleetVault extends Context.Service<
   FleetVault,
   {
     readonly read: Effect.Effect<FleetVaultRecord | undefined, LanFleetError>;
     readonly save: (record: FleetVaultRecord) => Effect.Effect<void, LanFleetError>;
+    readonly advanceRevision: (
+      expected: FleetVaultRecord,
+      revision: number,
+    ) => Effect.Effect<void, LanFleetError>;
   }
 >()("t3/lan/FleetVault") {}
 
-const decode = Schema.decodeSync(Schema.fromJsonString(FleetVaultRecord));
-const secretMarker = "T3F1:";
-const secretPrefix = new TextEncoder().encode(secretMarker);
+const credentialEntry = (id: string, platform: NodeJS.Platform) =>
+  // On Windows the synchronous store must stay on the calling thread.
+  platform === "win32"
+    ? new Entry("T3 Code LAN fleet", id)
+    : new AsyncEntry("T3 Code LAN fleet", id);
+
 const make = Effect.gen(function* () {
   const config = yield* Config.ServerConfig;
   const environment = yield* ServerEnvironment.ServerEnvironment;
@@ -32,53 +40,31 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const platform = yield* HostProcess.Platform;
   const id = yield* environment.getEnvironmentId;
+  const rosterPath = (yield* HostProcess.Environment)[FLEET_ROSTER_ENV];
   const mutex = yield* Semaphore.make(1);
   let knownIdentity = false;
-  // Windows credential reads must stay on the writing thread; its native store can return
-  // false absence across background threads, and keyring 1.3 suppresses those read errors.
-  const entry = () =>
-    platform === "win32"
-      ? new Entry("T3 Code LAN fleet", id)
-      : new AsyncEntry("T3 Code LAN fleet", id);
-  const decodeRecord = (value: string) => {
-    const record = decode(value);
-    knownIdentity = true;
-    return record;
-  };
+  const entry = () => credentialEntry(fleetLocalName(id, rosterPath), platform);
   const lock = path.join(config.stateDir, "lan-fleet-vault.lock");
-  const readStored = Effect.tryPromise({
-    try: async () => {
-      const result = await entry().getSecret();
-      // Windows keyring returns null for an absent credential despite its TypeScript declaration.
-      if (result === undefined || result === null) {
-        if (knownIdentity) throw new Error("The saved fleet credential became unavailable.");
-        return undefined;
-      }
-      // Native keyring builds can return number[] despite declaring Uint8Array.
-      const raw = Uint8Array.from(result);
-      if (
-        raw.length >= secretPrefix.length &&
-        secretPrefix.every((value, index) => raw[index] === value)
-      )
-        return decodeRecord(
-          new TextDecoder("utf-8", { fatal: true }).decode(raw.subarray(secretPrefix.length)),
-        );
-      // Existing entries use the keyring's UTF-16 password encoding. Read them
-      // without rewriting or regenerating any identity material.
-      const legacy = await entry().getPassword();
-      if (legacy === undefined || legacy === null)
-        throw new Error("Existing fleet credential cannot be decoded.");
-      return decodeRecord(legacy);
-    },
-    catch: () => new LanFleetError({ reason: "configuration" }),
-  });
+  const readStored = readFleetVaultRecord(entry).pipe(
+    Effect.flatMap((record) => {
+      if (record !== undefined) knownIdentity = true;
+      else if (knownIdentity) return Effect.fail(new LanFleetError({ reason: "configuration" }));
+      return Effect.succeed(record);
+    }),
+  );
   const read = readStored.pipe(mutex.withPermit);
-  const save = Effect.fn("FleetVault.save")(function* (record: FleetVaultRecord) {
+  const update = Effect.fn("FleetVault.update")(function* (
+    select: (
+      previous: FleetVaultRecord | undefined,
+    ) => Effect.Effect<FleetVaultRecord | undefined, LanFleetError>,
+  ) {
     yield* Effect.acquireUseRelease(
       fs.makeDirectory(lock).pipe(Effect.mapError(() => new LanFleetError({ reason: "busy" }))),
       () =>
         Effect.gen(function* () {
           const previous = yield* readStored;
+          const record = yield* select(previous);
+          if (record === undefined) return;
           if (
             record.environmentId !== id ||
             (previous !== undefined &&
@@ -116,6 +102,25 @@ const make = Effect.gen(function* () {
       () => fs.remove(lock, { recursive: true }).pipe(Effect.ignore),
     );
   }, mutex.withPermit);
-  return FleetVault.of({ read, save });
+  const save = (record: FleetVaultRecord) => update(() => Effect.succeed(record));
+
+  const advanceRevision = Effect.fn("FleetVault.advanceRevision")(
+    (expected: FleetVaultRecord, revision: number) =>
+      update((previous) => {
+        if (
+          previous === undefined ||
+          previous.environmentId !== expected.environmentId ||
+          previous.fleetId !== expected.fleetId ||
+          previous.machineId !== expected.machineId ||
+          previous.rootPublicKey !== expected.rootPublicKey
+        )
+          return Effect.fail(new LanFleetError({ reason: "configuration" }));
+        return Effect.succeed(
+          revision > previous.lastRevision ? { ...previous, lastRevision: revision } : undefined,
+        );
+      }),
+  );
+
+  return FleetVault.of({ read, save, advanceRevision });
 });
 export const layer = Layer.effect(FleetVault, make);

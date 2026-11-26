@@ -10,7 +10,7 @@ import * as Schema from "effect/Schema";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as Delivery from "./FleetDelivery.ts";
-import { FLEET_ROSTER_ENV, resolveFleetBootstrap } from "./FleetBootstrap.ts";
+import { FLEET_ROSTER_ENV, fleetLocalName, resolveFleetBootstrap } from "./FleetBootstrap.ts";
 import * as FleetEnrollment from "./FleetEnrollment.ts";
 import { readFleetJson, validateRoster } from "./FleetFiles.ts";
 import { makeMembership } from "./FleetMembership.ts";
@@ -49,7 +49,10 @@ const make = Effect.gen(function* () {
   const enrollment = yield* FleetEnrollment.FleetEnrollment;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const membership = yield* makeMembership(
-    path.join(serverConfig.stateDir, "lan-fleet-trusted.json"),
+    path.join(
+      serverConfig.stateDir,
+      fleetLocalName("lan-fleet-trusted.json", launchEnvironment[FLEET_ROSTER_ENV]),
+    ),
   );
 
   const load = Effect.gen(function* () {

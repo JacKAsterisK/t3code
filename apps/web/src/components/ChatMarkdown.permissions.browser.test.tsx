@@ -13,6 +13,7 @@ import { userEvent } from "vite-plus/test/browser";
 
 import { act, render } from "../../test/render";
 import { useRightPanelStore } from "../rightPanelStore";
+import { threadEnvironment } from "../state/threads";
 
 const state = vi.hoisted(() => ({
   allowed: true,
@@ -33,7 +34,6 @@ vi.mock(import("../state/use-atom-query-runner"), async (original) => ({
   useAtomQueryRunner: (() => state.search) as never,
 }));
 vi.mock(import("../state/use-atom-command"), async (original) => {
-  const { threadEnvironment } = await import("../state/threads");
   return {
     ...(await original()),
     useAtomCommand: ((command: unknown) =>

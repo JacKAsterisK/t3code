@@ -29,7 +29,12 @@ export class FleetTransport extends Context.Service<
       origin: string,
       previous?: StoredTls,
     ) => Effect.Effect<StoredTls, LanFleetError>;
+    readonly serializeSetup: <A, E, R>(operation: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
     readonly ready: (record: FleetVaultRecord) => Effect.Effect<boolean>;
+    readonly restore: (
+      record: FleetVaultRecord,
+      approved?: Effect.Effect<boolean, LanFleetError>,
+    ) => Effect.Effect<boolean, LanFleetError>;
     readonly persist: (record: FleetVaultRecord) => Effect.Effect<void, LanFleetError>;
     /** The https origin of the encrypted endpoint this server is running, if any. */
     readonly origin: Effect.Effect<string | undefined>;
@@ -48,6 +53,7 @@ const make = Effect.gen(function* () {
   const vault = yield* Vault.FleetVault;
   const network = yield* Network.FleetNetwork;
   const mutex = yield* Semaphore.make(1);
+  const setup = yield* Semaphore.make(1);
   const forwardedMark = NodeCrypto.randomBytes(32).toString("base64url");
   let running: { origin: string; proxy: FleetProxy } | undefined;
   const suggestions = network.addresses.pipe(
@@ -133,6 +139,38 @@ const make = Effect.gen(function* () {
       );
     running = { origin: identity.origin, proxy };
   });
+  const restore = Effect.fn("FleetTransport.restore")(
+    function* (
+      expected: FleetVaultRecord,
+      approved: Effect.Effect<boolean, LanFleetError> = Effect.succeed(true),
+    ) {
+      // An explicit stop can commit while an enrollment refresh is waiting for the mutex.
+      const saved = yield* vault.read;
+      if (
+        saved?.tls === undefined ||
+        !saved.enabled ||
+        saved.tlsEnabled === false ||
+        saved.environmentId !== expected.environmentId ||
+        saved.fleetId !== expected.fleetId ||
+        saved.machineId !== expected.machineId ||
+        saved.tls.origin !== expected.tls?.origin ||
+        saved.tls.publicKeySha256 !== expected.tls?.publicKeySha256
+      )
+        return false;
+      if (!(yield* approved)) return false;
+      const previous = running;
+      yield* ensure(saved);
+      const valid = yield* approved.pipe(
+        Effect.tapError(() =>
+          previous === undefined ? ensure({ ...saved, tlsEnabled: false }) : Effect.void,
+        ),
+      );
+      if (!valid && previous === undefined) yield* ensure({ ...saved, tlsEnabled: false });
+      return valid;
+    },
+    Effect.uninterruptible,
+    mutex.withPermit,
+  );
   const persist = Effect.fn("FleetTransport.persist")(
     function* (record: FleetVaultRecord) {
       const previous = running;
@@ -180,6 +218,8 @@ const make = Effect.gen(function* () {
     suggestions,
     prepare,
     persist,
+    restore,
+    serializeSetup: setup.withPermits(1),
     origin: Effect.sync(() => running?.origin),
     forwarded: (headers) => {
       const mark = Buffer.from(headers[FLEET_TLS_FORWARD_HEADER] ?? "");

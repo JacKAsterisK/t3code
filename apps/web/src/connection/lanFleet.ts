@@ -1,7 +1,20 @@
+// oxlint-disable t3code/no-untranslated-copy -- T3 Code LAN fleet messages ship English-only alongside fleet setup.
 import { useAtomValue } from "@effect/atom-react";
+import {
+  ConnectionBlockedError,
+  connectionRouteId,
+  connectionRoutes,
+  type ConnectionCatalogEntry,
+} from "@t3tools/client-runtime/connection";
+import { fleetPairingFailureDetail } from "./lanFleetPairingError";
+import * as Option from "effect/Option";
 import {
   LanFleetError,
   WS_METHODS,
+  type EnvironmentId,
+  type LanFleetResetInput,
+  type LanFleetResetPreview,
+  type LanFleetResetReceipt,
   type LanFleetSyncInput,
   type LanFleetSyncResult,
   type LanFleetSetupInput,
@@ -14,6 +27,8 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { Atom } from "effect/reactivity";
 import * as Schema from "effect/Schema";
+import { msg } from "gt-react";
+import { m } from "../i18n/messages";
 import { environmentCatalog } from "./catalog";
 import { resolveFleetEnvironmentId, resolveNativeWindowsPrimary } from "./lanFleetEnvironment";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
@@ -45,6 +60,117 @@ const busyAtom = Atom.make(false);
 const pausedAtom = Atom.make(false);
 const deniedAtom = Atom.make(false);
 const isFleetError = Schema.is(LanFleetError);
+const isConnectionBlockedError = Schema.is(ConnectionBlockedError);
+
+const resetFleet = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "web:lan-fleet:reset",
+  tag: WS_METHODS.serverResetLanFleetLinks,
+  scheduler: createAtomCommandScheduler(),
+  concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
+});
+
+function savedFleetConnections(
+  entries: ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>,
+  fleetId: string,
+) {
+  return [...entries].flatMap(([environmentId, entry]) =>
+    connectionRoutes(entry).flatMap((route) => {
+      const profile = Option.getOrUndefined(route.profile);
+      if (
+        profile?._tag !== "BearerConnectionProfile" ||
+        profile.learned === true ||
+        profile.fleetTls === undefined
+      )
+        return [];
+      const expectedFleet =
+        profile.fleetId === fleetId
+          ? { fleetId, fleetTls: profile.fleetTls }
+          : profile.fleetId === undefined
+            ? { fleetTls: profile.fleetTls }
+            : undefined;
+      return expectedFleet === undefined
+        ? []
+        : [
+            {
+              environmentId,
+              routeId: connectionRouteId(route.target),
+              expectedFleet: {
+                ...expectedFleet,
+                ...(profile.fleetReplacementDeliveryId === undefined
+                  ? {}
+                  : { fleetReplacementDeliveryId: profile.fleetReplacementDeliveryId }),
+              },
+              label: route.target.label,
+              address: profile.httpBaseUrl,
+            },
+          ];
+    }),
+  );
+}
+
+export function useLanFleetReset(environmentId: EnvironmentId) {
+  const allowed = useAtomValue(resetFleet.permissionAtom(environmentId));
+  const run = useAtomCommand(resetFleet, { reportFailure: false });
+  const remove = useAtomCommand(environmentCatalog.removeRoute, { reportFailure: false });
+  const reset = async (
+    input: LanFleetResetInput,
+    routes: ReturnType<typeof savedFleetConnections> = [],
+  ): Promise<
+    | { error: string; preview?: never; receipt?: never }
+    | {
+        preview: LanFleetResetPreview;
+        routes: ReturnType<typeof savedFleetConnections>;
+        error?: never;
+        receipt?: never;
+      }
+    | { receipt: LanFleetResetReceipt; error?: string; preview?: never }
+  > => {
+    if (input.mode === "apply") {
+      if (appAtomRegistry.get(busyAtom)) return { error: "Fleet sync is in progress. Try again." };
+      appAtomRegistry.set(busyAtom, true);
+    }
+    const work = async () => {
+      const result = await run({ environmentId, input });
+      if (result._tag !== "Success") {
+        const failure = squashAtomCommandFailure(result);
+        return {
+          error: isFleetError(failure)
+            ? failure.refusal === "stale-review"
+              ? "Fleet links changed. Review the current list before resetting."
+              : failure.message
+            : "Reset fleet links could not complete.",
+        };
+      }
+      if ("digest" in result.value) {
+        return {
+          preview: result.value,
+          routes: savedFleetConnections(
+            appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries,
+            result.value.fleetId,
+          ),
+        };
+      }
+      let removalError: string | undefined;
+      for (const { environmentId, routeId, expectedFleet } of routes) {
+        const removed = await remove({ environmentId, routeId, expectedFleet });
+        if (removed._tag === "Success") continue;
+        const failure = squashAtomCommandFailure(removed);
+        if (removalError === undefined)
+          removalError = isConnectionBlockedError(failure)
+            ? failure.message
+            : "Some saved fleet connections could not be removed.";
+      }
+      return {
+        receipt: result.value,
+        ...(removalError === undefined ? {} : { error: removalError }),
+      };
+    };
+    return work().finally(() => {
+      if (input.mode === "apply") appAtomRegistry.set(busyAtom, false);
+    });
+  };
+  return { allowed, reset };
+}
 
 export function useLanFleet() {
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
@@ -102,11 +228,16 @@ export function useLanFleet() {
     return whileBusy(async () => {
       const result = await updateSetup({ environmentId, input });
       if (result._tag !== "Success") {
+        const failure = squashAtomCommandFailure(result);
         appAtomRegistry.set(
           errorAtom,
-          appAtomRegistry.get(setupAtom)?.sharedFolderTrust === true
-            ? "Fleet setup failed. Check Windows access to BuildShare and the local LAN address."
-            : "Fleet setup was not confirmed. Check the verification code and shared storage; existing keys and trust were kept.",
+          // A refusal or a specific reason says what to fix; only a bare one gets the general hint.
+          isFleetError(failure) &&
+            (failure.refusal !== undefined || failure.reason !== "configuration")
+            ? failure.message
+            : appAtomRegistry.get(setupAtom)?.sharedFolderTrust === true
+              ? "Fleet setup did not complete. Check Windows access to BuildShare, this machine's row in the fleet roster, and the local LAN address."
+              : "Fleet setup was not confirmed. Check the verification code and shared storage; existing keys and trust were kept.",
         );
         return false;
       }
@@ -136,6 +267,26 @@ export function useLanFleet() {
             mode,
             sendMachineIds: remaining === 100 ? sendMachineIds : [],
             connectedEnvironmentIds: [...current.entries.keys()],
+            pinnedFleetRoutes: [...current.entries].flatMap(([environmentId, entry]) => {
+              const fleetIds = connectionRoutes(entry).flatMap(({ profile }) => {
+                const saved = Option.getOrUndefined(profile);
+                return saved?._tag === "BearerConnectionProfile" && saved.fleetTls !== undefined
+                  ? (saved.fleetId ?? [])
+                  : [];
+              });
+              return fleetIds.length === 0
+                ? []
+                : [{ environmentId, fleetIds: [...new Set(fleetIds)] }];
+            }),
+            completedReplacementDeliveryIds: [...current.entries.values()]
+              .flatMap(connectionRoutes)
+              .flatMap(({ profile }) => {
+                const saved = Option.getOrNull(profile);
+                return saved?._tag === "BearerConnectionProfile"
+                  ? (saved.fleetReplacementDeliveryId ?? [])
+                  : [];
+              })
+              .slice(0, 1000),
           },
         });
         if (result._tag !== "Success") {
@@ -159,16 +310,26 @@ export function useLanFleet() {
             host: delivery.host,
             pairingCode: delivery.pairingCode,
             ...(delivery.tls === undefined ? {} : { tls: delivery.tls }),
+            ...(delivery.fleetId === undefined ? {} : { fleetId: delivery.fleetId }),
             expectedEnvironmentId: delivery.environmentId,
             // A replacement swaps the saved credential, such as after a fleet access change.
             skipExisting: delivery.replace !== true,
+            ...(delivery.replace === true ? { replacementDeliveryId: delivery.deliveryId } : {}),
+            ...(delivery.requireSavedConnection === true ? { requireSavedConnection: true } : {}),
+            ...(delivery.preserveManualConnection === true
+              ? { preserveManualConnection: true }
+              : {}),
           });
           if (connected._tag !== "Success") {
             appAtomRegistry.set(
               errorAtom,
-              appAtomRegistry.get(setupAtom)?.sharedFolderTrust === true
-                ? "The connection could not be confirmed. Check that the other machine is online."
-                : "Pickup is unconfirmed. This delivery is paused for review; sync will not replace or retry its credential.",
+              fleetPairingFailureDetail(
+                squashAtomCommandFailure(connected),
+                delivery.pairingCode,
+              ) ??
+                (appAtomRegistry.get(setupAtom)?.sharedFolderTrust === true
+                  ? "Pairing with the other machine stopped without a reason. Check that it is online and enabled in the fleet roster."
+                  : "Pickup is unconfirmed. This delivery is paused for review; sync will not replace or retry its credential."),
             );
             return false;
           }
@@ -194,7 +355,14 @@ export function useLanFleet() {
     allowed,
     summary,
     setup,
-    error,
+    error:
+      setup?.credentialUnavailable === true
+        ? m(
+            msg(
+              "Windows could not read this machine's saved fleet credential. Restore the saved credential or ask the fleet owner to approve a replacement.",
+            ),
+          )
+        : error,
     busy,
     paused,
     pause,

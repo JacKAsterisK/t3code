@@ -2,7 +2,6 @@ import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
 import { isShownUnderParent } from "@t3tools/client-runtime/state/threads";
-import { threadKey } from "@t3tools/client-runtime/state/entities";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import * as React from "react";
@@ -167,11 +166,18 @@ export function useSnoozeWakeClock(
   return clockMs;
 }
 
-// Live status that says the cwd is not a repository means the checkout was removed.
+// Live status that says the cwd is not a repository means the checkout was removed. A worktree
+// thread of a project with tracked folders may sit in a plain task folder, which never is one.
 export function withoutRemovedCheckout<
   T extends { readonly branch: string | null; readonly worktreePath: string | null },
->(thread: T, gitStatus: { readonly isRepo?: boolean | undefined } | null): T {
-  return gitStatus?.isRepo === false ? { ...thread, branch: null, worktreePath: null } : thread;
+>(
+  thread: T,
+  gitStatus: { readonly isRepo?: boolean | undefined } | null,
+  project: { readonly trackedFolders?: ReadonlyArray<unknown> | undefined } | null,
+): T {
+  if (gitStatus?.isRepo !== false) return thread;
+  if (thread.worktreePath !== null && (project?.trackedFolders?.length ?? 0) > 0) return thread;
+  return { ...thread, branch: null, worktreePath: null };
 }
 
 export function useRetainedValue<T>(key: string | null, value: T | null): T | null {
@@ -584,23 +590,6 @@ export async function deleteSelectedThreadEntries<
   return { deletedThreadKeys, firstFailure };
 }
 
-// Machine folders list cross-environment work where it runs as well as under its parent.
-export function sidebarDelegatedUnderParent(
-  threads: readonly Pick<SidebarThreadSummary, "id" | "environmentId" | "delegatedFrom">[],
-  delegatedUnderParent: ReadonlySet<string>,
-  groupByMachine: boolean,
-): ReadonlySet<string> {
-  if (!groupByMachine || delegatedUnderParent.size === 0) return delegatedUnderParent;
-  const nested = new Set(delegatedUnderParent);
-  for (const thread of threads) {
-    const parent = thread.delegatedFrom;
-    if (parent != null && parent.environmentId !== thread.environmentId) {
-      nested.delete(threadKey(scopeThreadRef(thread.environmentId, thread.id)));
-    }
-  }
-  return nested;
-}
-
 /**
  * `delegatedUnderParent` holds the tasks linked environments run for a thread
  * the sidebar lists, by thread key; they show under that thread, as subagents do.
@@ -610,21 +599,28 @@ export function filterSidebarV2VisibleThreads<
   T extends Pick<SidebarThreadSummary, "archivedAt" | "environmentId" | "id" | "lineage"> & {
     projectId: string;
     ownerId?: string | null;
+    pinnedAt?: string | null;
+    delegatedFrom?: SidebarThreadSummary["delegatedFrom"];
   },
 >(
   threads: readonly T[],
   scopedProjectKeys: ReadonlySet<string> | null,
   delegatedUnderParent: ReadonlySet<string>,
   ownerFilterId: string | null = null,
+  showSubagents = false,
 ): T[] {
   return threads.filter(
     (thread) =>
       thread.archivedAt === null &&
-      !isShownUnderParent(
-        { environmentId: thread.environmentId, threadId: thread.id },
-        thread.lineage,
-        delegatedUnderParent,
-      ) &&
+      thread.lineage.sideChat !== true &&
+      (thread.pinnedAt != null ||
+        showSubagents ||
+        (thread.delegatedFrom == null &&
+          !isShownUnderParent(
+            { environmentId: thread.environmentId, threadId: thread.id },
+            thread.lineage,
+            delegatedUnderParent,
+          ))) &&
       (ownerFilterId === null || thread.ownerId === ownerFilterId) &&
       (scopedProjectKeys === null ||
         scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
@@ -834,6 +830,35 @@ export function shouldCreateNewThreadInCurrentProject(
   projectGroupCount: number,
 ): boolean {
   return shiftKey || openProjectGroupCount === 1 || projectGroupCount === 0;
+}
+
+/**
+ * A sidebar filtered to one project already says where the next thread belongs,
+ * so New skips the picker there. A project grouped across environments keeps the
+ * viewed thread's environment when that thread belongs to the group.
+ */
+export function resolveScopedNewThreadProjectRef<
+  TRef extends { readonly environmentId: string; readonly projectId: string },
+>(input: {
+  shiftKey: boolean;
+  scopedProjectGroups: readonly {
+    readonly environmentId: string;
+    readonly id: string;
+    readonly memberProjectRefs: readonly TRef[];
+  }[];
+  viewed: { readonly environmentId: string; readonly projectId: string } | null | undefined;
+}): TRef | null {
+  const [group, ...otherGroups] = input.scopedProjectGroups;
+  if (input.shiftKey || !group || otherGroups.length > 0) return null;
+  const memberAt = (environmentId: string, projectId: string) =>
+    group.memberProjectRefs.find(
+      (ref) => ref.environmentId === environmentId && ref.projectId === projectId,
+    );
+  return (
+    (input.viewed && memberAt(input.viewed.environmentId, input.viewed.projectId)) ??
+    memberAt(group.environmentId, group.id) ??
+    null
+  );
 }
 
 export function orderItemsByPreferredIds<TItem, TId>(input: {

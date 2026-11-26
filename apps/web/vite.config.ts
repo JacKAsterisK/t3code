@@ -63,7 +63,6 @@ const configuredDesktopUpdateRepository =
     : process.env.T3CODE_DESKTOP_UPDATE_REPOSITORY?.trim() ||
       process.env.GITHUB_REPOSITORY?.trim() ||
       "";
-const configuredFeatureSecrets = process.env.T3CODE_FEATURE_SECRETS?.trim() || "";
 const configuredHostedAppUrl = (() => {
   if (lanIdentity !== undefined) return undefined;
   const explicitHostedAppUrl = process.env.VITE_HOSTED_APP_URL?.trim();
@@ -126,6 +125,47 @@ const browserTestProject = {
     include: [
       "vite-plus/test/browser",
       "@base-ui/react/autocomplete",
+      "@base-ui/react/preview-card",
+      "@pierre/diffs/worker",
+      "@tiptap/core",
+      "@tiptap/extension-blockquote",
+      "@tiptap/extension-bold",
+      "@tiptap/extension-code",
+      "@tiptap/extension-code-block",
+      "@tiptap/extension-heading",
+      "@tiptap/extension-horizontal-rule",
+      "@tiptap/extension-italic",
+      "@tiptap/extension-list",
+      "@tiptap/extension-strike",
+      "@tiptap/extension-task-item",
+      "@tiptap/extension-task-list",
+      "@tiptap/pm/commands",
+      "@tiptap/pm/history",
+      "@tiptap/pm/model",
+      "@tiptap/pm/state",
+      "@tiptap/pm/transform",
+      "hast-util-to-html",
+      "hast-util-to-jsx-runtime",
+      "html-url-attributes",
+      "katex",
+      "micromark-util-combine-extensions",
+      "pele/lazy",
+      "react-markdown",
+      "remark-gfm",
+      "remark-math",
+      "remark-parse",
+      "remark-rehype",
+      "unified",
+      "vfile",
+      "@t3tools/client-runtime > unbash",
+      "@t3tools/shared > mdast-util-directive",
+      "@t3tools/shared > micromark-extension-directive",
+      "@t3tools/shared > micromark-util-character",
+      "@t3tools/shared > micromark-util-decode-string",
+      "@t3tools/shared > property-information",
+      "@t3tools/shared > rehype-raw",
+      "@t3tools/shared > rehype-sanitize",
+      "@t3tools/shared > remark-breaks",
       "saxes",
       "@betteroffice/docx/editor",
       "@betteroffice/docx/layout",
@@ -406,7 +446,6 @@ export default defineConfig(({ mode, command }) => {
       "import.meta.env.T3CODE_DESKTOP_UPDATE_REPOSITORY": JSON.stringify(
         configuredDesktopUpdateRepository,
       ),
-      "import.meta.env.T3CODE_FEATURE_SECRETS": JSON.stringify(configuredFeatureSecrets),
       "import.meta.env.VITE_RELEASE_CHANNEL": JSON.stringify(configuredReleaseChannel),
       "import.meta.env.APP_VERSION": JSON.stringify(configuredAppVersion),
       // This identifies the renderer artifact, independently of any connected environment.

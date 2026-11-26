@@ -8,9 +8,12 @@ import {
   LanFleetError,
   type LanFleetSyncInput,
   type LanFleetSyncResult,
+  type LanFleetResetInput,
+  type LanFleetResetResult,
   type LanFleetSetupInput,
   type LanFleetSetupState,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -20,6 +23,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -29,7 +33,12 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { isProcessAlive } from "../serverRuntimeState.ts";
 import * as Delivery from "./FleetDelivery.ts";
 import { readFleetJson, validateRoster, writeFleetJson } from "./FleetFiles.ts";
-import { FLEET_ROSTER_ENV, resolveFleetBootstrap } from "./FleetBootstrap.ts";
+import {
+  FLEET_ROSTER_ENV,
+  fleetLocalName,
+  isFleetSwitchRoster,
+  resolveFleetBootstrap,
+} from "./FleetBootstrap.ts";
 import * as FleetEnrollment from "./FleetEnrollment.ts";
 import * as FleetAccessPolicy from "./FleetAccessPolicy.ts";
 import * as FleetPeerLinks from "./FleetPeerLinks.ts";
@@ -40,6 +49,7 @@ const Record = Schema.Struct({
   expiresAt: Schema.Number,
   status: Schema.Literals(["publishing", "pending", "connecting", "connected"]),
   pairingLinkId: Schema.optionalKey(Schema.String),
+  credentialKeyDigest: Schema.optionalKey(Schema.String),
   senderCatalogCreatedAt: Schema.optionalKey(Schema.Number),
   // A pickup that replaces a credential this machine already holds for the sender.
   replacing: Schema.optionalKey(Schema.Boolean),
@@ -76,6 +86,9 @@ export class LanFleet extends Context.Service<
      */
     readonly backgroundSync: Effect.Effect<void, LanFleetError>;
     readonly setup: Effect.Effect<LanFleetSetupState, LanFleetError>;
+    readonly resetLinks: (
+      input: LanFleetResetInput,
+    ) => Effect.Effect<LanFleetResetResult, LanFleetError>;
     readonly configure: (
       input: LanFleetSetupInput,
     ) => Effect.Effect<LanFleetSetupState, LanFleetError>;
@@ -99,8 +112,12 @@ const make = Effect.gen(function* () {
   const fleetUsers = yield* Effect.serviceOption(FleetUsers.FleetUsers);
   // A sync may bring new catalogs, trust or peer-link requests for the peer-link adapter.
   const requestPeerLinkPass = Option.isSome(peerLinks) ? peerLinks.value.requestPass : Effect.void;
+  const rosterPath = launchEnvironment[FLEET_ROSTER_ENV];
   const privateFile = path.join(serverConfig.stateDir, "lan-fleet-private.json");
-  const journalFile = path.join(serverConfig.stateDir, "lan-fleet-state.json");
+  const journalFile = path.join(
+    serverConfig.stateDir,
+    fleetLocalName("lan-fleet-state.json", rosterPath),
+  );
   const lock = path.join(serverConfig.stateDir, "lan-fleet.lock");
   const disabled: LanFleetSyncResult = {
     enabled: false,
@@ -151,12 +168,60 @@ const make = Effect.gen(function* () {
     yield* claim.pipe(Effect.mapError(busy));
   }).pipe(Effect.provideService(FileSystem.FileSystem, fs));
 
+  const releaseLock = Effect.sync(() => {
+    holding = false;
+  }).pipe(
+    Effect.andThen(fs.remove(lock, { recursive: true })),
+    // The next sync clears it as this server's own.
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Could not release the LAN fleet sync lock.", { cause }),
+    ),
+  );
+
+  const resetLinks = Effect.fn("LanFleet.resetLinks")(
+    function* (input: LanFleetResetInput) {
+      if (Option.isNone(peerLinks)) return yield* new LanFleetError({ reason: "unavailable" });
+      const adapter = peerLinks.value;
+      const reset = Effect.gen(function* () {
+        const fleetId =
+          rosterPath === ""
+            ? undefined
+            : ((yield* enrollment.savedFleetId) ??
+              (isFleetSwitchRoster(rosterPath) || !(yield* fs.exists(privateFile))
+                ? undefined
+                : (yield* readFleetJson(privateFile, Delivery.FleetPrivateConfig)).fleetId));
+        if (fleetId === undefined) {
+          return yield* new LanFleetError({
+            reason: "configuration",
+            ...(input.mode === "apply" ? { refusal: "stale-review" } : {}),
+          });
+        }
+        return yield* adapter.resetLinks(fleetId, input);
+      });
+      return yield* input.mode === "preview"
+        ? reset
+        : Effect.acquireUseRelease(
+            acquireLock,
+            () => reset,
+            () => releaseLock,
+          );
+    },
+    Effect.mapError((error) =>
+      isFleetError(error) ? error : new LanFleetError({ reason: "unavailable" }),
+    ),
+    Effect.provideService(FileSystem.FileSystem, fs),
+  );
+
   const run = Effect.fn("LanFleet.sync")(
     function* (request: LanFleetSyncInput | "background") {
-      if (launchEnvironment[FLEET_ROSTER_ENV] === "") return disabled;
+      if (rosterPath === "") return disabled;
       const enrolled = yield* enrollment.resolve;
       if (enrolled === null) return disabled;
-      if (enrolled === undefined && !(yield* fs.exists(privateFile))) return disabled;
+      if (
+        enrolled === undefined &&
+        (isFleetSwitchRoster(rosterPath) || !(yield* fs.exists(privateFile)))
+      )
+        return disabled;
       // Every operation reloads trust and metadata; revocation takes effect without restarting.
       const privateConfig =
         enrolled ??
@@ -229,6 +294,13 @@ const make = Effect.gen(function* () {
               sendMachineIds: [],
               connectedEnvironmentIds: published?.connectedEnvironmentIds ?? [],
             };
+      const oldFleetRoutes = new Set(
+        config.fleetId === undefined
+          ? []
+          : (input.pinnedFleetRoutes ?? []).flatMap(({ environmentId, fleetIds }) =>
+              fleetIds.some((id) => id !== config.fleetId) ? [environmentId] : [],
+            ),
+      );
       const trusted = (machine: FleetRoster["machines"][number]) =>
         config.peers.find(
           (peer) =>
@@ -267,14 +339,10 @@ const make = Effect.gen(function* () {
             const activeSessions = sharedFolder ? yield* auth.listSessions() : [];
             const availableDeliveryIds = new Set<string>();
             const rejectedDeliveryIds = new Set<string>();
-            const activeGrant = (
-              outgoingKey: string,
-              expiresAt: number,
-              pairingLinkId?: string,
-            ) => {
+            const activeGrant = (subject: string, expiresAt: number, pairingLinkId?: string) => {
               const matches = activeLinks.filter(
                 (link) =>
-                  link.subject === `lan-fleet:${outgoingKey}` &&
+                  link.subject === subject &&
                   (pairingLinkId === undefined || link.id === pairingLinkId) &&
                   DateTime.toEpochMillis(link.expiresAt) > now &&
                   Math.abs(DateTime.toEpochMillis(link.expiresAt) - expiresAt) <= 60_000,
@@ -295,7 +363,18 @@ const make = Effect.gen(function* () {
               ...(input.mode === "status" ? [] : input.sendMachineIds),
               ...campaignIds,
             ]);
+            const readOffer = (file: string) => {
+              const read = readFleetJson(file, Delivery.Delivery);
+              return sharedFolder ? Effect.option(read) : read.pipe(Effect.asSome);
+            };
             for (const machine of roster.machines.filter((item) => item.enabled)) {
+              const reportStatus = (status: LanFleetSyncResult["machines"][number]["status"]) =>
+                machines.push({
+                  machineId: machine.machineId,
+                  environmentId: machine.environmentId,
+                  label: machine.label,
+                  status,
+                });
               const peer = trusted(machine);
               let status: LanFleetSyncResult["machines"][number]["status"] =
                 machine.machineId === self.machineId
@@ -305,6 +384,14 @@ const make = Effect.gen(function* () {
                     : "ready";
               if (peer !== undefined && peer.machineId !== self.machineId) {
                 const outgoingKey = Delivery.deliveryFileName(self.machineId, peer.machineId);
+                const legacySubject = "lan-fleet:" + outgoingKey;
+                const credentialKeyDigest = Delivery.fleetCredentialKeyFor(
+                  config.credentialKeyDigests,
+                  peer.machineId,
+                  config.credentialScope,
+                );
+                const generation = credentialKeyDigest === undefined ? {} : { credentialKeyDigest };
+                const subject = Delivery.fleetCredentialSubject(legacySubject, credentialKeyDigest);
                 const outFile = path.join(config.deliveryDirectory, `${outgoingKey}.json`);
                 let sent = journal[`sent:${outgoingKey}`];
                 let recipientReady = !config.managed;
@@ -326,6 +413,107 @@ const make = Effect.gen(function* () {
                   }
                 }
                 let outgoingExists = yield* fs.exists(outFile);
+                if (
+                  sharedFolder &&
+                  recipientReady &&
+                  outgoingExists &&
+                  (sent !== undefined ||
+                    credentialKeyDigest !== undefined ||
+                    requested.has(peer.machineId))
+                ) {
+                  const previous = yield* readFleetJson(outFile, Delivery.Delivery).pipe(
+                    Effect.result,
+                  );
+                  if (
+                    Result.isFailure(previous) &&
+                    (Cause.isUnknownError(previous.failure) ||
+                      Schema.isSchemaError(previous.failure))
+                  ) {
+                    // The bytes arrived but cannot describe a delivery. Preserve them under the
+                    // issuer's sync lock. Access or transport errors still leave the file in place.
+                    const archived = yield* fs
+                      .rename(outFile, outFile + ".invalid-" + NodeCrypto.randomUUID())
+                      .pipe(
+                        Effect.as(true),
+                        Effect.orElseSucceed(() => false),
+                      );
+                    if (!archived) {
+                      reportStatus("uncertain");
+                      continue;
+                    }
+                    const grant = activeLinks.find(
+                      (link) =>
+                        link.id === sent?.pairingLinkId &&
+                        Delivery.fleetCredentialSubjectParts(link.subject).subject ===
+                          legacySubject,
+                    );
+                    if (grant !== undefined && (yield* auth.revokePairingLink(grant.id)))
+                      activeLinks.splice(activeLinks.indexOf(grant), 1);
+                    if (sent?.status !== "connected") requested.add(peer.machineId);
+                    delete journal[`sent:${outgoingKey}`];
+                    sent = undefined;
+                    outgoingExists = false;
+                    yield* writeFleetJson(journalFile, journal);
+                  }
+                }
+                if (
+                  sharedFolder &&
+                  recipientReady &&
+                  credentialKeyDigest !== undefined &&
+                  (sent === undefined
+                    ? outgoingExists
+                    : sent.credentialKeyDigest !== credentialKeyDigest)
+                ) {
+                  let keepCurrentOffer = false;
+                  if (outgoingExists) {
+                    const old = Option.getOrUndefined(yield* readOffer(outFile));
+                    const ownPath =
+                      old !== undefined &&
+                      old.header.senderId === self.machineId &&
+                      old.header.recipientId === peer.machineId &&
+                      old.header.purpose === undefined;
+                    if (ownPath) {
+                      // A current grant can reconstruct a lost journal. An offer on this same
+                      // path may have been signed by this issuer's previous key.
+                      keepCurrentOffer =
+                        (yield* Effect.try(() =>
+                          Delivery.verifyDelivery(old, self, peer, now),
+                        ).pipe(Effect.orElseSucceed(() => false))) &&
+                        activeGrant(subject, old.header.expiresAt) !== undefined;
+                      if (!keepCurrentOffer)
+                        outgoingExists = !(yield* fs
+                          .rename(outFile, outFile + ".obsolete-" + old.header.deliveryId)
+                          .pipe(
+                            Effect.as(true),
+                            Effect.orElseSucceed(() => false),
+                          ));
+                    }
+                    if (!keepCurrentOffer && outgoingExists) {
+                      reportStatus("uncertain");
+                      continue;
+                    }
+                  }
+                  if (keepCurrentOffer) {
+                    delete journal["sent:" + outgoingKey];
+                    sent = undefined;
+                  } else {
+                    const retiredGrants = activeLinks.filter((link) => {
+                      const parts = Delivery.fleetCredentialSubjectParts(link.subject);
+                      return (
+                        parts.subject === legacySubject && parts.keyDigest !== credentialKeyDigest
+                      );
+                    });
+                    for (const grant of retiredGrants) {
+                      yield* auth.revokePairingLink(grant.id);
+                      activeLinks.splice(activeLinks.indexOf(grant), 1);
+                    }
+                    delete journal["sent:" + outgoingKey];
+                    yield* writeFleetJson(journalFile, journal);
+                    sent = undefined;
+                    recipientConnected = false;
+                    requested.add(peer.machineId);
+                  }
+                }
                 let outgoingRejected = false;
                 const access =
                   policy !== undefined && policyActive
@@ -335,7 +523,6 @@ const make = Effect.gen(function* () {
                       : "standard";
                 if (sharedFolder) {
                   // What this machine actually issued the peer is the truth, not the journal.
-                  const subject = `lan-fleet:${outgoingKey}`;
                   const held = [
                     ...activeSessions
                       .filter((session) => session.subject === subject)
@@ -391,6 +578,7 @@ const make = Effect.gen(function* () {
                         (item.used || now - item.issuedAt < UNUSED_SESSION_GRACE_MS)));
                   // Without a policy, only a peer that took a fleet credential is renewed.
                   const renewable =
+                    config.credentialScope !== undefined ||
                     enforcePolicy ||
                     held.some((item) => item.session) ||
                     (sent !== undefined && sent.deliveryId !== EXISTING_CONNECTION);
@@ -417,10 +605,12 @@ const make = Effect.gen(function* () {
                     // The peer keeps a connection here with no credential at its access, or one
                     // that is about to expire or already has: replace it.
                     if (outgoingExists) {
-                      const replaced = yield* readFleetJson(outFile, Delivery.Delivery).pipe(
-                        Effect.map((delivery) => delivery.header.deliveryId),
-                        Effect.orElseSucceed(() => NodeCrypto.randomUUID()),
-                      );
+                      const previous = yield* readOffer(outFile);
+                      if (Option.isNone(previous)) {
+                        reportStatus("uncertain");
+                        continue;
+                      }
+                      const replaced = previous.value.header.deliveryId;
                       yield* fs.rename(outFile, `${outFile}.obsolete-${replaced}`);
                     }
                     delete journal[`sent:${outgoingKey}`];
@@ -431,12 +621,17 @@ const make = Effect.gen(function* () {
                   }
                 }
                 if (sharedFolder && outgoingExists && !recipientConnected) {
-                  const existing = yield* readFleetJson(outFile, Delivery.Delivery);
+                  const offer = yield* readOffer(outFile);
+                  if (Option.isNone(offer)) {
+                    reportStatus("uncertain");
+                    continue;
+                  }
+                  const existing = offer.value;
                   const valid = yield* Effect.try(() =>
                     Delivery.verifyDelivery(existing, self, peer, now),
                   );
                   const grant = activeGrant(
-                    outgoingKey,
+                    subject,
                     existing.header.expiresAt,
                     sent?.pairingLinkId,
                   );
@@ -475,6 +670,7 @@ const make = Effect.gen(function* () {
                         deliveryId: existing.header.deliveryId,
                         expiresAt: existing.header.expiresAt,
                         pairingLinkId: grant.id,
+                        ...generation,
                         status: "pending",
                       };
                       journal[`sent:${outgoingKey}`] = sent;
@@ -487,6 +683,7 @@ const make = Effect.gen(function* () {
                   sent = {
                     deliveryId: sent?.deliveryId ?? EXISTING_CONNECTION,
                     expiresAt: sent?.expiresAt ?? now,
+                    ...generation,
                     status: "connected",
                   };
                   journal[`sent:${outgoingKey}`] = sent;
@@ -502,6 +699,7 @@ const make = Effect.gen(function* () {
                   sent = {
                     deliveryId: NodeCrypto.randomUUID(),
                     expiresAt: now + 24 * 60 * 60 * 1000,
+                    ...generation,
                     status: "publishing",
                   };
                   journal[`sent:${outgoingKey}`] = sent;
@@ -524,7 +722,7 @@ const make = Effect.gen(function* () {
                   const minted = yield* liveAccess(access);
                   const issued = yield* auth.createPairingLink({
                     ttl: Duration.hours(24),
-                    subject: `lan-fleet:${outgoingKey}`,
+                    subject,
                     scopes: FleetAccessPolicy.fleetCredentialScopes(minted),
                   });
                   if (sharedFolder) {
@@ -584,22 +782,37 @@ const make = Effect.gen(function* () {
                 const incomingKey = Delivery.deliveryFileName(peer.machineId, self.machineId);
                 const inFile = path.join(config.deliveryDirectory, `${incomingKey}.json`);
                 if (yield* fs.exists(inFile)) {
-                  const delivery = yield* readFleetJson(inFile, Delivery.Delivery);
+                  const offer = yield* readOffer(inFile);
+                  if (Option.isNone(offer)) {
+                    reportStatus("uncertain");
+                    continue;
+                  }
+                  const delivery = offer.value;
                   const received = journal[`received:${incomingKey}`];
-                  const grantAvailable =
-                    sharedFolder &&
-                    peerCatalog?.availableDeliveryIds?.includes(delivery.header.deliveryId) ===
-                      true;
-                  // The sender only offers a new grant to a connected machine to replace its credential.
-                  const replacement =
-                    grantAvailable &&
-                    received?.status === "connected" &&
-                    received.deliveryId !== delivery.header.deliveryId;
-                  // A grant that follows an unspent replacement, such as one that lapsed while
-                  // this machine was offline, still replaces.
+                  const grantOffered = peerCatalog?.availableDeliveryIds?.includes(
+                    delivery.header.deliveryId,
+                  );
+                  const grantAvailable = sharedFolder && grantOffered === true;
+                  const connected = input.connectedEnvironmentIds.includes(peer.environmentId);
+                  const retiringOldFleet = oldFleetRoutes.has(peer.environmentId);
+                  const replacementOffer =
+                    (received?.status === "connected" &&
+                      received.deliveryId !== delivery.header.deliveryId) ||
+                    ((sharedFolder ||
+                      config.credentialScope !== undefined ||
+                      grantOffered === true) &&
+                      received === undefined &&
+                      connected &&
+                      (!retiringOldFleet || sharedFolder));
+                  const replacement = grantAvailable && replacementOffer;
+                  // A following grant still replaces if the previous pickup was unfinished.
                   const replacing =
-                    replacement ||
+                    replacementOffer ||
                     (received?.replacing === true && received.status === "connecting");
+                  const replacementSaved =
+                    grantOffered === false &&
+                    input.completedReplacementDeliveryIds?.includes(delivery.header.deliveryId) ===
+                      true;
                   if (
                     delivery.header.expiresAt > now &&
                     (received === undefined ||
@@ -616,11 +829,7 @@ const make = Effect.gen(function* () {
                     if (payload === undefined) {
                       rejectedDeliveryIds.add(delivery.header.deliveryId);
                       status = "uncertain";
-                    } else if (
-                      input.connectedEnvironmentIds.includes(peer.environmentId) &&
-                      // A saved connection proves nothing until the replacement grant is spent.
-                      !(replacing && grantAvailable)
-                    ) {
+                    } else if (connected && !retiringOldFleet && (!replacing || replacementSaved)) {
                       yield* writeFleetJson(
                         path.join(config.deliveryDirectory, `${incomingKey}.receipt.json`),
                         Delivery.makeReceipt(delivery, config),
@@ -631,9 +840,7 @@ const make = Effect.gen(function* () {
                         status: "connected",
                       };
                     } else if (
-                      (!sharedFolder ||
-                        peerCatalog?.availableDeliveryIds?.includes(delivery.header.deliveryId) ===
-                          true) &&
+                      (grantAvailable || (!sharedFolder && !replacing)) &&
                       (received === undefined ||
                         replacement ||
                         (sharedFolder &&
@@ -648,7 +855,8 @@ const make = Effect.gen(function* () {
                       // Renewing a connection already accepted is no new trust decision, so a
                       // client collects it whether or not automatic pickup is on.
                       (input.mode === "manual" ||
-                        (input.mode === "automatic" && (config.autoPickup || replacing)))
+                        (input.mode === "automatic" &&
+                          (config.autoPickup || (replacing && connected))))
                     ) {
                       journal[`received:${incomingKey}`] = {
                         deliveryId: delivery.header.deliveryId,
@@ -674,26 +882,25 @@ const make = Effect.gen(function* () {
                       incoming.push({
                         deliveryId: delivery.header.deliveryId,
                         environmentId: peer.environmentId,
+                        ...(config.fleetId === undefined ? {} : { fleetId: config.fleetId }),
                         host: payload.origin,
                         pairingCode: payload.credential,
                         ...(tls === undefined ? {} : { tls }),
                         ...(replacing ? { replace: true } : {}),
+                        ...(replacing && input.mode === "automatic" && !config.autoPickup
+                          ? { requireSavedConnection: true }
+                          : {}),
+                        ...(replacing && config.credentialScope !== undefined
+                          ? { preserveManualConnection: true }
+                          : {}),
                       });
                     }
-                    if (
-                      received?.status === "connecting" &&
-                      !input.connectedEnvironmentIds.includes(peer.environmentId)
-                    )
+                    if (received?.status === "connecting" && (!connected || retiringOldFleet))
                       status = "uncertain";
                   }
                 }
               }
-              machines.push({
-                machineId: machine.machineId,
-                environmentId: machine.environmentId,
-                label: machine.label,
-                status,
-              });
+              reportStatus(status);
             }
             yield* writeFleetJson(journalFile, journal);
             if (config.managed)
@@ -718,16 +925,7 @@ const make = Effect.gen(function* () {
               incoming,
             } satisfies LanFleetSyncResult;
           }),
-        () =>
-          Effect.sync(() => {
-            holding = false;
-          }).pipe(
-            Effect.andThen(fs.remove(lock, { recursive: true })),
-            // The next sync clears it as this server's own.
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Could not release the LAN fleet sync lock.", { cause }),
-            ),
-          ),
+        () => releaseLock,
       );
     },
     Effect.mapError((error) =>
@@ -746,6 +944,7 @@ const make = Effect.gen(function* () {
     backgroundSync: Effect.asVoid(run("background")),
     setup: enrollment.status,
     configure,
+    resetLinks,
   });
 });
 

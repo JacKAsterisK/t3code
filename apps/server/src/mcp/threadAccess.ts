@@ -5,6 +5,7 @@ import type {
 import {
   CommandId,
   linkOriginIsFenced,
+  type OrchestrationV2RuntimeModeEscalation,
   type EnvironmentId,
   OrchestratorMcpFailure,
   type OrchestratorMcpThreadSendInput,
@@ -24,6 +25,10 @@ import {
 import { hasPendingBackgroundSubagent } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+
+import { ServerSettingsService } from "../serverSettings.ts";
+import { ApprovalPeerAccess } from "../auth/ApprovalPeerAccess.ts";
 import { THREAD_ID_INPUT_FORMS } from "@t3tools/shared/threadLinks";
 
 import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
@@ -117,19 +122,21 @@ export const unavailable = () =>
 export const dispatchFailure = (
   error: OrchestratorV2Error | ThreadManagement.ThreadManagementProviderInstanceDisabledError,
 ) =>
-  error._tag === "ThreadManagementProviderInstanceDisabledError" ||
-  error._tag === "OrchestratorRuntimeModeAboveCeilingError" ||
-  error._tag === "OrchestratorProviderSelectionBusyError"
-    ? new OrchestratorMcpFailure({ code: "invalid_request", message: error.message })
-    : (error._tag === "OrchestratorDispatchError" ||
-          error._tag === "OrchestratorCommandRejectedError") &&
-        typeof error.cause === "string" &&
-        error.cause.length > 0
-      ? new OrchestratorMcpFailure({
-          code: "orchestration_error",
-          message: Array.from(error.cause).slice(0, 1000).join(""),
-        })
-      : unavailable();
+  error._tag === "ThreadRuntimeModeChangeError"
+    ? new OrchestratorMcpFailure({ code: error.code, message: error.message })
+    : error._tag === "ThreadManagementProviderInstanceDisabledError" ||
+        error._tag === "OrchestratorRuntimeModeAboveCeilingError" ||
+        error._tag === "OrchestratorProviderSelectionBusyError"
+      ? new OrchestratorMcpFailure({ code: "invalid_request", message: error.message })
+      : (error._tag === "OrchestratorDispatchError" ||
+            error._tag === "OrchestratorCommandRejectedError") &&
+          typeof error.cause === "string" &&
+          error.cause.length > 0
+        ? new OrchestratorMcpFailure({
+            code: "orchestration_error",
+            message: Array.from(error.cause).slice(0, 1000).join(""),
+          })
+        : unavailable();
 
 export interface CallerLimits {
   readonly runtimeMode: RuntimeMode;
@@ -211,17 +218,76 @@ export function threadMessageLimits(
     : { ...limits, runtimeMode: autoThreadFullAccessLimit(scope, limits.runtimeMode, caller) };
 }
 
-/** An explicit request may opt up. An omitted or inherited mode keeps the caller's actual mode. */
-export function threadCreationRuntimeLimit(
+/** Evaluate the owner's opt-in at the environment where this check runs. */
+export const threadCreationRuntimeLimit = Effect.fn("mcp.threadCreationRuntimeLimit")(function* (
   scope: McpInvocationContext.McpInvocationScope,
   runtimeMode: RuntimeMode,
   requested: RuntimeMode | "inherit" | undefined,
   caller?: Pick<OrchestrationV2ThreadShell, "linkOrigin">,
-): RuntimeMode {
-  return requested === "full-access"
-    ? autoThreadFullAccessLimit(scope, runtimeMode, caller)
-    : runtimeMode;
+) {
+  if (runtimeMode !== "auto" || requested !== "full-access") return runtimeMode;
+  const service = yield* Effect.serviceOption(ServerSettingsService);
+  if (Option.isNone(service)) return runtimeMode;
+  const settings = yield* service.value.getSettings.pipe(Effect.orElseSucceed(() => undefined));
+  const ceiling = service.value.managedPolicy?.limits?.maxRuntimeMode;
+  if (
+    settings?.allowAgentFullAccessLaunches !== true ||
+    (ceiling !== undefined && ceiling !== "full-access")
+  ) {
+    return runtimeMode;
+  }
+  return autoThreadFullAccessLimit(scope, runtimeMode, caller);
+});
+
+export function runtimeModeEscalationForLaunch(
+  scope: McpInvocationContext.McpInvocationScope,
+  previousMode: RuntimeMode,
+  launchedMode: RuntimeMode,
+  caller?: Pick<OrchestrationV2ThreadShell, "id" | "title">,
+): OrchestrationV2RuntimeModeEscalation | undefined {
+  if (previousMode !== "auto" || launchedMode !== "full-access") return undefined;
+  if (caller === undefined) return undefined;
+  const actor = { environmentId: scope.environmentId, threadId: caller.id, title: caller.title };
+  return { actor, from: "auto", to: "full-access", reason: "explicit-launch-under-owner-policy" };
 }
+
+export const linkedRuntimeModeEscalation = Effect.fn("mcp.linkedRuntimeModeEscalation")(function* (
+  client: McpInvocationContext.McpClientCaller,
+): Effect.fn.Return<OrchestrationV2RuntimeModeEscalation, OrchestratorMcpFailure> {
+  const sender = client.senderThread;
+  if (sender === undefined || client.linked !== true) {
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message: "A linked Full access launch must identify its calling thread.",
+    });
+  }
+  const access = yield* Effect.serviceOption(ApprovalPeerAccess);
+  const binding = Option.isSome(access)
+    ? yield* access.value.rawPeer(client.sessionId).pipe(Effect.mapError(unavailable))
+    : undefined;
+  if (binding !== undefined && binding.sourceEnvironmentId !== sender.environmentId) {
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message: "The calling thread environment does not match the authenticated peer.",
+    });
+  }
+  // A classic link authenticates a credential without a bound source environment.
+  // Its audit keeps the authenticated session and treats its thread details as assertions.
+  return {
+    actor: {
+      threadId: sender.threadId,
+      title: sender.title,
+      peer: {
+        sessionId: client.sessionId,
+        label: client.label,
+        ...(binding === undefined ? {} : { environmentId: sender.environmentId }),
+      },
+    },
+    from: "auto",
+    to: "full-access",
+    reason: "explicit-launch-under-owner-policy",
+  };
+});
 
 export const assertTargetWithinLimits = (
   limits: CallerLimits,

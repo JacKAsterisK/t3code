@@ -1,3 +1,4 @@
+import { ServerSettingsService } from "../serverSettings.ts";
 import {
   CommandId,
   type EnvironmentId,
@@ -155,6 +156,7 @@ const isFinal = (error: OrchestratorMcpFailure) =>
 
 const make = Effect.gen(function* () {
   const followRetry = yield* FollowRetrySchedule;
+  const serverSettings = yield* ServerSettingsService;
   const forwarding = yield* PeerForwarding.PeerForwarding;
   const links = yield* PeerLinks.PeerLinks;
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -341,12 +343,12 @@ const make = Effect.gen(function* () {
         input.runtimeMode === undefined || input.runtimeMode === "inherit"
           ? undefined
           : yield* resolveRuntimeMode(
-              threadCreationRuntimeLimit(
+              yield* threadCreationRuntimeLimit(
                 scope,
                 parent.thread.runtimeMode,
                 input.runtimeMode,
                 parent.thread,
-              ),
+              ).pipe(Effect.provideService(ServerSettingsService, serverSettings)),
               input.runtimeMode,
             );
       const interactionMode =
@@ -644,7 +646,8 @@ const make = Effect.gen(function* () {
   ) {
     let reply: OrchestratorMcpThreadTimelineItem | undefined;
     let error: OrchestratorMcpThreadTimelineItem | undefined;
-    let afterPosition: number | undefined;
+    // Linked peers read newest first without a cursor; this scan runs forward.
+    let afterPosition = -1;
     let run: OrchestratorMcpThreadRun | undefined;
     let remainingItems = 0;
     let tailProbed = false;
@@ -657,7 +660,7 @@ const make = Effect.gen(function* () {
         // Keep the first and expected final activity pages whole. A result on a
         // middle page then needs an extra text read after the scan.
         maxCharsPerItem: failed && remainingItems > 100 ? 1 : 20_000,
-        ...(afterPosition === undefined ? {} : { afterPosition }),
+        afterPosition,
       });
       run ??= read.recentRuns.find((candidate) => candidate.runId === runId);
       reply =

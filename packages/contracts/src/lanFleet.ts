@@ -1,5 +1,10 @@
 import * as Schema from "effect/Schema";
-import { EnvironmentId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  AuthSessionId,
+  EnvironmentId,
+  NonNegativeInt,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { ProjectIconColor } from "./project.ts";
 
 export const FleetMachineId = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9_-]{0,63}$/u));
@@ -60,9 +65,22 @@ export const FleetTlsIdentity = Schema.Struct({
   connectHost: Schema.optionalKey(FleetConnectHost),
 });
 export type FleetTlsIdentity = typeof FleetTlsIdentity.Type;
+
+export const sameFleetTlsIdentity = (left: FleetTlsIdentity, right: FleetTlsIdentity) =>
+  left.origin === right.origin &&
+  left.publicKeySha256 === right.publicKeySha256 &&
+  left.certificate === right.certificate;
+
+export const sameFleetTlsRoute = (left: FleetTlsIdentity, right: FleetTlsIdentity) =>
+  sameFleetTlsIdentity(left, right) && left.connectHost === right.connectHost;
+
 export const FleetTlsGatewayInput = Schema.Struct({
   environmentId: EnvironmentId,
   identity: FleetTlsIdentity,
+  /** Only a verified replacement can name the precise gateway it supersedes. */
+  previousIdentity: Schema.optionalKey(FleetTlsIdentity),
+  retiredIdentities: Schema.optionalKey(Schema.Array(FleetTlsIdentity)),
+  stagedReplacement: Schema.optionalKey(Schema.Literals(["promote", "rollback", "finish"])),
 });
 export type FleetTlsGatewayInput = typeof FleetTlsGatewayInput.Type;
 export const FleetTlsGatewayResult = Schema.Struct({
@@ -74,6 +92,17 @@ export type FleetTlsGatewayResult = typeof FleetTlsGatewayResult.Type;
 export const LanFleetSyncInput = Schema.Struct({
   mode: Schema.Literals(["status", "manual", "automatic"]),
   connectedEnvironmentIds: Schema.Array(EnvironmentId).check(Schema.isMaxLength(1000)),
+  pinnedFleetRoutes: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        environmentId: EnvironmentId,
+        fleetIds: Schema.Array(Schema.String).check(Schema.isMaxLength(1000)),
+      }),
+    ).check(Schema.isMaxLength(1000)),
+  ),
+  completedReplacementDeliveryIds: Schema.optionalKey(
+    Schema.Array(Schema.String.check(Schema.isMaxLength(128))).check(Schema.isMaxLength(1000)),
+  ),
   sendMachineIds: Schema.Array(FleetMachineId).check(Schema.isMaxLength(100)),
 });
 export type LanFleetSyncInput = typeof LanFleetSyncInput.Type;
@@ -103,13 +132,59 @@ export const LanFleetSyncResult = Schema.Struct({
       environmentId: EnvironmentId,
       host: Schema.String,
       pairingCode: Schema.String,
+      fleetId: Schema.optionalKey(Schema.String),
       tls: Schema.optionalKey(FleetTlsIdentity),
       // The sender replaced a credential this machine already holds, such as after an access change.
       replace: Schema.optionalKey(Schema.Boolean),
+      preserveManualConnection: Schema.optionalKey(Schema.Literal(true)),
+      requireSavedConnection: Schema.optionalKey(Schema.Literal(true)),
     }),
   ),
 });
 export type LanFleetSyncResult = typeof LanFleetSyncResult.Type;
+
+const FleetResetDigest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
+export const LanFleetResetInput = Schema.Union([
+  Schema.Struct({ mode: Schema.Literal("preview") }),
+  Schema.Struct({
+    mode: Schema.Literal("apply"),
+    fleetId: TrimmedNonEmptyString,
+    previewDigest: FleetResetDigest,
+  }),
+]);
+export type LanFleetResetInput = typeof LanFleetResetInput.Type;
+
+export const LanFleetResetPreview = Schema.Struct({
+  fleetId: TrimmedNonEmptyString,
+  items: Schema.Struct({
+    links: Schema.Array(
+      Schema.Struct({
+        environmentId: EnvironmentId,
+        label: Schema.String,
+        machineId: FleetMachineId,
+        linkedAt: Schema.String,
+      }),
+    ),
+    sessions: Schema.Array(Schema.Struct({ sessionId: AuthSessionId, subject: Schema.String })),
+    codes: Schema.Array(Schema.Struct({ id: Schema.String, subject: Schema.String })),
+    state: Schema.Struct({ linking: NonNegativeInt, serving: NonNegativeInt }),
+  }),
+  digest: FleetResetDigest,
+});
+export type LanFleetResetPreview = typeof LanFleetResetPreview.Type;
+
+export const LanFleetResetReceipt = Schema.Struct({
+  fleetId: TrimmedNonEmptyString,
+  previewDigest: FleetResetDigest,
+  unlinked: NonNegativeInt,
+  revokedSessions: NonNegativeInt,
+  revokedCodes: NonNegativeInt,
+  completedUtc: Schema.String,
+});
+export type LanFleetResetReceipt = typeof LanFleetResetReceipt.Type;
+
+export const LanFleetResetResult = Schema.Union([LanFleetResetPreview, LanFleetResetReceipt]);
+export type LanFleetResetResult = typeof LanFleetResetResult.Type;
 
 export const FleetAccess = Schema.Literals(["read-only", "standard"]);
 export type FleetAccess = typeof FleetAccess.Type;
@@ -172,6 +247,8 @@ export const LanFleetSetupInput = Schema.Union([
     exceptions: Schema.optionalKey(
       Schema.Array(FleetAccessException).check(Schema.isMaxLength(100)),
     ),
+    // Saves the first list as shown with no starting list: refused if one has appeared since.
+    requireNoStartingList: Schema.optionalKey(Schema.Literal(true)),
   }),
   Schema.Struct({
     operation: Schema.Literal("transport"),
@@ -184,6 +261,7 @@ export type LanFleetSetupInput = typeof LanFleetSetupInput.Type;
 export const LanFleetSetupState = Schema.Struct({
   available: Schema.Boolean,
   sharedFolderTrust: Schema.optionalKey(Schema.Boolean),
+  credentialUnavailable: Schema.optionalKey(Schema.Boolean),
   stage: Schema.Literals(["unconfigured", "join", "pending", "active", "paused"]),
   owner: Schema.Boolean,
   ownerCode: Schema.NullOr(VerificationCode),
@@ -228,6 +306,34 @@ export const LanFleetSetupState = Schema.Struct({
 });
 export type LanFleetSetupState = typeof LanFleetSetupState.Type;
 
+/** What fleet setup tells a person when it refuses, by refusal. Shown as written; no secrets. */
+const FLEET_REFUSAL_MESSAGES: Readonly<Record<string, string>> = {
+  "roster-row-disabled":
+    "The fleet roster has a disabled row for this machine. Enable or remove its row in fleet-roster.json on the shared folder, then try again.",
+  "roster-origin-mismatch":
+    "The fleet roster lists this machine at a different LAN address. Use the address in its roster row, or update that row, then try again.",
+  "roster-row-without-keys":
+    "This machine is already in the fleet's roster or trust list, but this install does not have its fleet keys, and revoking it does not free its identity to join again. Restore this machine's fleet keys from its backup.",
+  "already-member":
+    "This machine is already a member of a fleet, so it cannot create one. Join that fleet, or leave it before creating a new one.",
+  "owner-authority-missing":
+    "This machine owns a fleet whose fleet-authority.json is missing from the shared folder. Restore that file rather than creating the fleet again.",
+  "switched-fleet-start":
+    "Only BuildMachine creates the replacement fleet. Join that fleet from this machine instead.",
+  "fleet-exists": "The shared folder already has a fleet. Join it instead of creating a new one.",
+  "fleet-missing":
+    "The shared folder has no fleet yet. Create it on the owner machine first, then join.",
+  "owner-code-mismatch":
+    "The owner verification code does not match this fleet's owner. Check the code on the owner machine.",
+  "not-owner": "Only the fleet's owner machine can do this.",
+  "stale-review":
+    "The fleet changed after this list was shown, so it was not saved. Review Machine access again.",
+  "reset-peer-unidentified":
+    "Fleet reset could not identify the machine for a served peer session. Existing links were kept. Review the session in Authorized clients before retrying.",
+  "machine-not-enabled":
+    "This machine, or one it was asked to link, is not an enabled fleet member in both the roster and the fleet's trust list.",
+};
+
 export class LanFleetError extends Schema.TaggedError<LanFleetError>()("LanFleetError", {
   reason: Schema.Literals(["configuration", "unavailable", "busy", "transport"]),
   // Why a change was refused, when it has a clearer message than its reason. A string, so a
@@ -239,6 +345,11 @@ export class LanFleetError extends Schema.TaggedError<LanFleetError>()("LanFleet
       return "An exception only applies on a machine that is itself read-only. Standard access on a standard machine reaches every machine it can change, so choose only read-only machines.";
     if (this.refusal === "exception-unknown-machine")
       return "An exception must name two machines in this fleet. Reload Machine access and choose from its machines.";
+    const refusal =
+      this.refusal !== undefined && Object.hasOwn(FLEET_REFUSAL_MESSAGES, this.refusal)
+        ? FLEET_REFUSAL_MESSAGES[this.refusal]
+        : undefined;
+    if (refusal !== undefined) return refusal;
     if (this.reason === "transport")
       return "The encrypted LAN endpoint could not start. Check that its selected address is local and its port is available; existing keys and connections were preserved.";
     return this.reason === "busy"

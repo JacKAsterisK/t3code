@@ -1,7 +1,10 @@
 import {
   AuthStandardClientScopes,
+  sameFleetTlsRoute,
   EnvironmentId,
   type AuthEnvironmentScope,
+  type FleetTlsIdentity,
+  type FleetTlsGatewayInput,
   ORCHESTRATION_PROTOCOL_VERSION,
 } from "@t3tools/contracts";
 import { assert, describe, expect, it } from "@effect/vitest";
@@ -16,6 +19,12 @@ import * as RpcHttp from "../rpc/http.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as ManagedRelay from "../relay/managedRelay.ts";
 import * as Persistence from "../platform/persistence.ts";
+import {
+  EMPTY_CONNECTION_CATALOG_DOCUMENT,
+  registerConnectionInCatalog,
+  setConnectionEnabledInCatalog,
+  setRoutesInCatalog,
+} from "../platform/storageDocument.ts";
 import { fetchRemoteSessionState } from "../authorization/remote.ts";
 import {
   BearerConnectionCredential,
@@ -41,7 +50,14 @@ import {
 } from "./onboarding.ts";
 import * as EnvironmentRegistry from "./registry.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
-import { connectionRoutes, routeHttpBaseUrl } from "./routes.ts";
+import {
+  connectionRouteId,
+  connectionRoutes,
+  credentialConnectionId,
+  fleetTlsOfRoute,
+  routeHttpBaseUrl,
+  usableRoutes,
+} from "./routes.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
 
 const layerClientPresentation = Layer.succeed(
@@ -170,22 +186,55 @@ function layerPairingOnboarding(
   calls: Array<{ readonly url: string; readonly init: RequestInit }> = [],
   provision?: ClientCapabilities.SshEnvironmentGateway["Service"]["provision"],
   registered: unknown[] = [],
+  fleetGateway?: Parameters<typeof ClientCapabilities.FleetTlsGateway.of>[0],
+  fixture?: {
+    registrationError?: () => Persistence.ConnectionPersistenceError | undefined;
+    catalog?: typeof EMPTY_CONNECTION_CATALOG_DOCUMENT;
+  },
 ) {
+  let document = fixture?.catalog ?? EMPTY_CONNECTION_CATALOG_DOCUMENT;
   const dependencies = Layer.mergeAll(
     layerClientPresentation,
     layerPairingHttp(calls, options),
+    fleetGateway === undefined
+      ? Layer.empty
+      : Layer.succeed(ClientCapabilities.FleetTlsGateway, fleetGateway),
     Layer.mock(Persistence.ConnectionTargetStore)({
-      list: Effect.succeed([]),
-      listDisabled: Effect.succeed([]),
+      list: Effect.sync(() => document.targets),
+      listDisabled: Effect.sync(() => document.disabledEnvironmentIds),
     }),
     Layer.mock(Persistence.ConnectionRegistrationStore)({
-      register: (registration) => Effect.sync(() => void registered.push(registration)),
-      setEnabled: () => Effect.void,
+      register: (registration, routes) =>
+        Effect.suspend(() => {
+          const error = fixture?.registrationError?.();
+          if (error !== undefined) return Effect.fail(error);
+          registered.push(registration);
+          document = registerConnectionInCatalog(document, registration, routes);
+          return Effect.void;
+        }),
+      setRoutes: (environmentId, routes) =>
+        Effect.sync(() => {
+          document = setRoutesInCatalog(document, environmentId, routes);
+        }),
+      setEnabled: (environmentId, enabled) =>
+        Effect.sync(() => {
+          document = setConnectionEnabledInCatalog(document, environmentId, enabled);
+        }),
     }),
     Layer.mock(Persistence.EnvironmentCacheStore)({}),
-    Layer.mock(ConnectionProfileStore.ConnectionProfileStore)({}),
+    Layer.mock(ConnectionProfileStore.ConnectionProfileStore)({
+      get: (id) =>
+        Effect.sync(() =>
+          Option.fromUndefinedOr(document.profiles.find((profile) => profile.connectionId === id)),
+        ),
+    }),
     Layer.mock(ConnectionCredentialStore.ConnectionCredentialStore)({
-      get: () => Effect.succeedNone,
+      get: (id) =>
+        Effect.sync(() =>
+          Option.fromUndefinedOr(
+            document.credentials.find((item) => item.connectionId === id)?.credential,
+          ),
+        ),
       put: () => Effect.void,
     }),
     Layer.mock(ClientCapabilities.SshEnvironmentGateway)(provision ? { provision } : {}),
@@ -231,29 +280,66 @@ const UNSUPPORTED_ERROR = new ConnectionBlockedError({
   detail: "The saved server used an incompatible orchestration protocol.",
 });
 
-const registerSwitchedOffEnvironment = Effect.gen(function* () {
-  const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-  const registration = new BearerConnectionRegistration({
-    target: new BearerConnectionTarget({
-      environmentId: PAIRED_ENVIRONMENT_ID,
-      connectionId: PAIRED_PROFILE.connectionId,
-      label: "Old label",
-    }),
-    profile: new BearerConnectionProfile({ ...PAIRED_PROFILE, label: "Old label" }),
-    credential: new BearerConnectionCredential({ token: "old-token" }),
+const registerSavedEnvironment = (fleetTls?: FleetTlsIdentity, fleetId?: string) =>
+  Effect.gen(function* () {
+    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+    const registration = new BearerConnectionRegistration({
+      target: new BearerConnectionTarget({
+        environmentId: PAIRED_ENVIRONMENT_ID,
+        connectionId: PAIRED_PROFILE.connectionId,
+        label: "Old label",
+      }),
+      profile: new BearerConnectionProfile({
+        ...PAIRED_PROFILE,
+        label: "Old label",
+        ...(fleetTls === undefined ? {} : { fleetTls }),
+        ...(fleetId === undefined ? {} : { fleetId }),
+      }),
+      credential: new BearerConnectionCredential({ token: "old-token" }),
+    });
+    yield* registry.register(registration);
+    yield* registry.setEnabled(PAIRED_ENVIRONMENT_ID, false);
+    yield* registry.setCompatibility(PAIRED_ENVIRONMENT_ID, UNSUPPORTED_ERROR);
+    const entries = yield* SubscriptionRef.get(registry.entries);
+    expect(entries.get(PAIRED_ENVIRONMENT_ID)).toEqual({
+      target: registration.target,
+      profile: Option.some(registration.profile),
+      enabled: false,
+      unsupportedReason: UNSUPPORTED_ERROR.message,
+    });
+    return entries;
   });
-  yield* registry.register(registration);
-  yield* registry.setEnabled(PAIRED_ENVIRONMENT_ID, false);
-  yield* registry.setCompatibility(PAIRED_ENVIRONMENT_ID, UNSUPPORTED_ERROR);
-  const entries = yield* SubscriptionRef.get(registry.entries);
-  expect(entries.get(PAIRED_ENVIRONMENT_ID)).toEqual({
-    target: registration.target,
-    profile: Option.some(registration.profile),
-    enabled: false,
-    unsupportedReason: UNSUPPORTED_ERROR.message,
+const registerSwitchedOffEnvironment = registerSavedEnvironment();
+
+function fixtureBearerRoute(
+  origin: string,
+  token: string,
+  options: {
+    connectionId?: string;
+    fleetTls?: FleetTlsIdentity;
+    learned?: true;
+    fleetId?: string;
+  } = {},
+) {
+  const connectionId = options.connectionId ?? "bearer:" + PAIRED_ENVIRONMENT_ID + ":" + origin;
+  const target = new BearerConnectionTarget({
+    environmentId: PAIRED_ENVIRONMENT_ID,
+    label: PAIRED_PROFILE.label,
+    connectionId,
   });
-  return entries;
-});
+  const profile = new BearerConnectionProfile({
+    ...PAIRED_PROFILE,
+    ...options,
+    connectionId,
+    httpBaseUrl: origin + "/",
+    wsBaseUrl: origin.replace("https:", "wss:") + "/",
+  });
+  return new BearerConnectionRegistration({
+    target,
+    profile,
+    credential: new BearerConnectionCredential({ token }),
+  });
+}
 
 describe("connection onboarding", () => {
   it.effect(
@@ -333,6 +419,7 @@ describe("connection onboarding", () => {
           ...PAIRING_INPUT,
           expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
           skipExisting: true,
+          fleetId: "current-synthetic-fleet",
         });
         expect(result).toBe(PAIRED_ENVIRONMENT_ID);
         expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
@@ -340,27 +427,1033 @@ describe("connection onboarding", () => {
       }).pipe(Effect.provide(layerPairingOnboarding(undefined, calls)));
     },
   );
-  it.effect("swaps the saved credential when a fleet sender replaces it", () => {
+  it.effect(
+    "keeps a manual desktop connection when the replacement fleet offers a credential",
+    () => {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      return Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        const before = yield* registerSwitchedOffEnvironment;
+        const result = yield* onboarding.registerPairing({
+          ...PAIRING_INPUT,
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          preserveManualConnection: true,
+        });
+        expect(result).toBe(PAIRED_ENVIRONMENT_ID);
+        expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
+        expect(calls).toEqual([]);
+      }).pipe(Effect.provide(layerPairingOnboarding(undefined, calls)));
+    },
+  );
+
+  it.effect("refuses to replace a verified route with an unpinned offer", () => {
     const registered: unknown[] = [];
     return Effect.gen(function* () {
       const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
       const onboarding = yield* Onboarding.ConnectionOnboarding;
-      yield* registerSwitchedOffEnvironment;
-      const result = yield* onboarding.registerPairing({
-        ...PAIRING_INPUT,
-        expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
-        skipExisting: false,
+      yield* registerSavedEnvironment({
+        origin: "https://remote.example.test",
+        certificate: "synthetic-public-certificate",
+        publicKeySha256: "a".repeat(64),
       });
-      expect(result).toBe(PAIRED_ENVIRONMENT_ID);
-      expect(registered.at(-1)).toMatchObject({
-        target: { connectionId: PAIRED_PROFILE.connectionId },
-        credential: { token: "bearer-token" },
-      });
-      const entries = yield* SubscriptionRef.get(registry.entries);
-      expect(entries.size).toBe(1);
-      expect(entries.get(PAIRED_ENVIRONMENT_ID)?.enabled).toBe(true);
+      const before = yield* SubscriptionRef.get(registry.entries);
+      const failure = yield* onboarding
+        .registerPairing({
+          ...PAIRING_INPUT,
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          preserveManualConnection: true,
+        })
+        .pipe(Effect.flip);
+      expect(failure).toMatchObject({ reason: "configuration" });
+      expect(registered).toHaveLength(1);
+      expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
     }).pipe(Effect.provide(layerPairingOnboarding(undefined, [], undefined, registered)));
   });
+  it.effect.each([false, true])(
+    "reconciles a verified replacement and keeps manual routes (pairing failure: %s)",
+    (failExchange) => {
+      const previousIdentity = {
+        origin: "https://remote.example.test",
+        certificate: "old-public-certificate",
+        publicKeySha256: "a".repeat(64),
+      };
+      const tls = {
+        origin: "https://new-fleet.example.test",
+        certificate: "new-public-certificate",
+        publicKeySha256: "b".repeat(64),
+      };
+      const manualProfile = new BearerConnectionProfile({
+        ...PAIRED_PROFILE,
+        connectionId: "bearer:environment-paired:https://manual.example.test",
+        httpBaseUrl: "https://manual.example.test/",
+        wsBaseUrl: "wss://manual.example.test/",
+      });
+      const prepared: FleetTlsGatewayInput[] = [];
+      return Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        yield* registerSavedEnvironment(previousIdentity);
+        yield* registry.register(
+          new BearerConnectionRegistration({
+            target: new BearerConnectionTarget({
+              environmentId: PAIRED_ENVIRONMENT_ID,
+              connectionId: manualProfile.connectionId,
+              label: "Manual",
+            }),
+            profile: manualProfile,
+            credential: new BearerConnectionCredential({ token: "manual-token" }),
+          }),
+        );
+        const pair = onboarding.registerPairing({
+          host: tls.origin,
+          pairingCode: "synthetic-replacement",
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          replacementDeliveryId: "same-fleet-replacement",
+          tls,
+        });
+        if (failExchange) yield* Effect.flip(pair);
+        else expect(yield* pair).toBe(PAIRED_ENVIRONMENT_ID);
+
+        expect(prepared).toEqual([
+          { environmentId: PAIRED_ENVIRONMENT_ID, identity: tls, previousIdentity },
+          ...(failExchange
+            ? []
+            : [
+                {
+                  environmentId: PAIRED_ENVIRONMENT_ID,
+                  identity: tls,
+                  stagedReplacement: "promote",
+                },
+                {
+                  environmentId: PAIRED_ENVIRONMENT_ID,
+                  identity: tls,
+                  stagedReplacement: "finish",
+                },
+              ]),
+        ]);
+        const saved = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID)!;
+        expect(connectionRoutes(saved).map(routeHttpBaseUrl)).toEqual(
+          expect.arrayContaining([
+            manualProfile.httpBaseUrl,
+            failExchange ? PAIRED_PROFILE.httpBaseUrl : `${tls.origin}/`,
+          ]),
+        );
+        expect(connectionRoutes(saved)).toHaveLength(2);
+        expect(
+          connectionRoutes(saved).some(
+            ({ profile }) =>
+              Option.isSome(profile) &&
+              profile.value._tag === "BearerConnectionProfile" &&
+              profile.value.fleetReplacementDeliveryId === "same-fleet-replacement",
+          ),
+        ).toBe(!failExchange);
+      }).pipe(
+        Effect.provide(
+          layerPairingOnboarding({ failExchange }, [], undefined, [], {
+            prepare: (input) =>
+              Effect.sync(() => {
+                prepared.push(input);
+                return {
+                  httpBaseUrl: "http://127.0.0.1:41001/",
+                  wsBaseUrl: "ws://127.0.0.1:41001/",
+                };
+              }),
+          }),
+        ),
+      );
+    },
+  );
+
+  it.effect("renews an unpinned connection from an original fleet", () => {
+    const registered: unknown[] = [];
+    return Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      yield* registerSavedEnvironment();
+      expect(
+        yield* onboarding.registerPairing({
+          ...PAIRING_INPUT,
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          replacementDeliveryId: "synthetic-renewal",
+          requireSavedConnection: true,
+        }),
+      ).toBe(PAIRED_ENVIRONMENT_ID);
+      expect(registered.at(-1)).toMatchObject({
+        target: { connectionId: PAIRED_PROFILE.connectionId },
+        profile: { fleetReplacementDeliveryId: "synthetic-renewal" },
+        credential: { token: "bearer-token" },
+      });
+      const saved = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID)!;
+      expect(connectionRoutes(saved)).toHaveLength(1);
+    }).pipe(Effect.provide(layerPairingOnboarding(undefined, [], undefined, registered)));
+  });
+
+  it.effect(
+    "refuses an unpinned renewal at a hand-edited address before redeeming its code",
+    () => {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      return Effect.gen(function* () {
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
+        yield* registerSavedEnvironment();
+        const newAddress = "https://manual.example.test/";
+        yield* onboarding.updateBearer({
+          environmentId: PAIRED_ENVIRONMENT_ID,
+          label: "Hand-edited route",
+          httpBaseUrl: newAddress,
+        });
+        const before = yield* SubscriptionRef.get(registry.entries);
+        const error = yield* Effect.flip(
+          onboarding.registerPairing({
+            host: newAddress,
+            pairingCode: "synthetic-renewal",
+            expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+            replacementDeliveryId: "synthetic-delivery",
+          }),
+        );
+        expect(error).toMatchObject({ reason: "configuration" });
+        expect(calls.some(({ url }) => url.endsWith("/oauth/token"))).toBe(false);
+        expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
+        expect(yield* credentials.get(PAIRED_PROFILE.connectionId)).toEqual(
+          Option.some(new BearerConnectionCredential({ token: "old-token" })),
+        );
+      }).pipe(Effect.provide(layerPairingOnboarding(undefined, calls)));
+    },
+  );
+
+  it.effect.each([
+    {
+      name: "a stamped replacement of a legacy pin",
+      incomingFleetId: "new-fleet",
+      replace: true,
+      outcome: "replaced",
+    },
+    {
+      name: "an unstamped replacement of a pin with proven fleet provenance",
+      savedFleetId: "old-fleet",
+      replace: true,
+      outcome: "replaced",
+    },
+    {
+      name: "an ordinary delivery beside a legacy pin",
+      incomingFleetId: "new-fleet",
+      replace: false,
+      outcome: "kept",
+    },
+    {
+      name: "a replacement when the saved pin disagrees with the active gateway",
+      incomingFleetId: "new-fleet",
+      replace: true,
+      outcome: "refused",
+    },
+  ] as const)("matches 1.0.53 D204 for $name", (fixture) => {
+    const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+    const prepared: FleetTlsGatewayInput[] = [];
+    const previousIdentity = {
+      origin: "https://remote.example.test",
+      certificate: "legacy-synthetic-pin",
+      publicKeySha256: "a".repeat(64),
+    };
+    const activeIdentity =
+      fixture.outcome === "refused"
+        ? { ...previousIdentity, publicKeySha256: "c".repeat(64) }
+        : previousIdentity;
+    const tls = {
+      origin: "https://new-fleet.example.test",
+      certificate: "new-synthetic-pin",
+      publicKeySha256: "b".repeat(64),
+    };
+    const savedPin = fixtureBearerRoute(previousIdentity.origin, "old-token", {
+      fleetTls: previousIdentity,
+      ...("savedFleetId" in fixture ? { fleetId: fixture.savedFleetId } : {}),
+    });
+    const newRoute = fixtureBearerRoute(tls.origin, "bearer-token");
+    return Effect.gen(function* () {
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
+      yield* registry.register(savedPin);
+      const before = yield* SubscriptionRef.get(registry.entries);
+      const outcome = yield* Effect.result(
+        onboarding.registerPairing({
+          host: tls.origin,
+          pairingCode: "synthetic-switch",
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          skipExisting: !fixture.replace,
+          ...(fixture.replace
+            ? { replacementDeliveryId: "synthetic-delivery", preserveManualConnection: true }
+            : {}),
+          ...("incomingFleetId" in fixture ? { fleetId: fixture.incomingFleetId } : {}),
+          tls,
+        }),
+      );
+      const expectedGateway = { environmentId: PAIRED_ENVIRONMENT_ID, identity: tls };
+      if (fixture.outcome === "replaced") {
+        expect(outcome).toMatchObject({ _tag: "Success", success: PAIRED_ENVIRONMENT_ID });
+        const saved = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID)!;
+        const routes = connectionRoutes(saved);
+        expect(routes.map(routeHttpBaseUrl)).toEqual([newRoute.profile.httpBaseUrl]);
+        expect(Option.getOrUndefined(routes[0]!.profile)).toMatchObject({
+          fleetTls: tls,
+          fleetReplacementDeliveryId: "synthetic-delivery",
+        });
+        expect(yield* credentials.get(savedPin.target.connectionId)).toEqual(Option.none());
+        expect(yield* credentials.get(newRoute.target.connectionId)).toEqual(
+          Option.some(newRoute.credential),
+        );
+        expect(prepared[0]).toEqual({ ...expectedGateway, previousIdentity });
+        expect(prepared.at(-1)).toMatchObject(expectedGateway);
+        expect(calls.filter(({ url }) => url.endsWith("/oauth/token"))).toHaveLength(1);
+      } else {
+        expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
+        expect(yield* credentials.get(savedPin.target.connectionId)).toEqual(
+          Option.some(savedPin.credential),
+        );
+        expect(calls).toEqual([]);
+        if (fixture.outcome === "refused") {
+          expect(outcome).toMatchObject({
+            _tag: "Failure",
+            failure: { reason: "configuration" },
+          });
+          expect(prepared).toEqual([{ ...expectedGateway, previousIdentity }]);
+        } else {
+          expect(outcome).toMatchObject({ _tag: "Success", success: PAIRED_ENVIRONMENT_ID });
+          expect(prepared).toEqual([]);
+        }
+      }
+    }).pipe(
+      Effect.provide(
+        layerPairingOnboarding(undefined, calls, undefined, [], {
+          prepare: (input) =>
+            Effect.suspend(() => {
+              prepared.push(input);
+              if (
+                input.previousIdentity !== undefined &&
+                !sameFleetTlsRoute(input.previousIdentity, activeIdentity)
+              )
+                return Effect.fail(
+                  new ConnectionBlockedError({
+                    reason: "configuration",
+                    detail: "The active gateway uses a different saved pin.",
+                  }),
+                );
+              return Effect.succeed({
+                httpBaseUrl: "http://127.0.0.1:41001/",
+                wsBaseUrl: "ws://127.0.0.1:41001/",
+              });
+            }),
+        }),
+      ),
+    );
+  });
+
+  it.effect("keeps refusing unstamped renewals when both saved pins are legacy", () => {
+    const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+    const tls = {
+      origin: "https://remote.example.test",
+      certificate: "synthetic-pin",
+      publicKeySha256: "c".repeat(64),
+    };
+    return Effect.gen(function* () {
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      yield* registerSavedEnvironment(tls);
+      yield* registry.register(
+        fixtureBearerRoute("https://ambiguous.example.test", "ambiguous-token", {
+          fleetTls: { ...tls, origin: "https://ambiguous.example.test" },
+        }),
+      );
+      const before = yield* SubscriptionRef.get(registry.entries);
+      const outcome = yield* Effect.exit(
+        onboarding.registerPairing({
+          ...PAIRING_INPUT,
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          replacementDeliveryId: "synthetic-renewal",
+          tls,
+        }),
+      );
+      expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
+      expect(outcome._tag).toBe("Failure");
+      expect(calls).toEqual([]);
+    }).pipe(
+      Effect.provide(
+        layerPairingOnboarding(undefined, calls, undefined, [], {
+          prepare: () =>
+            Effect.succeed({
+              httpBaseUrl: "http://127.0.0.1:41001/",
+              wsBaseUrl: "ws://127.0.0.1:41001/",
+            }),
+        }),
+      ),
+    );
+  });
+
+  it.effect.each(["saved", "failed exchange", "failed promotion", "failed save"] as const)(
+    "preserves manual and ambiguous routes while reconciling proven old pins (%s)",
+    (mode) => {
+      const manual = fixtureBearerRoute("https://192.168.4.20", "manual-token");
+      const tailnetOrigin = "https://gateway.example.ts.net";
+      const tailnet = fixtureBearerRoute(tailnetOrigin, "unused", {
+        connectionId:
+          "learned:" +
+          PAIRED_ENVIRONMENT_ID +
+          ":" +
+          tailnetOrigin +
+          "@" +
+          manual.target.connectionId,
+        learned: true,
+      });
+      const manualCatalog = {
+        ...registerConnectionInCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT, manual),
+        targets: [manual.target, tailnet.target],
+        profiles: [manual.profile, tailnet.profile],
+      };
+      const oldPin = {
+        origin: "https://remote.example.test",
+        certificate: "old-synthetic-pin",
+        publicKeySha256: "a".repeat(64),
+      };
+      const ambiguous = fixtureBearerRoute("https://ambiguous.example.test", "ambiguous-token", {
+        fleetTls: { ...oldPin, origin: "https://ambiguous.example.test" },
+      });
+      const unpinned = fixtureBearerRoute("https://unpinned.example.test", "unpinned-token", {
+        fleetId: "old-fleet",
+      });
+      const tls = {
+        origin: "https://new.example.test",
+        certificate: "new-synthetic-pin",
+        publicKeySha256: "b".repeat(64),
+      };
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const gatewayCalls: FleetTlsGatewayInput[] = [];
+      const writes: unknown[] = [];
+      const storageError = new Persistence.ConnectionPersistenceError({
+        operation: "register-connection",
+        message: "Synthetic catalog write failure",
+      });
+      let failWrite = false;
+      return Effect.gen(function* () {
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
+        const entries = () => SubscriptionRef.get(registry.entries);
+        const credentialFor = (id: string) => credentials.get(credentialConnectionId(id));
+        const loaded = (yield* entries()).get(PAIRED_ENVIRONMENT_ID)!;
+        expect(usableRoutes(loaded).map((route) => connectionRouteId(route.target))).toEqual([
+          manual.target.connectionId,
+          tailnet.target.connectionId,
+        ]);
+        expect(Option.getOrUndefined(yield* credentialFor(tailnet.target.connectionId))).toEqual(
+          manual.credential,
+        );
+
+        const old = fixtureBearerRoute(oldPin.origin, "old-token", {
+          fleetTls: oldPin,
+          fleetId: "old-fleet",
+        });
+        yield* registry.register(old);
+        yield* registry.register(ambiguous);
+        yield* registry.register(unpinned);
+        yield* registry.setEnabled(PAIRED_ENVIRONMENT_ID, false);
+        const before = yield* entries();
+        failWrite = mode === "failed save";
+        const pair = onboarding.registerPairing({
+          host: tls.origin,
+          pairingCode: "synthetic-switch",
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          skipExisting: true,
+          fleetId: "new-fleet",
+          tls,
+        });
+        if (mode === "saved") {
+          expect(yield* pair).toBe(PAIRED_ENVIRONMENT_ID);
+          expect(gatewayCalls.map((call) => call.stagedReplacement)).toEqual([
+            undefined,
+            "promote",
+            "finish",
+          ]);
+          expect(writes).toHaveLength(4);
+        } else {
+          const failure = yield* Effect.flip(pair);
+          if (mode === "failed save") expect(failure).toEqual(storageError);
+          const expectedCalls =
+            mode === "failed exchange"
+              ? [undefined]
+              : mode === "failed promotion"
+                ? [undefined, "promote"]
+                : [undefined, "promote", "rollback"];
+          expect(gatewayCalls.map((call) => call.stagedReplacement)).toEqual(expectedCalls);
+          expect(writes).toHaveLength(3);
+          expect(yield* entries()).toEqual(before);
+        }
+        const after = (yield* entries()).get(PAIRED_ENVIRONMENT_ID)!;
+        expect(after.enabled).toBe(false);
+        const routes = connectionRoutes(after);
+        for (const prior of [manual, tailnet, ambiguous, unpinned]) {
+          expect(routes).toContainEqual({
+            target: prior.target,
+            profile: Option.some(prior.profile),
+          });
+        }
+        expect(usableRoutes(after).map(routeHttpBaseUrl)).toContain(tailnet.profile.httpBaseUrl);
+        expect(Option.getOrUndefined(yield* credentialFor(tailnet.target.connectionId))).toEqual(
+          manual.credential,
+        );
+        expect(Option.getOrUndefined(yield* credentialFor(ambiguous.target.connectionId))).toEqual(
+          ambiguous.credential,
+        );
+        expect(Option.getOrUndefined(yield* credentialFor(unpinned.target.connectionId))).toEqual(
+          unpinned.credential,
+        );
+        expect(Option.getOrUndefined(yield* credentialFor(old.target.connectionId))).toEqual(
+          mode === "saved" ? undefined : old.credential,
+        );
+        if (mode === "saved") {
+          expect(routes.map(routeHttpBaseUrl)).not.toContain(old.profile.httpBaseUrl);
+          expect(
+            routes.find((route) => routeHttpBaseUrl(route) === tls.origin + "/")?.profile,
+          ).toEqual(Option.some(expect.objectContaining({ fleetId: "new-fleet", fleetTls: tls })));
+        }
+        expect(calls.filter(({ url }) => url.endsWith("/oauth/token"))).toHaveLength(1);
+      }).pipe(
+        Effect.provide(
+          layerPairingOnboarding(
+            { failExchange: mode === "failed exchange" },
+            calls,
+            undefined,
+            writes,
+            {
+              prepare: (input) =>
+                Effect.suspend(() => {
+                  gatewayCalls.push(input);
+                  if (input.stagedReplacement === "promote" && mode === "failed promotion")
+                    return Effect.fail(
+                      new ConnectionBlockedError({
+                        reason: "configuration",
+                        detail: "Synthetic promotion failure",
+                      }),
+                    );
+                  return Effect.succeed({
+                    httpBaseUrl: "http://127.0.0.1:41001/",
+                    wsBaseUrl: "ws://127.0.0.1:41001/",
+                  });
+                }),
+            },
+            {
+              catalog: manualCatalog,
+              registrationError: () => (failWrite ? storageError : undefined),
+            },
+          ),
+        ),
+      );
+    },
+  );
+
+  it.effect.each(["ordinary pickup", "replacement", "last pin", "pre-existing pin"] as const)(
+    "handles an unpinned fleet switch with the correct gateway lifetime (%s)",
+    (mode) => {
+      const oldPin = {
+        origin: "https://old.example.test",
+        certificate: "old-synthetic-pin",
+        publicKeySha256: "a".repeat(64),
+      };
+      const retainedPin = {
+        origin: "https://retained.example.test",
+        certificate: "retained-synthetic-pin",
+        publicKeySha256: "b".repeat(64),
+      };
+      const old = fixtureBearerRoute(oldPin.origin, "old-token", {
+        fleetTls: oldPin,
+        fleetId: "old-fleet",
+      });
+      const retained = fixtureBearerRoute(retainedPin.origin, "retained-token", {
+        fleetTls: retainedPin,
+        fleetId: "new-fleet",
+      });
+      const incoming = fixtureBearerRoute("https://new.example.test", "bearer-token");
+      const endpoint = {
+        httpBaseUrl: "http://127.0.0.1:41001/",
+        wsBaseUrl: "ws://127.0.0.1:41001/",
+      };
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const replacement = mode === "replacement" || mode === "pre-existing pin";
+      let activePin: FleetTlsIdentity | undefined = oldPin;
+      let reached!: () => void;
+      let release!: () => void;
+      const exchangeReached = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const exchangeGate = {
+        reached,
+        release: new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      };
+      return Effect.gen(function* () {
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
+        const gateway = yield* ClientCapabilities.FleetTlsGateway;
+        yield* registry.register(old);
+        const pair = onboarding.registerPairing({
+          host: incoming.profile.httpBaseUrl,
+          pairingCode: "synthetic-switch",
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          fleetId: "new-fleet",
+          skipExisting: !replacement,
+          ...(replacement ? { replacementDeliveryId: "synthetic-replacement" } : {}),
+        });
+        if (mode === "pre-existing pin") {
+          yield* registry.register(retained);
+          const before = yield* SubscriptionRef.get(registry.entries);
+          expect(yield* Effect.flip(pair)).toMatchObject({ reason: "configuration" });
+          expect(calls.some(({ url }) => url.endsWith("/oauth/token"))).toBe(false);
+          expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
+          return;
+        }
+        const pickup = yield* pair.pipe(Effect.result, Effect.forkChild);
+        yield* Effect.promise(() => exchangeReached);
+        if (mode !== "last pin") {
+          yield* registry.register(retained);
+          activePin = retainedPin;
+        }
+        const before = yield* SubscriptionRef.get(registry.entries);
+        release();
+
+        const outcome = yield* Fiber.join(pickup);
+        const after = yield* SubscriptionRef.get(registry.entries);
+        const saved = after.get(PAIRED_ENVIRONMENT_ID)!;
+        if (mode === "replacement") {
+          expect(outcome).toMatchObject({ _tag: "Failure", failure: { reason: "configuration" } });
+          expect(after).toEqual(before);
+          expect(yield* credentials.get(old.target.connectionId)).toEqual(
+            Option.some(old.credential),
+          );
+        } else {
+          expect(outcome).toMatchObject({ _tag: "Success", success: PAIRED_ENVIRONMENT_ID });
+          expect(connectionRoutes(saved).map(routeHttpBaseUrl)).toContain(
+            incoming.profile.httpBaseUrl,
+          );
+          expect(yield* credentials.get(old.target.connectionId)).toEqual(Option.none());
+        }
+        if (mode === "last pin") {
+          expect(activePin).toBeUndefined();
+        } else {
+          const route = usableRoutes(saved).find(
+            ({ target }) => connectionRouteId(target) === retained.target.connectionId,
+          );
+          expect(route).toBeDefined();
+          expect(yield* credentials.get(retained.target.connectionId)).toEqual(
+            Option.some(retained.credential),
+          );
+          expect(
+            yield* gateway.prepare({
+              environmentId: PAIRED_ENVIRONMENT_ID,
+              identity: fleetTlsOfRoute(route!)!,
+            }),
+          ).toEqual(endpoint);
+        }
+      }).pipe(
+        Effect.provide(
+          layerPairingOnboarding(
+            mode === "pre-existing pin" ? undefined : { exchangeGate },
+            calls,
+            undefined,
+            [],
+            {
+              prepare: ({ identity }) =>
+                Effect.suspend(() =>
+                  activePin !== undefined && sameFleetTlsRoute(activePin, identity)
+                    ? Effect.succeed(endpoint)
+                    : Effect.fail(
+                        new ConnectionBlockedError({
+                          reason: "configuration",
+                          detail: "The synthetic pinned gateway is closed.",
+                        }),
+                      ),
+                ),
+              disconnect: () =>
+                Effect.sync(() => {
+                  activePin = undefined;
+                }),
+            },
+          ),
+        ),
+      );
+    },
+  );
+
+  it.effect("keeps a hand-edited unpinned address and its credential on a fleet switch", () =>
+    Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
+      yield* registerSavedEnvironment(undefined, "old-fleet");
+      yield* onboarding.updateBearer({
+        environmentId: PAIRED_ENVIRONMENT_ID,
+        label: "Hand-edited route",
+        httpBaseUrl: "https://manual.example.test/",
+      });
+      yield* registry.register(
+        fixtureBearerRoute("https://old-fleet.example.test", "retired-token", {
+          fleetId: "old-fleet",
+          fleetTls: {
+            origin: "https://old-fleet.example.test",
+            certificate: "old-pin",
+            publicKeySha256: "a".repeat(64),
+          },
+        }),
+      );
+      yield* onboarding.registerPairing({
+        host: "new-fleet.example.test",
+        skipExisting: true,
+        pairingCode: "synthetic-switch",
+        expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+        fleetId: "new-fleet",
+      });
+      const entry = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID)!;
+      expect(connectionRoutes(entry).map(routeHttpBaseUrl)).toContain(
+        "https://new-fleet.example.test/",
+      );
+      const edited = connectionRoutes(entry).find(
+        (route) => routeHttpBaseUrl(route) === "https://manual.example.test/",
+      );
+      expect(edited).toBeDefined();
+      expect(Option.getOrUndefined(edited!.profile)).not.toHaveProperty("fleetId");
+      expect(
+        Option.getOrUndefined(yield* credentials.get(PAIRED_PROFILE.connectionId)),
+      ).toMatchObject({
+        token: "old-token",
+      });
+    }).pipe(Effect.provide(layerPairingOnboarding())),
+  );
+
+  it.effect.each([
+    { delivery: "ordinary", learned: false },
+    { delivery: "ordinary", learned: true },
+    { delivery: "replacement", learned: true },
+  ] as const)(
+    "keeps the credential of a saved alias during a fleet switch ($delivery delivery, learned: $learned)",
+    ({ delivery, learned }) => {
+      const replacement = delivery === "replacement";
+      const tls = {
+        origin: "https://remote.example.test",
+        certificate: "synthetic-pin",
+        publicKeySha256: "c".repeat(64),
+      };
+      const owner = fixtureBearerRoute(tls.origin, "old-token", { fleetTls: tls });
+      const aliasOrigin = "https://alias.example.test";
+      const alias = fixtureBearerRoute(aliasOrigin, "unused", {
+        connectionId: `learned:${PAIRED_ENVIRONMENT_ID}:${aliasOrigin}@${owner.target.connectionId}`,
+        ...(learned ? { learned: true } : {}),
+      });
+      const catalog = {
+        ...registerConnectionInCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT, owner),
+        targets: [owner.target, alias.target],
+        profiles: [owner.profile, alias.profile],
+      };
+      return Effect.gen(function* () {
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
+        yield* onboarding.registerPairing({
+          ...PAIRING_INPUT,
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          replacementDeliveryId: "synthetic-renewal",
+          fleetId: "original-fleet",
+          tls,
+        });
+        const before = yield* SubscriptionRef.get(registry.entries);
+        const aliasCredentialId = credentialConnectionId(alias.target.connectionId);
+        const credential = yield* credentials.get(aliasCredentialId);
+        expect(credential).toEqual(
+          Option.some(new BearerConnectionCredential({ token: "bearer-token" })),
+        );
+
+        const nextPin = { ...tls, origin: "https://next-fleet.example.test" };
+        const outcome = yield* onboarding
+          .registerPairing({
+            host: nextPin.origin,
+            pairingCode: "synthetic-switch",
+            expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+            skipExisting: !replacement,
+            fleetId: "next-fleet",
+            ...(replacement ? { replacementDeliveryId: "synthetic-switch", tls: nextPin } : {}),
+          })
+          .pipe(Effect.result);
+        expect(outcome).toMatchObject(
+          replacement
+            ? { _tag: "Failure", failure: { reason: "configuration" } }
+            : { _tag: "Success", success: PAIRED_ENVIRONMENT_ID },
+        );
+
+        expect(yield* credentials.get(aliasCredentialId)).toEqual(credential);
+        expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
+      }).pipe(
+        Effect.provide(
+          layerPairingOnboarding(
+            undefined,
+            [],
+            undefined,
+            [],
+            {
+              prepare: () =>
+                Effect.succeed({
+                  httpBaseUrl: "http://127.0.0.1:41001/",
+                  wsBaseUrl: "ws://127.0.0.1:41001/",
+                }),
+            },
+            { catalog },
+          ),
+        ),
+      );
+    },
+  );
+
+  it.effect.each(["unchanged", "changed"] as const)(
+    "renews a tagged route among two pins only when its gateway hostname is unchanged (%s)",
+    (hostname) => {
+      const registered: unknown[] = [];
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const prepared: FleetTlsGatewayInput[] = [];
+      const tls = {
+        origin: "https://remote.example.test",
+        certificate: "synthetic-pin",
+        publicKeySha256: "c".repeat(64),
+        connectHost: "gateway.example.test",
+      };
+      return Effect.gen(function* () {
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
+        yield* registerSavedEnvironment(tls, "original-fleet");
+        const ambiguous = fixtureBearerRoute("https://ambiguous.example.test", "ambiguous-token", {
+          fleetTls: { ...tls, origin: "https://ambiguous.example.test" },
+        });
+        yield* registry.register(ambiguous);
+        const before = yield* SubscriptionRef.get(registry.entries);
+        const outcome = yield* onboarding
+          .registerPairing({
+            ...PAIRING_INPUT,
+            expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+            replacementDeliveryId: "synthetic-renewal",
+            tls: hostname === "unchanged" ? tls : { ...tls, connectHost: "changed.example.test" },
+          })
+          .pipe(Effect.result);
+        if (hostname === "changed") {
+          expect(calls.map(({ url }) => url)).toEqual([]);
+          expect(prepared).toEqual([]);
+          expect(outcome).toMatchObject({ _tag: "Failure", failure: { reason: "configuration" } });
+          expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
+          expect(yield* credentials.get(PAIRED_PROFILE.connectionId)).toEqual(
+            Option.some(new BearerConnectionCredential({ token: "old-token" })),
+          );
+          return;
+        }
+        expect(outcome).toMatchObject({ _tag: "Success", success: PAIRED_ENVIRONMENT_ID });
+        expect(registered.at(-1)).toMatchObject({
+          profile: {
+            fleetId: "original-fleet",
+            fleetReplacementDeliveryId: "synthetic-renewal",
+            fleetTls: tls,
+          },
+          credential: { token: "bearer-token" },
+        });
+        const entry = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID)!;
+        expect(connectionRoutes(entry)).toContainEqual({
+          target: ambiguous.target,
+          profile: Option.some(ambiguous.profile),
+        });
+      }).pipe(
+        Effect.provide(
+          layerPairingOnboarding(undefined, calls, undefined, registered, {
+            prepare: (input) =>
+              Effect.sync(() => {
+                prepared.push(input);
+                return {
+                  httpBaseUrl: "http://127.0.0.1:41001/",
+                  wsBaseUrl: "ws://127.0.0.1:41001/",
+                };
+              }),
+          }),
+        ),
+      );
+    },
+  );
+
+  it.effect("keeps a newer fleet pin installed during an unpinned renewal", () => {
+    let reached!: () => void;
+    let release!: () => void;
+    const exchangeReached = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const exchangeGate = {
+      reached,
+      release: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    };
+    const registered: unknown[] = [];
+    const newerPin = {
+      origin: "https://remote.example.test",
+      certificate: "newer-synthetic-pin",
+      publicKeySha256: "c".repeat(64),
+    };
+    return Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      yield* registerSavedEnvironment();
+      const renewal = yield* onboarding
+        .registerPairing({
+          ...PAIRING_INPUT,
+          expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+          replacementDeliveryId: "synthetic-renewal",
+          requireSavedConnection: true,
+        })
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* Effect.promise(() => exchangeReached);
+      const newer = yield* registerSavedEnvironment(newerPin);
+      release();
+
+      expect(yield* Fiber.join(renewal)).toMatchObject({ reason: "configuration" });
+      expect(yield* SubscriptionRef.get(registry.entries)).toEqual(newer);
+      expect(registered).toHaveLength(2);
+      expect(registered.at(-1)).toMatchObject({
+        profile: { fleetTls: newerPin },
+        credential: { token: "old-token" },
+      });
+    }).pipe(Effect.provide(layerPairingOnboarding({ exchangeGate }, [], undefined, registered)));
+  });
+
+  it.effect("leaves an unspent automatic renewal when the environment was forgotten", () => {
+    const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+    return Effect.gen(function* () {
+      const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      expect(
+        yield* onboarding
+          .registerPairing({
+            ...PAIRING_INPUT,
+            expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+            replacementDeliveryId: "synthetic-renewal",
+            requireSavedConnection: true,
+          })
+          .pipe(Effect.flip),
+      ).toMatchObject({ reason: "configuration" });
+      expect(calls).toEqual([]);
+      expect((yield* SubscriptionRef.get(registry.entries)).has(PAIRED_ENVIRONMENT_ID)).toBe(false);
+    }).pipe(Effect.provide(layerPairingOnboarding(undefined, calls)));
+  });
+
+  it.effect.each(["ambiguous", "manual-collision", "predecessor-removed"] as const)(
+    "keeps existing routes on a fleet replacement conflict (%s)",
+    (conflict) => {
+      const previousIdentity = {
+        origin: "https://remote.example.test",
+        certificate: "prior-synthetic-pin",
+        publicKeySha256: "a".repeat(64),
+      };
+      const tls = {
+        origin: "https://next-fleet.example.test",
+        certificate: "next-synthetic-pin",
+        publicKeySha256: "b".repeat(64),
+      };
+      const alternateOrigin =
+        conflict === "manual-collision" ? tls.origin : "https://alternate.example.test";
+      const alternateId = `bearer:environment-paired:${alternateOrigin}`;
+      const alternateProfile = new BearerConnectionProfile({
+        ...PAIRED_PROFILE,
+        connectionId: alternateId,
+        httpBaseUrl: `${alternateOrigin}/`,
+        wsBaseUrl: `${alternateOrigin.replace("https:", "wss:")}/`,
+        ...(conflict === "ambiguous"
+          ? {
+              fleetTls: {
+                origin: alternateOrigin,
+                certificate: "other-synthetic-pin",
+                publicKeySha256: "c".repeat(64),
+              },
+            }
+          : {}),
+      });
+      let reached!: () => void;
+      let release!: () => void;
+      const exchangeReached = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const exchangeGate = {
+        reached,
+        release: new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      };
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const registered: unknown[] = [];
+      return Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const onboarding = yield* Onboarding.ConnectionOnboarding;
+        yield* registerSavedEnvironment(previousIdentity);
+        yield* registry.register(
+          new BearerConnectionRegistration({
+            target: new BearerConnectionTarget({
+              environmentId: PAIRED_ENVIRONMENT_ID,
+              connectionId: alternateId,
+              label: "Alternate",
+            }),
+            profile: alternateProfile,
+            credential: new BearerConnectionCredential({ token: "alternate-token" }),
+          }),
+        );
+        const replace = onboarding
+          .registerPairing({
+            host: tls.origin,
+            pairingCode: "synthetic-replacement",
+            expectedEnvironmentId: PAIRED_ENVIRONMENT_ID,
+            replacementDeliveryId: "synthetic-delivery",
+            tls,
+          })
+          .pipe(Effect.flip);
+        if (conflict === "predecessor-removed") {
+          const pending = yield* Effect.forkChild(replace);
+          yield* Effect.promise(() => exchangeReached);
+          yield* registry.removeRoute(PAIRED_ENVIRONMENT_ID, PAIRED_PROFILE.connectionId);
+          release();
+          expect(yield* Fiber.join(pending)).toMatchObject({ reason: "configuration" });
+          expect(calls.some(({ url }) => url.endsWith("/oauth/token"))).toBe(true);
+        } else {
+          expect(yield* replace).toMatchObject({ reason: "configuration" });
+          expect(calls).toEqual([]);
+        }
+        expect(registered).toHaveLength(2);
+        const saved = (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID)!;
+        const origins = connectionRoutes(saved).map(routeHttpBaseUrl).sort();
+        expect(origins).toEqual(
+          conflict === "predecessor-removed"
+            ? [alternateProfile.httpBaseUrl]
+            : [PAIRED_PROFILE.httpBaseUrl, alternateProfile.httpBaseUrl].sort(),
+        );
+      }).pipe(
+        Effect.provide(
+          layerPairingOnboarding(
+            conflict === "predecessor-removed" ? { exchangeGate } : {},
+            calls,
+            undefined,
+            registered,
+            {
+              prepare: () =>
+                Effect.succeed({
+                  httpBaseUrl: "http://127.0.0.1:41001/",
+                  wsBaseUrl: "ws://127.0.0.1:41001/",
+                }),
+            },
+          ),
+        ),
+      );
+    },
+  );
+
   it.effect("prepares a persisted bearer registration from pairing details", () =>
     Effect.gen(function* () {
       const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];

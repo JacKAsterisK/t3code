@@ -23,7 +23,11 @@ import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { derive } from "./IdAllocator.ts";
-import { isOrchestrationV2WorkActive, latestProviderTurnForAttempt } from "@t3tools/contracts";
+import {
+  inheritThreadLaunchProvenance,
+  isOrchestrationV2WorkActive,
+  latestProviderTurnForAttempt,
+} from "@t3tools/contracts";
 
 function trimmed(value: string | null | undefined): string | undefined {
   const result = value?.trim();
@@ -62,10 +66,15 @@ export function makeSubagentChildThread(input: {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
 }): OrchestrationV2AppThread {
-  // The remote parent delegated the parent thread, not its subagents.
-  const { delegatedFrom: _delegatedFrom, ...inherited } = input.parentThread;
+  // The parent's delegation and launch audit describe its own creation.
+  const {
+    delegatedFrom: _delegatedFrom,
+    runtimeModeEscalation: _runtimeModeEscalation,
+    ...inherited
+  } = input.parentThread;
   return {
     ...inherited,
+    launchProvenance: inheritThreadLaunchProvenance(input.parentThread.launchProvenance),
     createdBy: input.createdBy,
     creationSource: input.creationSource,
     id: input.childThreadId,
@@ -194,13 +203,43 @@ export function withExecutedModelNote(
 /** Run signal of the notice that carries a provider's stop reason on a completed run. */
 export const PROVIDER_STOP_REASON_SIGNAL = "provider-stop-reason";
 
-function stopNotice(
+/** Turn item types `subagentResultForRun` reads; load at least these for its projection. */
+export const SUBAGENT_RESULT_TURN_ITEM_TYPES = [
+  "assistant_message",
+  "error",
+  "system_notice",
+  "run_interrupt_result",
+] as const satisfies ReadonlyArray<OrchestrationV2TurnItem["type"]>;
+
+/** The item carrying a provider's stop reason for a run, which its delegated result ends with. */
+export function subagentStopNotice(
   projection: Pick<OrchestrationV2ThreadProjection, "turnItems">,
   run: OrchestrationV2Run,
-): string | undefined {
-  const id = derive.runSignalTurnItem({ runId: run.id, signal: PROVIDER_STOP_REASON_SIGNAL });
-  const notice = projection.turnItems.find((item) => item.id === id);
-  return notice?.type === "system_notice" ? notice.message : undefined;
+) {
+  // Codex ends a hook-stopped turn as completed or interrupted, depending on its version.
+  const ids = [
+    derive.runSignalTurnItem({ runId: run.id, signal: PROVIDER_STOP_REASON_SIGNAL }),
+    derive.runSignalTurnItem({ runId: run.id, signal: "interrupt-result" }),
+  ];
+  return projection.turnItems.find(
+    (
+      item,
+    ): item is Extract<
+      OrchestrationV2TurnItem,
+      { readonly type: "system_notice" | "run_interrupt_result" }
+    > =>
+      ids.includes(item.id) &&
+      (item.type === "system_notice" || item.type === "run_interrupt_result"),
+  );
+}
+
+function withStopNotice(
+  projection: Pick<OrchestrationV2ThreadProjection, "turnItems">,
+  run: OrchestrationV2Run,
+  text: string,
+): string {
+  const notice = subagentStopNotice(projection, run);
+  return notice === undefined ? text : `${text}\n\n${notice.message}`;
 }
 
 type MonitorNotice = Pick<OrchestrationV2ConversationMessage, "runId" | "notification">;
@@ -263,7 +302,7 @@ export function subagentResultForRun(
     run.status !== "completed" ||
     result.messageId !== null ||
     result.turnItemId !== null ||
-    stopNotice(projection, run) !== undefined
+    subagentStopNotice(projection, run) !== undefined
   )
     return result;
   for (const earlier of delegatedTaskReportRuns(
@@ -320,19 +359,21 @@ function resultOfRun(
     failure !== undefined && turnItem !== null && turnItem.ordinal < failure.ordinal
       ? (message?.text ?? turnItem.text)
       : undefined;
+  const report = message?.text ?? turnItem?.text;
   const text =
     (failure?.type === "error"
       ? reportBeforeFailure === undefined
         ? failure.failure.message
         : `${failure.failure.message}\n\nLast assistant message before the run failed:\n\n${reportBeforeFailure}`
       : undefined) ??
-    message?.text ??
-    turnItem?.text ??
-    (run.status === "completed"
-      ? ["Child task completed without an assistant result.", stopNotice(projection, run)]
-          .filter((part) => part !== undefined)
-          .join("\n\n")
-      : `Child task ended with status ${run.status}.`);
+    withStopNotice(
+      projection,
+      run,
+      report ??
+        (run.status === "completed"
+          ? "Child task completed without an assistant result."
+          : `Child task ended with status ${run.status}.`),
+    );
   const executedModel = latestProviderTurnForAttempt(
     projection.providerTurns,
     run.activeAttemptId,

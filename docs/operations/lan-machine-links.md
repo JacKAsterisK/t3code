@@ -116,7 +116,9 @@ share cannot give, such as while it is unreachable, only waits; it is never
 reported as refused. Machines adopting it at once serialize on the lock, and any
 competing first revisions merge as above. Write it with the checker, which reads
 the roster and authority, refuses once a list exists, and writes only with
-`--write`:
+`--write`. It writes under the same `fleet-access.lock` a list change holds, so it
+and a first save from Settings never both succeed; while that lock is held it asks
+you to run it again:
 
 ```powershell
 node apps/server/scripts/lan-fleet-access-seed.ts \\fileserver\private-share\fleet-roster.json <machineId> <machineId> --write
@@ -431,6 +433,37 @@ normal importer verifies the destination environment before exchanging its code.
 Each delivery is claimed once; uncertain exchanges pause for review instead of
 rotating credentials or replaying enrollment.
 
+A saved connection records its fleet ID when the pairing delivery includes one.
+A delivery from a different fleet can retire a route with both an older fleet ID
+and a fleet TLS pin. A pin stays saved while another route borrows its credential.
+After pairing succeeds and the desktop promotes the gateway for a pinned
+delivery, the catalog saves the new route and retires eligible old routes and
+their credentials in one update. A failed pairing or catalog write keeps the
+saved routes and credentials. The environment
+retains its enabled or disabled state. An unpinned replacement stops if a TLS
+pin would remain, including one saved during pairing. A successful unpinned
+pickup closes the gateway only after the last fleet TLS pin is gone.
+
+D250/D258:
+
+- A route with no fleet provenance (no fleetId and no fleet TLS pin, i.e. a manual route) is never overwritten or retired.
+- A single pinned route without a fleetId follows the 1.0.53 D204 verified replacement exactly. That replacement requires a replace delivery, a saved pin that matches the active gateway, and a staged promotion.
+- A proven old-fleet route (a recorded fleetId that differs, plus a pin) may be retired after a fully successful pairing.
+- 1.0.54 never retires a route, or replaces a route's identity or credential with a different one, in any case where 1.0.53 would not. Renewing a fleetId-tagged route in place on an exact pin match is a same-identity renewal and is explicitly allowed.
+
+Legacy unpinned shared-folder connections can still renew their credentials in
+place. A replace delivery can omit its fleet ID during a mixed-version rollout.
+If the gateway check fails, the prior route and credential stay in place. If
+several pins remain, only an exact renewal of a route with a recorded fleet ID
+can proceed, at the same saved address and gateway hostname. An exact TLS pin
+renewal keeps the recorded fleet ID when the delivery omits it. Editing a saved
+address clears its fleet ID.
+
+Known limitation from 1.0.53. A legacy unpinned renewal sent to the original
+address can still revert a saved address and label edited by hand and replace
+the credential, because the edit preserves the connection ID. A durable
+manual-edit marker is planned for the next release.
+
 Deliveries and owner link requests expire after 24 hours; signed connection
 summaries last ten minutes. Polling stops after three consecutive failures and
 shows a paused state. **Sync now** permits a manual check. Interrupted publishing,
@@ -443,6 +476,44 @@ connections. The owner can revoke a member to stop new links/deliveries. Existin
 sessions are deliberately preserved; withdraw existing access separately through
 Authorized clients. Restoring a lost owner/device key is an administrator recovery
 operation, not an automatic key rotation.
+
+## Reset fleet links
+
+Use **Settings → Connections → LAN machine links → Reset fleet links** on the
+machine you want to reset. Review its fleet-made agent links, sessions it served,
+pending codes, and adapter state. Confirm to retire the reviewed items and see
+a receipt. If the list changed during review, request a fresh preview. To remove
+saved connections too, opt in to the displayed routes. Like automatic
+retirement, this cleanup requires a fleet TLS pin. The list includes only pins
+from the current fleet and older pins with no recorded fleet ID. Reset keeps
+manual connections, manual agent links and routes added or renewed after the
+preview. If a learned route borrows a listed pin's credential, Reset keeps both
+routes and explains why. Removing the last listed route takes the environment
+out of Connections. Its local drafts, cache and disabled setting are preserved
+for when a fleet route is added again.
+
+Reset invalidates sign-ins approved under retired offers. Before revoking
+sessions, it records which peers need a fresh offer, using the served sessions
+if the adapter state is missing or unreadable. Those peers can reconnect on
+the next eligible fleet pass under the current Machine access policy. The
+serving count includes peers recovered from authenticated sessions and peers
+with saved serving state. If revocation stops partway through, the surviving
+sessions stay tracked. Preview again to review the remaining items. If Reset
+cannot identify a served peer, it stops before applying changes and directs you
+to Authorized clients. If an agent link pass is already running, wait for it
+to finish and confirm again. Reset itself changes local state only. Keep shared
+files and the desktop connection delivery journal for sync and recovery.
+
+## Share locks: why no fencing
+
+The share operation lock is a directory. A lock older than two minutes can be
+reclaimed. A plain file share provides no atomic fencing, so a holder that
+stalls past the limit can still act after another holder reclaims the lock. LAN
+1.0.53 deliberately kept that limitation (D245).
+
+If stalled holders cause conflicting writes, consider leased locks with a
+heartbeat and holder liveness checks over the fleet link, or a single-writer
+owner service.
 
 ## Agents on other machines
 
@@ -459,6 +530,24 @@ Links form only once the fleet has a Machine access list, adopted from a startin
 list or saved in Settings. Until then no machine asks for or offers a link, since
 a link would carry each machine's setup access, normally standard. That includes a
 machine with no saved list that finds no `fleet-access` folder on the share.
+
+A fleet rebuilt or switched to a new roster never takes a list on its own; a person
+saves the first one. With no list and no starting list, **Machine access** offers
+**Save access list**, which saves the access it shows as revision 1 without
+changing any machine, when that leaves a machine standard. Without it, the switch's
+credential retirement leaves every machine unlinked: on 2026-11-25 the D178 roster
+switch revoked every peer link, and nothing replaced them until a list was saved.
+Carrying the previous fleet's list over is planned separately.
+
+On its first start on a switched roster, the link adapter begins from the links
+the previous fleet made, keeping only which machine each reached. Each machine
+still in the fleet links again; the fleet-made link to one that left is forgotten
+on the next pass. Manual links are never touched.
+
+An agent link card made for a fleet peer's forwarded https address while fleet
+links are inactive is still refused with the plain-http audience. The refusal now
+says why: the fleet has no Machine access list yet, or fleet links are turned off
+on that machine. Fleet peers need no card once links are active.
 
 The linking machine also holds itself to its own list: it never links above the
 access its accepted list gives it, whatever the destination offers, reading its

@@ -23,6 +23,32 @@ export const NativeMaintenanceRequest = Schema.Struct({
   journalPath: Schema.NonEmptyString,
   bootstrapId: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   manualActivation: Schema.optionalKey(Schema.Boolean),
+  reportStaleWork: Schema.optionalKey(Schema.Boolean),
+  fleetSwitch: Schema.optionalKey(Schema.Literal(true)),
   generationVersion: Schema.optionalKey(Schema.Literal(2)),
 });
 export type NativeMaintenanceRequest = typeof NativeMaintenanceRequest.Type;
+
+const UnfinishedWorkRequestFields = {
+  schemaVersion: Schema.Literal(1),
+  nonce: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+  homeDirectory: Schema.NonEmptyString,
+  environmentId: Schema.NonEmptyString,
+  journalPath: Schema.NonEmptyString,
+  includeScheduledWork: Schema.optionalKey(Schema.Boolean),
+  includeRestartContinuations: Schema.optionalKey(Schema.Boolean),
+};
+
+export const NativeUnfinishedWorkRequest = Schema.Union([
+  Schema.Struct({
+    ...UnfinishedWorkRequestFields,
+    operation: Schema.Literal("inspect-unfinished-work"),
+  }),
+  Schema.Struct({
+    ...UnfinishedWorkRequestFields,
+    operation: Schema.Literals(["cancel-unfinished-work", "settle-stale-work"]),
+    expectedWorkGeneration: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+    expectedReviewSha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+  }),
+]);
+export type NativeUnfinishedWorkRequest = typeof NativeUnfinishedWorkRequest.Type;

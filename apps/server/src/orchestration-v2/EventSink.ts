@@ -59,6 +59,11 @@ export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>
   }
 }
 
+export class EventSinkThreadChanged extends Schema.TaggedError<EventSinkThreadChanged>()(
+  "EventSinkThreadChanged",
+  { threadId: ThreadId },
+) {}
+
 export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamError>()(
   "EventSinkStreamError",
   {
@@ -212,6 +217,7 @@ export interface EventSinkV2Shape {
   >;
   readonly commitCommand: (input: {
     readonly approvalGuard?: ApprovalGuard;
+    readonly runtimeModeGuard?: { readonly expectedThreadSequence: number };
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
     readonly commandType: string;
@@ -830,6 +836,14 @@ const layerBase: Layer.Layer<
         const result = yield* commitThenPublish(
           [input.threadId, ...projectedThreadIds(input.events)],
           Effect.gen(function* () {
+            if (
+              input.runtimeModeGuard !== undefined &&
+              ((yield* eventStore.latestSequence({ threadId: input.threadId })) !==
+                input.runtimeModeGuard.expectedThreadSequence ||
+                (yield* projectionStore.hasBusyRuntimeModeDelegation(input.threadId)))
+            ) {
+              return yield* new EventSinkThreadChanged({ threadId: input.threadId });
+            }
             const reserved = yield* commandReceipts.insertIfAbsent({
               commandId: input.commandId,
               threadId: input.threadId,
@@ -889,9 +903,9 @@ const layerBase: Layer.Layer<
             // A Stop that changes nothing can still queue the stop of its delegated tasks.
             const sequence =
               storedEvents.at(-1)?.sequence ??
-              (input.effects.length === 0
-                ? undefined
-                : yield* eventStore.latestSequence({ threadId: input.threadId }));
+              (input.effects.length > 0 || input.runtimeModeGuard !== undefined
+                ? yield* eventStore.latestSequence({ threadId: input.threadId })
+                : undefined);
             if (sequence === undefined) {
               return yield* Effect.die(
                 new Error(`Command ${input.commandId} produced no orchestration events.`),

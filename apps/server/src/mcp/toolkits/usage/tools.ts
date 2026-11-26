@@ -200,7 +200,7 @@ export const UsageReportTool = Tool.make("usage_report", {
     SqlClient.SqlClient,
   ],
   description:
-    "Token use, API-rate cost and subscription limits from T3's Usage page. Rows come from provider transcripts; grouping by thread or project, or a threadId, uses T3's own turn records (attribution thread-turns) instead. Present limit windows as remaining: remainingPercent 100 is full, 0 is empty. Reads cached scans and stored limits; never refreshes.",
+    "Read cached token use, API-rate cost and limits from Usage. Default rows use provider transcripts. Thread/project grouping or threadId uses T3 turn records (thread-turns). Report remainingPercent as remaining: 100 full, 0 empty. Never refreshes.",
   parameters: UsageReportParameters,
   success: UsageReportResult,
 })

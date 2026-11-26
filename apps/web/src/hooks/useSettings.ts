@@ -55,6 +55,14 @@ import { primaryServerSettingsAtom, serverEnvironment } from "~/state/server";
 import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { useTheme } from "./useTheme";
+import {
+  getClientSettingsSnapshot,
+  replaceClientSettingsSnapshot,
+  resetClientSettingsStoreForTests,
+  setClientSettingsHydrator,
+  setClientSettingsSnapshotQuietly,
+  subscribeClientSettings,
+} from "./clientSettingsStore";
 import { msg } from "gt-react";
 import { m } from "~/i18n/messages";
 import {
@@ -70,10 +78,8 @@ const CLIENT_SETTINGS_PERSISTENCE_ERROR_SCOPE = "[CLIENT_SETTINGS]";
 
 type UnifiedSettingsPatch = ServerSettingsPatch & ClientSettingsPatch;
 
-const clientSettingsListeners = new Set<() => void>();
 const clientSettingsHydrationListeners = new Set<() => void>();
 type ClientSettingsHydrationStatus = "pending" | "ready" | "failed" | "retrying";
-let clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
 let clientSettingsHydrationStatus: ClientSettingsHydrationStatus = "pending";
 let clientSettingsHydrationPromise: Promise<void> | null = null;
 let clientSettingsHydrationGeneration = 0;
@@ -81,26 +87,13 @@ let clientSettingsPersistenceQueue: Promise<void> = Promise.resolve();
 let deferredClientSettingsPatchCount = 0;
 let unsubscribeOtherTabClientSettings: (() => void) | null = null;
 
-function emitClientSettingsChange() {
-  for (const listener of clientSettingsListeners) {
-    listener();
-  }
-}
-
 function emitClientSettingsHydrationChange() {
   for (const listener of clientSettingsHydrationListeners) {
     listener();
   }
 }
 
-export function getClientSettingsSnapshot(): ClientSettings {
-  return clientSettingsSnapshot;
-}
-
-function replaceClientSettingsSnapshot(settings: ClientSettings): void {
-  clientSettingsSnapshot = settings;
-  emitClientSettingsChange();
-}
+export { getClientSettingsSnapshot, subscribeClientSettings };
 
 function setClientSettingsHydrationStatus(nextStatus: ClientSettingsHydrationStatus): void {
   if (clientSettingsHydrationStatus === nextStatus) {
@@ -108,14 +101,6 @@ function setClientSettingsHydrationStatus(nextStatus: ClientSettingsHydrationSta
   }
   clientSettingsHydrationStatus = nextStatus;
   emitClientSettingsHydrationChange();
-}
-
-export function subscribeClientSettings(listener: () => void): () => void {
-  clientSettingsListeners.add(listener);
-  void hydrateClientSettings().catch(() => undefined);
-  return () => {
-    clientSettingsListeners.delete(listener);
-  };
 }
 
 export function getClientSettingsHydratedSnapshot(): boolean {
@@ -376,7 +361,7 @@ function migrateModelPreferences(): void {
     modelPreferencesMigrationTargetsAtom,
   )) {
     if (attemptedMigrationGenerations.get(environmentId) === generation) continue;
-    const patch = modelPreferencesMigrationPatch(settings, clientSettingsSnapshot);
+    const patch = modelPreferencesMigrationPatch(settings, getClientSettingsSnapshot());
     if (!patch) continue;
     attemptedMigrationGenerations.set(environmentId, generation);
     void runAtomCommand(
@@ -814,20 +799,22 @@ export function updateClientSettings(patch: ClientSettingsPatch): Promise<void> 
 
 export function __resetClientSettingsPersistenceForTests(): void {
   clientSettingsHydrationGeneration += 1;
-  clientSettingsSnapshot = DEFAULT_CLIENT_SETTINGS;
   clientSettingsHydrationStatus = "pending";
   clientSettingsHydrationPromise = null;
   clientSettingsPersistenceQueue = Promise.resolve();
   deferredClientSettingsPatchCount = 0;
   unsubscribeOtherTabClientSettings?.();
   unsubscribeOtherTabClientSettings = null;
-  clientSettingsListeners.clear();
+  resetClientSettingsStoreForTests();
   clientSettingsHydrationListeners.clear();
 }
 
 export function __setClientSettingsForTests(settings: ClientSettings): void {
   clientSettingsHydrationGeneration += 1;
-  clientSettingsSnapshot = settings;
+  setClientSettingsSnapshotQuietly(settings);
   clientSettingsHydrationStatus = "ready";
   clientSettingsHydrationPromise = null;
 }
+
+// Registered last, so hydration started for an early subscriber sees every binding above.
+setClientSettingsHydrator(() => void hydrateClientSettings().catch(() => undefined));

@@ -22,7 +22,7 @@ import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { isHostedStaticApp } from "../hostedPairing";
 import { isLocalEnvironmentDisabled } from "../localEnvironment";
-import { getClientSettingsSnapshot, subscribeClientSettings } from "../hooks/useSettings";
+import { getClientSettingsSnapshot, subscribeClientSettings } from "../hooks/clientSettingsStore";
 
 export const shellEnvironment = createShellEnvironmentAtoms(connectionAtomRuntime);
 const showSubagentsAtom = Atom.make((get) => {

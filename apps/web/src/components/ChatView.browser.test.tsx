@@ -476,7 +476,9 @@ it("a failed image-only first send of a new thread keeps the new draft", async (
     .dispatchEvent(new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }));
   await expect.element(page.getByRole("img", { name: "shot.png" })).toBeVisible();
   await userEvent.keyboard("{Enter}");
-  await vi.waitFor(() => expect(launch.calls).toHaveLength(1));
+  // T3 Code LAN: the send waits for the image to finish preparing, which on a loaded host (the
+  // Windows release gate) outlasts waitFor's default second.
+  await vi.waitFor(() => expect(launch.calls).toHaveLength(1), { timeout: 10_000 });
   await userEvent.keyboard("next draft");
   await expect.element(editor).toHaveTextContent("next draft");
   launch.release();

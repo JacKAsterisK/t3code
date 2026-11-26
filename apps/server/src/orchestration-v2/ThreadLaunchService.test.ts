@@ -85,6 +85,7 @@ import * as ThreadTitleRegeneration from "./ThreadTitleRegenerationService.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const projectId = ProjectId.make("project:launch-test");
 const otherProjectId = ProjectId.make("project:launch-other");
@@ -3080,7 +3081,8 @@ const withLayoutProject = <A, E>(
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, layerGit)), Effect.scoped);
 };
 
-it.live(
+// Its layout command fixture is a POSIX shell script.
+it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "a thread started through a link below full access gets no worktree from a project's layout command",
   () =>
     withLayoutProject(({ ran }) =>
@@ -3171,7 +3173,8 @@ it.live(
     ),
 );
 
-it.live(
+// Its layout command fixture is a POSIX shell script.
+it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
   "an agent's launch runs a project's approved layout command only when the thread that asked is in Full access",
   () =>
     withLayoutProject(({ ran }) =>

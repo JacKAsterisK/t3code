@@ -41,6 +41,7 @@ import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
 import * as WorktreeMcpService from "../../WorktreeMcpService.ts";
 import * as WorktreeHandlers from "./handlers.ts";
 import { WorktreeToolkit } from "./tools.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const threadId = ThreadId.make("thread:handoff");
 
@@ -256,20 +257,23 @@ it.live.each(belowFullAccess)(
     ),
 );
 
-it.live("t3_worktree_handoff from a Full access thread runs an approved layout command", () =>
-  handoffFrom(
-    { runtimeMode: "full-access", interactionMode: "default" },
-    ({ handoff, writeLayout, layoutRan, setupScriptRuns }) =>
-      Effect.gen(function* () {
-        yield* writeLayout;
-        yield* approveLayoutCommands;
+// Its layout command fixture is a POSIX shell script.
+it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "t3_worktree_handoff from a Full access thread runs an approved layout command",
+  () =>
+    handoffFrom(
+      { runtimeMode: "full-access", interactionMode: "default" },
+      ({ handoff, writeLayout, layoutRan, setupScriptRuns }) =>
+        Effect.gen(function* () {
+          yield* writeLayout;
+          yield* approveLayoutCommands;
 
-        const result = yield* handoff;
+          const result = yield* handoff;
 
-        assert.isTrue(yield* layoutRan, JSON.stringify(result));
-        assert.deepEqual(setupScriptRuns, [result.worktreePath]);
-      }),
-  ),
+          assert.isTrue(yield* layoutRan, JSON.stringify(result));
+          assert.deepEqual(setupScriptRuns, [result.worktreePath]);
+        }),
+    ),
 );
 
 const fullAccess: Modes = { runtimeMode: "full-access", interactionMode: "default" };

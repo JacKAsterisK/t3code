@@ -8,6 +8,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { runMigrations } from "../src/persistence/Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { dropResumableFamilies, runMigrateDevDb } from "./migrate-dev-db.ts";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
 const withDatabase = <A, E, R>(
   databasePath: string,
@@ -324,37 +325,40 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
     }),
   );
 
-  it.effect("refuses to drop from the shared database through a symlink or a hard link", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const sharedHome = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-shared-" });
-      const elsewhere = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-link-" });
-      const fixture = yield* createFixtureSource(sharedHome);
-      const live = path.join(sharedHome, "userdata", "statev2.sqlite");
-      yield* fs.makeDirectory(path.dirname(live), { recursive: true });
-      yield* fs.rename(fixture, live);
-      const symlink = path.join(elsewhere, "statev2.sqlite");
-      yield* fs.symlink(live, symlink);
-      // A hard link has its own path; only the file's identity gives it away.
-      const hardLink = path.join(elsewhere, "copy.sqlite");
-      yield* fs.link(live, hardLink);
+  // Its fixtures are symlinks (Windows: Developer Mode or elevation).
+  it.effect.skipIf(!symlinksSupported)(
+    "refuses to drop from the shared database through a symlink or a hard link",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-shared-" });
+        const elsewhere = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-link-" });
+        const fixture = yield* createFixtureSource(sharedHome);
+        const live = path.join(sharedHome, "userdata", "statev2.sqlite");
+        yield* fs.makeDirectory(path.dirname(live), { recursive: true });
+        yield* fs.rename(fixture, live);
+        const symlink = path.join(elsewhere, "statev2.sqlite");
+        yield* fs.symlink(live, symlink);
+        // A hard link has its own path; only the file's identity gives it away.
+        const hardLink = path.join(elsewhere, "copy.sqlite");
+        yield* fs.link(live, hardLink);
 
-      for (const link of [symlink, hardLink]) {
-        const refused = yield* Effect.flip(dropResumableFamilies(link, { sharedHome }));
-        assert.equal(refused._tag, "MigrateDevDbSharedHomeError", link);
-      }
-      const threads = yield* withDatabase(
-        live,
-        Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          const [row] = yield* sql<{ n: number }>`
+        for (const link of [symlink, hardLink]) {
+          const refused = yield* Effect.flip(dropResumableFamilies(link, { sharedHome }));
+          assert.equal(refused._tag, "MigrateDevDbSharedHomeError", link);
+        }
+        const threads = yield* withDatabase(
+          live,
+          Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const [row] = yield* sql<{ n: number }>`
             SELECT COUNT(*) AS n FROM orchestration_v2_projection_threads`;
-          return Number(row?.n ?? 0);
-        }),
-      );
-      assert.equal(threads, 10, "the shared database is untouched");
-    }),
+            return Number(row?.n ?? 0);
+          }),
+        );
+        assert.equal(threads, 10, "the shared database is untouched");
+      }),
   );
 
   it.effect("never copies an archived thread, and new events append after the source's", () =>

@@ -3,13 +3,15 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { expect, it } from "vite-plus/test";
 
 import { RESTORE_OOMD_WATCH_SCRIPT } from "./userManagerOom.ts";
 
 const userService = "/user.slice/user-1001.slice/user@1001.service";
 
-it.each([
+// The script edits a systemd user manager, which only Linux has.
+it.skipIf(HostProcess.Platform.defaultValue() !== "linux").each([
   [
     "mirrors the system manager's kill policy onto the user manager's root slice",
     { cgroup: userService, mode: "kill", limit: "4252017622", duration: "" },

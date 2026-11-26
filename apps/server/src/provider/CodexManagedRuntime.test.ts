@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - checks the host's default Codex directory without writing to it.
 import * as NodeURL from "node:url";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as CodexManagedTokenBroker from "./CodexManagedTokenBroker.ts";
@@ -30,9 +31,12 @@ const decodeCommand = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.Array(Schema.String)])),
 );
 it.live.each(
-  (["managed", "local"] as const).flatMap((source) =>
-    (["primary", "additional"] as const).map((account) => ({ source, account })),
-  ),
+  (["managed", "local"] as const)
+    .flatMap((source) =>
+      (["primary", "additional"] as const).map((account) => ({ source, account })),
+    )
+    // An additional account links shared state with symlinks (Windows: Developer Mode or elevation).
+    .filter(({ account }) => account !== "additional" || symlinksSupported),
 )(
   "$source Codex $account account shares home state without routing owned tokens through ambient CLI overrides",
   ({ source, account }) =>

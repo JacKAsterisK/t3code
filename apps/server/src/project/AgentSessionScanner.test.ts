@@ -36,6 +36,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
 const makeProjectShell = (workspaceRoot: string): OrchestrationProjectShell => ({
   id: ProjectId.make("project-1"),
@@ -1350,58 +1351,68 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
-    it.effect("excludes sandboxes recorded by their real path when the base dir is a symlink", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
-        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
-        const realBaseDir = yield* fileSystem.realPath(yield* makeTempDir("t3code-scanner-base-"));
-        const linkParent = yield* makeTempDir("t3code-scanner-links-");
-        const configBaseDir = path.join(linkParent, "t3-home");
-        yield* fileSystem.symlink(realBaseDir, configBaseDir);
+    // Its fixtures are symlinks (Windows: Developer Mode or elevation).
+    it.effect.skipIf(!symlinksSupported)(
+      "excludes sandboxes recorded by their real path when the base dir is a symlink",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+          const realBaseDir = yield* fileSystem.realPath(
+            yield* makeTempDir("t3code-scanner-base-"),
+          );
+          const linkParent = yield* makeTempDir("t3code-scanner-links-");
+          const configBaseDir = path.join(linkParent, "t3-home");
+          yield* fileSystem.symlink(realBaseDir, configBaseDir);
 
-        const worktreeCwd = path.join(realBaseDir, "worktrees", "t3code", "wt-4");
-        yield* fileSystem.makeDirectory(worktreeCwd, { recursive: true });
-        yield* writeTranscript({
-          filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
-          contents: claudeSessionLine(worktreeCwd),
-          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
-        });
+          const worktreeCwd = path.join(realBaseDir, "worktrees", "t3code", "wt-4");
+          yield* fileSystem.makeDirectory(worktreeCwd, { recursive: true });
+          yield* writeTranscript({
+            filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
+            contents: claudeSessionLine(worktreeCwd),
+            mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          });
 
-        const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
+          const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
 
-        expect(result.candidates).toEqual([]);
-      }),
+          expect(result.candidates).toEqual([]);
+        }),
     );
 
-    it.effect("offers an outside project reached through a link inside a symlinked base dir", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const fileSystem = yield* FileSystem.FileSystem;
-        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
-        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
-        const projectDir = yield* fileSystem.realPath(
-          yield* makeTempDir("t3code-scanner-project-"),
-        );
-        const realBaseDir = yield* fileSystem.realPath(yield* makeTempDir("t3code-scanner-base-"));
-        const linkParent = yield* makeTempDir("t3code-scanner-links-");
-        const configBaseDir = path.join(linkParent, "t3-home");
-        yield* fileSystem.symlink(realBaseDir, configBaseDir);
-        const projectLink = path.join(realBaseDir, "project-link");
-        yield* fileSystem.symlink(projectDir, projectLink);
-        yield* writeTranscript({
-          filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
-          contents: claudeSessionLine(projectLink),
-          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
-        });
+    // Its fixtures are symlinks (Windows: Developer Mode or elevation).
+    it.effect.skipIf(!symlinksSupported)(
+      "offers an outside project reached through a link inside a symlinked base dir",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+          const projectDir = yield* fileSystem.realPath(
+            yield* makeTempDir("t3code-scanner-project-"),
+          );
+          const realBaseDir = yield* fileSystem.realPath(
+            yield* makeTempDir("t3code-scanner-base-"),
+          );
+          const linkParent = yield* makeTempDir("t3code-scanner-links-");
+          const configBaseDir = path.join(linkParent, "t3-home");
+          yield* fileSystem.symlink(realBaseDir, configBaseDir);
+          const projectLink = path.join(realBaseDir, "project-link");
+          yield* fileSystem.symlink(projectDir, projectLink);
+          yield* writeTranscript({
+            filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
+            contents: claudeSessionLine(projectLink),
+            mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+          });
 
-        const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
+          const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
 
-        expect(result.candidates.map(({ path, threadCount }) => ({ path, threadCount }))).toEqual([
-          { path: projectLink, threadCount: 1 },
-        ]);
-      }),
+          expect(result.candidates.map(({ path, threadCount }) => ({ path, threadCount }))).toEqual(
+            [{ path: projectLink, threadCount: 1 }],
+          );
+        }),
     );
 
     it.effect("finds the cwd on a later line when the first records carry none", () =>
@@ -2102,7 +2113,11 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
-    it.effect.each([{ layout: "plain" }, { layout: "symlinked into Downloads" }] as const)(
+    // The symlinked layout needs symlinks (Windows: Developer Mode or elevation).
+    it.effect.each([
+      { layout: "plain" },
+      ...(symlinksSupported ? [{ layout: "symlinked into Downloads" }] : []),
+    ] as const)(
       "does not file T3 sandbox chats under the Codex project they were moved into ($layout base dir)",
       ({ layout }) =>
         Effect.gen(function* () {

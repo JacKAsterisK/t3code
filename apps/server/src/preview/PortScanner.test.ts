@@ -673,61 +673,65 @@ effectIt.effect.each([
   }).pipe(Effect.provide(layer));
 });
 
-effectIt.effect("ignores a partial Windows netstat snapshot when one query exits nonzero", () => {
-  let ipv6Fails = true;
-  const requests: string[] = [];
-  const fetchFn = ((input: Parameters<typeof globalThis.fetch>[0]) => {
-    requests.push(String(input));
-    return Promise.resolve(new Response("hello", { headers: { "content-type": "text/html" } }));
-  }) as typeof globalThis.fetch;
-  const layer = layerScanner.pipe(
-    Layer.provide(
-      Layer.mergeAll(
-        layerNoProc,
-        Layer.succeed(ProcessRunner.ProcessRunner, {
-          run: (input) => {
-            if (input.command === String.raw`C:\Windows\System32\tasklist.exe`) {
-              return Effect.succeed(
-                processOutput('"node.exe","1234","Console","1","50,000 K"\r\n'),
-              );
-            }
-            const isIpv6 = input.args.includes("tcpv6");
-            return Effect.succeed({
-              stdout: isIpv6
-                ? ""
-                : "  TCP    127.0.0.1:5173         0.0.0.0:0              LISTENING       1234\r\n",
-              stderr: "",
-              code: isIpv6 && ipv6Fails ? ChildProcessSpawner.ExitCode(1) : null,
-              timedOut: false,
-              stdoutTruncated: false,
-              stderrTruncated: false,
-              stdoutInvalidUtf8: false,
-              stderrInvalidUtf8: false,
-            });
-          },
-        }),
-        Layer.succeed(HostProcess.Platform, "win32"),
-        Layer.succeed(HostProcess.Environment, {}),
-        FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetchFn))),
+// On a Windows host the process-name lookup is not the one this test fakes.
+effectIt.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "ignores a partial Windows netstat snapshot when one query exits nonzero",
+  () => {
+    let ipv6Fails = true;
+    const requests: string[] = [];
+    const fetchFn = ((input: Parameters<typeof globalThis.fetch>[0]) => {
+      requests.push(String(input));
+      return Promise.resolve(new Response("hello", { headers: { "content-type": "text/html" } }));
+    }) as typeof globalThis.fetch;
+    const layer = layerScanner.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          layerNoProc,
+          Layer.succeed(ProcessRunner.ProcessRunner, {
+            run: (input) => {
+              if (input.command === String.raw`C:\Windows\System32\tasklist.exe`) {
+                return Effect.succeed(
+                  processOutput('"node.exe","1234","Console","1","50,000 K"\r\n'),
+                );
+              }
+              const isIpv6 = input.args.includes("tcpv6");
+              return Effect.succeed({
+                stdout: isIpv6
+                  ? ""
+                  : "  TCP    127.0.0.1:5173         0.0.0.0:0              LISTENING       1234\r\n",
+                stderr: "",
+                code: isIpv6 && ipv6Fails ? ChildProcessSpawner.ExitCode(1) : null,
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+                stdoutInvalidUtf8: false,
+                stderrInvalidUtf8: false,
+              });
+            },
+          }),
+          Layer.succeed(HostProcess.Platform, "win32"),
+          Layer.succeed(HostProcess.Environment, {}),
+          FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetchFn))),
+        ),
       ),
-    ),
-  );
+    );
 
-  return Effect.gen(function* () {
-    const scanner = yield* PortScanner.PortDiscovery;
-    yield* scanner.registerTerminalProcesses({
-      threadId: "scanner-thread",
-      terminalId: "scanner-terminal",
-      processIds: [1234],
-    });
-    expect(yield* scanner.scan()).toEqual([]);
-    ipv6Fails = false;
-    expect(yield* scanner.scan()).toMatchObject([
-      { port: 5173, pid: 1234, processName: "node", url: "http://localhost:5173" },
-    ]);
-    expect(requests).toEqual([]);
-  }).pipe(Effect.provide(layer));
-});
+    return Effect.gen(function* () {
+      const scanner = yield* PortScanner.PortDiscovery;
+      yield* scanner.registerTerminalProcesses({
+        threadId: "scanner-thread",
+        terminalId: "scanner-terminal",
+        processIds: [1234],
+      });
+      expect(yield* scanner.scan()).toEqual([]);
+      ipv6Fails = false;
+      expect(yield* scanner.scan()).toMatchObject([
+        { port: 5173, pid: 1234, processName: "node", url: "http://localhost:5173" },
+      ]);
+      expect(requests).toEqual([]);
+    }).pipe(Effect.provide(layer));
+  },
+);
 
 effectIt.effect("rechecks the socket owner before stopping a Linux server without lsof", () => {
   let holder = "4242";

@@ -229,7 +229,8 @@ describe("AgentScope service", () => {
     ),
   );
 
-  it.effect(
+  // Anchors the agent with systemd-run, which is Linux-only.
+  it.effect.skipIf(HostProcess.Platform.defaultValue() !== "linux")(
     "keeps shared Codex scopes running without attributing their OOM to the launch thread",
     () =>
       withFakeSystemd(({ scope, units, calls }) =>

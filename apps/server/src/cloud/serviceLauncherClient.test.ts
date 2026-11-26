@@ -372,7 +372,8 @@ it.layer(NodeServices.layer)("self-update launchers", (it) => {
           { name: "leading", searchPath: (missing: string) => `:${missing}`, moved: true },
           { name: "trailing", searchPath: (missing: string) => `${missing}:`, moved: true },
         ]),
-    { name: "whole", searchPath: () => "", moved: false },
+    // Its fixtures are symlinks (Windows: Developer Mode or elevation).
+    ...(symlinksSupported ? [{ name: "whole", searchPath: () => "", moved: false }] : []),
   ])("treats a $name empty PATH entry like the shell does", ({ searchPath, moved }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -406,33 +407,36 @@ it.layer(NodeServices.layer)("self-update launchers", (it) => {
     }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 
-  it.effect("passes over a working-directory t3 the shell cannot run", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
-      const baseDir = path.join(root, ".t3");
-      const exe = (version: string) => path.join(baseDir, "runtime/versions", version, "t3");
-      const cwd = path.join(root, "work");
-      const onPath = path.join(root, "bin/t3");
-      for (const file of [exe("1.0.0"), exe("2.0.0")]) {
-        yield* fs.makeDirectory(path.dirname(file), { recursive: true });
-        yield* fs.writeFileString(file, "", { mode: 0o755 });
-      }
-      // A directory named t3 in the working directory, which the shell skips.
-      yield* fs.makeDirectory(path.join(cwd, "t3"), { recursive: true });
-      yield* fs.makeDirectory(path.dirname(onPath), { recursive: true });
-      yield* fs.symlink(exe("1.0.0"), onPath);
+  // Its fixtures are symlinks (Windows: Developer Mode or elevation).
+  it.effect.skipIf(!symlinksSupported)(
+    "passes over a working-directory t3 the shell cannot run",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-" });
+        const baseDir = path.join(root, ".t3");
+        const exe = (version: string) => path.join(baseDir, "runtime/versions", version, "t3");
+        const cwd = path.join(root, "work");
+        const onPath = path.join(root, "bin/t3");
+        for (const file of [exe("1.0.0"), exe("2.0.0")]) {
+          yield* fs.makeDirectory(path.dirname(file), { recursive: true });
+          yield* fs.writeFileString(file, "", { mode: 0o755 });
+        }
+        // A directory named t3 in the working directory, which the shell skips.
+        yield* fs.makeDirectory(path.join(cwd, "t3"), { recursive: true });
+        yield* fs.makeDirectory(path.dirname(onPath), { recursive: true });
+        yield* fs.symlink(exe("1.0.0"), onPath);
 
-      yield* ServiceLauncherClient.repointLaunchers({ baseDir, targetVersion: "2.0.0" }).pipe(
-        Effect.provideService(HostProcess.Environment, {
-          HOME: root,
-          PATH: `:${path.dirname(onPath)}`,
-        }),
-        Effect.provideService(HostProcess.WorkingDirectory, cwd),
-      );
+        yield* ServiceLauncherClient.repointLaunchers({ baseDir, targetVersion: "2.0.0" }).pipe(
+          Effect.provideService(HostProcess.Environment, {
+            HOME: root,
+            PATH: `:${path.dirname(onPath)}`,
+          }),
+          Effect.provideService(HostProcess.WorkingDirectory, cwd),
+        );
 
-      assert.equal(yield* fs.readFileString(onPath), posixLauncherScript(exe("2.0.0")));
-    }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+        assert.equal(yield* fs.readFileString(onPath), posixLauncherScript(exe("2.0.0")));
+      }).pipe(Effect.provideService(HostProcess.Platform, "linux")),
   );
 });

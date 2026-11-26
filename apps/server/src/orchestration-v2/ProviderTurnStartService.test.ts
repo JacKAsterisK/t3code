@@ -2118,6 +2118,7 @@ effectIt.effect("leaves a managed worktree folder without .git that holds user f
       text: "Continue",
       worktreePath,
       worktreesDir,
+      path,
       fileSystem,
       failReadsAfterRunning: true,
     });
@@ -2143,6 +2144,7 @@ effectIt.effect.each([
     const harness = makeLocalCommandHarness({
       text: "Continue",
       worktreesDir,
+      path,
       worktreePath,
       fileSystem,
       failReadsAfterRunning: true,
@@ -2204,6 +2206,7 @@ effectIt.effect("runs setup for a worktree a send recreated before dispatch", ()
     const harness = makeLocalCommandHarness({
       text: "Continue",
       worktreesDir,
+      path,
       worktreePath,
       fileSystem,
       failReadsAfterRunning: true,

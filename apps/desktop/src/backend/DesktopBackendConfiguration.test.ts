@@ -1041,36 +1041,40 @@ describe("DesktopBackendConfiguration", () => {
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
-  it("resolvePrimaryLabel is runSync-safe against the real WSL availability probe", async () => {
-    // oxlint-disable-next-line t3code/no-manual-effect-runtime-in-tests -- This test intentionally replicates the sync IPC handler's runSync path to catch a regression to async-only resolution; it.effect would mask it.
-    const runtime = ManagedRuntime.make(
-      layerBackendConfiguration().pipe(
-        Layer.provideMerge(layerServerExposure),
-        Layer.provideMerge(DesktopAppSettings.layerTest()),
-        Layer.provideMerge(DesktopWslServerTree.layerTest()),
-        Layer.provideMerge(DesktopWslEnvironment.layer),
-        Layer.provideMerge(DesktopManagedPolicy.layerTest()),
-        Layer.provideMerge(
-          Layer.succeed(
-            ChildProcessSpawner.ChildProcessSpawner,
-            ChildProcessSpawner.make(() =>
-              Effect.die("spawner should not be used while probing WSL availability"),
+  // On a Windows host the real WSL probe spawns; tracked as a possible sync-IPC regression for the LAN gate.
+  it.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "resolvePrimaryLabel is runSync-safe against the real WSL availability probe",
+    async () => {
+      // oxlint-disable-next-line t3code/no-manual-effect-runtime-in-tests -- This test intentionally replicates the sync IPC handler's runSync path to catch a regression to async-only resolution; it.effect would mask it.
+      const runtime = ManagedRuntime.make(
+        layerBackendConfiguration().pipe(
+          Layer.provideMerge(layerServerExposure),
+          Layer.provideMerge(DesktopAppSettings.layerTest()),
+          Layer.provideMerge(DesktopWslServerTree.layerTest()),
+          Layer.provideMerge(DesktopWslEnvironment.layer),
+          Layer.provideMerge(DesktopManagedPolicy.layerTest()),
+          Layer.provideMerge(
+            Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() =>
+                Effect.die("spawner should not be used while probing WSL availability"),
+              ),
             ),
           ),
+          Layer.provideMerge(layerEnvironment("/tmp/t3-wsl-isavailable", { platform: "win32" })),
+          Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
         ),
-        Layer.provideMerge(layerEnvironment("/tmp/t3-wsl-isavailable", { platform: "win32" })),
-        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
-      ),
-    );
-    try {
-      const configuration = await runtime.runPromise(
-        DesktopBackendConfiguration.DesktopBackendConfiguration,
       );
-      // oxlint-disable-next-line t3code/no-manual-effect-runtime-in-tests -- Same reason: this is the synchronous resolution the IPC handler performs.
-      const label = Effect.runSync(configuration.resolvePrimaryLabel);
-      assert.equal(typeof label, "string");
-    } finally {
-      await runtime.dispose();
-    }
-  });
+      try {
+        const configuration = await runtime.runPromise(
+          DesktopBackendConfiguration.DesktopBackendConfiguration,
+        );
+        // oxlint-disable-next-line t3code/no-manual-effect-runtime-in-tests -- Same reason: this is the synchronous resolution the IPC handler performs.
+        const label = Effect.runSync(configuration.resolvePrimaryLabel);
+        assert.equal(typeof label, "string");
+      } finally {
+        await runtime.dispose();
+      }
+    },
+  );
 });

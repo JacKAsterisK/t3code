@@ -118,32 +118,35 @@ describe("DesktopClerk", () => {
     storageMock.mockReset();
   });
 
-  it.each([
-    {
-      name: "packaged macOS",
-      isDevelopment: false,
-      platform: "darwin" as const,
-      userData: "/tmp/app-data/t3code-v2",
-    },
-    {
-      name: "packaged Linux",
-      isDevelopment: false,
-      platform: "linux" as const,
-      userData: "/tmp/app-data/t3code-v2",
-    },
-    {
-      name: "packaged Windows",
-      isDevelopment: false,
-      platform: "win32" as const,
-      userData: "/tmp/app-data/t3code-v2",
-    },
-    {
-      name: "development",
-      isDevelopment: true,
-      platform: "win32" as const,
-      userData: "/tmp/app-data/t3code-dev",
-    },
-  ])(
+  // Pins the POSIX path layer but builds its expectation with the host path.
+  it.each(
+    [
+      {
+        name: "packaged macOS",
+        isDevelopment: false,
+        platform: "darwin" as const,
+        userData: "/tmp/app-data/t3code-v2",
+      },
+      {
+        name: "packaged Linux",
+        isDevelopment: false,
+        platform: "linux" as const,
+        userData: "/tmp/app-data/t3code-v2",
+      },
+      {
+        name: "packaged Windows",
+        isDevelopment: false,
+        platform: "win32" as const,
+        userData: "/tmp/app-data/t3code-v2",
+      },
+      {
+        name: "development",
+        isDevelopment: true,
+        platform: "win32" as const,
+        userData: "/tmp/app-data/t3code-dev",
+      },
+    ].filter(() => !(HostProcess.Platform.defaultValue() === "win32")),
+  )(
     "creates the bridge before startup can yield to the event loop ($name)",
     ({ isDevelopment, platform, userData }) => {
       const events: string[] = [];
@@ -175,20 +178,24 @@ describe("DesktopClerk", () => {
     },
   );
 
-  it.effect("keeps Clerk tokens under a relative state directory instead of userData", () => {
-    storageMock.mockReturnValue(storageAdapter);
-    createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
+  // Pins the POSIX path layer but builds its expectation with the host path.
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "keeps Clerk tokens under a relative state directory instead of userData",
+    () => {
+      storageMock.mockReturnValue(storageAdapter);
+      createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
 
-    return Effect.sync(() => {
-      assert.deepEqual(storageMock.mock.calls, [
-        [{ path: NodePath.resolve("relative-state", "clerk") }],
-      ]);
-    }).pipe(
-      Effect.provide(
-        layerDesktopClerk(true, [], "darwin", undefined, undefined, undefined, "relative-state"),
-      ),
-    );
-  });
+      return Effect.sync(() => {
+        assert.deepEqual(storageMock.mock.calls, [
+          [{ path: NodePath.resolve("relative-state", "clerk") }],
+        ]);
+      }).pipe(
+        Effect.provide(
+          layerDesktopClerk(true, [], "darwin", undefined, undefined, undefined, "relative-state"),
+        ),
+      );
+    },
+  );
 
   it.effect.each(["before configure", "after configure"] as const)(
     "reveals the running window when a second instance launches %s",

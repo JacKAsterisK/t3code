@@ -56,6 +56,7 @@ import {
 } from "../preview/GuestProtocol.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import * as PreviewPasskeys from "../preview/Passkeys.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const environmentInput = {
   dirname: "/repo/apps/desktop/dist-electron",
@@ -1531,13 +1532,16 @@ describe("DesktopWindow", () => {
     }),
   );
 
-  it.effect.each([
-    {
-      primaryPasteEnabled: false,
-      expected: [PASSKEY_BRIDGE_ARGUMENT, PRIMARY_PASTE_DISABLED_ARGUMENT],
-    },
-    { primaryPasteEnabled: true, expected: [PASSKEY_BRIDGE_ARGUMENT] },
-  ])(
+  // Expects a POSIX preload path.
+  it.effect.each(
+    [
+      {
+        primaryPasteEnabled: false,
+        expected: [PASSKEY_BRIDGE_ARGUMENT, PRIMARY_PASTE_DISABLED_ARGUMENT],
+      },
+      { primaryPasteEnabled: true, expected: [PASSKEY_BRIDGE_ARGUMENT] },
+    ].filter(() => !(HostProcess.Platform.defaultValue() === "win32")),
+  )(
     "isolates preview guests and passes them the primary-paste setting (enabled: $primaryPasteEnabled)",
     ({ primaryPasteEnabled, expected }) =>
       Effect.gen(function* () {

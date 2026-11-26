@@ -2601,7 +2601,8 @@ describe("UsageService", () => {
   it.effect("reads Antigravity history from the default instance's T3-managed profile", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;
-      const prefix = "usage-service-antigravity-default-profile-test";
+      // Short: the profile key and conversation folders stay under the Windows path limit.
+      const prefix = "ag-profile";
       const stateDir = NodePath.join(home, prefix, "userdata");
       const conversations = NodePath.join(
         stateDir,

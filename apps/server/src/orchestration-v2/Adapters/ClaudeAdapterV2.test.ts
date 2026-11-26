@@ -9072,122 +9072,128 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     } satisfies ModelSelection;
     const sonnet = { ...opus, model: "claude-sonnet-4-6" } satisfies ModelSelection;
 
-    it.effect("starts the new version, and only for the model change", () =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const install = yield* makeInstall;
-          const harness = yield* makeWakeHarnessWithOptions({
-            settings: install.settings,
-            close: (messages) => Queue.shutdown(messages),
-            freshQueueOnReopen: true,
-          });
-          const now = yield* DateTime.now;
-          const turn = (ordinal: number, modelSelection: ModelSelection) =>
-            makeClaudeTestTurnInput({
-              threadId: harness.threadId,
-              providerThread: harness.providerThread,
-              now,
-              attemptId: RunAttemptId.make(`attempt-updated-cli:${ordinal}`),
-              text: `Request ${ordinal}`,
-              attachments: [],
-              providerTurnOrdinal: ordinal,
-              modelSelection,
+    // Installs Claude Code versions as #!/bin/sh scripts.
+    it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+      "starts the new version, and only for the model change",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const install = yield* makeInstall;
+            const harness = yield* makeWakeHarnessWithOptions({
+              settings: install.settings,
+              close: (messages) => Queue.shutdown(messages),
+              freshQueueOnReopen: true,
             });
-          const settle = Effect.gen(function* () {
-            yield* harness.offerAndWait(turnOneResult);
-            yield* Queue.take(harness.terminalReceipts);
-          });
-          yield* harness.runtime.startTurn(turn(1, opus));
-          yield* settle;
+            const now = yield* DateTime.now;
+            const turn = (ordinal: number, modelSelection: ModelSelection) =>
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now,
+                attemptId: RunAttemptId.make(`attempt-updated-cli:${ordinal}`),
+                text: `Request ${ordinal}`,
+                attachments: [],
+                providerTurnOrdinal: ordinal,
+                modelSelection,
+              });
+            const settle = Effect.gen(function* () {
+              yield* harness.offerAndWait(turnOneResult);
+              yield* Queue.take(harness.terminalReceipts);
+            });
+            yield* harness.runtime.startTurn(turn(1, opus));
+            yield* settle;
 
-          // The update alone restarts nothing.
-          install.update();
-          yield* harness.runtime.startTurn(turn(2, opus));
-          yield* settle;
-          assert.lengthOf(harness.processQueues, 1);
+            // The update alone restarts nothing.
+            install.update();
+            yield* harness.runtime.startTurn(turn(2, opus));
+            yield* settle;
+            assert.lengthOf(harness.processQueues, 1);
 
-          yield* harness.runtime.startTurn(turn(3, sonnet));
-          assert.lengthOf(harness.processQueues, 2);
-          assert.equal(harness.getOpenedOptions()?.model, "claude-sonnet-4-6");
-          assert.deepEqual(harness.liveSelectionChanges, []);
-          assert.lengthOf(harness.offeredMessages, 3);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-              NodeCrypto.layer,
+            yield* harness.runtime.startTurn(turn(3, sonnet));
+            assert.lengthOf(harness.processQueues, 2);
+            assert.equal(harness.getOpenedOptions()?.model, "claude-sonnet-4-6");
+            assert.deepEqual(harness.liveSelectionChanges, []);
+            assert.lengthOf(harness.offeredMessages, 3);
+          }).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                IdAllocator.layer,
+                McpProviderSessions.layer,
+                NodeServices.layer,
+                NodeCrypto.layer,
+              ),
             ),
           ),
         ),
-      ),
     );
 
-    it.effect("keeps a process that runs background work until that work ends", () =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          const install = yield* makeInstall;
-          const harness = yield* makeWakeHarnessWithOptions({
-            settings: install.settings,
-            close: (messages) => Queue.shutdown(messages),
-            freshQueueOnReopen: true,
-          });
-          const now = yield* DateTime.now;
-          const turn = (ordinal: number, modelSelection: ModelSelection) =>
-            makeClaudeTestTurnInput({
-              threadId: harness.threadId,
-              providerThread: harness.providerThread,
-              now,
-              attemptId: RunAttemptId.make(`attempt-updated-cli-background:${ordinal}`),
-              text: `Request ${ordinal}`,
-              attachments: [],
-              providerTurnOrdinal: ordinal,
-              modelSelection,
+    // Installs Claude Code versions as #!/bin/sh scripts.
+    it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+      "keeps a process that runs background work until that work ends",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const install = yield* makeInstall;
+            const harness = yield* makeWakeHarnessWithOptions({
+              settings: install.settings,
+              close: (messages) => Queue.shutdown(messages),
+              freshQueueOnReopen: true,
             });
-          const settle = Effect.gen(function* () {
-            yield* harness.offerAndWait(turnOneResult);
-            yield* Queue.take(harness.terminalReceipts);
-          });
-          yield* harness.runtime.startTurn(turn(1, opus));
-          const originalOptions = harness.getOpenedOptions();
-          yield* harness.offerAndWait(wakeTaskStarted);
-          yield* settle;
-          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+            const now = yield* DateTime.now;
+            const turn = (ordinal: number, modelSelection: ModelSelection) =>
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now,
+                attemptId: RunAttemptId.make(`attempt-updated-cli-background:${ordinal}`),
+                text: `Request ${ordinal}`,
+                attachments: [],
+                providerTurnOrdinal: ordinal,
+                modelSelection,
+              });
+            const settle = Effect.gen(function* () {
+              yield* harness.offerAndWait(turnOneResult);
+              yield* Queue.take(harness.terminalReceipts);
+            });
+            yield* harness.runtime.startTurn(turn(1, opus));
+            const originalOptions = harness.getOpenedOptions();
+            yield* harness.offerAndWait(wakeTaskStarted);
+            yield* settle;
+            assert.isTrue(yield* harness.hasPendingBackgroundWork);
 
-          install.update();
-          yield* harness.runtime.startTurn(turn(2, sonnet));
-          yield* settle;
-          assert.deepEqual(harness.liveSelectionChanges[0], { model: "claude-sonnet-4-6" });
-          assert.strictEqual(harness.getOpenedOptions(), originalOptions);
-          assert.lengthOf(harness.processQueues, 1);
+            install.update();
+            yield* harness.runtime.startTurn(turn(2, sonnet));
+            yield* settle;
+            assert.deepEqual(harness.liveSelectionChanges[0], { model: "claude-sonnet-4-6" });
+            assert.strictEqual(harness.getOpenedOptions(), originalOptions);
+            assert.lengthOf(harness.processQueues, 1);
 
-          // The background shell ended: the next turn starts the new version.
-          yield* harness.offerAndWait(
-            claudeSdkFrame({
-              type: "system",
-              subtype: "background_tasks_changed",
-              tasks: [],
-              uuid: "00000000-0000-4000-8000-000000000520",
-              session_id: WAKE_NATIVE_SESSION,
-            }),
-          );
-          assert.isFalse(yield* harness.hasPendingBackgroundWork);
-          yield* harness.runtime.startTurn(turn(3, sonnet));
-          assert.lengthOf(harness.processQueues, 2);
-          assert.equal(harness.getOpenedOptions()?.model, "claude-sonnet-4-6");
-          assert.lengthOf(harness.offeredMessages, 3);
-        }).pipe(
-          Effect.provide(
-            Layer.mergeAll(
-              IdAllocator.layer,
-              McpProviderSessions.layer,
-              NodeServices.layer,
-              NodeCrypto.layer,
+            // The background shell ended: the next turn starts the new version.
+            yield* harness.offerAndWait(
+              claudeSdkFrame({
+                type: "system",
+                subtype: "background_tasks_changed",
+                tasks: [],
+                uuid: "00000000-0000-4000-8000-000000000520",
+                session_id: WAKE_NATIVE_SESSION,
+              }),
+            );
+            assert.isFalse(yield* harness.hasPendingBackgroundWork);
+            yield* harness.runtime.startTurn(turn(3, sonnet));
+            assert.lengthOf(harness.processQueues, 2);
+            assert.equal(harness.getOpenedOptions()?.model, "claude-sonnet-4-6");
+            assert.lengthOf(harness.offeredMessages, 3);
+          }).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                IdAllocator.layer,
+                McpProviderSessions.layer,
+                NodeServices.layer,
+                NodeCrypto.layer,
+              ),
             ),
           ),
         ),
-      ),
     );
   });
 

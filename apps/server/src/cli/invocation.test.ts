@@ -40,40 +40,46 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
     return bin;
   });
 
-  it.effect("keeps a user-installed Node reachable when the command runs under sudo", () =>
-    Effect.gen(function* () {
-      const npx = "/home/theo/.npm/_npx/abc/node_modules/t3/dist/bin.mjs";
-      expect(yield* rootCommand({ node: "/usr/bin/node", entry: npx })).toBe(
-        "sudo npx t3 browser setup",
-      );
-      expect(
-        yield* rootCommand({ node: "/home/theo/.nvm/versions/node/v24/bin/node", entry: npx }),
-      ).toBe('sudo env "PATH=$PATH" npx t3 browser setup');
-      expect(
-        yield* rootCommand({
-          node: "/home/theo/.local/node/bin/node",
-          entry: "/home/theo/.local/lib/node_modules/t3/dist/bin.mjs",
-          path: yield* pathWithT3,
-        }),
-      ).toBe('sudo env "PATH=$PATH" t3 browser setup');
-    }),
+  // Asserts POSIX sudo command lines.
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "keeps a user-installed Node reachable when the command runs under sudo",
+    () =>
+      Effect.gen(function* () {
+        const npx = "/home/theo/.npm/_npx/abc/node_modules/t3/dist/bin.mjs";
+        expect(yield* rootCommand({ node: "/usr/bin/node", entry: npx })).toBe(
+          "sudo npx t3 browser setup",
+        );
+        expect(
+          yield* rootCommand({ node: "/home/theo/.nvm/versions/node/v24/bin/node", entry: npx }),
+        ).toBe('sudo env "PATH=$PATH" npx t3 browser setup');
+        expect(
+          yield* rootCommand({
+            node: "/home/theo/.local/node/bin/node",
+            entry: "/home/theo/.local/lib/node_modules/t3/dist/bin.mjs",
+            path: yield* pathWithT3,
+          }),
+        ).toBe('sudo env "PATH=$PATH" t3 browser setup');
+      }),
   );
 
-  it.effect("keeps the arguments, so root runs setup on the same T3 home", () =>
-    Effect.gen(function* () {
-      const args = ["--base-dir", "/srv/t3 home"];
-      expect(
-        yield* rootCommand({
-          node: "/home/theo/.local/node/bin/node",
-          entry: "/home/theo/.local/lib/node_modules/t3/dist/bin.mjs",
-          path: yield* pathWithT3,
-          args,
-        }),
-      ).toBe(`sudo env "PATH=$PATH" t3 browser setup --base-dir '/srv/t3 home'`);
-      expect(
-        yield* rootCommand({ node: "/opt/t3/t3", entry: "/opt/t3/t3", executable: true, args }),
-      ).toBe("sudo /opt/t3/t3 browser setup --base-dir '/srv/t3 home'");
-    }),
+  // Asserts POSIX sudo command lines.
+  it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "keeps the arguments, so root runs setup on the same T3 home",
+    () =>
+      Effect.gen(function* () {
+        const args = ["--base-dir", "/srv/t3 home"];
+        expect(
+          yield* rootCommand({
+            node: "/home/theo/.local/node/bin/node",
+            entry: "/home/theo/.local/lib/node_modules/t3/dist/bin.mjs",
+            path: yield* pathWithT3,
+            args,
+          }),
+        ).toBe(`sudo env "PATH=$PATH" t3 browser setup --base-dir '/srv/t3 home'`);
+        expect(
+          yield* rootCommand({ node: "/opt/t3/t3", entry: "/opt/t3/t3", executable: true, args }),
+        ).toBe("sudo /opt/t3/t3 browser setup --base-dir '/srv/t3 home'");
+      }),
   );
 
   // Its fixtures are symlinks (Windows: Developer Mode or elevation).

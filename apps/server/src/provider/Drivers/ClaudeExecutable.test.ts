@@ -15,6 +15,7 @@ import {
   claudeProgramWasReplaced,
   resolveClaudeSdkExecutablePath,
 } from "./ClaudeExecutable.ts";
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
 const NPM_DIR = "C:\\Users\\dev\\AppData\\Roaming\\npm";
 const NPM_SHIM = `${NPM_DIR}\\claude.cmd`;
@@ -137,7 +138,8 @@ describe("claudeProgramReader", () => {
     };
   });
 
-  it.effect("follows a bare command name through PATH", () =>
+  // Its fixtures are symlinks (Windows: Developer Mode or elevation).
+  it.effect.skipIf(!symlinksSupported)("follows a bare command name through PATH", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const { bin, update } = yield* makeInstall;

@@ -263,7 +263,9 @@ it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
     }).pipe(Effect.provide(RepositoryIdentityResolver.layer)),
   );
 
-  it.effect.each(["repo", "repo ", ...lineBreakSuffixes.map((suffix) => `repo${suffix}`)])(
+  // Windows drops a trailing space from a folder name, like it rejects line breaks.
+  const trailingSpace = HostProcess.Platform.defaultValue() === "win32" ? [] : ["repo "];
+  it.effect.each(["repo", ...trailingSpace, ...lineBreakSuffixes.map((suffix) => `repo${suffix}`)])(
     "returns the git top-level root path when resolving from a nested workspace in %j",
     (rootName) =>
       Effect.gen(function* () {

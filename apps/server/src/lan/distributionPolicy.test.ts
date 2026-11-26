@@ -50,11 +50,11 @@ it.effect("disabled analytics neither reads provider identities nor initializes 
     yield* analytics.record("fixture");
     yield* analytics.recordOwners([{ source: "device", ownerId: "fixture" }], "client");
     yield* analytics.flush;
-    assert.deepEqual(yield* Identify.getTelemetryIdentityForHome("unused-home"), {
+    assert.deepEqual(yield* Identify.getTelemetryIdentity, {
       distinctId: null,
       installId: null,
     });
-    assert.deepEqual(yield* Identify.getServerOwnersForHome("unused-home"), []);
+    assert.deepEqual(yield* Identify.getServerOwners, []);
   }).pipe(withoutRuntimeDependencies),
 );
 

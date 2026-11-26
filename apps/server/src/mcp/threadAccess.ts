@@ -7,6 +7,7 @@ import {
   linkOriginIsFenced,
   type OrchestrationV2RuntimeModeEscalation,
   type EnvironmentId,
+  isRuntimeModeAbove,
   OrchestratorMcpFailure,
   type OrchestratorMcpThreadSendInput,
   type ProjectId,
@@ -336,6 +337,23 @@ export const assertFullAccess = (context: Caller, message: string) =>
   context.limits.runtimeMode === "full-access" && context.limits.interactionMode === "default"
     ? Effect.void
     : Effect.fail(new OrchestratorMcpFailure({ code: "capability_denied", message }));
+
+/**
+ * For work whose definition picks its own modes: the caller must hold the broadest modes a
+ * thread may run in here, full access or an administrator's ceiling below it.
+ */
+export const assertBroadestAccess = (context: Caller, what: string) => {
+  const broadest = context.scope.runtimeModeCeiling ?? "full-access";
+  return !isRuntimeModeAbove(broadest, context.limits.runtimeMode) &&
+    context.limits.interactionMode === "default"
+    ? Effect.void
+    : Effect.fail(
+        new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message: `Only a caller with ${broadest}/default access can ${what}, because that work picks its own modes. This caller is limited to ${context.limits.runtimeMode}/${context.limits.interactionMode}.`,
+        }),
+      );
+};
 
 export const resolveProjectId = (context: Caller, projectId: ProjectId | undefined) =>
   projectId !== undefined

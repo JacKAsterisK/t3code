@@ -1,5 +1,4 @@
 // @effect-diagnostics nodeBuiltinImport:off - Vite bootstrap reads only public branding inputs before an Effect runtime exists.
-import * as NodeFSP from "node:fs/promises";
 import * as NodeZlib from "node:zlib";
 import * as NodeFS from "node:fs";
 
@@ -14,10 +13,7 @@ import * as Hash from "effect/Hash";
 import pkg from "./package.json" with { type: "json" };
 import pdfjsPkg from "pdfjs-dist/package.json" with { type: "json" };
 
-import {
-  DEV_PROXIED_ORIGIN_PRESERVING_PREFIXES,
-  DEV_PROXIED_PATH_PREFIXES,
-} from "@t3tools/shared/devProxy";
+import { DEV_PROXIED_PATH_PREFIXES } from "@t3tools/shared/devProxy";
 
 import { loadRepoEnv } from "../../scripts/lib/public-config";
 import {
@@ -207,33 +203,12 @@ const browserTestProject = {
         resetPointer: async ({ page }) => {
           await page.mouse.move(-1, -1);
         },
-      },
-    },
-  },
-} satisfies TestProjectInlineConfiguration;
-
-// Render scenarios count React commits; they run only through scripts/render-metrics.ts,
-// which reads the per-scenario reports this command writes.
-const renderScenariosProject = {
-  ...browserTestProject,
-  test: {
-    ...browserTestProject.test,
-    name: "renders",
-    include: ["test/*.renders.tsx"],
-    // App scenarios mount the whole app per test, which outlasts 15s on a loaded machine.
-    hookTimeout: 60_000,
-    testTimeout: 60_000,
-    setupFiles: ["./test/renderCounter.ts", ...browserTestProject.test.setupFiles],
-    browser: {
-      ...browserTestProject.test.browser,
-      // Vitest names each instance in place, so a shared array would clash with the browser project.
-      instances: [{ browser: "chromium" }],
-      commands: {
-        ...browserTestProject.test.browser.commands,
-        writeRenderReport: async (_context, scenario: string, json: string) => {
-          const directory = process.env.T3CODE_RENDER_REPORT_DIR;
-          if (!directory) throw new Error("T3CODE_RENDER_REPORT_DIR is not set");
-          await NodeFSP.writeFile(`${directory}/${scenario}.json`, json);
+        // A press held across a render: userEvent only offers whole clicks.
+        pointerDown: async ({ page }) => {
+          await page.mouse.down();
+        },
+        pointerUp: async ({ page }) => {
+          await page.mouse.up();
         },
       },
     },
@@ -482,7 +457,9 @@ export default defineConfig(({ mode, command }) => {
                 prefix,
                 {
                   target: devProxyTarget,
-                  changeOrigin: !DEV_PROXIED_ORIGIN_PRESERVING_PREFIXES.has(prefix),
+                  // Keep the client's Host: OAuth metadata, cookie Origin checks and DPoP proofs
+                  // all compare against the URL the client used.
+                  changeOrigin: false,
                   ...(prefix === "/ws" || prefix === "/api" ? { ws: true } : {}),
                 },
               ]),
@@ -522,11 +499,7 @@ export default defineConfig(({ mode, command }) => {
     },
     worker: { format: "es" },
     test: {
-      projects: [
-        defineProject(unitTestProject),
-        defineProject(browserTestProject),
-        defineProject(renderScenariosProject),
-      ],
+      projects: [defineProject(unitTestProject), defineProject(browserTestProject)],
     },
   };
 });

@@ -254,6 +254,7 @@ interface PendingCode {
   readonly codeChallenge: string;
   readonly resource: string;
   readonly access: AuthMcpClientAccess;
+  readonly approvedAtRevocationCount: number;
   readonly expiresAtMs: number;
   readonly taskOnly: boolean;
   readonly renewable: boolean;
@@ -559,6 +560,7 @@ const make = Effect.gen(function* () {
     access: AuthMcpClientAccess,
     approvalSubject: string | undefined,
     approvals: boolean,
+    approvedAtRevocationCount: number,
   ) {
     const now = yield* Clock.currentTimeMillis;
     const code = Buffer.from(yield* random.randomBytes(32)).toString("base64url");
@@ -572,6 +574,7 @@ const make = Effect.gen(function* () {
         codeChallenge: authorization.codeChallenge,
         resource: authorization.resource,
         access,
+        approvedAtRevocationCount,
         expiresAtMs: now + AUTHORIZATION_CODE_TTL_MS,
         taskOnly: authorization.taskOnly,
         renewable: authorization.renewable,
@@ -585,6 +588,9 @@ const make = Effect.gen(function* () {
 
   const approve: McpOAuth["Service"]["approve"] = Effect.fn("McpOAuth.approve")(function* (input) {
     const { decision } = input;
+    // Read before the approver is checked: "revoke all others" then ends this sign-in whether
+    // it lands before the check or after the code is handed out.
+    const approvedAtRevocationCount = yield* environmentAuth.otherSessionRevocationCount;
     if (input.authorization.taskOnly && decision.access === "full-access") {
       return yield* new McpOAuthPageError({
         description: "Task-only access is limited to Auto or a lower mode.",
@@ -644,7 +650,13 @@ const make = Effect.gen(function* () {
       }
       approvalSubject = session.subject;
     }
-    const code = yield* mintCode(input.authorization, access, approvalSubject, approvals);
+    const code = yield* mintCode(
+      input.authorization,
+      access,
+      approvalSubject,
+      approvals,
+      approvedAtRevocationCount,
+    );
     yield* Effect.logInfo("Approved an MCP client sign-in.", {
       client: input.authorization.client.name,
       access,
@@ -775,6 +787,12 @@ const make = Effect.gen(function* () {
       ) {
         return yield* fail("invalid_grant", "The authorization code is invalid or expired.");
       }
+      // "Revoke all others" since the approval also ends a task grant's sign-in.
+      if (
+        pending.taskOnly &&
+        (yield* environmentAuth.otherSessionRevocationCount) !== pending.approvedAtRevocationCount
+      )
+        return yield* fail("invalid_grant", "The authorization code is invalid or expired.");
       if (pending.taskOnly) {
         return yield* approvalAuthority
           .withoutFamilyApproval(
@@ -807,14 +825,17 @@ const make = Effect.gen(function* () {
           ...(pending.approvalSubject === undefined
             ? {}
             : { approvalSubject: pending.approvalSubject }),
+          approvedAtRevocationCount: pending.approvedAtRevocationCount,
         })
         .pipe(
           Effect.catch((cause) =>
-            Effect.logError("Could not issue an MCP client session.", { cause }).pipe(
-              Effect.andThen(
-                Effect.fail(fail("invalid_grant", "The session could not be issued.")),
-              ),
-            ),
+            cause._tag === "ServerAuthInvalidCredentialError"
+              ? Effect.fail(fail("invalid_grant", "The authorization code is invalid or expired."))
+              : Effect.logError("Could not issue an MCP client session.", { cause }).pipe(
+                  Effect.andThen(
+                    Effect.fail(fail("invalid_grant", "The session could not be issued.")),
+                  ),
+                ),
           ),
         );
       const issued = yield* pending.peerLink &&

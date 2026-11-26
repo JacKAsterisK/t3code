@@ -437,7 +437,14 @@ it.live("signs in with a pairing code and issues a token only /mcp accepts", () 
         expect((yield* handler(at("/oauth/mcp/revoke", form({ token: other })))).status).toBe(200);
       }
       yield* auth.authenticateHttpRequest(bearer(owner.access_token));
-      const revoked = yield* handler(at("/oauth/mcp/revoke", form({ token: token.access_token })));
+      // T3 Code LAN: an RFC 7009 client may name itself; the access token still ends (council
+      // 2026-11-26), though only task grants have refresh tokens for the client_id to select.
+      const revoked = yield* handler(
+        at(
+          "/oauth/mcp/revoke",
+          form({ client_id: clientId, token: token.access_token, resource: `${ORIGIN}/mcp` }),
+        ),
+      );
       expect(revoked.status).toBe(200);
       yield* auth.authenticateMcpClient(bearer(token.access_token)).pipe(Effect.flip);
     }),

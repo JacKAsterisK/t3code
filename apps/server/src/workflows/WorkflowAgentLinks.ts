@@ -49,7 +49,7 @@ const isFinal = (error: OrchestratorMcpFailure) =>
 const retried = { schedule: Schedule.exponential("2 seconds"), times: 5 };
 
 // T3 Code LAN: a read-only link refuses writes, so each call says whether its tool writes.
-const READING_TOOLS = new Set(["t3_thread_read", "t3_thread_wait"]);
+const READING_TOOLS = new Set(["t3_project_list", "t3_thread_read", "t3_thread_wait"]);
 
 type Service = WorkflowAgents["Service"];
 

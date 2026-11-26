@@ -978,6 +978,12 @@ it.effect("requires pinned transport for a retained link of unknown provenance",
       const unavailable = yield* a.links.resolve(box.environmentId).pipe(Effect.flip);
       expect(unavailable.reason).toBe("unreachable");
       expect(unavailable.message).toContain("approved fleet TLS pin");
+      // T3 Code LAN: unlink sends the link's bearer only where resolve would, so without the pin
+      // the link ends here alone (council 2026-11-26).
+      expect(yield* a.links.unlink(box.environmentId)).toEqual({
+        removed: true,
+        endedThere: false,
+      });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

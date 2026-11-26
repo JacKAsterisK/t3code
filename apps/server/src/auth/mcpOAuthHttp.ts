@@ -252,7 +252,9 @@ export const layer = HttpApiBuilder.group(
                 ...(payload.resource === undefined ? {} : { resource: payload.resource }),
               },
             });
-            return {};
+            // T3 Code LAN: RFC 7009 clients send their client_id with an access token too. The
+            // grant lookup above reads refresh tokens only, so the token is also ended as a bearer
+            // (council 2026-11-26); an unknown token still gets the same empty answer.
           }
           yield* environmentAuth
             .revokeMcpClientToken(Redacted.value(payload.token))

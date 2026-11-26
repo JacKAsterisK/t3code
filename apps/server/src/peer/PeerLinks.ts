@@ -752,8 +752,14 @@ const make = Effect.gen(function* () {
 
   /** Best effort: a peer that is gone or too old to revoke lets its session expire instead. */
   const revokeAtPeer = Effect.fn("PeerLinks.revokeAtPeer")(
-    function* (environmentId: EnvironmentId, urlsJson: string, token: string) {
-      const urls = yield* decodeUrls(urlsJson);
+    function* (environmentId: EnvironmentId, urlsJson: string, provenance: string, token: string) {
+      // T3 Code LAN: the token goes only where `resolve` would send it. A link that may be
+      // fleet-managed needs the current fleet TLS pin; without one it ends here alone.
+      const requiresFleetPin = provenance !== "manual";
+      const trusted = Option.isSome(fleetTrust) ? yield* fleetTrust.value.current : [];
+      const urls = (yield* decodeUrls(urlsJson)).filter(
+        (url) => !requiresFleetPin || trusted.some((peer) => peer.origin === url),
+      );
       // A race over no addresses never settles.
       if (urls.length === 0) return false;
       yield* Effect.raceAll(
@@ -767,6 +773,7 @@ const make = Effect.gen(function* () {
                 .revoke({ payload: { token: Redacted.make(token) } })
                 .pipe(Effect.timeout(probeTimeout(url))),
             ),
+            Effect.provideService(Fleet.RequireFleetPin, requiresFleetPin),
           ),
         ),
       );
@@ -781,12 +788,12 @@ const make = Effect.gen(function* () {
 
   const unlink: PeerLinks["Service"]["unlink"] = Effect.fn("PeerLinks.unlink")(
     function* (environmentId, expectedFleet) {
-      const deleted = yield* sql<{ secret_name: string; urls_json: string }>`
+      const deleted = yield* sql<{ secret_name: string; urls_json: string; provenance: string }>`
         DELETE FROM peer_environment_links WHERE environment_id = ${environmentId}
         AND (${expectedFleet === undefined} OR (provenance = 'fleet' AND fleet_machine_id = ${expectedFleet?.machineId ?? null}
           AND (${expectedFleet?.linkedAt === undefined} OR linked_at = ${expectedFleet?.linkedAt ?? null}))
           OR (provenance = 'unknown' AND linked_at = ${expectedFleet?.linkedAt ?? null}))
-        RETURNING secret_name, urls_json
+        RETURNING secret_name, urls_json, provenance
       `.pipe(
         Effect.tap(() => PubSub.publish(changes, environmentId)),
         withGate,
@@ -809,6 +816,7 @@ const make = Effect.gen(function* () {
           endedThere = yield* revokeAtPeer(
             environmentId,
             row.urls_json,
+            row.provenance,
             new TextDecoder().decode(token.value),
           );
         }

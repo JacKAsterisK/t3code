@@ -1811,14 +1811,12 @@ export const layerMilestoneEvents = Layer.effectDiscard(
   Layer.provide(layerWebhookTransport),
 );
 
+// T3 Code LAN: no layerMilestoneEvents. The fork owns `events/*` (decision 17); upstream's
+// milestone events would answer `events/poll` and `events/stream` past the fork's admission,
+// which keeps task-only and linked callers out, and would serve all of `events/*` once agent
+// events were turned off after startup (council 2026-11-26).
 export const layer = layerMcpTransport(
-  Layer.mergeAll(
-    layerLanToolkit,
-    layerUsageToolkit,
-    layerTools,
-    layerToolSearch,
-    layerMilestoneEvents,
-  ),
+  Layer.mergeAll(layerLanToolkit, layerUsageToolkit, layerTools, layerToolSearch),
 ).pipe(
   Layer.provideMerge(ApprovalReceiver.layer),
   Layer.provideMerge(ApprovalForwarding.layer),

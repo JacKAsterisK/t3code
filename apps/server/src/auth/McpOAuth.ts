@@ -787,31 +787,35 @@ const make = Effect.gen(function* () {
       ) {
         return yield* fail("invalid_grant", "The authorization code is invalid or expired.");
       }
-      // "Revoke all others" since the approval also ends a task grant's sign-in.
-      if (
-        pending.taskOnly &&
-        (yield* environmentAuth.otherSessionRevocationCount) !== pending.approvedAtRevocationCount
-      )
-        return yield* fail("invalid_grant", "The authorization code is invalid or expired.");
       if (pending.taskOnly) {
-        return yield* approvalAuthority
-          .withoutFamilyApproval(
-            clientId,
-            pending.approvalSubject ?? "",
-            grants
-              .issue({
-                clientId,
-                resource: urls.resource,
-                access: pending.access,
-                client: { ...deriveAuthClientMetadata({ request }), label: pending.clientName },
-                renewable: pending.renewable,
-                // A grant acts for the fleet machine whose credential approved it, if any.
-                subject: CredentialAttribution.mcpClientSubject(pending.approvalSubject ?? ""),
-              })
-              .pipe(Effect.map(grantResult)),
+        // "Revoke all others" since the approval also ends a task grant's sign-in. The count is
+        // checked and the grant issued under the lock a run holds, as for any other MCP session,
+        // so a run cannot finish its sweep between the two (council 2026-11-26).
+        return yield* environmentAuth
+          .issueUnlessOthersRevokedSince(
+            pending.approvedAtRevocationCount,
+            approvalAuthority.withoutFamilyApproval(
+              clientId,
+              pending.approvalSubject ?? "",
+              grants
+                .issue({
+                  clientId,
+                  resource: urls.resource,
+                  access: pending.access,
+                  client: { ...deriveAuthClientMetadata({ request }), label: pending.clientName },
+                  renewable: pending.renewable,
+                  // A grant acts for the fleet machine whose credential approved it, if any.
+                  subject: CredentialAttribution.mcpClientSubject(pending.approvalSubject ?? ""),
+                })
+                .pipe(Effect.map(grantResult)),
+            ),
           )
           .pipe(
-            Effect.mapError(() => fail("invalid_grant", "The task grant could not be issued.")),
+            Effect.mapError((error) =>
+              error._tag === "ServerAuthInvalidCredentialError"
+                ? fail("invalid_grant", "The authorization code is invalid or expired.")
+                : fail("invalid_grant", "The task grant could not be issued."),
+            ),
           );
       }
       const issue = environmentAuth

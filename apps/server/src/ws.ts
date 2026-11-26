@@ -1750,11 +1750,17 @@ export const layerWsRpc = (
         );
       // A project's layout command is its owner's code: only a session that may already run
       // commands on the host has it run from a worktree request.
-      const projectCommands: TaskFolders.ProjectCommands =
-        currentSession.scopes.includes(AuthOrchestrationOperateScope) ||
-        currentSession.scopes.includes(AuthTerminalOperateScope)
-          ? "permitted"
-          : "request-not-permitted";
+      // T3 Code LAN: asked again when a queued command's turn comes, from what the connection may
+      // use now, so a narrowed fleet cap stops work that was waiting (council 2026-11-26).
+      const projectCommands: TaskFolders.ProjectCommandsNow = currentScopes.pipe(
+        Effect.map((scopes): TaskFolders.ProjectCommands =>
+          scopes.includes(AuthOrchestrationOperateScope) ||
+          scopes.includes(AuthTerminalOperateScope)
+            ? "permitted"
+            : "request-not-permitted",
+        ),
+        Effect.orElseSucceed((): TaskFolders.ProjectCommands => "request-not-permitted"),
+      );
       const authorizeEffect = <A, E, R>(
         requiredScope: AuthEnvironmentScope,
         effect: Effect.Effect<A, E, R>,

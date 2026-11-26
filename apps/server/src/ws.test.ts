@@ -76,6 +76,7 @@ import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import * as Ref from "effect/Ref";
 import { Headers, HttpRouter, HttpServer } from "effect/http";
 import * as Context from "effect/Context";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
@@ -1979,8 +1980,13 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const browser = yield* ServerBrowser.ServerBrowser;
-      const requested = Effect.fnUntraced(function* (scopes: ReadonlyArray<AuthEnvironmentScope>) {
+      const requested = Effect.fnUntraced(function* (
+        scopes: ReadonlyArray<AuthEnvironmentScope>,
+        // What the connection may use when a command's turn comes; the scopes at open by default.
+        scopesWhenItRuns: ReadonlyArray<AuthEnvironmentScope> = scopes,
+      ) {
         const seen: TaskFolders.ProjectCommandsNow[] = [];
+        const current = yield* Ref.make<ReadonlyArray<AuthEnvironmentScope>>(scopes);
         const exits = yield* Queue.unbounded<string>();
         const services = Layer.mergeAll(
           layerUnusedConfigRpcServices,
@@ -2022,6 +2028,7 @@ it.effect(
               browser,
               () => Effect.void,
               { secretReferences: true },
+              Ref.get(current),
             ).pipe(Layer.provide(services), Layer.merge(RpcAuthorization.layer(scopes))),
           ),
         );
@@ -2041,7 +2048,11 @@ it.effect(
           headers: Headers.empty,
         });
         assert.equal(yield* Queue.take(exits), "Success");
-        return seen;
+        // TaskFolders asks again once a queued command's turn comes (council 2026-11-26).
+        yield* Ref.set(current, scopesWhenItRuns);
+        return yield* Effect.forEach(seen, (asked) =>
+          typeof asked === "string" ? Effect.succeed(asked) : asked,
+        );
       }, Effect.scoped);
 
       assert.deepEqual(yield* requested([AuthSourceControlWriteScope]), [
@@ -2056,6 +2067,14 @@ it.effect(
         "permitted",
         "permitted",
       ]);
+      // Narrowed while the requests waited: their commands do not run.
+      assert.deepEqual(
+        yield* requested(
+          [AuthSourceControlWriteScope, AuthOrchestrationOperateScope],
+          [AuthSourceControlWriteScope],
+        ),
+        ["request-not-permitted", "request-not-permitted"],
+      );
     }).pipe(
       Effect.provide(
         Layer.mergeAll(

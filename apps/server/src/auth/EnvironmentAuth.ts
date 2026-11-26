@@ -660,6 +660,14 @@ export class EnvironmentAuth extends Context.Service<
     ) => Effect.Effect<boolean, ServerAuthInternalError>;
     /** How many times "revoke all others" has run since this server started. */
     readonly otherSessionRevocationCount: Effect.Effect<number>;
+    /**
+     * Runs `issue` under the lock "revoke all others" holds, and only if it has not run since
+     * `since` was read: a credential approved before a run cannot outlive it.
+     */
+    readonly issueUnlessOthersRevokedSince: <A, E>(
+      since: number,
+      issue: Effect.Effect<A, E>,
+    ) => Effect.Effect<A, E | ServerAuthInvalidCredentialError>;
     readonly issueMcpClientSession: (input: {
       readonly label: string;
       readonly access: AuthMcpClientAccess;
@@ -1907,6 +1915,7 @@ export const make = Effect.gen(function* () {
     authenticateMcpClient,
     revokeMcpClientToken,
     otherSessionRevocationCount: Ref.get(otherSessionRevocations),
+    issueUnlessOthersRevokedSince,
     issueMcpClientSession,
     consumeMcpApprovalCode,
   });

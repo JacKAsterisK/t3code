@@ -8,6 +8,10 @@ approval before code or runtime changes.
 
 ## Baseline
 
+- LAN 1.0.55 upstream merge: upstream `6378cabd19` (933 commits after
+  `15d945faef`), merged in two stages (`f29c824614`, then `6378cabd19`) on
+  `lan/upstream-merge-20261126`. Upstream migrations 106 through 119 append as
+  fork 120 through 133; application 0.1.12; home repair recognizes schema 133.
 - LAN 1.0.44 integration in progress against upstream `15d945faef` (311 commits
   after `e6d521012d`). Upstream migrations 103 through 105 append as fork 117 through 119.
   The target schema is 119, pending the Windows gate and packaged data audits.
@@ -85,6 +89,29 @@ can carry the card without changing its durable work digest. Hub opts into
 this admission only when it supports rollback with stale cards. A running
 version still owns its guarded-close
 decision and may need a normal close before this update.
+
+## 2026-11-26 sync decisions
+
+- Keep (decision 17, owner-approved): the fork owns MCP `events/*`. Upstream now
+  always serves MCP `2026-07-28` with native milestone events (SEP-3415) and
+  sessionless requests. LAN serves `2026-07-28` only while agent events were on
+  at startup, and then `McpEventsEndpoint` answers `events/*`. Upstream's
+  milestone events and sessionless approval are therefore unavailable in LAN;
+  their tests carry a documented skip (`036f9bccfc`). Revisit when the fork's
+  events move onto the native implementation (row 16).
+- Keep the fork's graceful desktop stop over stdin; other launches use
+  upstream's `stopOnLauncherLoss` grace-period exit.
+- Adopt upstream's revoke-at-peer on unlink and its RFC 7009 revoke endpoint.
+  A `client_id` still selects the fork's task-grant revoke, and revocation by
+  token covers fork-attributed `mcp-client:<approver>` sessions.
+- Adopt upstream's install-id-only telemetry identity behind the LAN guard.
+- Upstream's workflows reach linked environments through the peer client; the
+  fleet write ceiling caps their writes like every other link use.
+- Sidebar rows follow upstream's environment line; a row under a machine
+  heading does not repeat the machine.
+- Upstream replaced the render-scenario project with `scripts/metrics`. The
+  fork's machine-activity renders scenario is removed; porting it to the
+  metrics probes is a follow-up.
 
 ## 2026-11-20 sync decisions
 
@@ -312,6 +339,7 @@ decision and may need a normal close before this update.
 | 13  | Per-machine fleet access                         | One `AuthMcpClientAccess` mode per peer link                   | nightly, Labs beta                | keep                                                                                         |
 | 14  | Task owners                                      | None                                                           | none (`cb9629e68`)                | keep                                                                                         |
 | 15  | Agent usage report (`usage_report`)              | Usage page and `/usage-limits`, no MCP tool                    | released (page only)              | keep ([design](usage-report-tool.md))                                                        |
+| 16  | MCP Events (`events/*`, `2026-07-28`)            | Native milestone events and sessionless requests (SEP-3415)    | released (always served)          | keep ([2026-11-26](#2026-11-26-sync-decisions))                                              |
 
 ## Rows
 
@@ -969,3 +997,20 @@ Proposed; each step needs Dan's approval.
 - **Owner:** Dan. **Rollback:** remove the registration and the toolkit folder.
 - **Revisit:** when upstream adds a usage tool for agents, or stores a reading
   time per limit window.
+
+### 16. MCP Events
+
+- **Local:** `apps/server/src/mcp/events/{McpEventsAdmission,McpEventsEndpoint}.ts`,
+  served from `McpHttpServer.ts`, which offers MCP `2026-07-28` beside
+  `2025-06-18` only when agent events were on at startup. See
+  [Agent events and approvals](agent-events-and-approvals.md).
+- **Upstream:** `apps/server/src/milestones/MilestoneEvents.ts` always serves
+  `2026-07-28` with milestone events (SEP-3415) and sessionless requests.
+- **Must preserve:** the fork's events admission in front of `events/*`, and
+  `2025-06-18` alone while agent events are off.
+- **Tests:** the upstream milestone-event and sessionless tests in
+  `MilestoneEvents.test.ts` and `McpHttpServer.test.ts` skip under
+  `lanServesEventsOnlyWithAgentEvents` (`036f9bccfc`).
+- **Owner:** Dan. **Rollback:** drop the admission gate and the skips, and let
+  upstream's milestone events answer `events/*`.
+- **Revisit:** when the fork's events move onto the native implementation.

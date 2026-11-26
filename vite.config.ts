@@ -3,6 +3,7 @@ import { defineConfig } from "vite-plus";
 import * as NodeURL from "node:url";
 import { remoteCacheUrl } from "./infra/task-cache/src/remoteCache.ts";
 import { cachedTestTasks } from "./scripts/lib/cached-tests.ts";
+import { chunkStagedCommands } from "./scripts/lib/staged-commands.ts";
 import { releaseBatchConfig, releaseBatchRequest } from "./scripts/lib/release-batches.ts";
 
 const TEST_EXCLUDE = [
@@ -174,7 +175,12 @@ export default defineConfig({
   },
   staged: {
     // In order, so lint reads the formatted file. CI lint failures cost a full round trip.
-    "*": ["vp fmt --no-error-on-unmatched-pattern", "vp lint --no-error-on-unmatched-pattern"],
+    // Split so each command fits cmd.exe on Windows, where a large commit's list overflows it.
+    "*": (files) =>
+      chunkStagedCommands(
+        ["vp fmt --no-error-on-unmatched-pattern", "vp lint --no-error-on-unmatched-pattern"],
+        files,
+      ),
     // knip checks the whole repo, so it takes no file list. Any code or manifest change can leave
     // a file, export, or dependency unused.
     "{*.{js,jsx,ts,tsx,mjs,cjs,mts,cts},package.json,knip.jsonc}": () => "vp run knip:check",

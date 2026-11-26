@@ -104,6 +104,8 @@ it.effect(
         Layer.provide(
           Layer.mergeAll(
             Layer.mock(Secrets.ServerSecretStore)({
+              // Unlink reads the token to end the link's session there; these links have none.
+              get: () => Effect.succeedNone,
               remove: () =>
                 !blockRemoval
                   ? Effect.die("Unexpected cleanup of a replacement pointer")
@@ -166,6 +168,6 @@ it.effect(
         }),
       );
       yield* Deferred.succeed(releaseSecret, undefined);
-      assert.isTrue(yield* Fiber.join(deletion));
+      assert.isTrue((yield* Fiber.join(deletion)).removed);
     }).pipe(Effect.provide(dependencies), Effect.scoped),
 );

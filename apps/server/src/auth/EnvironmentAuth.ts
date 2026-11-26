@@ -1769,9 +1769,10 @@ export const make = Effect.gen(function* () {
       Effect.catchIf(SessionStore.isSessionCredentialInvalidError, () => Effect.succeedNone),
       Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })),
     );
+    // Approved MCP sessions carry their approver in the subject (`mcp-client:<approver>`).
     if (
       Option.isNone(session) ||
-      session.value.subject !== MCP_CLIENT_SUBJECT ||
+      !isMcpClientSubject(session.value.subject) ||
       session.value.method !== "bearer-access-token"
     ) {
       return false;

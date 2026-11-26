@@ -598,7 +598,7 @@ itWithPosixShell(
     ),
 );
 
-it.live("leaves a project's layout commands out for a request that may not run them", () =>
+itWithPosixShell("leaves a project's layout commands out for a request that may not run them", () =>
   withState((state) =>
     Effect.gen(function* () {
       const { fileSystem, path, tmp, run, repository, worktreeCount } = yield* fixture;
@@ -1200,7 +1200,7 @@ const layoutProject = Effect.gen(function* () {
   return { fileSystem, path, run, project, ran, writeLayout, createFor, approved };
 });
 
-it.live("runs a project's layout command only once its exact text is approved", () =>
+itWithPosixShell("runs a project's layout command only once its exact text is approved", () =>
   withState((state) =>
     Effect.gen(function* () {
       const { run, project, ran, writeLayout, createFor, approved } = yield* layoutProject;
@@ -1233,64 +1233,66 @@ it.live("runs a project's layout command only once its exact text is approved", 
   ),
 );
 
-it.live("removes and restores a thread folder without layout commands nobody approved", () =>
-  withState((state) =>
-    Effect.gen(function* () {
-      const { fileSystem, run, project, ran, writeLayout, createFor } = yield* layoutProject;
-      yield* writeLayout("create-1", "remove-1");
-      state.workspaceRoot = project;
-      yield* approveLayoutCommands;
-      const kept = yield* createFor("kept");
-      const gone = yield* createFor("gone");
-      const taskFolders = yield* TaskFolders.TaskFolders;
-      const keptFolder = (yield* taskFolders.find(kept!.worktree.path))!;
-      yield* writeLayout("create-2", "remove-2");
+itWithPosixShell(
+  "removes and restores a thread folder without layout commands nobody approved",
+  () =>
+    withState((state) =>
+      Effect.gen(function* () {
+        const { fileSystem, run, project, ran, writeLayout, createFor } = yield* layoutProject;
+        yield* writeLayout("create-1", "remove-1");
+        state.workspaceRoot = project;
+        yield* approveLayoutCommands;
+        const kept = yield* createFor("kept");
+        const gone = yield* createFor("gone");
+        const taskFolders = yield* TaskFolders.TaskFolders;
+        const keptFolder = (yield* taskFolders.find(kept!.worktree.path))!;
+        yield* writeLayout("create-2", "remove-2");
 
-      // A missing checkout comes back plain.
-      yield* fileSystem.remove(kept!.worktree.path, { recursive: true });
-      yield* run(project, "worktree", "prune");
-      yield* taskFolders.restore({
-        taskFolder: keptFolder,
-        branch: "kept",
-        projectCommands: "permitted",
-        recreate: (checkout) =>
-          run(checkout.repositoryPath, "worktree", "add", "-q", checkout.worktreePath, "kept"),
-      });
-      assert.isFalse(yield* ran("create-2"));
-      assert.equal(yield* run(kept!.worktree.path, "symbolic-ref", "--short", "HEAD"), "kept");
-
-      // The folder goes, its checkouts with it, and the project's teardown stays unrun.
-      assert.isTrue(
-        yield* taskFolders.removeIfTaskFolder({
-          path: gone!.worktree.path,
-          force: true,
+        // A missing checkout comes back plain.
+        yield* fileSystem.remove(kept!.worktree.path, { recursive: true });
+        yield* run(project, "worktree", "prune");
+        yield* taskFolders.restore({
+          taskFolder: keptFolder,
+          branch: "kept",
           projectCommands: "permitted",
-        }),
-      );
-      assert.isFalse(yield* ran("remove-1"));
-      assert.isFalse(yield* ran("remove-2"));
-      assert.isFalse(yield* fileSystem.exists(gone!.worktree.path));
+          recreate: (checkout) =>
+            run(checkout.repositoryPath, "worktree", "add", "-q", checkout.worktreePath, "kept"),
+        });
+        assert.isFalse(yield* ran("create-2"));
+        assert.equal(yield* run(kept!.worktree.path, "symbolic-ref", "--short", "HEAD"), "kept");
 
-      // Approved as written now, both run again.
-      yield* approveLayoutCommands;
-      yield* fileSystem.remove(kept!.worktree.path, { recursive: true });
-      yield* run(project, "worktree", "prune");
-      yield* taskFolders.restore({
-        taskFolder: keptFolder,
-        branch: "kept",
-        projectCommands: "permitted",
-        recreate: () => Effect.die("the layout command rebuilds the folder"),
-      });
-      assert.isTrue(yield* ran("create-2"));
-      yield* taskFolders.remove({
-        root: keptFolder.root,
-        force: true,
-        forget: true,
-        projectCommands: "permitted",
-      });
-      assert.isTrue(yield* ran("remove-2"));
-    }),
-  ),
+        // The folder goes, its checkouts with it, and the project's teardown stays unrun.
+        assert.isTrue(
+          yield* taskFolders.removeIfTaskFolder({
+            path: gone!.worktree.path,
+            force: true,
+            projectCommands: "permitted",
+          }),
+        );
+        assert.isFalse(yield* ran("remove-1"));
+        assert.isFalse(yield* ran("remove-2"));
+        assert.isFalse(yield* fileSystem.exists(gone!.worktree.path));
+
+        // Approved as written now, both run again.
+        yield* approveLayoutCommands;
+        yield* fileSystem.remove(kept!.worktree.path, { recursive: true });
+        yield* run(project, "worktree", "prune");
+        yield* taskFolders.restore({
+          taskFolder: keptFolder,
+          branch: "kept",
+          projectCommands: "permitted",
+          recreate: () => Effect.die("the layout command rebuilds the folder"),
+        });
+        assert.isTrue(yield* ran("create-2"));
+        yield* taskFolders.remove({
+          root: keptFolder.root,
+          force: true,
+          forget: true,
+          projectCommands: "permitted",
+        });
+        assert.isTrue(yield* ran("remove-2"));
+      }),
+    ),
 );
 
 it.live("leaves an approved layout command unrun for an agent below Full access", () =>
@@ -1372,7 +1374,7 @@ const afterWaitingItsTurn = <A, E, R, E1, E2, R2>(
     return yield* Fiber.await(waiting);
   });
 
-it.live(
+itWithPosixShell(
   "leaves a layout command unrun when its approval is withdrawn while it waits its turn",
   () =>
     withState((state) =>
@@ -1399,7 +1401,7 @@ it.live(
     ),
 );
 
-it.live(
+itWithPosixShell(
   "leaves a layout command unrun when the thread that asked leaves Full access while it waits its turn",
   () =>
     withState((state) =>
@@ -1429,7 +1431,7 @@ it.live(
     ),
 );
 
-it.live(
+itWithPosixShell(
   "keeps a branch that appeared while a layout command waited its turn when the command fails",
   () =>
     withState((state) =>

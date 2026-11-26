@@ -426,6 +426,8 @@ it.effect.each(["interrupt", "timeout"] as const)(
       const server = yield* Effect.acquireRelease(
         Effect.sync(() =>
           NodeNet.createServer((socket) => {
+            // T3 Code LAN: Windows resets the connection of a killed filter instead of closing it.
+            socket.on("error", () => undefined);
             sockets.add(socket);
             connected.resolve();
           }),

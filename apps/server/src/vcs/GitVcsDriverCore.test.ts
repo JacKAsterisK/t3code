@@ -7,6 +7,7 @@ import * as NodeURL from "node:url";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import { assert, it, describe } from "@effect/vitest";
 import { afterAll, vi } from "vite-plus/test";
 import * as Cause from "effect/Cause";
@@ -209,7 +210,12 @@ it.effect("runs background Git in its own lane so user commands never queue behi
     yield* Deferred.succeed(gate, undefined);
     assert.equal((yield* Fiber.join(background)).length, 12);
     assert.equal((yield* Fiber.join(foreground)).length, 4);
-  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  }).pipe(
+    // T3 Code LAN: on Windows each spawn first finds git on PATH with real file IO, which ends
+    // after the test clock has moved. An immediate resolver keeps this about the lanes.
+    Effect.provideService(SpawnExecutableResolution, () => undefined),
+    Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+  ),
 );
 
 describe("Git output collection", () => {

@@ -269,3 +269,37 @@ describe("findEsmImportsOfExternalPackages", () => {
     assert.deepStrictEqual(findEsmImportsOfExternalPackages(source), []);
   });
 });
+
+// T3 Code LAN: an upstream merge once dropped @napi-rs/keyring from the server manifest while the
+// fleet vault still imported it; the staged server.asar is built from that manifest alone.
+it.layer(NodeServices.layer)("server runtime externals", (it) => {
+  it.effect("declares every external package the server's sources import", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = path.resolve(path.dirname(NodeURL.fileURLToPath(import.meta.url)), "../..");
+      const manifest = decodeManifest(
+        yield* fileSystem.readFileString(path.join(root, "apps/server/package.json")),
+      );
+      const declared = new Set([
+        ...Object.keys(manifest.dependencies ?? {}),
+        ...Object.keys(manifest.optionalDependencies ?? {}),
+      ]);
+      const packageOf = (id: string) =>
+        id.startsWith("@") ? id.split("/").slice(0, 2).join("/") : id.split("/")[0]!;
+      const missing = new Set<string>();
+      const sources = (yield* fileSystem.readDirectory(path.join(root, "apps/server/src"), {
+        recursive: true,
+      })).filter((file) => /\.[cm]?ts$/.test(file) && !/\.test\.|testkit|test-fixtures/.test(file));
+      for (const file of sources) {
+        const text = yield* fileSystem.readFileString(path.join(root, "apps/server/src", file));
+        for (const match of text.matchAll(/(?:from|require\()\s*\(?\s*"([^"./][^"]*)"/g)) {
+          const id = match[1]!;
+          if (isRuntimeExternalCliDependency(id) && !declared.has(packageOf(id)))
+            missing.add(`${packageOf(id)} (${file})`);
+        }
+      }
+      assert.deepStrictEqual([...missing].sort(), []);
+    }),
+  );
+});
